@@ -467,6 +467,19 @@ export function percentile(arr: number[], p: number): number {
 // Market state / service status
 // ──────────────────────────────────────────────────────────────────────────
 
+/** Live-source RPC failover status. Labels only ("primary", "backup-1") —
+ *  endpoint URLs embed keys and must never reach this public shape. */
+export interface RpcStatus {
+  /** label of the endpoint currently serving requests. */
+  active: string;
+  /** true while serving from a backup instead of the primary. */
+  degraded: boolean;
+  /** true when no endpoint is serving — chain data is frozen. */
+  down: boolean;
+  /** epoch ms when the primary was left (absent while on it). */
+  degradedSinceTs?: number;
+}
+
 export interface MarketState {
   chainId: number;
   block: number;
@@ -482,6 +495,8 @@ export interface MarketState {
   venues: VenueMeta[];
   /** present when the live source degrades and parts fall back. */
   notes?: string[];
+  /** RPC failover health (absent in sim — there is no RPC). */
+  rpc?: RpcStatus;
 }
 
 // ──────────────────────────────────────────────────────────────────────────

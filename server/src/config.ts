@@ -24,6 +24,11 @@ export const config = {
 
   rpcHttp: env.RPC_HTTP_URL ?? 'https://rpc.monad.xyz',
   rpcWs: env.RPC_WS_URL ?? 'wss://rpc.monad.xyz',
+  /** Ordered failover RPCs behind the primary (comma-separated). Default: the
+   *  public RPC, so every deployment survives a provider outage with zero
+   *  config. Set RPC_BACKUP_URLS="" to opt out (single-endpoint behavior). */
+  rpcBackups: (env.RPC_BACKUP_URLS ?? 'https://rpc.monad.xyz')
+    .split(',').map((s) => s.trim()).filter(Boolean),
 
   bybitRest: env.BYBIT_REST_URL ?? 'https://api.bybit.com',
   bybitWs: env.BYBIT_WS_URL ?? 'wss://stream.bybit.com/v5/public/spot',

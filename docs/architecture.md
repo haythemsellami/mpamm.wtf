@@ -130,8 +130,9 @@ The leaderboard aggregates server-side on purpose: shipping raw fills truncated 
 ## Operations & reliability
 
 - **RPC requirements**: `eth_call` + `getLogs`. Public endpoints cap `getLogs` (~100 blocks) — fine for the live tail, slow for deep backfills; a high-limit/archive RPC makes venue-lifetime scans practical. All chunking is adaptive.
+- **RPC failover** (`server/src/chain/failover.ts`): every consumer rides ONE viem client, so failover lives in one breaker in front of an ordered endpoint list (`RPC_HTTP_URL`, then `RPC_BACKUP_URLS`, default the public endpoint). Three consecutive **transport-level** failures switch endpoints — JSON-RPC errors and 429s never do (reverts and range-cap probes prove the node is alive) — and a 60s probe snaps back to the primary after two healthy checks. Mixed providers are safe because reads are block-pinned and tails run at head−5. While degraded: quotes/fills/gap-fill keep running, deep crawls (volume backfill, markout onboarding, gas passes) hold losslessly; the UI shows an amber/red `RPC` chip and `state.notes` records every transition (labels only — URLs embed keys).
 - **Fail-loud registry**: duplicate/invalid venue ids throw at startup; fills/quotes for undeclared venue ids are dropped with a public note, never silently stored.
-- **Boot sanity**: live mode fail-fasts on chain id 143 + Multicall3 presence rather than half-starting.
+- **Boot sanity**: live mode fail-fasts on chain id 143 + Multicall3 presence rather than half-starting — but a dead primary with a healthy backup boots degraded instead of failing; wrong-chain backups are dropped loudly, a wrong-chain primary stays fatal.
 - **Self-healing discovery**: every adapter's `discover()` re-runs periodically (default 10 min) and must merge, never replace, its cache.
 - **Public notes**: `state.notes` (visible in `/api/markets`) carries every degradation — starving reference feeds, deferred archives, skipped RPC holes — sanitized (URLs stripped) so a private RPC key can never leak.
 

@@ -22,6 +22,19 @@ export function TopBar() {
   const block = d.state ? fmtInt(d.state.block) : '—';
   const liveColor = d.conn === 'live' ? C.green : d.conn === 'reconnecting' ? C.amber : C.faint;
 
+  // RPC failover health (live source only — sim has no RPC, chip hidden).
+  // CVD-safe: the LABEL changes with the state, never color alone.
+  const rpc = d.state?.rpc;
+  const rpcLabel = rpc ? (rpc.down ? 'DOWN' : rpc.degraded ? rpc.active.toUpperCase() : 'OK') : '';
+  const rpcColor = rpc ? (rpc.down ? C.red : rpc.degraded ? C.amber : C.green) : C.faint;
+  const rpcTitle = rpc
+    ? rpc.down
+      ? 'No RPC endpoint is serving — chain data frozen until one recovers'
+      : rpc.degraded
+        ? `Primary RPC unhealthy — serving from ${rpc.active}${rpc.degradedSinceTs ? ` since ${new Date(rpc.degradedSinceTs).toISOString().slice(11, 16)} UTC` : ''}`
+        : 'RPC healthy — serving from the primary endpoint'
+    : '';
+
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 16, height: 42, padding: '0 16px',
@@ -63,6 +76,14 @@ export function TopBar() {
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: liveColor, animation: 'blink 1.6s infinite' }} />
           {d.conn === 'live' ? 'live' : d.conn === 'reconnecting' ? 'reconnecting' : 'connecting'}
         </span>
+        {rpc && (
+          <span role="status" title={rpcTitle} aria-label={rpcTitle}
+            style={{ display: 'flex', alignItems: 'center', gap: 5, color: rpcColor, whiteSpace: 'nowrap' }}>
+            {/* static dot — the blinking one above is socket liveness, this is chain-source health */}
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: rpcColor }} />
+            RPC {rpcLabel}
+          </span>
+        )}
         <span>MON <span style={{ color: C.text }}>${monPx}</span></span>
         <span>BLOCK <span style={{ color: C.text }}>{block}</span></span>
         <span>UTC <span style={{ color: C.text }}>{clock}</span></span>
