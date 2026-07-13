@@ -10,6 +10,7 @@ The [`Dockerfile`](../Dockerfile) builds the frontend and runs the server servin
 
 - **Deploys are Render-native**: every push to `main` builds the Dockerfile and deploys (health-gated, zero-downtime). [`ci.yml`](../.github/workflows/ci.yml) runs verification (typecheck → tests → frontend build → Docker build) on every push + PR.
 - Key service variable: `RPC_HTTP_URL` — a **trusted Monad node**. The public endpoint works but is rate-limited and caps `getLogs` ranges, which slows the venue-lifetime backfills considerably.
+- **RPC failover is on by default**: if the primary node dies, the indexer switches to `RPC_BACKUP_URLS` (default: the public endpoint) and probes the primary every minute, snapping back once it's healthy — the TopBar shows an amber `RPC` chip and `state.notes` records the switch. Heavy history crawls pause on a backup; live quotes/fills keep flowing.
 
 ## Any container host / local
 
@@ -28,6 +29,7 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | Variable | What |
 |---|---|
 | `RPC_HTTP_URL` / `RPC_WS_URL` | Monad node (default: public endpoint) |
+| `RPC_BACKUP_URLS` | ordered failover nodes, comma-separated (default: public endpoint; `""` disables failover) |
 | `DATA_SOURCE=sim` | offline simulator instead of live |
 | `VENUES=id,id` | run a subset of the adapter registry (adapter development) |
 | `API_PORT` | HTTP/WS port (default 8787) |
