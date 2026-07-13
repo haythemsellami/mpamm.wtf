@@ -45,6 +45,9 @@ export class GasTracker {
     private store: VolumeStore,
     private adapters: readonly VenueAdapter[],
     private note: (m: string) => void,
+    /** RPC failover state — gas accrual pauses on a backup endpoint (cursors
+     *  hold exactly, so the series catches up losslessly on the primary). */
+    private degraded: () => boolean = () => false,
   ) {
     for (const a of adapters) {
       const vid = a.venues()[0]?.id;
@@ -67,6 +70,13 @@ export class GasTracker {
   /** one pass: tail every gas-declaring venue to head, then reschedule. */
   private async pass(): Promise<void> {
     if (this.running || this.stopped) return;
+    // Receipt/log crawls are the heaviest RPC consumers — while on a backup
+    // endpoint they'd starve the live tail's rate budget, so skip the pass
+    // and just re-arm the timer; accrual resumes on the primary.
+    if (this.degraded()) {
+      this.timer = setTimeout(() => { void this.pass(); }, config.gasTailMs);
+      return;
+    }
     this.running = true;
     try {
       // a venue whose adapter no longer declares gasSources must not keep a

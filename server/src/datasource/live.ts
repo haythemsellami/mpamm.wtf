@@ -9,7 +9,7 @@ import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
 import { GasTracker } from '../gas.js';
 import { config } from '../config.js';
-import { publicClient, getLogsChunked, probeChain, blockAtOrAfter } from '../chain/rpc.js';
+import { publicClient, getLogsChunked, probeChain, blockAtOrAfter, onRpcEvent, rpcStatus } from '../chain/rpc.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore } from '../db.js';
 import { utcDay, annotateCex } from '../util.js';
@@ -17,6 +17,15 @@ import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, validateRegistr
 import type { AdapterContext, LogBundle, LogSource, VenueAdapter } from '../venues/adapter.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Hold a deep history crawl while the RPC runs on a backup: the live tail and
+ *  quote ticks keep the backup's rate budget; crawls resume on the primary.
+ *  (Cursors/accumulators simply wait — nothing is lost or restarted.) */
+async function holdWhileDegraded(): Promise<boolean> {
+  const wasDegraded = rpcStatus().degraded;
+  while (rpcStatus().degraded) await sleep(15_000);
+  return wasDegraded;
+}
 
 /**
  * LiveDataSource — real Monad RPC + CEX reference, run as a persist-forward
@@ -37,8 +46,9 @@ export class LiveDataSource extends BaseSource {
   private pricer = new UsdPricer((key) => REFERENCES.assetUsd(key), (market) => REFERENCES.midForPair(market));
   private store = new VolumeStore(config.dbPath);
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
-  private gas = new GasTracker(publicClient, this.store, ADAPTERS, (m) => this.noteOnce(m));
-  /** fill attribution — UNKNOWN → DIRECT / "Router - X" from tx.to (best-effort). */
+  private gas = new GasTracker(publicClient, this.store, ADAPTERS, (m) => this.noteOnce(m), () => rpcStatus().degraded);
+  /** fill attribution — UNKNOWN → DIRECT / "Router - X" from tx.to (best-effort;
+   *  stays on during failover — per-fill lookups are live-path cheap, unlike crawls). */
   private attributor = new FillAttributor(publicClient, ADAPTERS);
   /** shared infra handed to every adapter (they don't import globals). */
   private ctx: AdapterContext = {
@@ -88,7 +98,12 @@ export class LiveDataSource extends BaseSource {
     // touching the network — a colliding id would silently merge two venues.
     validateRegistry();
     this.knownVenueIds = venueIds();
-    // Fail fast on an unreachable/wrong chain (docs/architecture.md: operations) rather than half-start.
+    // RPC failover events (switch / all-down / recovery) land in state.notes.
+    // Subscribed BEFORE the boot probe so a degraded start is on the record.
+    onRpcEvent((m) => this.noteOnce(m));
+    // Fail fast when NO endpoint serves or the primary is on the wrong chain
+    // (docs/architecture.md: operations) rather than half-start; a dead primary
+    // with a healthy backup boots degraded instead of failing.
     const probe = await probeChain();
     if (!probe.ok) throw new Error(`Monad RPC sanity check failed (${probe.reason}). Set DATA_SOURCE=sim to run offline.`);
 
@@ -161,6 +176,7 @@ export class LiveDataSource extends BaseSource {
       chainId: 143, block: this.block, monUsd: REFERENCES.assetUsd('MON'), monChangePct: REFERENCES.changePctFor('MON'),
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
       quoteCadenceMs: config.quoteIntervalMs, source: 'live', venues: venueMeta(), notes: this.notes,
+      rpc: rpcStatus(),
     };
   }
   getQuotes(): QuoteSnapshot { return this.quotes; }
@@ -449,6 +465,7 @@ export class LiveDataSource extends BaseSource {
       publicClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
 
     while (cursor <= end) {
+      if (await holdWhileDegraded()) this.noteOnce(`${name} backfill held while on backup RPC — resumed on primary`);
       // ── in-hole mode: probe a floor-sized slice at the cursor. Readable → the
       // hole is over (fall through and INGEST that probe normally). Unreadable →
       // skip a stride and double it (capped), so a multi-million-block hole is
@@ -656,6 +673,7 @@ export class LiveDataSource extends BaseSource {
       publicClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
 
     while (cursor <= end) {
+      if (await holdWhileDegraded()) this.noteOnce(`${name} onboarding scan held while on backup RPC — resumed on primary`);
       const to = cursor + chunk - 1n > end ? end : cursor + chunk - 1n;
       let batches: any[][] | null = null;
       let tries = 0;
