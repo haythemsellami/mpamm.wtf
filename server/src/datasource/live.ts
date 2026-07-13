@@ -12,6 +12,7 @@ import { publicClient, getLogsChunked, probeChain, blockAtOrAfter } from '../cha
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore } from '../db.js';
 import { utcDay, annotateCex } from '../util.js';
+import { seedSources } from './seed.js';
 import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, validateRegistry } from '../venues/registry.js';
 import type { AdapterContext, LogBundle, LogSource, VenueAdapter } from '../venues/adapter.js';
 
@@ -118,13 +119,33 @@ export class LiveDataSource extends BaseSource {
 
   /** Background history stages, in product-value order: onboarding markouts
    *  first (bounded ~30d — populates the leaderboard window a viewer actually
-   *  sees), THEN the deep venue-lifetime volume backfill (can run for hours). */
+   *  sees), THEN the deep venue-lifetime volume backfill (can run for hours).
+   *  Re-invoked by the rediscovery timer while seeds are pending (a venue whose
+   *  pools were quarantined at boot must seed once they recover — same
+   *  process, not just next deploy); the guard keeps one chain in flight. */
+  private historyRunning = false;
   private async backgroundHistory(): Promise<void> {
-    if (config.markoutBackfill) {
-      try { await this.markoutOnboarding(); }
-      catch (e) { this.noteOnce(`markout onboarding stopped: ${(e as Error).message}; resumes next boot`); }
+    if (this.historyRunning) return;
+    this.historyRunning = true;
+    try {
+      if (config.markoutBackfill) {
+        try { await this.markoutOnboarding(); }
+        catch (e) { this.noteOnce(`markout onboarding stopped: ${(e as Error).message}; retried automatically`); }
+      }
+      if (config.backfillEnabled) await this.backfillOnchain();
+    } finally {
+      this.historyRunning = false;
     }
-    if (config.backfillEnabled) await this.backfillOnchain();
+  }
+
+  /** true while any fill-landing venue still awaits a one-time history seed. */
+  private seedsPending(): boolean {
+    return ADAPTERS.some((a) => {
+      const v = a.venues()[0];
+      if (!v?.id || v.role !== 'venue') return false;
+      return (config.backfillEnabled && !!a.backfillFromUtc && this.store.getMeta(`backfill_done_${v.id}`) !== '1')
+        || (config.markoutBackfill && this.store.getMeta(`mkfill_done_${v.id}`) !== '1');
+    });
   }
 
   stop(): void {
@@ -151,6 +172,10 @@ export class LiveDataSource extends BaseSource {
       try { await a.discover(this.ctx); }
       catch (e) { this.noteOnce(`${a.venues()[0]?.name ?? 'venue'} re-discovery failed: ${(e as Error).message}`); }
     }
+    // seeds deferred at boot (pools quarantined / not discovered) retry here —
+    // no-op when everything is seeded, and the in-flight guard makes an extra
+    // kick free while a multi-hour backfill is still running.
+    if (this.seedsPending()) void this.backgroundHistory();
   }
 
   getState(): MarketState {
@@ -370,7 +395,7 @@ export class LiveDataSource extends BaseSource {
    * but have no keyless subgraph — by replaying their Swap logs on-chain. Runs
    * OFF the boot path (never blocks the dashboard or the live tail): chunked +
    * paced under the RPC's limits, resumable across restarts, and self-healing
-   * (retried each boot until `backfill_done_<venue>` is set).
+   * (retried each boot and on the rediscovery tick until `backfill_done_<venue>` is set).
    */
   private async backfillOnchain(): Promise<void> {
     this.applyBackfillReset();
@@ -379,12 +404,14 @@ export class LiveDataSource extends BaseSource {
       const vid = a.venues()[0]?.id ?? '';
       const name = a.venues()[0]?.name ?? vid;
       if (!sinceUtc || !vid || this.store.getMeta(`backfill_done_${vid}`) === '1') continue;
-      let sources: LogSource[];
-      try { sources = a.logSources().filter((s) => (s.kind ?? 'fills') === 'fills'); }
-      catch { this.noteOnce(`${name} backfill deferred — pools not discovered yet`); continue; }
-      if (!sources.length) { this.store.setMeta(`backfill_done_${vid}`, '1'); continue; }
-      try { await this.backfillAdapter(a, vid, name, sinceUtc, sources); }
-      catch (e) { this.noteOnce(`${name} backfill paused (${(e as Error).message}); resumes next boot`); }
+      const seed = seedSources(a);
+      // 'skip' (can't land fills by design) is done forever; 'defer' (pools
+      // quarantined/undiscovered right now) must NOT be — the done-flag would
+      // silently drop the venue's lifetime history (issue: seed vs quarantine).
+      if (seed.action === 'skip') { this.store.setMeta(`backfill_done_${vid}`, '1'); continue; }
+      if (seed.action === 'defer') { this.noteOnce(`${name} backfill deferred — ${seed.reason}`); continue; }
+      try { await this.backfillAdapter(a, vid, name, sinceUtc, seed.fills); }
+      catch (e) { this.noteOnce(`${name} backfill paused (${(e as Error).message}); retried automatically`); }
     }
   }
 
@@ -596,15 +623,14 @@ export class LiveDataSource extends BaseSource {
       // ALL sources (fills + state + attribution), unlike the volume backfill:
       // these rows are user-visible in the tape/leaderboard, so decode needs its
       // state (e.g. Clober book Opens) and router attribution to label them.
-      let sources: LogSource[];
-      try { sources = a.logSources(); }
-      catch { this.noteOnce(`${name} markout onboarding deferred — pools not discovered yet`); continue; }
-      if (!sources.some((s) => (s.kind ?? 'fills') === 'fills')) { this.store.setMeta(`mkfill_done_${vid}`, '1'); continue; }
+      const seed = seedSources(a);
+      if (seed.action === 'skip') { this.store.setMeta(`mkfill_done_${vid}`, '1'); continue; }
+      if (seed.action === 'defer') { this.noteOnce(`${name} markout onboarding deferred — ${seed.reason}`); continue; }
       try {
-        if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') await this.backfillRecentFills(a, vid, name, sources);
+        if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') await this.backfillRecentFills(a, vid, name, seed.all);
         await this.remarkVenue(vid, name);
       } catch (e) {
-        this.noteOnce(`${name} markout onboarding paused (${(e as Error).message}); resumes next boot`);
+        this.noteOnce(`${name} markout onboarding paused (${(e as Error).message}); retried automatically`);
       }
     }
   }
