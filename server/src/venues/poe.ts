@@ -204,6 +204,10 @@ export function createPoeAdapter(): VenueAdapter {
       return [{ key: 'swap', address: pairs, events: [ev(poePoolAbi, 'Swap')], kind: 'fills' as const }];
     },
 
+    // taker entries owned by the venue: the pools themselves. LFJ's routers are
+    // in the global registry (they route beyond POE, so they carry the brand).
+    entryPoints: () => [...byMarket.values()].map((p) => ({ address: p.pool })),
+
     // QUOTE_UPDATE_BURN: the oracle operator pushes setData() to the
     // ClapOracle every block (~400ms) with NO event, so updates can't be
     // enumerated from logs — 'blocks' mode samples eth_getBlockReceipts for
@@ -241,7 +245,9 @@ export function createPoeAdapter(): VenueAdapter {
         out.push({
           id: `poe-${String(l.transactionHash).toLowerCase()}-${l.logIndex}`,
           venueId: POE_VENUE.id,
-          market: p.market, side, category: 'DIRECT',
+          // attribution is the core's job (tx.to): claiming DIRECT here would
+          // label aggregator/searcher flow as direct — emit honest UNKNOWN.
+          market: p.market, side, category: 'UNKNOWN',
           usd, baseAmount, execPx,
           txHash: l.transactionHash, to: shortHex(String(a.recipient ?? '0x')),
           pool: `poe ${p.pool.slice(0, 8)}`,

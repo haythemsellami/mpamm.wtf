@@ -50,6 +50,16 @@ export interface LogSource {
 /** Logs delivered to `decode()`, keyed by `LogSource.key`. */
 export type LogBundle = Record<string, any[]>;
 
+/** A contract belonging to this venue that takers enter through (compared
+ *  against `tx.to` by the core fill attributor — server/src/attribution.ts):
+ *  no `router` = the venue itself (pool/book/proxy) — a match is a DIRECT
+ *  fill; with `router` = the venue's own periphery — a match labels the fill
+ *  `Router - <name>`. Aggregators do NOT belong here (global registry). */
+export interface EntryPoint {
+  address: string;
+  router?: string;
+}
+
 /**
  * How a venue's QUOTE-UPDATE transactions are found on-chain — the txs its own
  * keeper sends to push prices / reprice books (QUOTE_UPDATE_BURN). Monad
@@ -109,6 +119,11 @@ export interface VenueAdapter {
    *  gas tracker holds that venue's cursor and retries. Omit entirely when the
    *  venue doesn't self-fund its price updates. */
   gasSources?(): GasSource[];
+  /** optional: this venue's taker entry contracts (see EntryPoint) — lets the
+   *  core attributor turn an UNKNOWN fill into DIRECT (tx.to is the venue
+   *  itself) or `Router - <venue>` (tx.to is the venue's own periphery).
+   *  Return the currently-known set; called per tail pass, cheap. */
+  entryPoints?(): EntryPoint[];
   /** decode this adapter's fetched logs into normalized fills. Owns any
    *  venue-specific correlation (router maps, mid-run pool discovery, filtering).
    *  `failedSources` holds the keys of any `'attribution'` sources whose fetch

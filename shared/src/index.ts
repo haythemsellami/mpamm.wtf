@@ -338,6 +338,10 @@ export interface Fill {
   txHash: string;
   /** human label for the `to`/router address. */
   to: string;
+  /** brand of the known intermediary the tx entered through (tx.to) — e.g.
+   *  'Relay', 'KyberSwap', '0x', or the venue's own name for its router.
+   *  Set with category ROUTER by attribution; absent = direct or unknown. */
+  router?: string;
   /** pool/book label. */
   pool: string;
   blockNumber: number;

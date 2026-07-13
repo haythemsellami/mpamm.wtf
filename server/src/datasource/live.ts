@@ -5,6 +5,7 @@ import {
   type LeaderboardResponse, type GasResponse,
 } from '@shared';
 import { computeLeaderboard } from '../analytics.js';
+import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
 import { GasTracker } from '../gas.js';
 import { config } from '../config.js';
@@ -37,6 +38,8 @@ export class LiveDataSource extends BaseSource {
   private store = new VolumeStore(config.dbPath);
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
   private gas = new GasTracker(publicClient, this.store, ADAPTERS, (m) => this.noteOnce(m));
+  /** fill attribution — UNKNOWN → DIRECT / "Router - X" from tx.to (best-effort). */
+  private attributor = new FillAttributor(publicClient, ADAPTERS);
   /** shared infra handed to every adapter (they don't import globals). */
   private ctx: AdapterContext = {
     client: publicClient,
@@ -174,6 +177,14 @@ export class LiveDataSource extends BaseSource {
     // and block any re-backfill — unrecoverable without a manual reset).
     const pruned = this.store.reconcileVenues([...allVenueIds()]);
     if (pruned.volume || pruned.fills) this.note(`pruned ${pruned.volume} volume row(s) + ${pruned.fills} fill(s) for removed venue(s)`);
+    // one-time honesty relabel: Metric/POE used to hardcode DIRECT with no
+    // attribution evidence — retained rows revert to UNKNOWN (new fills get
+    // real labels from the attributor; evidence-based venues are untouched).
+    if (this.store.getMeta('attribution_relabel') !== 'v1') {
+      const n = this.store.relabelCategory(['metric', 'poe'], 'DIRECT', 'UNKNOWN');
+      if (n > 0) this.note(`attribution: relabeled ${n} retained unevidenced DIRECT fill(s) to UNKNOWN`);
+      this.store.setMeta('attribution_relabel', 'v1');
+    }
     // 1. authoritative persisted history
     this.days = this.store.all();
     // load recent fills for live serving; drop rows past the retention window
@@ -961,6 +972,9 @@ export class LiveDataSource extends BaseSource {
     // every required source succeeded → advance the cursor and ingest.
     this.lastBlock = head;
     fresh.sort((a, b) => a.blockNumber - b.blockNumber);
+    // best-effort label enrichment (UNKNOWN → DIRECT / Router - X). Never
+    // cursor-critical: a lookup failure leaves the adapter's honest UNKNOWN.
+    try { await this.attributor.attribute(fresh); } catch { /* labels only */ }
     for (const f of fresh) this.ingest(f);
   }
 

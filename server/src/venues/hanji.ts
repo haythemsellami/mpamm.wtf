@@ -207,6 +207,10 @@ export function createHanjiAdapter(): VenueAdapter {
       return [{ key: 'orderPlaced', address: markets.map((m) => m.clob), events: [ev(lobAbi, 'OrderPlaced')], kind: 'fills' as const }];
     },
 
+    // taker entries owned by Hanji: the per-market proxies (a direct trade's
+    // tx.to is the proxy; the CLOBs themselves are only reached internally).
+    entryPoints: () => KNOWN_MARKETS.map((m) => ({ address: m.proxy })),
+
     // QUOTE_UPDATE_BURN: Hanji's keeper pays to keep quotes fresh by writing
     // externalPrices into the FastQuoter (~1 updatePrices/s, log-less) — see
     // the FAST_QUOTER note for the verified mechanism. 'blocks' mode because
@@ -231,27 +235,10 @@ export function createHanjiAdapter(): VenueAdapter {
       if (!trades.length) return [];
 
       // ATTRIBUTION: the event's owner/initiator are the Hanji PROXY for routed
-      // flow (verified on-chain — both fields were the proxy on a live fill),
-      // which would collapse the leaderboard's TO-ADDRESS grouping to one row.
-      // The real trader is tx.from; tx.to distinguishes direct proxy calls from
-      // an upstream router. One getTransaction per unique fill tx (pooled) —
-      // a lookup failure degrades that fill to UNKNOWN, never drops it.
-      const txs = [...new Set(trades.map((l) => String(l.transactionHash)))];
-      const txInfo = new Map<string, { from: string; to: string }>();
-      const proxies = new Set(markets.map((m) => m.proxy.toLowerCase()));
-      const POOL = 10;
-      for (let i = 0; i < txs.length; i += POOL) {
-        await Promise.all(txs.slice(i, i + POOL).map(async (h) => {
-          for (let r = 0; r < 3; r++) {
-            try {
-              const t = await ctx.client.getTransaction({ hash: h as `0x${string}` });
-              txInfo.set(h, { from: String(t.from).toLowerCase(), to: String(t.to ?? '').toLowerCase() });
-              return;
-            } catch { await new Promise((res) => setTimeout(res, 150 * (r + 1))); }
-          }
-        }));
-      }
-
+      // flow (verified on-chain — both fields were the proxy on a live fill).
+      // The tx-level lookup (real trader = tx.from; tx.to picks DIRECT via the
+      // proxy entryPoints vs a branded router) now lives in the core attributor
+      // — emit honest UNKNOWN and let it label.
       const out: Fill[] = [];
       for (const l of trades) {
         const m = byClob.get(String(l.address).toLowerCase())!;
@@ -269,14 +256,13 @@ export function createHanjiAdapter(): VenueAdapter {
         if (usd <= 0) throw new Error(`Hanji ${m.market}: no USD price for either leg (feeds warming?)`);
         // isAsk = the aggressive order SELLS the base (tokenX) into the book.
         const side: Side = a.isAsk ? 'sell' : 'buy';
-        const tx = txInfo.get(String(l.transactionHash));
         out.push({
           id: `hanji-${String(l.transactionHash).toLowerCase()}-${l.logIndex}`,
           venueId: HANJI_VENUE.id,
           market: m.market, side,
-          category: tx ? (proxies.has(tx.to) ? 'DIRECT' : 'ROUTER') : 'UNKNOWN',
+          category: 'UNKNOWN',
           usd, baseAmount, execPx,
-          txHash: l.transactionHash, to: tx ? shortHex(tx.from) : shortHex(String(a.initiator ?? '0x')),
+          txHash: l.transactionHash, to: shortHex(String(a.initiator ?? '0x')),
           pool: `lob ${m.clob.slice(0, 8)}`,
           blockNumber: Number(l.blockNumber), ts: tsOf(l.blockNumber),
           markoutsBps: [null, null, null, null, null],
