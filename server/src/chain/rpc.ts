@@ -1,6 +1,7 @@
-import { createPublicClient, defineChain, http, type PublicClient } from 'viem';
+import { createPublicClient, createTransport, defineChain, http, type PublicClient, type Transport } from 'viem';
 import { config } from '../config.js';
 import { ADDR, MONAD_CHAIN_ID } from '@shared';
+import { RpcBreaker, type RpcStatusView } from './failover.js';
 
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
@@ -14,29 +15,56 @@ export const monad = defineChain({
   },
 });
 
+/** Ordered endpoints: primary first, then backups (deduped — with no
+ *  RPC_HTTP_URL set the default backup IS the primary). Labels are the only
+ *  thing that may ever surface publicly; URLs embed keys. */
+const RPC_URLS = [config.rpcHttp, ...config.rpcBackups.filter((u) => u !== config.rpcHttp)];
+const PUBLIC_RPC = 'https://rpc.monad.xyz';
+const rpcLabel = (i: number) =>
+  i === 0 ? 'primary' : `backup-${i}${RPC_URLS[i] === PUBLIC_RPC ? ' (public)' : ''}`;
+
+const breaker = new RpcBreaker();
+
+/** All endpoints share one failover breaker (chain/failover.ts): K consecutive
+ *  transport failures advance to the next endpoint; a 60s probe snaps back to
+ *  the primary once it recovers. Inner transports keep their own retry/backoff
+ *  (so the breaker only sees post-retry failures); the outer transport must
+ *  not retry again on top. */
+const failoverTransport: Transport = ({ chain }) => {
+  breaker.attach(RPC_URLS.map((url, i) => ({
+    label: rpcLabel(i),
+    request: http(url, {
+      batch: { batchSize: 256, wait: 8 },
+      retryCount: 2,
+      timeout: 12_000,
+    })({ chain }).request as (args: { method: string; params?: unknown }) => Promise<unknown>,
+  })));
+  return createTransport({
+    key: 'failover',
+    name: 'Failover HTTP',
+    type: 'failover',
+    retryCount: 0,
+    request: (args) => breaker.request(args) as Promise<any>,
+  });
+};
+
 /** HTTP public client. JSON-RPC batching is enabled so the quote poller's
  *  per-market reads collapse toward a single round-trip (docs/architecture.md: quote poller). */
 export const publicClient: PublicClient = createPublicClient({
   chain: monad,
-  transport: http(config.rpcHttp, {
-    batch: { batchSize: 256, wait: 8 },
-    retryCount: 2,
-    timeout: 12_000,
-  }),
+  transport: failoverTransport,
 });
 
-/** Quick liveness probe — confirms chain id 143 (boot sanity check — docs/architecture.md: operations). */
+/** Failover status for /api/markets (labels only) + event sink for state.notes. */
+export const rpcStatus = (): RpcStatusView => breaker.status();
+export const onRpcEvent = (cb: (msg: string) => void): void => breaker.subscribe(cb);
+
+/** Boot sanity check — verifies chain id 143 on EVERY endpoint (wrong-chain
+ *  backups are dropped, wrong-chain primary is fatal) and pre-positions onto
+ *  the first healthy endpoint when the primary is mid-outage. Boot proceeds if
+ *  ANY endpoint serves (docs/architecture.md: operations). */
 export async function probeChain(): Promise<{ ok: boolean; block: number; reason?: string }> {
-  try {
-    const [id, block] = await Promise.all([
-      publicClient.getChainId(),
-      publicClient.getBlockNumber(),
-    ]);
-    if (id !== MONAD_CHAIN_ID) return { ok: false, block: 0, reason: `chainId ${id} != ${MONAD_CHAIN_ID}` };
-    return { ok: true, block: Number(block) };
-  } catch (e) {
-    return { ok: false, block: 0, reason: (e as Error).message };
-  }
+  return breaker.verify(MONAD_CHAIN_ID);
 }
 
 /** Earliest block whose timestamp >= `targetSec`, by binary search over [0, hi]
