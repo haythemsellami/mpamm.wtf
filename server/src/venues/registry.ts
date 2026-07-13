@@ -4,6 +4,7 @@ import { createPoeAdapter } from './poe.js';
 import { createCloberVaultAdapter } from './clober.js';
 import { createMetricAdapter } from './metric.js';
 import { createHanjiAdapter } from './hanji.js';
+import { createLunarbaseAdapter } from './lunarbase.js';
 import { createUniswapAdapter } from './uniswap.js';
 import { createReferenceRegistry } from './reference.js';
 
@@ -21,6 +22,7 @@ const ALL_ADAPTERS: VenueAdapter[] = [
   createCloberVaultAdapter(),
   createMetricAdapter(),
   createHanjiAdapter(),
+  createLunarbaseAdapter(),
   createUniswapAdapter(), // baseline (quote-only) — the standard-DEX band
 ];
 
