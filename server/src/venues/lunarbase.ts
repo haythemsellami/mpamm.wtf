@@ -539,6 +539,11 @@ export function createLunarbaseAdapter(): VenueAdapter {
       return addresses.length ? [{ mode: 'logs' as const, address: addresses, topic0: CURRENT_STATE_TOPIC }] : [];
     },
 
+    // taker entries owned by the venue: the pools. Production flow arrives via
+    // external aggregators (Relay et al — global registry); the whitelisted
+    // execution adapters are internal hops, never a tx entry point.
+    entryPoints: () => [...byAddress.values()].map((pool) => ({ address: pool.pool })),
+
     decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
       const staged = applyLunarbaseStateLogs(byAddress, logs.state ?? []);
       for (const [address, pool] of staged) {

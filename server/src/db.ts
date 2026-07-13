@@ -140,6 +140,11 @@ export class VolumeStore {
     if (!fillCols.some((c) => c.name === 'px_approx')) {
       this.db.exec(`ALTER TABLE fills ADD COLUMN px_approx INTEGER NOT NULL DEFAULT 0`);
     }
+    // additive migration: fills gained `router` (the attributed intermediary
+    // brand — "Router - X" in the tape). NULL = direct/unattributed.
+    if (!fillCols.some((c) => c.name === 'router')) {
+      this.db.exec(`ALTER TABLE fills ADD COLUMN router TEXT`);
+    }
     // Defense in depth: pxApprox fills must never expose persisted markouts. This
     // normalizes adapter-supplied/backfilled rows and cleans any rows written by a
     // prior build that aged approximate fills before the live guard existed.
@@ -171,8 +176,8 @@ export class VolumeStore {
       ON CONFLICT(utc_day) DO UPDATE SET partial = excluded.partial`);
     this.metaStmt = this.db.prepare(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
     this.fillStmt = this.db.prepare(`
-      INSERT INTO fills (id, ts, block_number, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label, pool, markouts_bps)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO fills (id, ts, block_number, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label, pool, markouts_bps, router)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET markouts_bps = excluded.markouts_bps, px_approx = excluded.px_approx`);
     this.midStmt = this.db.prepare(`
       INSERT INTO mid_history (market, ts, mid) VALUES (?, ?, ?)
@@ -189,7 +194,7 @@ export class VolumeStore {
   private runFill(f: Fill): void {
     const markouts = f.pxApprox ? NULL_MARKOUTS_JSON : JSON.stringify(f.markoutsBps);
     this.fillStmt.run(f.id, f.ts, f.blockNumber, f.venueId, f.market, f.side, f.category,
-      f.usd, f.baseAmount, f.execPx, f.pxApprox ? 1 : 0, f.txHash, f.to, f.pool, markouts);
+      f.usd, f.baseAmount, f.execPx, f.pxApprox ? 1 : 0, f.txHash, f.to, f.pool, markouts, f.router ?? null);
   }
 
   getMeta(key: string): string | undefined {
@@ -329,14 +334,14 @@ export class VolumeStore {
    *  pxApprox rows are excluded here: the shared contract keeps them out of
    *  every markout/leaderboard stat, volume included. ts-ascending so the
    *  aggregation's cumulative-PnL sparklines accumulate in fill order. */
-  lbFillsChunk(sinceMs: number, afterTs: number, afterId: string, limit: number, maxTs?: number): Array<{ id: string; ts: number; venueId: string; category: string; pool: string; to: string; usd: number; markoutsBps: (number | null)[] }> {
+  lbFillsChunk(sinceMs: number, afterTs: number, afterId: string, limit: number, maxTs?: number): Array<{ id: string; ts: number; venueId: string; category: string; router?: string; pool: string; to: string; usd: number; markoutsBps: (number | null)[] }> {
     // KEYSET page (ts, id) so the aggregation streams the window in bounded
     // slices — materializing a full 30d window (10⁵–10⁶ rows) OOM'd the 512MB
     // production box. Horizons extracted in SQL (C-side): a per-row JSON.parse
     // in JS was a measurable slice of the pass. `maxTs` pins a later pass to an
     // earlier pass's snapshot upper bound (live fills keep landing in between).
     const rows = this.db.prepare(`
-      SELECT id, ts, venue_id, category, pool, to_label, usd,
+      SELECT id, ts, venue_id, category, router, pool, to_label, usd,
              json_extract(markouts_bps, '$[0]') AS m0, json_extract(markouts_bps, '$[1]') AS m1,
              json_extract(markouts_bps, '$[2]') AS m2, json_extract(markouts_bps, '$[3]') AS m3,
              json_extract(markouts_bps, '$[4]') AS m4
@@ -379,8 +384,8 @@ export class VolumeStore {
   insertFillsIfAbsent(fills: Fill[]): number {
     if (!fills.length) return 0;
     const ins = this.db.prepare(`
-      INSERT INTO fills (id, ts, block_number, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label, pool, markouts_bps)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO fills (id, ts, block_number, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label, pool, markouts_bps, router)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO NOTHING`);
     let added = 0;
     this.db.exec('BEGIN');
@@ -388,7 +393,7 @@ export class VolumeStore {
       for (const f of fills) {
         const markouts = f.pxApprox ? NULL_MARKOUTS_JSON : JSON.stringify(f.markoutsBps);
         const info = ins.run(f.id, f.ts, f.blockNumber, f.venueId, f.market, f.side, f.category,
-          f.usd, f.baseAmount, f.execPx, f.pxApprox ? 1 : 0, f.txHash, f.to, f.pool, markouts);
+          f.usd, f.baseAmount, f.execPx, f.pxApprox ? 1 : 0, f.txHash, f.to, f.pool, markouts, f.router ?? null);
         added += Number(info.changes);
       }
       this.db.exec('COMMIT');
@@ -397,6 +402,16 @@ export class VolumeStore {
       throw e;
     }
     return added;
+  }
+
+  /** One-time honesty relabel for retained fills: adapters that used to
+   *  hardcode a category reset their stored claims (unevidenced DIRECT →
+   *  UNKNOWN); the caller guards with a meta flag so it runs once. */
+  relabelCategory(venueIds: string[], from: string, to: string): number {
+    if (!venueIds.length) return 0;
+    const q = venueIds.map(() => '?').join(',');
+    const info = this.db.prepare(`UPDATE fills SET category = ? WHERE category = ? AND venue_id IN (${q})`).run(to, from, ...venueIds);
+    return Number(info.changes);
   }
 
   /** Markets where this VENUE still has unmarked fills (all-null markouts, real
@@ -513,6 +528,7 @@ function rowToFill(r: Record<string, any>): Fill {
     // excluded from markout/leaderboard stats across restarts (shared contract).
     ...(pxApprox ? { pxApprox: true } : {}),
     txHash: r.tx_hash, to: r.to_label, pool: r.pool,
+    ...(r.router ? { router: r.router } : {}),
     markoutsBps: pxApprox ? nullMarkouts() : JSON.parse(r.markouts_bps),
   };
 }

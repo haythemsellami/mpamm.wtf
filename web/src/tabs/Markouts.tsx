@@ -10,12 +10,17 @@ const TAPE_GRID = '78px 78px 84px 84px 64px 92px 80px 88px 46px 80px 80px 52px 5
 const OUT_GRID = '78px 82px 92px 84px 84px 46px 88px 88px 84px 96px 1fr 1fr';
 
 // CATEGORY colour — a fill's routing class, coloured from stable semantic/theme
-// tokens (never a venue color): UNKNOWN/ROUTER→amber, CEX/DEX→link, AGG→accent, DIRECT→faint.
-function catColor(c: string): string {
+// tokens (never a venue color): UNKNOWN/unbranded ROUTER→amber (attribution
+// unavailable), branded router/AGG→accent (identified flow), CEX/DEX→link,
+// DIRECT→faint.
+function catColor(c: string, router?: string): string {
+  if (router) return C.accent;
   return c === 'UNKNOWN' || c === 'ROUTER' ? C.amber : c === 'CEX/DEX' ? C.link : c === 'AGG' ? C.accent : C.faint2;
 }
-/** category display — DIRECT renders as an em dash. */
-function catLabel(c: string): string {
+/** category display — DIRECT renders as an em dash; attributed routed flow
+ *  carries the intermediary's brand ("Router - Relay"). */
+function catLabel(c: string, router?: string): string {
+  if (router) return `Router - ${router}`;
   return c === 'DIRECT' ? '—' : c;
 }
 
@@ -142,7 +147,7 @@ export function MarkoutsTab() {
                 <div style={{ color: C.dim3 }}>{fmtInt(f.blockNumber)}</div>
                 <div style={{ color: C.link }}>{shortHex(f.txHash)}</div>
                 <div style={{ color: C.faint2 }}>{f.to}</div>
-                <div style={{ color: catColor(f.category), fontSize: 9 }}>{catLabel(f.category)}</div>
+                <div style={{ color: catColor(f.category, f.router), fontSize: 9 }}>{catLabel(f.category, f.router)}</div>
                 <div style={{ color: venueColor(venuesById[f.venueId], d.theme), fontWeight: 600 }}>{dp}</div>
                 <div style={{ color: C.text2 }}>{f.market}</div>
                 <div style={{ color: C.faint2 }}>{f.pool}</div>

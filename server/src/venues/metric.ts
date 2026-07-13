@@ -189,6 +189,11 @@ export function createMetricAdapter(): VenueAdapter {
       return [{ key: 'swap', address: pools.map((p) => p.pool), events: [ev(metricPoolAbi, 'Swap')], kind: 'fills' as const }];
     },
 
+    // taker entries owned by Metric: today only the pools themselves — sampled
+    // flow is dominated by FastLane auctions + searcher bots (global registry /
+    // UNKNOWN). Add Metric's official router here if the team publishes one.
+    entryPoints: () => pools.map((p) => ({ address: p.pool })),
+
     decode(_ctx: AdapterContext, logs: LogBundle, tsOf) {
       const out: Fill[] = [];
       const abs = (x: bigint) => (x < 0n ? -x : x);
@@ -209,7 +214,9 @@ export function createMetricAdapter(): VenueAdapter {
         out.push({
           id: `metric-${String(l.transactionHash).toLowerCase()}-${l.logIndex}`,
           venueId: METRIC_VENUE.id,
-          market: p.market, side, category: 'DIRECT',
+          // attribution is the core's job (tx.to): claiming DIRECT here would
+          // label aggregator/searcher flow as direct — emit honest UNKNOWN.
+          market: p.market, side, category: 'UNKNOWN',
           usd, baseAmount, execPx,
           txHash: l.transactionHash, to: shortHex(String(a.recipient ?? '0x')),
           pool: `metric ${p.pool.slice(0, 8)}`,
