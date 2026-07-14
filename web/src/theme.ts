@@ -27,8 +27,11 @@ export const C = {
 export const MONO = "'JetBrains Mono','SF Mono',monospace";
 export const SANS = "'Space Grotesk',sans-serif";
 
-/** Official Monad Purple — the product logomark stays this in BOTH themes (brand mark, not the theme accent). */
-export const LOGO_PURPLE = '#6E54FF';
+/** Official Monad logomark fill — the brand kit's logo SVGs ship #836EF9
+ *  (monad.xyz/brand-and-media-kit; #6E54FF is the palette-primary swatch, kept
+ *  as our theme-color). The mark stays this in BOTH themes (brand mark, not
+ *  the theme accent). */
+export const LOGO_PURPLE = '#836EF9';
 
 /** Neutral fallback for a missing/unknown venue color (theme-aware) — used when a
  *  venueId has no registry entry yet, so a swatch/line never renders `undefined`. */

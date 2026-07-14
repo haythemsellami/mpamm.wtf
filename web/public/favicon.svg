@@ -1,6 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="propAMM">
   <rect width="32" height="32" rx="7" fill="#0E091C"/>
-  <circle cx="16" cy="16" r="10.5" fill="none" stroke="#6E54FF" stroke-width="2"/>
-  <polygon points="16,7 25,16 16,25 7,16" fill="#6E54FF"/>
-  <circle cx="16" cy="16" r="2.3" fill="#0E091C"/>
+  <!-- official Monad logomark (brand kit path, 24x24) centered on the tile -->
+  <g transform="translate(4.2 4)">
+    <path fill="#836EF9" d="M11.782 0C8.37963 0 0 8.53443 0 11.9999C0 15.4654 8.37963 24 11.782 24C15.1844 24 23.5642 15.4653 23.5642 11.9999C23.5642 8.53458 15.1845 0 11.782 0ZM9.94598 18.8619C8.51124 18.4637 4.65378 11.5912 5.04481 10.1299C5.43584 8.66856 12.1834 4.73984 13.6181 5.1381C15.0529 5.5363 18.9104 12.4087 18.5194 13.87C18.1283 15.3314 11.3807 19.2602 9.94598 18.8619Z"/>
+  </g>
 </svg>
