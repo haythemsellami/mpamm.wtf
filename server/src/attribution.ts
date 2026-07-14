@@ -43,6 +43,11 @@ export const KNOWN_ROUTERS: ReadonlyMap<string, string> = new Map([
   // it routes to more than the POE venue.
   ['0x18556da13313f3532c54711497a8fedac273220e', 'LFJ'],
   ['0x4face5b0ef2757ceb9151d14c036a1135931c70e', 'LFJ'],
+  // ERC-4337 EntryPoints (canonical cross-chain addresses, verified live on
+  // Monad) — bundler-submitted USER operations: smart-account users swapping.
+  // Observed callers are 0x4337…-vanity bundler EOAs.
+  ['0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789', 'ERC-4337'], // v0.6
+  ['0x0000000071727de22e5e9d8baf0edac6f37da032', 'ERC-4337'], // v0.7
   // Bungee (Socket) — intent/RFQ solver-side executor ("RFQVaultExecutor",
   // verified source). Provenance: deployer/solverSigner 0xF76e737…C34Bd5 is
   // Socket's Bungee solver signer across chains (explorer-tagged "Socket:
@@ -69,6 +74,22 @@ export const KNOWN_ROUTERS: ReadonlyMap<string, string> = new Map([
  *  aggregator/pool they called (bundling is relay-level, not calldata-level). */
 export const KNOWN_MEV: ReadonlyMap<string, string> = new Map([
   ['0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58', 'FastLane'],
+  // "Kubera" — private multichain searcher (their own codename, from the
+  // executor's revert strings; no public identity exists). Executor deployed
+  // on Monad 2025-11-24 (block 37,740,451) and at the SAME address on
+  // Arbitrum/Scroll/Polygon/Optimism/BNB/Blast/Ethereum; deployer + sole
+  // caller is the operator wallet below. Admission rule holds: unverified
+  // arb-only executor, caller==deployer, no user-facing entrypoints.
+  ['0x415669455d93b755efe7f20ef6f1dbdce7f68f7d', 'Kubera'],
+]);
+
+/** Searcher OPERATOR wallets → brand, matched against tx.FROM as the LAST
+ *  resort (only when tx.to matched nothing). An EOA cannot carry another
+ *  user's flow, so from-matching can never mislabel user swaps — and it
+ *  survives executor-contract rotation. Admission: the EOA must be the
+ *  proven deployer/sole caller of a KNOWN_MEV executor. */
+export const KNOWN_MEV_OPERATORS: ReadonlyMap<string, string> = new Map([
+  ['0x256efafed786d24163bedf15d583ea5dbdb4757c', 'Kubera'],
 ]);
 
 const LOOKUP_POOL = 12;   // concurrent tx lookups (batched by the transport anyway)
@@ -142,6 +163,12 @@ export class FillAttributor {
       if (mev) {
         f.category = 'MEV';
         f.router = mev;
+        continue;
+      }
+      const op = KNOWN_MEV_OPERATORS.get(tx.from);
+      if (op) {
+        f.category = 'MEV';
+        f.router = op;
       }
     }
     // drop failed lookups so the next pass retries them.
