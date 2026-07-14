@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FillAttributor, KNOWN_MEV, KNOWN_ROUTERS } from '../attribution.js';
+import { FillAttributor, KNOWN_MEV, KNOWN_MEV_OPERATORS, KNOWN_ROUTERS } from '../attribution.js';
 import type { Fill } from '@shared';
 import type { VenueAdapter } from '../venues/adapter.js';
 
@@ -81,6 +81,46 @@ describe('FillAttributor', () => {
     expect(f.to).toContain(TAKER.slice(2, 6));
   });
 
+  it('brands a known searcher executor (Kubera) as MEV', async () => {
+    const KUBERA = '0x415669455d93b755efe7f20ef6f1dbdce7f68f7d'; // in KNOWN_MEV
+    const a = new FillAttributor(clientFor({ '0x3k': KUBERA }) as any, [fakeAdapter()]);
+    const f = fill('0x3k');
+    await a.attribute([f]);
+    expect(f.category).toBe('MEV');
+    expect(f.router).toBe('Kubera');
+  });
+
+  it('falls back to the OPERATOR wallet (tx.from) when tx.to is an unknown contract', async () => {
+    const OPERATOR = '0x256efafed786d24163bedf15d583ea5dbdb4757c'; // in KNOWN_MEV_OPERATORS
+    const client = {
+      getTransaction: async () => ({ to: BOT, from: OPERATOR }) as any, // rotated executor
+    };
+    const a = new FillAttributor(client as any, [fakeAdapter()]);
+    const f = fill('0x3o');
+    await a.attribute([f]);
+    expect(f.category).toBe('MEV');
+    expect(f.router).toBe('Kubera');
+  });
+
+  it('a tx.to match always wins over the operator fallback', async () => {
+    const OPERATOR = '0x256efafed786d24163bedf15d583ea5dbdb4757c';
+    const FASTLANE = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58';
+    const client = { getTransaction: async () => ({ to: FASTLANE, from: OPERATOR }) as any };
+    const a = new FillAttributor(client as any, [fakeAdapter()]);
+    const f = fill('0x3w');
+    await a.attribute([f]);
+    expect(f.router).toBe('FastLane'); // the wrapper entered through, not the wallet
+  });
+
+  it('labels ERC-4337 EntryPoint flow as routed user flow', async () => {
+    const ENTRYPOINT = '0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789';
+    const a = new FillAttributor(clientFor({ '0x3e': ENTRYPOINT }) as any, [fakeAdapter()]);
+    const f = fill('0x3e');
+    await a.attribute([f]);
+    expect(f.category).toBe('ROUTER');
+    expect(f.router).toBe('ERC-4337');
+  });
+
   it('leaves unidentified intermediaries UNKNOWN (but still shows the real initiator)', async () => {
     const a = new FillAttributor(clientFor({ '0x4': BOT }) as any, [fakeAdapter()]);
     const f = fill('0x4');
@@ -127,9 +167,14 @@ describe('FillAttributor', () => {
   it('registry addresses are lowercased (lookup is case-insensitive on tx.to)', () => {
     for (const k of KNOWN_ROUTERS.keys()) expect(k).toBe(k.toLowerCase());
     for (const k of KNOWN_MEV.keys()) expect(k).toBe(k.toLowerCase());
+    for (const k of KNOWN_MEV_OPERATORS.keys()) expect(k).toBe(k.toLowerCase());
   });
 
   it('no address sits in both registries (a contract is a router XOR auction infra)', () => {
     for (const k of KNOWN_MEV.keys()) expect(KNOWN_ROUTERS.has(k)).toBe(false);
+    for (const k of KNOWN_MEV_OPERATORS.keys()) {
+      expect(KNOWN_ROUTERS.has(k)).toBe(false);
+      expect(KNOWN_MEV.has(k)).toBe(false);
+    }
   });
 });
