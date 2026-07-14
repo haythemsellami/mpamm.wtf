@@ -46,6 +46,13 @@ export const KNOWN_ROUTERS: ReadonlyMap<string, string> = new Map([
   // it routes to more than the POE venue.
   ['0x18556da13313f3532c54711497a8fedac273220e', 'LFJ'],
   ['0x4face5b0ef2757ceb9151d14c036a1135931c70e', 'LFJ'],
+  // Bungee (Socket) — intent/RFQ solver-side executor ("RFQVaultExecutor",
+  // verified source). Provenance: deployer/solverSigner 0xF76e737…C34Bd5 is
+  // Socket's Bungee solver signer across chains (explorer-tagged "Socket:
+  // Bungee Solver" contracts share it), and the source carries Socket codebase
+  // signatures (RescueFundsLib, FulfilExec/fulfil). Observed filling through
+  // the Metric pAMM.
+  ['0x97caca78ac2a94c67643d07843f85afaa44a3ea5', 'Bungee'],
 ]);
 
 const LOOKUP_POOL = 12;   // concurrent tx lookups (batched by the transport anyway)
