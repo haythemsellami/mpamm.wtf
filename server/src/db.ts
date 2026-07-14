@@ -414,6 +414,13 @@ export class VolumeStore {
     return Number(info.changes);
   }
 
+  /** One-time reclassification of retained fills by attributed brand — e.g.
+   *  FastLane rows written as ROUTER before the MEV class existed. */
+  relabelCategoryByRouter(router: string, from: string, to: string): number {
+    const info = this.db.prepare(`UPDATE fills SET category = ? WHERE category = ? AND router = ?`).run(to, from, router);
+    return Number(info.changes);
+  }
+
   /** Markets where this VENUE still has unmarked fills (all-null markouts, real
    *  execPx) older than `beforeTs` — the remark job's work list. Venue-scoped so
    *  one venue's onboarding can never skip another's later-added history. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FillAttributor, KNOWN_ROUTERS } from '../attribution.js';
+import { FillAttributor, KNOWN_MEV, KNOWN_ROUTERS } from '../attribution.js';
 import type { Fill } from '@shared';
 import type { VenueAdapter } from '../venues/adapter.js';
 
@@ -71,6 +71,16 @@ describe('FillAttributor', () => {
     expect(f.router).toBe('Relay');
   });
 
+  it('classifies auction/bundle infrastructure as MEV, not ROUTER', async () => {
+    const FASTLANE = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58'; // in KNOWN_MEV
+    const a = new FillAttributor(clientFor({ '0x3m': FASTLANE }) as any, [fakeAdapter()]);
+    const f = fill('0x3m');
+    await a.attribute([f]);
+    expect(f.category).toBe('MEV');
+    expect(f.router).toBe('FastLane');
+    expect(f.to).toContain(TAKER.slice(2, 6));
+  });
+
   it('leaves unidentified intermediaries UNKNOWN (but still shows the real initiator)', async () => {
     const a = new FillAttributor(clientFor({ '0x4': BOT }) as any, [fakeAdapter()]);
     const f = fill('0x4');
@@ -116,5 +126,10 @@ describe('FillAttributor', () => {
 
   it('registry addresses are lowercased (lookup is case-insensitive on tx.to)', () => {
     for (const k of KNOWN_ROUTERS.keys()) expect(k).toBe(k.toLowerCase());
+    for (const k of KNOWN_MEV.keys()) expect(k).toBe(k.toLowerCase());
+  });
+
+  it('no address sits in both registries (a contract is a router XOR auction infra)', () => {
+    for (const k of KNOWN_MEV.keys()) expect(KNOWN_ROUTERS.has(k)).toBe(false);
   });
 });

@@ -201,6 +201,14 @@ export class LiveDataSource extends BaseSource {
       if (n > 0) this.note(`attribution: relabeled ${n} retained unevidenced DIRECT fill(s) to UNKNOWN`);
       this.store.setMeta('attribution_relabel', 'v1');
     }
+    // FastLane rows written as ROUTER before the MEV class existed: the
+    // auction handler sells priority execution (bid → shMonad), it routes
+    // nothing — the inner swap is searcher flow.
+    if (this.store.getMeta('mev_relabel') !== 'v1') {
+      const n = this.store.relabelCategoryByRouter('FastLane', 'ROUTER', 'MEV');
+      if (n > 0) this.note(`attribution: reclassified ${n} FastLane fill(s) ROUTER → MEV`);
+      this.store.setMeta('mev_relabel', 'v1');
+    }
     // 1. authoritative persisted history
     this.days = this.store.all();
     // load recent fills for live serving; drop rows past the retention window

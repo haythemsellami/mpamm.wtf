@@ -11,16 +11,17 @@ const OUT_GRID = '78px 82px 92px 84px 84px 46px 88px 88px 84px 96px 1fr 1fr';
 
 // CATEGORY colour — a fill's routing class, coloured from stable semantic/theme
 // tokens (never a venue color): UNKNOWN/unbranded ROUTER→amber (attribution
-// unavailable), branded router/AGG→accent (identified flow), CEX/DEX→link,
-// DIRECT→faint.
+// unavailable), branded router/AGG→accent (identified flow), MEV→accent2
+// (identified machine flow), CEX/DEX→link, DIRECT→faint.
 function catColor(c: string, router?: string): string {
+  if (c === 'MEV') return C.accent2;
   if (router) return C.accent;
   return c === 'UNKNOWN' || c === 'ROUTER' ? C.amber : c === 'CEX/DEX' ? C.link : c === 'AGG' ? C.accent : C.faint2;
 }
-/** category display — DIRECT renders as an em dash; attributed routed flow
- *  carries the intermediary's brand ("Router - Relay"). */
+/** category display — DIRECT renders as an em dash; attributed flow carries
+ *  the intermediary's brand ("Router - Relay", "MEV - FastLane"). */
 function catLabel(c: string, router?: string): string {
-  if (router) return `Router - ${router}`;
+  if (router) return `${c === 'MEV' ? 'MEV' : 'Router'} - ${router}`;
   return c === 'DIRECT' ? '—' : c;
 }
 
