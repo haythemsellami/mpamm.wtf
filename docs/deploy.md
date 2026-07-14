@@ -30,6 +30,7 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 |---|---|
 | `RPC_HTTP_URL` / `RPC_WS_URL` | Monad node (default: public endpoint) |
 | `RPC_BACKUP_URLS` | ordered failover nodes, comma-separated (default: public endpoint; `""` disables failover) |
+| `QUOTE_INTERVAL_MS` / `TAIL_INTERVAL_MS` | quote-loop / fills-tail-loop cadence floors (default 500 each; the loops are independent and self-scheduling) |
 | `DATA_SOURCE=sim` | offline simulator instead of live |
 | `VENUES=id,id` | run a subset of the adapter registry (adapter development) |
 | `API_PORT` | HTTP/WS port (default 8787) |
