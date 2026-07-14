@@ -31,6 +31,16 @@ export function VolumeTab() {
   // transient hover — local (never persisted); brush window lives in the store
   // so it survives tab switches (design keeps it in global state too).
   const [hover, setHover] = useState<HoverState>(null);
+  // legend toggles — venues hidden from a chart's stacks (per chart, keyed by
+  // venue id). The tables keep EVERY venue as the toggle surface; totals stay
+  // full-window so the table remains the reference while the chart filters.
+  const [hiddenVol, setHiddenVol] = useState<ReadonlySet<string>>(new Set());
+  const [hiddenBurn, setHiddenBurn] = useState<ReadonlySet<string>>(new Set());
+  const toggleIn = (set: ReadonlySet<string>, id: string): Set<string> => {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  };
   const brushRef = useRef<HTMLDivElement | null>(null);
   // active drag's window-listener cleanup — run on unmount so a mid-drag tab
   // switch can't leak window listeners.
@@ -154,7 +164,7 @@ export function VolumeTab() {
         kSwaps: '0', kPeak: f(0), kPeakDay: '—',
         kToday: f(0), kTodayChg: '▲ 0%', kTodaycss: C.green,
         since: '—',
-        legRows: series.map((s) => ({ name: s.name, color: s.color, vol: f(0), share: '0.0%' })),
+        legRows: series.map((s) => ({ id: s.id, name: s.name, color: s.color, vol: f(0), share: '0.0%', hidden: false })),
         legTotal: f(0), cumLine: '', cumArea: '', cumSigma: f(0),
         rangeLabel: 'ALL-TIME', rangeCaption: '',
         msBands: [] as { path: string; color: string }[],
@@ -173,7 +183,7 @@ export function VolumeTab() {
         burnBars: [] as { op: number; segs: { h: string; color: string }[]; bg: string; onEnter: () => void }[],
         burnMaxLabel: '0 MON', burnMidLabel: '0 MON',
         burnTip: null as null | { left: string; date: string; total: string; usd: string; rows: { name: string; color: string; val: string }[] },
-        burnRows: [] as { name: string; color: string; burn: string; updates: string }[],
+        burnRows: [] as { id: string; name: string; color: string; burn: string; updates: string; hidden: boolean }[],
         burnTotal: '0 MON', burnUpdatesTotal: '0', burnColHdr: 'ALL-TIME BURN', burnPerM: '0',
       };
     }
@@ -186,14 +196,19 @@ export function VolumeTab() {
     const pDays = allDays.slice(pS, pE + 1);
     const ndP = pDays.length;
 
-    const maxT = Math.max(...wDays.map(dayTotal)) || 1;
+    // chart-only subset: legend-hidden venues drop out of the stacks and the
+    // y-scale renormalizes; every OTHER consumer (KPIs, cum/ms, breakdown)
+    // stays full-series — the toggle is a lens, not a data filter.
+    const volShown = series.filter((s) => !hiddenVol.has(s.id));
+    const shownTotal = (x: DailyVolume) => volShown.reduce((a, s) => a + s.val(x), 0);
+    const maxT = Math.max(...wDays.map(shownTotal)) || 1;
     const H = 150;
     const hv = hover;
     const hiW = hv && hv.c === 'daily' ? Math.min(hv.i, ndW - 1) : -1;
     const hiP = hv && hv.c !== 'daily' ? Math.min(hv.i, ndP - 1) : -1;
     const volBars = wDays.map((x, i) => ({
       op: x.partial ? 0.5 : 1,
-      segs: series.map((s) => ({ h: (s.val(x) / maxT * H).toFixed(1), color: s.color })),
+      segs: volShown.map((s) => ({ h: (s.val(x) / maxT * H).toFixed(1), color: s.color })),
       // full-height accent wash behind the hovered day's stack
       bg: hiW === i ? 'var(--accent-dim)' : 'transparent',
       onEnter: () => setHover({ c: 'daily', i }),
@@ -210,7 +225,7 @@ export function VolumeTab() {
     // window totals per venue — venues that didn't EXIST during any part of the
     // window are omitted (same honesty rule as the per-day tooltips).
     const winSeries = series.filter((s) => !s.since || s.since <= winEndDay);
-    const totals = winSeries.map((s) => ({ name: s.name, color: s.color, tot: wDays.reduce((a, x) => a + s.val(x), 0) }));
+    const totals = winSeries.map((s) => ({ id: s.id, name: s.name, color: s.color, tot: wDays.reduce((a, x) => a + s.val(x), 0) }));
     const winTot = totals.reduce((a, t) => a + t.tot, 0);
     const share = (x: number) => (winTot ? (x / winTot * 100) : 0).toFixed(1) + '%';
 
@@ -300,8 +315,8 @@ export function VolumeTab() {
     if (hiW >= 0) {
       const x = wDays[hiW];
       dailyTip = {
-        left: tipLeft(hiW, ndW), date: dateOf(x), total: f(dayTotal(x)),
-        rows: series.filter((s) => existsOn(s, x)).map((s) => ({ name: s.name, color: s.color, val: f(s.val(x)) })),
+        left: tipLeft(hiW, ndW), date: dateOf(x), total: f(shownTotal(x)),
+        rows: volShown.filter((s) => existsOn(s, x)).map((s) => ({ name: s.name, color: s.color, val: f(s.val(x)) })),
       };
     } else if (hiP >= 0) {
       const x = pDays[hiP];
@@ -331,12 +346,13 @@ export function VolumeTab() {
     const gVal = (utc: string, vid: string) => gasByDay.get(utc)?.[vid]?.mon ?? 0;
     const gTxs = (utc: string, vid: string) => gasByDay.get(utc)?.[vid]?.txs ?? 0;
     const fMON = (m: number) => (m >= 1000 ? (m / 1000).toFixed(1) + 'K' : Math.round(m).toLocaleString()) + ' MON';
-    const bTot = wDays.map((x) => burnSeries.reduce((a, s) => a + gVal(x.utcDay, s.id), 0));
+    const burnShown = burnSeries.filter((s) => !hiddenBurn.has(s.id));
+    const bTot = wDays.map((x) => burnShown.reduce((a, s) => a + gVal(x.utcDay, s.id), 0));
     const bMax = Math.max(...bTot, 0) || 1;
     const hiB = hv && hv.c === 'burn' ? Math.min(hv.i, ndW - 1) : -1;
     const burnBars = wDays.map((x, i) => ({
       op: x.partial ? 0.5 : 1,
-      segs: burnSeries.filter((s) => gVal(x.utcDay, s.id) > 0).map((s) => ({ h: (gVal(x.utcDay, s.id) / bMax * H).toFixed(1), color: s.color })),
+      segs: burnShown.filter((s) => gVal(x.utcDay, s.id) > 0).map((s) => ({ h: (gVal(x.utcDay, s.id) / bMax * H).toFixed(1), color: s.color })),
       bg: hiB === i ? 'var(--accent-dim)' : 'transparent',
       onEnter: () => setHover({ c: 'burn', i }),
     }));
@@ -346,7 +362,7 @@ export function VolumeTab() {
       const monUsd = d.state?.monUsd ?? 0;
       burnTip = {
         left: tipLeft(hiB, ndW), date: dateOf(x),
-        rows: burnSeries.filter((s) => gVal(x.utcDay, s.id) > 0)
+        rows: burnShown.filter((s) => gVal(x.utcDay, s.id) > 0)
           .map((s) => ({ name: s.name, color: s.color, val: (approx.has(s.id) ? '≈' : '') + gVal(x.utcDay, s.id).toFixed(1) + ' MON' })),
         total: Math.round(bTot[hiB]).toLocaleString() + ' MON',
         usd: monUsd > 0 ? '~$' + (bTot[hiB] * monUsd).toFixed(0) : '',
@@ -355,9 +371,9 @@ export function VolumeTab() {
     const burnRows = burnSeries.map((s) => {
       const tot = wDays.reduce((a, x) => a + gVal(x.utcDay, s.id), 0);
       const ups = wDays.reduce((a, x) => a + gTxs(x.utcDay, s.id), 0);
-      return { name: s.name, color: s.color, burn: (approx.has(s.id) ? '≈' : '') + fMON(tot), updates: ups.toLocaleString() };
+      return { id: s.id, name: s.name, color: s.color, burn: (approx.has(s.id) ? '≈' : '') + fMON(tot), updates: ups.toLocaleString(), hidden: hiddenBurn.has(s.id) };
     });
-    const burnTotal = bTot.reduce((a, b) => a + b, 0);
+    const burnTotal = burnSeries.reduce((a, s) => a + wDays.reduce((x, y) => x + gVal(y.utcDay, s.id), 0), 0);
     const burnUpdatesTotal = burnSeries.reduce((a, s) => a + wDays.reduce((x, y) => x + gTxs(y.utcDay, s.id), 0), 0);
     // burn per $1M of volume, over only the days that HAVE a gas series — the
     // burn history is deliberately shallow (~30d), so dividing by the window's
@@ -386,7 +402,7 @@ export function VolumeTab() {
       kTodayChg: todayChg == null ? (todayT > 0 ? '▲ ∞%' : '▲ 0%') : (todayChg >= 0 ? '▲ ' : '▼ ') + Math.abs(todayChg).toFixed(0) + '%',
       kTodaycss: todayChg == null ? (todayT > 0 ? C.green : C.faint2) : (todayChg >= 0 ? C.green : C.red),
       since,
-      legRows: totals.map((t) => ({ name: t.name, color: t.color, vol: f(t.tot), share: share(t.tot) })),
+      legRows: totals.map((t) => ({ id: t.id, name: t.name, color: t.color, vol: f(t.tot), share: share(t.tot), hidden: hiddenVol.has(t.id) })),
       legTotal: f(winTot), cumLine, cumArea, cumSigma: f(cum || winTot),
       rangeLabel, rangeCaption,
       msBands,
@@ -408,7 +424,7 @@ export function VolumeTab() {
       burnColHdr: `${rangeLabel} BURN`, burnPerM,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d.volume, d.gas, d.theme, d.displayVenues, wS, wE, pS, pE, hover]);
+  }, [d.volume, d.gas, d.theme, d.displayVenues, wS, wE, pS, pE, hover, hiddenVol, hiddenBurn]);
 
   // svg charts: cursor-x → nearest day index (round(frac × (n−1))); only
   // re-render when the index or chart changes, not on every mousemove pixel.
@@ -543,20 +559,24 @@ export function VolumeTab() {
               <div>VENUE</div><div style={{ textAlign: 'right' }}>{vm.rangeLabel}</div><div style={{ textAlign: 'right' }}>SHARE</div>
             </div>
             {vm.legRows.map((r) => (
-              <div key={r.name} style={{ display: 'grid', gridTemplateColumns: '1fr 70px 44px', gap: '3px 8px', fontSize: 10.5, padding: '4px 0', alignItems: 'center' }}>
+              <button key={r.id} type="button" aria-pressed={!r.hidden}
+                title={r.hidden ? 'show in chart' : 'hide from chart'}
+                onClick={() => setHiddenVol((h) => toggleIn(h, r.id))}
+                style={{ display: 'grid', gridTemplateColumns: '1fr 70px 44px', gap: '3px 8px', fontSize: 10.5, padding: '4px 0', alignItems: 'center', width: '100%', cursor: 'pointer', opacity: r.hidden ? 0.4 : 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: 2, background: r.color, flex: 'none' }} />
-                  <span style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{r.name}</span>
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: r.hidden ? 'transparent' : r.color, border: `1px solid ${r.color}`, flex: 'none' }} />
+                  <span style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, textDecoration: r.hidden ? 'line-through' : 'none' }}>{r.name}</span>
                 </div>
                 <div style={{ textAlign: 'right', color: C.text }}>{r.vol}</div>
                 <div style={{ textAlign: 'right', color: C.dim }}>{r.share}</div>
-              </div>
+              </button>
             ))}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 70px 44px', gap: '3px 8px', fontSize: 10.5, paddingTop: 6, marginTop: 3, borderTop: `1px solid ${C.line}` }}>
               <div style={{ color: C.dim3 }}>TOTAL</div>
               <div style={{ textAlign: 'right', color: C.text, fontWeight: 600 }}>{vm.legTotal}</div>
               <div style={{ textAlign: 'right', color: C.dim }}>100%</div>
             </div>
+            <div style={{ fontSize: 8.5, color: C.faint2, marginTop: 5, textAlign: 'right' }}>click a venue to hide/show it in the chart</div>
           </div>
         </div>
       </div>
@@ -607,26 +627,29 @@ export function VolumeTab() {
               </div>
             </div>
             {/* summary column — VENUE / window burn / update-tx counts */}
-            <div style={{ flex: 'none', width: 248, background: C.overlay, border: `1px solid ${C.line}`, padding: '8px 10px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 84px 58px', gap: '3px 8px', fontSize: 8.5, color: C.faint2, letterSpacing: '.05em', paddingBottom: 5, borderBottom: `1px solid ${C.line}` }}>
+            <div style={{ flex: 'none', width: 272, background: C.overlay, border: `1px solid ${C.line}`, padding: '8px 10px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 84px 66px', gap: '3px 8px', fontSize: 8.5, color: C.faint2, letterSpacing: '.05em', paddingBottom: 5, borderBottom: `1px solid ${C.line}` }}>
                 <div>VENUE</div><div style={{ textAlign: 'right' }}>{vm.burnColHdr}</div><div style={{ textAlign: 'right' }}>UPDATES</div>
               </div>
               {vm.burnRows.map((r) => (
-                <div key={r.name} style={{ display: 'grid', gridTemplateColumns: '1fr 84px 58px', gap: '3px 8px', fontSize: 10.5, padding: '4px 0', alignItems: 'center' }}>
+                <button key={r.id} type="button" aria-pressed={!r.hidden}
+                  title={r.hidden ? 'show in chart' : 'hide from chart'}
+                  onClick={() => setHiddenBurn((h) => toggleIn(h, r.id))}
+                  style={{ display: 'grid', gridTemplateColumns: '1fr 84px 66px', gap: '3px 8px', fontSize: 10.5, padding: '4px 0', alignItems: 'center', width: '100%', cursor: 'pointer', opacity: r.hidden ? 0.4 : 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: 2, background: r.color, flex: 'none' }} />
-                    <span style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{r.name}</span>
+                    <span style={{ width: 8, height: 8, borderRadius: 2, background: r.hidden ? 'transparent' : r.color, border: `1px solid ${r.color}`, flex: 'none' }} />
+                    <span style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, textDecoration: r.hidden ? 'line-through' : 'none' }}>{r.name}</span>
                   </div>
                   <div style={{ textAlign: 'right', color: C.text }}>{r.burn}</div>
                   <div style={{ textAlign: 'right', color: C.dim }}>{r.updates}</div>
-                </div>
+                </button>
               ))}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 84px 58px', gap: '3px 8px', fontSize: 10.5, paddingTop: 6, marginTop: 3, borderTop: `1px solid ${C.line}` }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 84px 66px', gap: '3px 8px', fontSize: 10.5, paddingTop: 6, marginTop: 3, borderTop: `1px solid ${C.line}` }}>
                 <div style={{ color: C.dim3 }}>TOTAL</div>
                 <div style={{ textAlign: 'right', color: C.text, fontWeight: 600 }}>{vm.burnTotal}</div>
                 <div style={{ textAlign: 'right', color: C.dim }}>{vm.burnUpdatesTotal}</div>
               </div>
-              <div style={{ fontSize: 9, color: C.faint2, marginTop: 5, textAlign: 'right' }}>burn per $1M volume: {vm.burnPerM} MON</div>
+              <div style={{ fontSize: 9, color: C.faint2, marginTop: 5, textAlign: 'right' }}>burn per $1M volume: {vm.burnPerM} MON · click a venue to hide/show</div>
             </div>
           </div>
         </div>
