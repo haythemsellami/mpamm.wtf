@@ -41,11 +41,9 @@ export function TopBar() {
       borderBottom: `1px solid ${C.line}`, position: 'sticky', top: 0, zIndex: 50, background: C.panel,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-        {/* Monad product logomark — stays purple in both themes (brand mark, not the theme accent). */}
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-          <circle cx="12" cy="12" r="10.5" stroke={LOGO_PURPLE} strokeWidth="1.3" />
-          <polygon points="12,6 18,12 12,18 6,12" stroke={LOGO_PURPLE} strokeWidth="1.3" fill="none" />
-          <circle cx="12" cy="12" r="1.7" fill={LOGO_PURPLE} />
+        {/* OFFICIAL Monad logomark (brand kit path, verbatim) — stays brand purple in both themes. */}
+        <svg width="18" height="18" viewBox="0 0 24 24" role="img" aria-label="Monad">
+          <path fill={LOGO_PURPLE} d="M11.782 0C8.37963 0 0 8.53443 0 11.9999C0 15.4654 8.37963 24 11.782 24C15.1844 24 23.5642 15.4653 23.5642 11.9999C23.5642 8.53458 15.1845 0 11.782 0ZM9.94598 18.8619C8.51124 18.4637 4.65378 11.5912 5.04481 10.1299C5.43584 8.66856 12.1834 4.73984 13.6181 5.1381C15.0529 5.5363 18.9104 12.4087 18.5194 13.87C18.1283 15.3314 11.3807 19.2602 9.94598 18.8619Z" />
         </svg>
         <span style={{ fontWeight: 700, fontSize: 13, letterSpacing: '.01em', fontFamily: SANS, color: C.text }}>propAMM</span>
         <span style={{ fontSize: 8.5, color: C.accent2, border: `1px solid var(--accent-border)`, borderRadius: 3, padding: '2px 6px', letterSpacing: '.08em' }}>
