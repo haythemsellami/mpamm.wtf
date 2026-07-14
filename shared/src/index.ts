@@ -13,10 +13,12 @@
 /** buy/sell of the base asset (MON/BTC/ETH). */
 export type Side = 'buy' | 'sell';
 
-/** Routing classification for a fill, shown in the tape/leaderboard. `UNKNOWN`
- *  = the attribution source was unavailable when the fill was decoded, so we
- *  can't say whether it was direct or routed (never guessed as DIRECT). */
-export type FillCategory = 'DIRECT' | 'ROUTER' | 'AGG' | 'CEX/DEX' | 'UNKNOWN';
+/** Routing classification for a fill, shown in the tape/leaderboard. `MEV` =
+ *  the tx entered through auction/bundle infrastructure (e.g. FastLane) — the
+ *  inner swap is searcher flow, not user routing. `UNKNOWN` = the attribution
+ *  source was unavailable when the fill was decoded, so we can't say whether
+ *  it was direct or routed (never guessed as DIRECT). */
+export type FillCategory = 'DIRECT' | 'ROUTER' | 'AGG' | 'MEV' | 'CEX/DEX' | 'UNKNOWN';
 
 export type DataSourceMode = 'live' | 'sim';
 
@@ -338,6 +340,11 @@ export interface Fill {
   txHash: string;
   /** human label for the `to`/router address. */
   to: string;
+  /** brand of the known intermediary the tx entered through (tx.to) — e.g.
+   *  'Relay', 'KyberSwap', '0x', a venue's own router name, or MEV-auction
+   *  infrastructure ('FastLane', with category MEV). Set by attribution;
+   *  absent = direct or unknown. */
+  router?: string;
   /** pool/book label. */
   pool: string;
   blockNumber: number;
@@ -463,6 +470,19 @@ export function percentile(arr: number[], p: number): number {
 // Market state / service status
 // ──────────────────────────────────────────────────────────────────────────
 
+/** Live-source RPC failover status. Labels only ("primary", "backup-1") —
+ *  endpoint URLs embed keys and must never reach this public shape. */
+export interface RpcStatus {
+  /** label of the endpoint currently serving requests. */
+  active: string;
+  /** true while serving from a backup instead of the primary. */
+  degraded: boolean;
+  /** true when no endpoint is serving — chain data is frozen. */
+  down: boolean;
+  /** epoch ms when the primary was left (absent while on it). */
+  degradedSinceTs?: number;
+}
+
 export interface MarketState {
   chainId: number;
   block: number;
@@ -478,6 +498,8 @@ export interface MarketState {
   venues: VenueMeta[];
   /** present when the live source degrades and parts fall back. */
   notes?: string[];
+  /** RPC failover health (absent in sim — there is no RPC). */
+  rpc?: RpcStatus;
 }
 
 // ──────────────────────────────────────────────────────────────────────────

@@ -12,11 +12,15 @@ const GROUP_ID: Record<string, LeaderboardGrouping> = {
 
 // CATEGORY colour (DCLogic.catCol) from stable semantic/theme tokens (never a
 // venue color). UNKNOWN is highlighted because attribution was unavailable.
-function catCol(c: string): string {
+function catCol(c: string, router?: string): string {
+  if (c === 'MEV') return C.accent2;
+  if (router) return C.accent;
   return c === 'UNKNOWN' || c === 'ROUTER' ? C.amber : c === 'CEX/DEX' ? C.link : c === 'AGG' ? C.accent : C.faint2;
 }
-// display label for a fill category — DIRECT renders as the em-dash.
-function catLabel(c: string): string {
+// display label for a fill category — DIRECT renders as the em-dash; attributed
+// flow carries the intermediary's brand ("Router - Relay", "MEV - FastLane").
+function catLabel(c: string, router?: string): string {
+  if (router) return `${c === 'MEV' ? 'MEV' : 'Router'} - ${router}`;
   return c === 'DIRECT' ? '—' : c;
 }
 
@@ -206,7 +210,7 @@ export function LeaderboardTab() {
                 <div style={{ color: C.faint2 }}>{humanAge((Date.now() - f.ts) / 1000)}</div>
                 <div style={{ color: C.link }}>{shortHex(f.txHash)}</div>
                 <div style={{ color: C.dim3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.to}</div>
-                <div style={{ color: catCol(f.category), fontSize: 9 }}>{catLabel(f.category)}</div>
+                <div style={{ color: catCol(f.category, f.router), fontSize: 9 }}>{catLabel(f.category, f.router)}</div>
                 <div style={{ color: C.faint2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.pool}</div>
                 <div><SideTag side={f.side} /></div>
                 <div style={{ textAlign: 'right', color: C.dim }}>{inAmt}</div>

@@ -3,6 +3,7 @@ import type { QuoteRow, Fill, Side, FillCategory, VenueMeta, Pair } from '@share
 import { ADDR, TOKENS, ASSETS, PAIRS, pairFor, assetForToken, baseTokenOf } from '@shared';
 import { bookViewerAbi, bookManagerAbi, liquidityVaultAbi, routerGatewayAbi, simpleOracleStrategyAbi, CLOBER_MIN_PRICE } from '../chain/abis.js';
 import { fromUnits, toUnits, shortHex } from '../util.js';
+import { KNOWN_ROUTERS } from '../attribution.js';
 import type { UsdPricer } from '../pricer.js';
 import type { VenueAdapter, AdapterContext, LogBundle } from './adapter.js';
 
@@ -328,7 +329,7 @@ export async function quoteClober(
 }
 
 /** routed-flow attribution for a Take (its tx also emitted a RouterGateway.Swap). */
-export interface RouterInfo { to: string; category: FillCategory; }
+export interface RouterInfo { to: string; category: FillCategory; router?: string; }
 
 /**
  * Clober V2 tick → realized price, stable-per-base. price(tick) = 1.0001^tick =
@@ -369,7 +370,7 @@ function registeredBookPair(book: CloberBook): { pair: Pair; baseIsBookBase: boo
  */
 export function decodeCloberTake(
   log: { args: any; transactionHash: string; blockNumber: bigint; logIndex: number },
-  books: Map<string, CloberBook>, tsMs: number, router?: RouterInfo, attributionUnavailable = false,
+  books: Map<string, CloberBook>, tsMs: number, router?: RouterInfo,
 ): Fill | null {
   const a = log.args; if (!a) return null;
   const bookId = String(a.bookId);
@@ -404,9 +405,12 @@ export function decodeCloberTake(
     // deterministic id (txHash:logIndex) so re-tail/gap-fill/restart dedupes.
     id: `clb-${log.transactionHash.toLowerCase()}-${log.logIndex}`,
     venueId: CLOBER_VAULT_VENUE.id,
-    // routed → the router's class; else DIRECT — unless attribution was unavailable
-    // this cycle, in which case we don't know (UNKNOWN, not a false DIRECT).
-    market: pair.symbol, side, category: router?.category ?? (attributionUnavailable ? 'UNKNOWN' : 'DIRECT'),
+    // routed → the gateway's evidence (with the external router's brand when
+    // known); else UNKNOWN — "no gateway event" is NOT proof of a direct hit
+    // (searcher contracts reach the books without the gateway). The core
+    // attributor upgrades UNKNOWN to DIRECT via tx.to == controller/bookManager.
+    market: pair.symbol, side, category: router?.category ?? 'UNKNOWN',
+    ...(router?.router ? { router: router.router } : {}),
     usd, baseAmount, execPx,
     txHash: log.transactionHash, to: router?.to ?? shortHex(a.user ?? ZERO),
     pool: `book ${bookId.slice(0, 8)}`,
@@ -420,7 +424,9 @@ export function buildRouterMap(logs: Array<{ args: any; transactionHash: string 
   const m = new Map<string, RouterInfo>();
   for (const l of logs) {
     const a = l.args; if (!a) continue;
-    m.set(l.transactionHash.toLowerCase(), { to: shortHex(String(a.router ?? ZERO)), category: 'ROUTER' });
+    const ext = String(a.router ?? ZERO).toLowerCase();
+    const brand = KNOWN_ROUTERS.get(ext);
+    m.set(l.transactionHash.toLowerCase(), { to: shortHex(String(a.router ?? ZERO)), category: 'ROUTER', ...(brand ? { router: brand } : {}) });
   }
   return m;
 }
@@ -516,6 +522,10 @@ export function createCloberVaultAdapter(): VenueAdapter {
         { key: 'router', address: ADDR.routerGateway as `0x${string}`, events: [ev(routerGatewayAbi, 'Swap')], kind: 'attribution' as const },
       ];
     },
+
+    // taker entries owned by Clober: a tx entering at the controller or the
+    // book manager is a direct trade (the gateway path is evidenced above).
+    entryPoints: () => [{ address: ADDR.controller }, { address: ADDR.bookManager }],
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf, failed: Set<string>) {
       if (!authoritativeDiscovery && (logs.take?.length ?? 0) > 0) {
         throw new Error('authoritative vault-book discovery unavailable');
@@ -534,14 +544,13 @@ export function createCloberVaultAdapter(): VenueAdapter {
         if (unresolved.length || resolved.missing.size) throw new Error(`missing metadata for vault book ${unresolved[0] ?? [...resolved.missing][0]}`);
       }
       const routerMap = buildRouterMap(logs.router ?? []);
-      const attributionUnavailable = failed.has('router'); // router logs failed → don't assert DIRECT
       const out: Fill[] = [];
       for (const l of logs.take ?? []) {
         const bookId = l.args?.bookId === undefined ? undefined : String(l.args.bookId);
         if (bookId && vault.has(bookId) && !books.has(bookId) && !ignoredVaultBooks.has(bookId)) {
           throw new Error(`missing metadata for vault book ${bookId}`);
         }
-        const f = decodeCloberTake(l, books, tsOf(l.blockNumber), routerMap.get(String(l.transactionHash).toLowerCase()), attributionUnavailable);
+        const f = decodeCloberTake(l, books, tsOf(l.blockNumber), routerMap.get(String(l.transactionHash).toLowerCase()));
         if (f) out.push(f);
       }
       return out;
