@@ -13,13 +13,14 @@ const GROUP_ID: Record<string, LeaderboardGrouping> = {
 // CATEGORY colour (DCLogic.catCol) from stable semantic/theme tokens (never a
 // venue color). UNKNOWN is highlighted because attribution was unavailable.
 function catCol(c: string, router?: string): string {
+  if (c === 'MEV') return C.accent2;
   if (router) return C.accent;
   return c === 'UNKNOWN' || c === 'ROUTER' ? C.amber : c === 'CEX/DEX' ? C.link : c === 'AGG' ? C.accent : C.faint2;
 }
 // display label for a fill category — DIRECT renders as the em-dash; attributed
-// routed flow carries the intermediary's brand ("Router - Relay").
+// flow carries the intermediary's brand ("Router - Relay", "MEV - FastLane").
 function catLabel(c: string, router?: string): string {
-  if (router) return `Router - ${router}`;
+  if (router) return `${c === 'MEV' ? 'MEV' : 'Router'} - ${router}`;
   return c === 'DIRECT' ? '—' : c;
 }
 

@@ -13,10 +13,12 @@
 /** buy/sell of the base asset (MON/BTC/ETH). */
 export type Side = 'buy' | 'sell';
 
-/** Routing classification for a fill, shown in the tape/leaderboard. `UNKNOWN`
- *  = the attribution source was unavailable when the fill was decoded, so we
- *  can't say whether it was direct or routed (never guessed as DIRECT). */
-export type FillCategory = 'DIRECT' | 'ROUTER' | 'AGG' | 'CEX/DEX' | 'UNKNOWN';
+/** Routing classification for a fill, shown in the tape/leaderboard. `MEV` =
+ *  the tx entered through auction/bundle infrastructure (e.g. FastLane) — the
+ *  inner swap is searcher flow, not user routing. `UNKNOWN` = the attribution
+ *  source was unavailable when the fill was decoded, so we can't say whether
+ *  it was direct or routed (never guessed as DIRECT). */
+export type FillCategory = 'DIRECT' | 'ROUTER' | 'AGG' | 'MEV' | 'CEX/DEX' | 'UNKNOWN';
 
 export type DataSourceMode = 'live' | 'sim';
 
@@ -339,8 +341,9 @@ export interface Fill {
   /** human label for the `to`/router address. */
   to: string;
   /** brand of the known intermediary the tx entered through (tx.to) — e.g.
-   *  'Relay', 'KyberSwap', '0x', or the venue's own name for its router.
-   *  Set with category ROUTER by attribution; absent = direct or unknown. */
+   *  'Relay', 'KyberSwap', '0x', a venue's own router name, or MEV-auction
+   *  infrastructure ('FastLane', with category MEV). Set by attribution;
+   *  absent = direct or unknown. */
   router?: string;
   /** pool/book label. */
   pool: string;

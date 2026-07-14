@@ -38,9 +38,6 @@ export const KNOWN_ROUTERS: ReadonlyMap<string, string> = new Map([
   ['0x6131b5fae19ea4f9d964eac0408e4408b66337b5', 'KyberSwap'],
   // 0x (ZeroEx) Settler AllowanceHolder — canonical cross-chain address.
   ['0x0000000000001ff3684f28c67538d4d072c22734', '0x'],
-  // FastLane AuctionHandler (shMonad) — verified source on monadscan; MEV
-  // auction flash-execution entry (dominant Metric flow in sampling).
-  ['0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58', 'FastLane'],
   // LFJ routers on Monad mainnet (developers.lfj.gg deployment addresses):
   // LBRouter v2.2 + Router v1 — LFJ's own periphery, brand-labeled here since
   // it routes to more than the POE venue.
@@ -53,6 +50,25 @@ export const KNOWN_ROUTERS: ReadonlyMap<string, string> = new Map([
   // signatures (RescueFundsLib, FulfilExec/fulfil). Observed filling through
   // the Metric pAMM.
   ['0x97caca78ac2a94c67643d07843f85afaa44a3ea5', 'Bungee'],
+]);
+
+/** MEV auction/bundle infrastructure → brand. These are NOT routers: the
+ *  entry contract sells priority execution (bid forwarded to validators) and
+ *  the inner swap is the winning searcher's own flow — labeled category MEV,
+ *  "MEV - <brand>" in the tape. Traced example: FastLaneAuctionHandler
+ *  (verified source; bid → shMonad 0x1B68626d…) wrapping a flash-loan MON arb
+ *  that fills on Metric.
+ *
+ *  ADMISSION RULE: only SEARCHER-ONLY entrypoints belong here — verify the
+ *  contract exposes no user-facing swap/route/user-op function before adding
+ *  (AuctionHandler: flashExecutionBid/bidWrapper only; census 120/120 recent
+ *  entry txs = one bid selector). A user-op bundler that wraps REAL user flow
+ *  (e.g. FastLane's Atlas EntryPoint) must NOT be added wholesale — it would
+ *  MEV-label user swaps and needs selector-level gating instead. Users on
+ *  FastLane's protect-RPC are unaffected either way: their tx.to stays the
+ *  aggregator/pool they called (bundling is relay-level, not calldata-level). */
+export const KNOWN_MEV: ReadonlyMap<string, string> = new Map([
+  ['0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58', 'FastLane'],
 ]);
 
 const LOOKUP_POOL = 12;   // concurrent tx lookups (batched by the transport anyway)
@@ -120,6 +136,12 @@ export class FillAttributor {
       if (brand) {
         f.category = 'ROUTER';
         f.router = brand;
+        continue;
+      }
+      const mev = KNOWN_MEV.get(tx.to);
+      if (mev) {
+        f.category = 'MEV';
+        f.router = mev;
       }
     }
     // drop failed lookups so the next pass retries them.
