@@ -80,14 +80,15 @@ export class LiveDataSource extends BaseSource {
   private bootHead = 0n;
   /** process start — grace period before "reference feed has no mid" notes. */
   private bootMs = Date.now();
-  private timer?: ReturnType<typeof setInterval>;
+  private quoteTimer?: ReturnType<typeof setTimeout>;
+  private tailTimer?: ReturnType<typeof setTimeout>;
+  private loopsStopped = false;
   private persistTimer?: ReturnType<typeof setInterval>;
   private rediscoverTimer?: ReturnType<typeof setInterval>;
   private remarkTimer?: ReturnType<typeof setInterval>;
   /** re-entrancy guard shared by the boot onboarding chain and the retry timer
    *  — two remark walks over the same cursors must never interleave. */
   private remarkRunning = false;
-  private tickRunning = false;
   private notes: string[] = [];
   private block = 0;
   /** all registered venue ids — a fill/quote carrying an unknown id is dropped
@@ -118,7 +119,14 @@ export class LiveDataSource extends BaseSource {
     await this.initHistory();
 
     await this.poll().catch(() => undefined);
-    this.timer = setInterval(() => { void this.tick(); }, config.quoteIntervalMs);
+    // Quotes and the fills tail run as INDEPENDENT self-scheduling loops: the
+    // old shared setInterval skipped overlapping fires, so one slow phase
+    // quantized the whole cadence to interval multiples (a 600ms tick became a
+    // 1s cadence) and log tailing stretched quote freshness. Chaining runs the
+    // next pass as soon as the previous finishes (floored at the interval), so
+    // cadence = max(interval, duration) — never rounded up.
+    this.scheduleLoop('quote');
+    this.scheduleLoop('tail');
     this.persistTimer = setInterval(() => this.persist(), config.persistMs);
     this.rediscoverTimer = setInterval(() => { void this.rediscover(); }, config.rediscoverMs);
     // seed deep history in the BACKGROUND — never blocks boot or the live tail.
@@ -167,7 +175,9 @@ export class LiveDataSource extends BaseSource {
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
+    this.loopsStopped = true;
+    if (this.quoteTimer) clearTimeout(this.quoteTimer);
+    if (this.tailTimer) clearTimeout(this.tailTimer);
     if (this.persistTimer) clearInterval(this.persistTimer);
     if (this.rediscoverTimer) clearInterval(this.rediscoverTimer);
     if (this.remarkTimer) clearInterval(this.remarkTimer);
@@ -890,17 +900,23 @@ export class LiveDataSource extends BaseSource {
   }
 
   // ── poll loop ───────────────────────────────────────────────────────────────
-  private async tick(): Promise<void> {
-    if (this.tickRunning) return;
-    this.tickRunning = true;
-    try {
-      try { await this.poll(); } catch { /* keep ticking */ }
-      try { await this.tailFills(); } catch (e) { this.noteOnce(`tail failed — holding cursor, retrying: ${(e as Error).message}`); }
-      this.ageMarkouts();
-      this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) });
-    } finally {
-      this.tickRunning = false;
-    }
+  /** one self-scheduling pass of either loop; a pass can never overlap itself
+   *  (the next run is only armed after the previous completes). */
+  private scheduleLoop(kind: 'quote' | 'tail', delay?: number): void {
+    if (this.loopsStopped) return;
+    const interval = kind === 'quote' ? config.quoteIntervalMs : config.tailIntervalMs;
+    const timer = setTimeout(async () => {
+      const t0 = Date.now();
+      if (kind === 'quote') {
+        try { await this.poll(); } catch { /* keep ticking */ }
+        this.ageMarkouts();
+      } else {
+        try { await this.tailFills(); } catch (e) { this.noteOnce(`tail failed — holding cursor, retrying: ${(e as Error).message}`); }
+        this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) });
+      }
+      this.scheduleLoop(kind, Math.max(0, interval - (Date.now() - t0)));
+    }, delay ?? interval);
+    if (kind === 'quote') this.quoteTimer = timer; else this.tailTimer = timer;
   }
 
   private async poll(): Promise<void> {
@@ -929,14 +945,18 @@ export class LiveDataSource extends BaseSource {
       this.midHist.set(pair.symbol, h);
     }
 
-    const head = await publicClient.getBlockNumber();
+    // head rides the SAME batched round as the adapters' first reads — a
+    // dedicated await here paid one extra network round-trip per tick.
+    const [head, venueRowsNested] = await Promise.all([
+      publicClient.getBlockNumber(),
+      Promise.all(ADAPTERS.map(async (a) => {
+        if (!a.quote) return [] as QuoteRow[];
+        const rows = await a.quote(this.ctx, config.sizesUsd).catch(() => [] as QuoteRow[]);
+        return this.ownVenues(a, rows, 'quote'); // drop rows for ids the adapter didn't declare
+      })),
+    ]);
     this.block = Number(head);
-
-    const venueRows = (await Promise.all(ADAPTERS.map(async (a) => {
-      if (!a.quote) return [] as QuoteRow[];
-      const rows = await a.quote(this.ctx, config.sizesUsd).catch(() => [] as QuoteRow[]);
-      return this.ownVenues(a, rows, 'quote'); // drop rows for ids the adapter didn't declare
-    }))).flat();
+    const venueRows = venueRowsNested.flat();
     // benchmark rows for every pair, each routed to + tagged with its CEX (Bybit/Binance).
     const refRows = REFERENCES.quote(config.sizesUsd);
     annotateCex(venueRows, refRows); // docs/architecture.md: fill stream — matched per market, so each venue row hits its pair's CEX

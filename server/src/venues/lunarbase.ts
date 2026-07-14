@@ -449,10 +449,27 @@ export function createLunarbaseAdapter(): VenueAdapter {
         return [];
       }
 
+      // ROUND-TRIP FLATTENING: the quoter legs depend only on static pool
+      // config + the pinned head — not on the snapshot's VALUES — so they fire
+      // in the SAME batched round as the gate snapshot. Gates are applied
+      // after: a pool that fails validation/pause/staleness simply has its
+      // already-fetched legs discarded (identical semantics, one less
+      // network round-trip per tick).
+      const gatePools = [...byMarket.values()];
+      const legsByPool = new Map(gatePools.map((pool) => [pool.pool.toLowerCase(), Promise.all(sizesUsd.map(async (sizeUsd) => {
+        const sellIn = toUnits(ctx.pricer.tokenForUsd(pool.baseToken, sizeUsd), pool.baseDec);
+        const buyIn = toUnits(sizeUsd, pool.stableDec);
+        const [bid, ask] = await Promise.all([
+          quoteLunarbaseLeg(ctx, pool, 'sell', sellIn, head),
+          quoteLunarbaseLeg(ctx, pool, 'buy', buyIn, head),
+        ]);
+        return { sizeUsd, bid, ask };
+      }))]));
       let current: LunarbaseCachedPool[];
       try {
-        current = await readPoolsAtBlock(ctx, [...byMarket.values()], head, (config, reason) => quarantine(ctx, config, reason));
+        current = await readPoolsAtBlock(ctx, gatePools, head, (config, reason) => quarantine(ctx, config, reason));
       } catch (error) {
+        // legs settle harmlessly (quoteLunarbaseLeg never rejects) — nothing dangles.
         noteOnce(ctx, 'snapshot', `Lunarbase quote refresh failed: ${error instanceof Error ? error.message : String(error)}`);
         return [];
       }
@@ -475,15 +492,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
         recovered(`inactive:${pool.pool}`);
         const mid = ctx.pricer.pairMid(pool.market);
         if (!(mid > 0)) continue;
-        const legs = await Promise.all(sizesUsd.flatMap(async (sizeUsd) => {
-          const sellIn = toUnits(ctx.pricer.tokenForUsd(pool.baseToken, sizeUsd), pool.baseDec);
-          const buyIn = toUnits(sizeUsd, pool.stableDec);
-          const [bid, ask] = await Promise.all([
-            quoteLunarbaseLeg(ctx, pool, 'sell', sellIn, head),
-            quoteLunarbaseLeg(ctx, pool, 'buy', buyIn, head),
-          ]);
-          return { sizeUsd, bid, ask };
-        }));
+        const legs = await (legsByPool.get(pool.pool.toLowerCase()) ?? Promise.resolve([]));
         for (const { sizeUsd, bid, ask } of legs) {
           const rawBidBps = bid ? (bid.px / mid - 1) * 1e4 : 0;
           const rawAskBps = ask ? (ask.px / mid - 1) * 1e4 : 0;

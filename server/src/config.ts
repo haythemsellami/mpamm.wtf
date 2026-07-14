@@ -51,6 +51,9 @@ export const config = {
   /** Binance taker fee (bps) for the BTC/ETH benchmark — default VIP9 (2.25 bps). */
   binanceTakerBps: num('BINANCE_TAKER_BPS', 2.25),
   quoteIntervalMs: num('QUOTE_INTERVAL_MS', 500),
+  /** fills-tail loop cadence (ms) — independent of the quote loop, so log
+   *  tailing never stretches the quote cadence (and vice versa). */
+  tailIntervalMs: num('TAIL_INTERVAL_MS', 500),
 
   sizesUsd: [...SIZES_USD],
 
