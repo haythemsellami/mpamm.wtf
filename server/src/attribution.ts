@@ -57,7 +57,16 @@ export const KNOWN_ROUTERS: ReadonlyMap<string, string> = new Map([
  *  the inner swap is the winning searcher's own flow — labeled category MEV,
  *  "MEV - <brand>" in the tape. Traced example: FastLaneAuctionHandler
  *  (verified source; bid → shMonad 0x1B68626d…) wrapping a flash-loan MON arb
- *  that fills on Metric. */
+ *  that fills on Metric.
+ *
+ *  ADMISSION RULE: only SEARCHER-ONLY entrypoints belong here — verify the
+ *  contract exposes no user-facing swap/route/user-op function before adding
+ *  (AuctionHandler: flashExecutionBid/bidWrapper only; census 120/120 recent
+ *  entry txs = one bid selector). A user-op bundler that wraps REAL user flow
+ *  (e.g. FastLane's Atlas EntryPoint) must NOT be added wholesale — it would
+ *  MEV-label user swaps and needs selector-level gating instead. Users on
+ *  FastLane's protect-RPC are unaffected either way: their tx.to stays the
+ *  aggregator/pool they called (bundling is relay-level, not calldata-level). */
 export const KNOWN_MEV: ReadonlyMap<string, string> = new Map([
   ['0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58', 'FastLane'],
 ]);
