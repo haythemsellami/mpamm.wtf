@@ -165,7 +165,7 @@ export function VolumeTab() {
         kToday: f(0), kTodayChg: '▲ 0%', kTodaycss: C.green,
         since: '—',
         legRows: series.map((s) => ({ id: s.id, name: s.name, color: s.color, vol: f(0), share: '0.0%', hidden: false })),
-        legTotal: f(0), cumLine: '', cumArea: '', cumSigma: f(0),
+        legTotal: f(0), cumLine: '', cumArea: '', cumVenueLines: [] as { color: string; path: string }[], cumSigma: f(0),
         rangeLabel: 'ALL-TIME', rangeCaption: '',
         msBands: [] as { path: string; color: string }[],
         msTopName: '—', msTopPct: '0.0%', msTopColor: msLabelColor(C.faint2),
@@ -175,7 +175,7 @@ export function VolumeTab() {
         volScopeNote: scopeNote,
         ndPreset: 0,
         dailyTip: null as null | { left: string; date: string; total: string; rows: { name: string; color: string; val: string }[] },
-        cumTip: null as null | { left: string; guide: string; date: string; cum: string; day: string },
+        cumTip: null as null | { left: string; guide: string; date: string; cum: string; day: string; rows: { name: string; color: string; cum: string }[] },
         msTip: null as null | { left: string; guide: string; date: string; rows: { name: string; color: string; pct: string; val: string }[] },
         brushBars: [] as { h: string; color: string }[],
         brushLeft: '0', brushWidth: '100', brushStartLbl: '—', brushEndLbl: '—',
@@ -262,6 +262,23 @@ export function VolumeTab() {
     const cy = (y: number) => (cum ? HC - y / cum * HC : HC); // zero window ⇒ flat at the BOTTOM
     const cumLine = 'M' + pts.map((p) => p[0].toFixed(1) + ',' + cy(p[1]).toFixed(1)).join(' L');
     const cumArea = cumLine + ' L' + W + ',' + HC + ' L0,' + HC + ' Z';
+    // per-venue cumulative lines on the SAME y-scale as the total. Each line
+    // starts at the venue's first day of existence in the window (honest
+    // absence — no flat fabricated-zero segment before the venue was live).
+    const cumVenue = series.map((s2) => {
+      let c2 = 0;
+      const vpts: [number, number][] = [];
+      pDays.forEach((x, i) => {
+        if (!existsOn(s2, x)) return;
+        c2 += s2.val(x);
+        vpts.push([ndP > 1 ? i / (ndP - 1) * W : 0, c2]);
+      });
+      return { name: s2.name, color: s2.color, cum: c2, pts: vpts };
+    });
+    const cumVenueLines = cumVenue.filter((v) => v.pts.length > 1 && v.cum > 0).map((v) => ({
+      color: v.color,
+      path: 'M' + v.pts.map((pt) => pt[0].toFixed(1) + ',' + cy(pt[1]).toFixed(1)).join(' L'),
+    }));
 
     const xs = (i: number) => (ndP > 1 ? i / (ndP - 1) * W : 0);
     const bands = series.map(() => ({ top: [] as [number, number][], bot: [] as [number, number][] }));
@@ -322,7 +339,12 @@ export function VolumeTab() {
       const x = pDays[hiP];
       if (hv!.c === 'cum') {
         let c2 = 0; for (let k = 0; k <= hiP; k++) c2 += pTot[k];
-        cumTip = { left: tipLeft(hiP, ndP), guide: guideLeft(hiP, ndP), date: dateOf(x), cum: f(c2), day: f(pTot[hiP]) };
+        const rows = series.filter((s2) => existsOn(s2, x)).map((s2) => {
+          let cv = 0;
+          for (let k = 0; k <= hiP; k++) if (existsOn(s2, pDays[k])) cv += s2.val(pDays[k]);
+          return { name: s2.name, color: s2.color, cum: f(cv) };
+        }).filter((r2) => r2.cum !== f(0));
+        cumTip = { left: tipLeft(hiP, ndP), guide: guideLeft(hiP, ndP), date: dateOf(x), cum: f(c2), day: f(pTot[hiP]), rows };
       } else {
         const t = pTot[hiP] || 1;
         msTip = {
@@ -403,7 +425,7 @@ export function VolumeTab() {
       kTodaycss: todayChg == null ? (todayT > 0 ? C.green : C.faint2) : (todayChg >= 0 ? C.green : C.red),
       since,
       legRows: totals.map((t) => ({ id: t.id, name: t.name, color: t.color, vol: f(t.tot), share: share(t.tot), hidden: hiddenVol.has(t.id) })),
-      legTotal: f(winTot), cumLine, cumArea, cumSigma: f(cum || winTot),
+      legTotal: f(winTot), cumLine, cumArea, cumVenueLines, cumSigma: f(cum || winTot),
       rangeLabel, rangeCaption,
       msBands,
       msTopName: series[series.length - 1].name,
@@ -672,6 +694,10 @@ export function VolumeTab() {
                 </linearGradient>
               </defs>
               <path d={vm.cumArea} fill="url(#cumg)" />
+              {/* per-venue cumulative lines (registry colors), under the total */}
+              {vm.cumVenueLines.map((l, i) => (
+                <path key={i} d={l.path} fill="none" stroke={l.color} strokeOpacity="0.9" strokeWidth="1.3" vectorEffect="non-scaling-stroke" />
+              ))}
               <path d={vm.cumLine} fill="none" style={{ stroke: 'var(--accent2)', strokeWidth: 2 }} vectorEffect="non-scaling-stroke" />
             </svg>
             {vm.cumTip && (
@@ -681,6 +707,13 @@ export function VolumeTab() {
                   <div style={{ fontSize: 9, color: C.faint2, letterSpacing: '.05em', paddingBottom: 5, borderBottom: `1px solid ${C.line2}` }}>{vm.cumTip.date}</div>
                   <div style={{ display: 'flex', fontSize: 10.5, paddingTop: 5 }}><span style={{ color: C.dim }}>CUMULATIVE</span><span style={{ marginLeft: 'auto', color: C.text, fontWeight: 600 }}>{vm.cumTip.cum}</span></div>
                   <div style={{ display: 'flex', fontSize: 10.5, paddingTop: 4 }}><span style={{ color: C.dim }}>DAY VOL</span><span style={{ marginLeft: 'auto', color: C.text }}>{vm.cumTip.day}</span></div>
+                  {vm.cumTip.rows.map((r) => (
+                    <div key={r.name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, paddingTop: 4 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 2, background: r.color, flex: 'none' }} />
+                      <span style={{ color: C.text2 }}>{r.name}</span>
+                      <span style={{ marginLeft: 'auto', color: C.text }}>{r.cum}</span>
+                    </div>
+                  ))}
                 </div>
               </>
             )}
