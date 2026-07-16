@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DailyVolume } from '@shared';
 import { useDashboard } from '../store';
+import { useViewport } from '../lib/viewport';
 import { C, pill, venueColor } from '../theme';
 import { fMillions } from '../lib/format';
 
@@ -30,6 +31,7 @@ export function VolumeTab() {
   const d = useDashboard();
   // transient hover — local (never persisted); brush window lives in the store
   // so it survives tab switches (design keeps it in global state too).
+  const { mobile } = useViewport();
   const [hover, setHover] = useState<HoverState>(null);
   // legend toggles — venues hidden from a chart's stacks (per chart, keyed by
   // venue id). The tables keep EVERY venue as the toggle surface; totals stay
@@ -79,7 +81,7 @@ export function VolumeTab() {
 
   // ── brush interactions (port of the design's brushDown): edge-grab resizes,
   // inside-grab pans, outside-click re-centers then pans from the NEW window.
-  const brushDown = (e: React.MouseEvent) => {
+  const brushDown = (e: React.PointerEvent) => {
     const el = brushRef.current;
     if (!el || nAll < MIN_WIN + 1) return;
     e.preventDefault();
@@ -104,7 +106,7 @@ export function VolumeTab() {
     }
     const drag = { mode, fr0: fr, s0: ds, e0: de };
     let cur: [number, number] = [ds, de];
-    const mv = (ev: MouseEvent) => {
+    const mv = (ev: PointerEvent) => {
       const f = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
       const di = Math.round((f - drag.fr0) * (n - 1));
       let s = drag.s0, en = drag.e0;
@@ -113,9 +115,15 @@ export function VolumeTab() {
       else { en = Math.max(drag.s0 + MIN_WIN, Math.min(n - 1, drag.e0 + di)); }
       if (s !== cur[0] || en !== cur[1]) { cur = [s, en]; setWin(s, en); }
     };
-    const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); dragCleanup.current = null; };
-    window.addEventListener('mousemove', mv);
-    window.addEventListener('mouseup', up);
+    const up = () => {
+      window.removeEventListener('pointermove', mv);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      dragCleanup.current = null;
+    };
+    window.addEventListener('pointermove', mv);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
     dragCleanup.current = up;
   };
 
@@ -468,7 +476,7 @@ export function VolumeTab() {
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '18px 18px 14px' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '18px 18px 14px' }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '.06em', color: C.text }}>PROPAMM VOLUME</div>
           <div style={{ fontSize: 11, color: C.dim3, marginTop: 6, lineHeight: 1.55, maxWidth: 760 }}>
@@ -487,7 +495,7 @@ export function VolumeTab() {
       </div>
 
       {/* KPI row */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 0, border: `1px solid ${C.line}`, margin: '0 18px 14px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? 'repeat(2, 1fr)' : 'repeat(5,1fr)', gap: 0, border: `1px solid ${C.line}`, margin: '0 18px 14px' }}>
         <div style={{ padding: '14px 16px', borderRight: `1px solid ${C.line2}` }}>
           <div style={{ fontSize: 9, color: C.faint2, letterSpacing: '.06em' }}>ALL-TIME VOLUME</div>
           <div style={{ fontSize: 22, fontWeight: 600, marginTop: 8, color: C.text }}>{vm.kAll}</div>
@@ -524,7 +532,7 @@ export function VolumeTab() {
         </div>
         {/* flex row: the bars end where the summary column begins, so the newest
             (right-most) bars never render underneath it — no absolute overlay. */}
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, padding: '16px 18px 8px' }}>
+        <div style={{ display: 'flex', flexDirection: mobile ? 'column' : 'row', alignItems: mobile ? 'stretch' : 'flex-start', gap: 14, padding: mobile ? '16px 12px 8px' : '16px 18px 8px' }}>
           <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
             <div style={{ position: 'absolute', top: -2, left: 0, fontSize: 8.5, color: C.faint2 }}>{vm.volMaxLabel}</div>
             <div style={{ position: 'absolute', top: 72, left: 0, fontSize: 8.5, color: C.faint2 }}>{vm.volMidLabel}</div>
@@ -560,8 +568,8 @@ export function VolumeTab() {
               ))}
             </div>
             {/* timeline brush: full history minimap — drag inside to pan, edges to resize, click outside to jump */}
-            <div ref={brushRef} onMouseDown={brushDown}
-              style={{ position: 'relative', height: 40, margin: '12px 2px 2px 42px', border: `1px solid ${C.line2}`, background: C.panel, cursor: 'grab', userSelect: 'none' }}>
+            <div ref={brushRef} onPointerDown={brushDown}
+              style={{ position: 'relative', height: 40, margin: '12px 2px 2px 42px', border: `1px solid ${C.line2}`, background: C.panel, cursor: 'grab', userSelect: 'none', touchAction: 'none' }}>
               <div style={{ position: 'absolute', left: 3, right: 3, top: 3, bottom: 3, display: 'flex', alignItems: 'flex-end', gap: 1, pointerEvents: 'none' }}>
                 {vm.brushBars.map((b, i) => <div key={i} style={{ flex: 1, height: `${b.h}%`, background: b.color, opacity: 0.55 }} />)}
               </div>
@@ -576,7 +584,7 @@ export function VolumeTab() {
             </div>
           </div>
           {/* summary table — a real column now (was an absolute overlay hiding the newest bars) */}
-          <div style={{ flex: 'none', width: 248, background: C.overlay, border: `1px solid ${C.line}`, padding: '8px 10px' }}>
+          <div style={{ flex: 'none', width: mobile ? 'auto' : 248, background: C.overlay, border: `1px solid ${C.line}`, padding: '8px 10px' }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 70px 44px', gap: '3px 8px', fontSize: 8.5, color: C.faint2, letterSpacing: '.05em', paddingBottom: 5, borderBottom: `1px solid ${C.line}` }}>
               <div>VENUE</div><div style={{ textAlign: 'right' }}>{vm.rangeLabel}</div><div style={{ textAlign: 'right' }}>SHARE</div>
             </div>
@@ -613,7 +621,7 @@ export function VolumeTab() {
           <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em' }}>
             <span style={{ color: C.purple }}>~</span> <span style={{ color: C.text, fontWeight: 600 }}>QUOTE_UPDATE_BURN</span> <span style={{ color: C.faint }}>gas burned keeping quotes fresh · MON · UTC days · tracked venues</span>
           </div>
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, padding: '16px 18px 8px' }}>
+          <div style={{ display: 'flex', flexDirection: mobile ? 'column' : 'row', alignItems: mobile ? 'stretch' : 'flex-start', gap: 14, padding: mobile ? '16px 12px 8px' : '16px 18px 8px' }}>
             <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
               <div style={{ position: 'absolute', top: -2, left: 0, fontSize: 8.5, color: C.faint2 }}>{vm.burnMaxLabel}</div>
               <div style={{ position: 'absolute', top: 72, left: 0, fontSize: 8.5, color: C.faint2 }}>{vm.burnMidLabel}</div>
@@ -649,7 +657,7 @@ export function VolumeTab() {
               </div>
             </div>
             {/* summary column — VENUE / window burn / update-tx counts */}
-            <div style={{ flex: 'none', width: 272, background: C.overlay, border: `1px solid ${C.line}`, padding: '8px 10px' }}>
+            <div style={{ flex: 'none', width: mobile ? 'auto' : 272, background: C.overlay, border: `1px solid ${C.line}`, padding: '8px 10px' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 84px 66px', gap: '3px 8px', fontSize: 8.5, color: C.faint2, letterSpacing: '.05em', paddingBottom: 5, borderBottom: `1px solid ${C.line}` }}>
                 <div>VENUE</div><div style={{ textAlign: 'right' }}>{vm.burnColHdr}</div><div style={{ textAlign: 'right' }}>UPDATES</div>
               </div>
@@ -678,7 +686,7 @@ export function VolumeTab() {
       )}
 
       {/* CUMULATIVE + MARKET SHARE — follow the RANGE presets, not the custom brush (intentional) */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, margin: '0 18px 14px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 14, margin: '0 18px 14px' }}>
         <div style={{ position: 'relative', border: `1px solid ${C.line}`, background: C.panel }}>
           <i style={{ position: 'absolute', top: -1, left: -1, width: 8, height: 8, borderTop: `1px solid ${C.purple}`, borderLeft: `1px solid ${C.purple}` }} />
           <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em' }}>
@@ -760,7 +768,8 @@ export function VolumeTab() {
         <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em' }}>
           <span style={{ color: C.purple }}>#</span> <span style={{ color: C.text, fontWeight: 600 }}>VENUE_BREAKDOWN</span>{vm.rangeCaption ? <span style={{ color: C.faint }}> {vm.rangeCaption}</span> : null}
         </div>
-        <div style={{ padding: '6px 14px 12px' }}>
+        <div style={{ padding: '6px 14px 12px', overflowX: 'auto' }}>
+          <div style={{ minWidth: 640 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 1.4fr 1fr 1.2fr 1fr', gap: 8, padding: '9px 6px', fontSize: 9, color: C.faint2, letterSpacing: '.05em', borderBottom: `1px solid ${C.line}` }}>
             <div>VENUE</div><div style={{ textAlign: 'right' }}>{vm.rangeLabel} VOL</div><div style={{ textAlign: 'right' }}>SHARE</div><div style={{ textAlign: 'right' }}>SWAPS</div><div style={{ textAlign: 'right' }}>PEAK DAY</div><div style={{ textAlign: 'right' }}>FIRST ACTIVE</div>
           </div>
@@ -790,6 +799,7 @@ export function VolumeTab() {
             <div style={{ textAlign: 'right', color: C.faint2 }}>—</div>
             {/* an aggregate has no single first-active date */}
             <div style={{ textAlign: 'right', color: C.dim3 }}>—</div>
+          </div>
           </div>
         </div>
       </div>

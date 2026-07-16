@@ -54,7 +54,8 @@
   <!-- ===================== TOP BAR ===================== -->
   <div style="display:flex; align-items:center; gap:16px; height:42px; padding:0 16px; border-bottom:1px solid var(--border); position:sticky; top:0; z-index:50; background:var(--panel)">
     <div style="display:flex; align-items:center; gap:9px">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10.5" stroke="#836EF9" stroke-width="1.3" data-comment-anchor="218671af9a-circle"></circle><polygon points="12,6 18,12 12,18 6,12" stroke="#836EF9" stroke-width="1.3" fill="none"></polygon><circle cx="12" cy="12" r="1.7" fill="#836EF9"></circle></svg>
+      <!-- OFFICIAL Monad logomark (brand-kit path, verbatim) — stays brand purple in both themes -->
+      <svg width="18" height="18" viewBox="0 0 24 24" role="img" aria-label="Monad"><path fill="#836EF9" d="M11.782 0C8.37963 0 0 8.53443 0 11.9999C0 15.4654 8.37963 24 11.782 24C15.1844 24 23.5642 15.4653 23.5642 11.9999C23.5642 8.53458 15.1845 0 11.782 0ZM9.94598 18.8619C8.51124 18.4637 4.65378 11.5912 5.04481 10.1299C5.43584 8.66856 12.1834 4.73984 13.6181 5.1381C15.0529 5.5363 18.9104 12.4087 18.5194 13.87C18.1283 15.3314 11.3807 19.2602 9.94598 18.8619Z"></path></svg>
       <span style="font-weight:700; font-size:13px; letter-spacing:.01em; font-family:'Space Grotesk',sans-serif">propAMM</span>
       <span style="font-size:8.5px; color:var(--accent2); border:1px solid var(--accent-border); border-radius:3px; padding:2px 6px; letter-spacing:.08em">MONAD MAINNET</span>
     </div>
@@ -66,6 +67,10 @@
     <div style="margin-left:auto; display:flex; align-items:center; gap:15px; font-size:10px; color:var(--dim2)">
       <div onClick="{{ toggleTheme }}" style="display:flex; align-items:center; gap:5px; border:1px solid var(--pill-border); border-radius:4px; padding:3px 8px; cursor:pointer; letter-spacing:.06em; user-select:none" style-hover="color:var(--text); border-color:var(--border)">◐ {{ themeLabel }}</div>
       <span style="display:flex; align-items:center; gap:5px; color:var(--green)"><span style="width:6px; height:6px; border-radius:50%; background:var(--green); animation:blink 1.6s infinite"></span>live</span>
+      <!-- RPC failover chip (static dot — chain-source health, not socket liveness). States: healthy green "RPC OK";
+           degraded amber "RPC <ACTIVE-BACKUP>"; all-down red "RPC DOWN". CVD-safe: the LABEL changes, never color alone.
+           On mobile the chip renders only when degraded/down. -->
+      <span title="RPC healthy — serving from the primary endpoint" style="display:flex; align-items:center; gap:5px; color:var(--green); white-space:nowrap"><span style="width:6px; height:6px; border-radius:50%; background:var(--green)"></span>RPC OK</span>
       <span>MON <span style="color:var(--text)">${{ monPx }}</span></span>
       <span>BLOCK <span style="color:var(--text)">{{ block }}</span></span>
       <span>UTC <span style="color:var(--text)">{{ clock }}</span></span>
@@ -283,8 +288,10 @@
         <!-- legend column (dedicated, never overlaps the chart) -->
         <div style="flex:none; width:248px; background:var(--overlay); border:1px solid var(--border); padding:8px 10px">
           <div style="display:grid; grid-template-columns:1fr 70px 44px; gap:3px 8px; font-size:8.5px; color:var(--faint); letter-spacing:.05em; padding-bottom:5px; border-bottom:1px solid var(--border)"><div>PROTOCOL</div><div style="text-align:right">ALL-TIME</div><div style="text-align:right">SHARE</div></div>
+          <!-- rows are TOGGLES: click hides/shows the venue in the chart stacks (row dims to 0.4).
+               The table keeps every venue and totals stay full-series — the toggle is a lens, not a data filter. -->
           <sc-for list="{{ legRows }}" as="r" hint-placeholder-count="3">
-            <div style="display:grid; grid-template-columns:1fr 70px 44px; gap:3px 8px; font-size:10.5px; padding:4px 0; align-items:center"><div style="display:flex; align-items:center; gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:{{ r.color }}"></span><span style="color:var(--text2)">{{ r.name }}</span></div><div style="text-align:right; color:var(--text)">{{ r.vol }}</div><div style="text-align:right; color:var(--text4)">{{ r.share }}</div></div>
+            <div onClick="{{ r.onToggle }}" style="display:grid; grid-template-columns:1fr 70px 44px; gap:3px 8px; font-size:10.5px; padding:4px 0; align-items:center; cursor:pointer; opacity:{{ r.op }}"><div style="display:flex; align-items:center; gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:{{ r.color }}"></span><span style="color:var(--text2)">{{ r.name }}</span></div><div style="text-align:right; color:var(--text)">{{ r.vol }}</div><div style="text-align:right; color:var(--text4)">{{ r.share }}</div></div>
           </sc-for>
           <div style="display:grid; grid-template-columns:1fr 70px 44px; gap:3px 8px; font-size:10.5px; padding-top:6px; margin-top:3px; border-top:1px solid var(--border)"><div style="color:var(--dim)">TOTAL</div><div style="text-align:right; color:var(--text); font-weight:600">{{ legTotal }}</div><div style="text-align:right; color:var(--text4)">100%</div></div>
         </div>
@@ -335,8 +342,9 @@
         <!-- summary column (dedicated, never overlaps the chart) -->
         <div style="flex:none; width:248px; background:var(--overlay); border:1px solid var(--border); padding:8px 10px">
           <div style="display:grid; grid-template-columns:1fr 84px 58px; gap:3px 8px; font-size:8.5px; color:var(--faint); letter-spacing:.05em; padding-bottom:5px; border-bottom:1px solid var(--border)"><div>VENUE</div><div style="text-align:right">{{ burnColHdr }}</div><div style="text-align:right">UPDATES</div></div>
+          <!-- rows are TOGGLES, same lens semantics as DAILY_VOLUME's legend -->
           <sc-for list="{{ burnRows }}" as="r" hint-placeholder-count="3">
-            <div style="display:grid; grid-template-columns:1fr 84px 58px; gap:3px 8px; font-size:10.5px; padding:4px 0; align-items:center"><div style="display:flex; align-items:center; gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:{{ r.color }}"></span><span style="color:var(--text2)">{{ r.name }}</span></div><div style="text-align:right; color:var(--text)">{{ r.burn }}</div><div style="text-align:right; color:var(--text4)">{{ r.updates }}</div></div>
+            <div onClick="{{ r.onToggle }}" style="display:grid; grid-template-columns:1fr 84px 58px; gap:3px 8px; font-size:10.5px; padding:4px 0; align-items:center; cursor:pointer; opacity:{{ r.op }}"><div style="display:flex; align-items:center; gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:{{ r.color }}"></span><span style="color:var(--text2)">{{ r.name }}</span></div><div style="text-align:right; color:var(--text)">{{ r.burn }}</div><div style="text-align:right; color:var(--text4)">{{ r.updates }}</div></div>
           </sc-for>
           <div style="display:grid; grid-template-columns:1fr 84px 58px; gap:3px 8px; font-size:10.5px; padding:4px 0; align-items:center"><div style="display:flex; align-items:center; gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:var(--faint2)"></span><span style="color:var(--text2)">Metric</span></div><div style="text-align:right; color:var(--faint); font-size:9px">external oracle</div><div style="text-align:right; color:var(--faint)">—</div></div>
           <div style="display:grid; grid-template-columns:1fr 84px 58px; gap:3px 8px; font-size:10.5px; padding-top:6px; margin-top:3px; border-top:1px solid var(--border)"><div style="color:var(--dim)">TOTAL</div><div style="text-align:right; color:var(--text); font-weight:600">{{ burnTotal }}</div><div style="text-align:right; color:var(--text4)">{{ burnUpdatesTotal }}</div></div>
@@ -354,7 +362,10 @@
           <svg viewBox="0 0 1000 260" preserveAspectRatio="none" style="display:block; width:100%; height:230px">
             <defs><linearGradient id="cumg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" style="stop-color:var(--accent)" stop-opacity="0.32"></stop><stop offset="100%" style="stop-color:var(--accent)" stop-opacity="0.02"></stop></linearGradient></defs>
             <path d="{{ cumArea }}" fill="url(#cumg)" data-comment-anchor="e74b0437c3-path"></path>
-            <path d="{{ cumLine }}" fill="none" style="stroke:var(--accent2); stroke-width:2" vector-effect="non-scaling-stroke"></path>
+            <!-- per-venue cumulative lines (registry colors), UNDER the total; the total is
+                 text-strong (neutral) so it can never collide with a venue hue -->
+            <sc-for list="{{ cumVenueLines }}" as="l" hint-placeholder-count="2"><path d="{{ l.path }}" fill="none" stroke="{{ l.color }}" stroke-opacity="0.9" stroke-width="1.3" vector-effect="non-scaling-stroke"></path></sc-for>
+            <path d="{{ cumLine }}" fill="none" style="stroke:var(--text-strong); stroke-width:2" vector-effect="non-scaling-stroke"></path>
           </svg>
           <sc-if value="{{ cumTipShow }}" hint-placeholder-val="{{ false }}">
             <div style="position:absolute; top:14px; bottom:20px; left:{{ cumTip.guide }}%; width:1px; background:var(--accent); opacity:.55; pointer-events:none"></div>
@@ -362,9 +373,12 @@
               <div style="font-size:9px; color:var(--faint); letter-spacing:.05em; padding-bottom:5px; border-bottom:1px solid var(--border2)">{{ cumTip.date }}</div>
               <div style="display:flex; font-size:10.5px; padding-top:5px"><span style="color:var(--dim)">CUMULATIVE</span><span style="margin-left:auto; color:var(--text); font-weight:600">{{ cumTip.cum }}</span></div>
               <div style="display:flex; font-size:10.5px; padding-top:4px"><span style="color:var(--dim)">DAY VOL</span><span style="margin-left:auto; color:var(--text)">{{ cumTip.day }}</span></div>
+              <sc-for list="{{ cumTip.rows }}" as="r" hint-placeholder-count="2">
+                <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; padding-top:4px"><span style="width:8px; height:8px; border-radius:2px; background:{{ r.color }}; flex:none"></span><span style="color:var(--text2)">{{ r.name }}</span><span style="margin-left:auto; color:var(--text)">{{ r.cum }}</span></div>
+              </sc-for>
             </div>
           </sc-if>
-          <div style="position:absolute; top:14px; right:16px; font-size:11px; color:var(--accent2)">Σ {{ cumSigma }}</div>
+          <div style="position:absolute; top:14px; right:16px; font-size:11px; color:var(--text-strong); font-weight:600">Σ {{ cumSigma }}</div>
         </div>
       </div>
       <div style="position:relative; border:1px solid var(--border); background:var(--panel)">
@@ -437,12 +451,12 @@
           <div onClick="{{ togglePause }}" style="{{ mkPauseStyle }}">{{ mkPauseLabel }}</div>
         </div>
       </div>
-      <div style="display:grid; grid-template-columns:78px 78px 84px 84px 64px 64px 80px 88px 46px 80px 80px 52px 52px 52px 52px 52px; gap:0 6px; padding:9px 14px; font-size:8.5px; color:var(--faint); letter-spacing:.04em; border-bottom:1px solid var(--border)">
+      <div style="display:grid; grid-template-columns:78px 78px 84px 84px 64px 92px 80px 88px 46px 80px 80px 52px 52px 52px 52px 52px; gap:0 6px; padding:9px 14px; font-size:8.5px; color:var(--faint); letter-spacing:.04em; border-bottom:1px solid var(--border)">
         <div>TS UTC</div><div>BLOCK</div><div>TX</div><div>TO</div><div>CATEGORY</div><div>PROTOCOL</div><div>PAIR</div><div>POOL</div><div>SIDE</div><div style="text-align:right">SIZE USD</div><div style="text-align:right">EXEC PX</div><div style="text-align:right">MK-0S</div><div style="text-align:right">MK-5S</div><div style="text-align:right">MK-10S</div><div style="text-align:right">MK-30S</div><div style="text-align:right">MK-60S</div>
       </div>
       <div style="max-height:454px; overflow-y:auto">
         <sc-for list="{{ mkRows }}" as="f" hint-placeholder-count="20">
-          <div style="display:grid; grid-template-columns:78px 78px 84px 84px 64px 64px 80px 88px 46px 80px 80px 52px 52px 52px 52px 52px; gap:0 6px; padding:6px 14px; font-size:10.5px; border-bottom:1px solid var(--border-soft); align-items:center">
+          <div style="display:grid; grid-template-columns:78px 78px 84px 84px 64px 92px 80px 88px 46px 80px 80px 52px 52px 52px 52px 52px; gap:0 6px; padding:6px 14px; font-size:10.5px; border-bottom:1px solid var(--border-soft); align-items:center">
             <div style="color:var(--dim2)">{{ f.ts }}</div>
             <div style="color:var(--dim)">{{ f.block }}</div>
             <div style="color:var(--link)">{{ f.tx }}</div>
@@ -569,6 +583,103 @@
   </div>
 </sc-if>
 
+  <!-- ===================== MOBILE — RESPONSIVE SPEC (shipped 2026-07) =====================
+       The app styles inline (no media queries), so responsiveness is JS-driven conditional
+       rendering — useViewport(): mobile <700px, tablet <1000px — the same approach as the
+       pamm.wtf reference. Desktop (everything above) is unchanged. The frames below are
+       static 375px illustrations of what swaps at the mobile breakpoint. -->
+  <div style="border-top:1px dashed var(--border); margin:28px 18px 0; padding:18px 0 4px">
+    <div style="font-size:13px; font-weight:600; letter-spacing:.06em; color:var(--text)">MOBILE — RESPONSIVE SPEC</div>
+    <div style="font-size:10.5px; color:var(--dim); margin-top:6px; line-height:1.7; max-width:900px">
+      Breakpoints are JS state, layouts are conditional rendering (<span style="color:var(--text3)">useViewport(): mobile &lt;700px · tablet &lt;1000px</span>).<br>
+      <span style="color:var(--text3)">TABLET</span> — top bar drops MON px + UTC · ASSET/SIZE pill rows wrap · every wide grid scrolls inside its own overflow-x container (the page never exceeds the viewport).<br>
+      <span style="color:var(--text3)">MOBILE</span> — top bar collapses to logo · theme icon · live · RPC (only when degraded/down) · block · clock; navigation moves to a fixed bottom tab bar (safe-area inset); ASSET/SIZE become native selects; venue chips wrap; chart/table rows stack with tables full-width below the chart; KPI tiles go 2-up; the swap tape renders as CARDS (frame below); the volume brush uses pointer events so touch-drag works.
+    </div>
+
+    <div style="display:flex; gap:22px; flex-wrap:wrap; margin-top:16px; align-items:flex-start">
+
+      <!-- frame: mobile chrome — collapsed top bar + fixed bottom nav -->
+      <div>
+        <div style="font-size:9px; color:var(--faint); letter-spacing:.08em; margin-bottom:6px">CHROME · 375px — collapsed top bar / fixed bottom nav</div>
+        <div style="width:375px; border:1px solid var(--border); background:var(--bg)">
+          <div style="display:flex; align-items:center; gap:10px; height:42px; padding:0 16px; border-bottom:1px solid var(--border); background:var(--panel); font-size:10px; color:var(--dim2)">
+            <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#836EF9" d="M11.782 0C8.37963 0 0 8.53443 0 11.9999C0 15.4654 8.37963 24 11.782 24C15.1844 24 23.5642 15.4653 23.5642 11.9999C23.5642 8.53458 15.1845 0 11.782 0ZM9.94598 18.8619C8.51124 18.4637 4.65378 11.5912 5.04481 10.1299C5.43584 8.66856 12.1834 4.73984 13.6181 5.1381C15.0529 5.5363 18.9104 12.4087 18.5194 13.87C18.1283 15.3314 11.3807 19.2602 9.94598 18.8619Z"></path></svg>
+            <span style="font-weight:700; font-size:13px; font-family:'Space Grotesk',sans-serif; color:var(--text)">propAMM</span>
+            <span style="margin-left:auto; display:flex; align-items:center; gap:10px; white-space:nowrap">
+              <span style="border:1px solid var(--pill-border); border-radius:4px; padding:3px 6px">◐</span>
+              <span style="display:flex; align-items:center; gap:5px; color:var(--green)"><span style="width:6px; height:6px; border-radius:50%; background:var(--green)"></span>live</span>
+              <span style="color:var(--text)">84,500,998</span>
+              <span style="color:var(--text)">06:17:56</span>
+            </span>
+          </div>
+          <div style="height:118px; display:flex; align-items:center; justify-content:center; font-size:9px; color:var(--faint2); letter-spacing:.08em">TAB CONTENT — stacked, full-width panels</div>
+          <div style="display:flex; border-top:1px solid var(--border); background:var(--panel)">
+            <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:9px 0 7px; font-size:8.5px; letter-spacing:.08em; color:var(--accent); border-top:2px solid var(--accent)"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 2v3M6 13v3M3.5 5h5v8h-5zM12 3v2M12 14v2M9.5 5h5v9h-5z"></path></svg>EXECUTION</div>
+            <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:9px 0 7px; font-size:8.5px; letter-spacing:.08em; color:var(--dim2); border-top:2px solid transparent"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 15V9M7.5 15V4M12 15V7M16 15V11" stroke-linecap="round"></path></svg>VOLUME</div>
+            <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:9px 0 7px; font-size:8.5px; letter-spacing:.08em; color:var(--dim2); border-top:2px solid transparent"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 10h3l2-5 3.5 8 2.5-6 1.5 3h2.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>MARKOUTS</div>
+            <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:9px 0 7px; font-size:8.5px; letter-spacing:.08em; color:var(--dim2); border-top:2px solid transparent"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 15V11h3v4M7.5 15V5h3v10M12.5 15V8h3v7M2 15.5h14" stroke-linecap="round"></path></svg>LEADERBOARD</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- frame: swap tape as cards -->
+      <div>
+        <div style="font-size:9px; color:var(--faint); letter-spacing:.08em; margin-bottom:6px">SWAP_TAPE · 375px — one card per fill (whole card = tx link)</div>
+        <div style="width:375px; border:1px solid var(--border); background:var(--panel)">
+          <div style="padding:10px 14px; border-bottom:1px solid var(--border-soft)">
+            <div style="display:flex; align-items:center; gap:8px">
+              <span style="font-size:9px; font-weight:600; padding:1px 5px; border-radius:3px; border:1px solid var(--green-border); color:var(--green)">BUY</span>
+              <span style="color:var(--text2); font-size:12px; font-weight:600">MON/USDC</span>
+              <span style="margin-left:auto; color:var(--text); font-size:12px; font-weight:600">$12.4k</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+              <span style="color:#EA580C; font-size:10.5px; font-weight:600">LFJ POE</span>
+              <span style="color:var(--accent); font-size:9.5px">Router - Relay</span>
+              <span style="margin-left:auto; color:var(--dim); font-size:10px">0.01915</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:6px; font-size:9.5px">
+              <span style="color:var(--faint)">06:17:52.114</span>
+              <span style="color:var(--link)">0x7d85…4a21</span>
+              <span style="color:var(--faint2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0">0xb92fe925…ff4f</span>
+            </div>
+            <div style="display:flex; margin-top:7px">
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-0S</div><div style="font-size:10.5px; margin-top:2px; color:var(--green)">+1.24</div></div>
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-5S</div><div style="font-size:10.5px; margin-top:2px; color:var(--green)">+0.87</div></div>
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-10S</div><div style="font-size:10.5px; margin-top:2px; color:var(--red)">−0.32</div></div>
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-30S</div><div style="font-size:10.5px; margin-top:2px; color:var(--faint2)">·</div></div>
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-60S</div><div style="font-size:10.5px; margin-top:2px; color:var(--faint2)">·</div></div>
+            </div>
+          </div>
+          <div style="padding:10px 14px">
+            <div style="display:flex; align-items:center; gap:8px">
+              <span style="font-size:9px; font-weight:600; padding:1px 5px; border-radius:3px; border:1px solid var(--red-border); color:var(--red)">SELL</span>
+              <span style="color:var(--text2); font-size:12px; font-weight:600">cbBTC/USDC</span>
+              <span style="margin-left:auto; color:var(--text); font-size:12px; font-weight:600">$486.20</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:6px">
+              <span style="color:#0284C7; font-size:10.5px; font-weight:600">CLOBER</span>
+              <span style="color:var(--accent2); font-size:9.5px">MEV - Kubera</span>
+              <span style="margin-left:auto; color:var(--dim); font-size:10px">109,214.5</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:6px; font-size:9.5px">
+              <span style="color:var(--faint)">06:17:48.590</span>
+              <span style="color:var(--link)">0x3c11…e08d</span>
+              <span style="color:var(--faint2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0">0x256efafe…757c</span>
+            </div>
+            <div style="display:flex; margin-top:7px">
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-0S</div><div style="font-size:10.5px; margin-top:2px; color:var(--red)">−2.10</div></div>
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-5S</div><div style="font-size:10.5px; margin-top:2px; color:var(--red)">−1.65</div></div>
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-10S</div><div style="font-size:10.5px; margin-top:2px; color:var(--green)">+0.44</div></div>
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-30S</div><div style="font-size:10.5px; margin-top:2px; color:var(--green)">+1.02</div></div>
+              <div style="flex:1; text-align:center"><div style="font-size:8px; color:var(--faint2); letter-spacing:.04em">MK-60S</div><div style="font-size:10.5px; margin-top:2px; color:var(--faint2)">·</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
 </div>
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:860}}">
@@ -579,9 +690,11 @@ class Component extends DCLogic {
   BENCH = ['UniV4'];   // standard-DEX benchmark band
   get isLight() { return !this.state || this.state.theme !== 'dark'; }
   get COL() {
+    // implementation-owned palette (CVD/contrast-validated, one hue family per
+    // venue across both themes) — source of truth is each adapter's VenueMeta.color
     return this.isLight
-      ? { LFJ: '#FF4D00', Clober: '#221E15', Vault: '#9C6B16', Bybit: '#8A8375', UniV4: '#3F6212' }
-      : { LFJ: '#6E8BFF', Clober: '#45C8E8', Vault: '#9A88FF', Bybit: '#B9BCC6', UniV4: '#4D7C0F' };
+      ? { LFJ: '#FF4D00', Clober: '#0284C7', Vault: '#9C6B16', Bybit: '#8A8375', UniV4: '#3F6212' }
+      : { LFJ: '#EA580C', Clober: '#0284C7', Vault: '#9A88FF', Bybit: '#B9BCC6', UniV4: '#4D7C0F' };
   }
   get SEM() {
     return this.isLight
@@ -599,11 +712,12 @@ class Component extends DCLogic {
   slip = { LFJ: 1.3, Clober: 1.7, Vault: 0.5, Bybit: 0.22, UniV4: 4.2 };
   pairMult = { 'MON/USDC': 1.0, 'MON/USDT0': 1.15, 'MON/AUSD': 1.4, 'MON/USD1': 1.6 };
 
-  state = { tab: 'exec', pair: 'MON/USDC', size: 1000, frame: 0, theme: (function () { try { return localStorage.getItem('pamm-theme') === 'dark' ? 'dark' : 'light'; } catch (e) { return 'light'; } })(), ven: { LFJ: true, Clober: true, Vault: true, Bybit: true, UniV4: false }, mkProto: 'ALL', mkSide: 'ALL', mkSize: 'ANY', mkPaused: false, clScope: 'venue', volRange: 'ALL', volHover: null, lbWin: '24H', lbShow: 'PROPAMM', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbMk: 'TAKER', lbWinners: true, lbTop: 25 };
+  state = { tab: 'exec', pair: 'MON/USDC', size: 1000, frame: 0, theme: (function () { try { return localStorage.getItem('pamm-theme') === 'dark' ? 'dark' : 'light'; } catch (e) { return 'light'; } })(), ven: { LFJ: true, Clober: true, Vault: true, Bybit: true, UniV4: false }, mkProto: 'ALL', mkSide: 'ALL', mkSize: 'ANY', mkPaused: false, clScope: 'venue', volRange: 'ALL', volHover: null, hiddenVol: {}, hiddenBurn: {}, lbWin: '24H', lbShow: 'PROPAMM', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbMk: 'TAKER', lbWinners: true, lbTop: 25 };
 
   setCanvas = (el) => { this.canvas = el; };
   setSel = (k, v) => { if (k === 'pair') this.pairSel = v; if (k === 'size') this.sizeSel = v; this.setState({ [k]: v }); this.reseedQuotes(); };
   toggleVen = (v) => { this.setState(s => ({ ven: { ...s.ven, [v]: !s.ven[v] } })); };
+  toggleHidden = (key, name) => { this.setState(s => ({ [key]: { ...s[key], [name]: !s[key][name] } })); };
   toggleTheme = () => {
     const t = this.state.theme === 'dark' ? 'light' : 'dark';
     try { localStorage.setItem('pamm-theme', t); } catch (e) {}
@@ -705,21 +819,29 @@ class Component extends DCLogic {
   clockAt(a) { return new Date(Date.now() - a * 1000).toISOString().slice(11, 23); }
   fmtUsd(x) { return x >= 1e6 ? '$' + (x / 1e6).toFixed(2) + 'M' : x >= 1e3 ? '$' + (x / 1e3).toFixed(1) + 'k' : '$' + x.toFixed(2); }
   protoCol(p) { const C = this.COL; return p === 'LFJ' ? C.LFJ : p === 'Clober' ? C.Clober : C.Vault; }
-  catCol(c) { const C = this.COL; return c === 'ROUTER' ? 'var(--amber)' : c === 'CEX/DEX' ? C.Clober : c === 'AGG' ? C.Vault : 'var(--faint)'; }
+  // CATEGORY colour — routing class from stable semantic/theme tokens (never a venue
+  // color): MEV→accent2, branded router→accent, UNKNOWN→amber, CEX/DEX→link, direct→faint
+  catCol(c) { return c.indexOf('MEV') === 0 ? 'var(--accent2)' : c.indexOf('Router') === 0 ? 'var(--accent)' : c === 'UNKNOWN' ? 'var(--amber)' : c === 'CEX/DEX' ? 'var(--link)' : 'var(--faint)'; }
   wpick(a, w) { const r = Math.random() * w.reduce((x, y) => x + y, 0); let c = 0; for (let i = 0; i < a.length; i++) { c += w[i]; if (r < c) return a[i]; } return a[a.length - 1]; }
   makeFill(ageT, big) {
     const pair = this.PAIRS[Math.floor(Math.random() * this.PAIRS.length)];
     const side = Math.random() < 0.5 ? 'BUY' : 'SELL';
     const proto = this.wpick(['LFJ', 'Clober', 'Vault'], [0.5, 0.32, 0.18]);
+    // attribution taxonomy (shipped): direct pAMM hit = '\u2014', identified intermediary
+    // carries its brand ('Router - X' / 'MEV - X'), everything else is an honest UNKNOWN
     let cat = '\u2014'; const cr = Math.random();
-    if (proto === 'Vault') cat = cr < 0.45 ? 'CEX/DEX' : '\u2014'; else cat = cr < 0.16 ? 'ROUTER' : cr < 0.24 ? 'AGG' : '\u2014';
+    if (proto === 'Vault' && cr < 0.45) cat = 'CEX/DEX';
+    else if (cr < 0.60) cat = '\u2014';
+    else if (cr < 0.82) cat = this.wpick(['Router - Relay', 'Router - KyberSwap', 'Router - 0x', 'Router - LFJ', 'Router - Bungee', 'Router - ERC-4337'], [3, 2, 1, 3, 1, 1]);
+    else if (cr < 0.90) cat = this.wpick(['MEV - FastLane', 'MEV - Kubera'], [1, 1]);
+    else cat = 'UNKNOWN';
     const usd = big ? (60000 + Math.random() * 640000) : (Math.random() < 0.72 ? 50 + Math.random() * 9000 : 9000 + Math.random() * 90000);
     const execPx = this.mon * (1 + (Math.random() * 2 - 1) * 0.0009);
     const e0 = (proto === 'Vault' ? 0.9 : proto === 'LFJ' ? 0.1 : -0.5) + (Math.random() * 2 - 1) * 1.6;
     const ss = side === 'BUY' ? 1 : -1; let d = 0; const mk = [e0];
     [5, 10, 30, 60].forEach(h => { d += (Math.random() * 2 - 1) * Math.sqrt(h) * 1.05; mk.push(e0 + ss * d); });
     const pool = (this.pools && this.pools[proto + pair]) || this.txS();
-    const to = (cat === 'ROUTER' || cat === 'AGG') ? (this.routers ? this.routers[Math.floor(Math.random() * this.routers.length)] : this.txS()) : ((this.addrs && Math.random() < 0.85) ? this.addrs[Math.floor(Math.random() * this.addrs.length)] : this.txS());
+    const to = cat.indexOf('Router') === 0 ? (this.routers ? this.routers[Math.floor(Math.random() * this.routers.length)] : this.txS()) : ((this.addrs && Math.random() < 0.85) ? this.addrs[Math.floor(Math.random() * this.addrs.length)] : this.txS());
     return { pair, side, proto, cat, usd, execPx, mk, ageT, bornT: this.simT - ageT, block: Math.max(1, this.block - Math.round(ageT / 0.4)), tx: this.txS(), to, pool, ts: this.clockAt(ageT) };
   }
   seedFills() {
@@ -743,7 +865,8 @@ class Component extends DCLogic {
     this.pools = {};
     ['LFJ', 'Clober', 'Vault'].forEach(p => this.PAIRS.forEach(pr => { this.pools[p + pr] = this.txS(); }));
     this.addrs = Array.from({ length: 14 }, () => this.txS());
-    this.routers = ['Uniswap Universal Router', 'KyberSwap: Meta Aggregation', 'Relay: Approval Proxy V3', '1inch v6 Router', 'Odos Router v2'];
+    // the registered intermediaries the attributor recognizes on Monad
+    this.routers = ['Relay: Router v3', 'KyberSwap: Meta Aggregation', '0x: AllowanceHolder', 'LFJ: LBRouter v2.2', 'Bungee: RFQ Vault', 'ERC-4337: EntryPoint v0.7'];
   }
   humanAge(a) { return a < 60 ? Math.round(a) + 's ago' : a < 3600 ? Math.round(a / 60) + 'm ago' : Math.round(a / 3600) + 'h ago'; }
   fmtAmt(x) { return x >= 1e6 ? (x / 1e6).toFixed(2) + 'M' : x >= 1e3 ? (x / 1e3).toFixed(2) + 'k' : x.toFixed(4); }
@@ -937,14 +1060,18 @@ class Component extends DCLogic {
       ? [{ name: 'LFJ', color: C.LFJ, val: d => d.lfj }, { name: 'Clober \u00b7 Vault', color: C.Vault, val: d => d.vault }]
       : [{ name: 'LFJ', color: C.LFJ, val: d => d.lfj }, { name: 'Clober', color: C.Clober, val: d => d.clob + d.vault }];
     const dayTotal = d => series.reduce((a, s) => a + s.val(d), 0);
+    // chart-only subset: legend-hidden venues drop out of the stacks; the table and
+    // totals stay full-series — the toggle is a lens, not a data filter
+    const hidV = this.state.hiddenVol || {};
+    const volShown = series.filter(s => !hidV[s.name]);
     const grand = days.reduce((a, d) => a + d.lfj + d.clob + d.vault, 0);
-    const maxT = Math.max(...days.map(dayTotal));
+    const maxT = Math.max(...days.map(d => volShown.reduce((a, s) => a + s.val(d), 0))) || 1;
     const H = 150;
     const hv = this.state.volHover;
     const hi = hv ? Math.min(hv.i, nd - 1) : -1;
     const volBars = days.map((d, i) => ({
       op: d.partial ? 0.5 : 1,
-      segs: series.map(s => ({ h: (s.val(d) / maxT * H).toFixed(1), color: s.color })),
+      segs: volShown.map(s => ({ h: (s.val(d) / maxT * H).toFixed(1), color: s.color })),
       bg: (hv && hv.c === 'daily' && hi === i) ? 'var(--accent-dim)' : 'transparent',
       onEnter: () => this.setState({ volHover: { c: 'daily', i } }),
     }));
@@ -964,6 +1091,12 @@ class Component extends DCLogic {
     const cy = y => HC - y / cum * HC;
     const cumLine = 'M' + pts.map(p => p[0].toFixed(1) + ',' + cy(p[1]).toFixed(1)).join(' L');
     const cumArea = cumLine + ' L' + W + ',' + HC + ' L0,' + HC + ' Z';
+    // per-venue cumulative lines on the SAME y-scale as the total
+    const cumVenueLines = series.map(s => {
+      let cv = 0;
+      const vp = days.map((d, i) => { cv += s.val(d); return [(nd > 1 ? i / (nd - 1) : 0) * W, cv]; });
+      return { color: s.color, path: 'M' + vp.map(p => p[0].toFixed(1) + ',' + cy(p[1]).toFixed(1)).join(' L') };
+    });
     const xs = i => i / (nd - 1) * W;
     const bands = series.map(() => ({ top: [], bot: [] }));
     days.forEach((d, i) => { const t = dTot[i] || 1; let below = 0; for (let k = 0; k < series.length; k++) { const fr = series[k].val(d) / t; bands[k].bot.push([xs(i), HC * (1 - below)]); bands[k].top.push([xs(i), HC * (1 - below - fr)]); below += fr; } });
@@ -981,10 +1114,11 @@ class Component extends DCLogic {
     if (hv && hi >= 0) {
       const d = days[hi];
       if (hv.c === 'daily') {
-        dailyTip = { left: tipLeft(hi), date: dateOf(d), total: f(dTot[hi]), rows: series.map(s => ({ name: s.name, color: s.color, val: f(s.val(d)) })) };
+        dailyTip = { left: tipLeft(hi), date: dateOf(d), total: f(dTot[hi]), rows: volShown.map(s => ({ name: s.name, color: s.color, val: f(s.val(d)) })) };
       } else if (hv.c === 'cum') {
         let c2 = 0; for (let k = 0; k <= hi; k++) c2 += dTot[k];
-        cumTip = { left: tipLeft(hi), guide: guideLeft(hi), date: dateOf(d), cum: f(c2), day: f(dTot[hi]) };
+        const vRows = series.map(s => { let cv = 0; for (let k = 0; k <= hi; k++) cv += s.val(days[k]); return { name: s.name, color: s.color, cum: f(cv) }; });
+        cumTip = { left: tipLeft(hi), guide: guideLeft(hi), date: dateOf(d), cum: f(c2), day: f(dTot[hi]), rows: vRows };
       } else if (hv.c === 'ms') {
         const t = dTot[hi] || 1;
         msTip = { left: tipLeft(hi), guide: guideLeft(hi), date: dateOf(d), rows: series.map(s => ({ name: s.name, color: s.color, pct: (s.val(d) / t * 100).toFixed(1) + '%', val: f(s.val(d)) })) };
@@ -998,12 +1132,14 @@ class Component extends DCLogic {
       { name: 'Clober', key: 'bClob', ukey: 'uClob', color: C2.Clober, approx: false },
       { name: 'Hanji', key: 'bHanji', ukey: 'uHanji', color: C2.Vault, approx: false },
     ];
+    const hidB = this.state.hiddenBurn || {};
+    const burnShown = burnSeries.filter(s => !hidB[s.name]);
     const bTot = days.map(d => burnSeries.reduce((a, s) => a + d[s.key], 0));
-    const bMax = Math.max(...bTot) || 1;
+    const bMax = Math.max(...days.map(d => burnShown.reduce((a, s) => a + d[s.key], 0))) || 1;
     const BH = 150;
     const burnBars = days.map((d, i) => ({
       op: d.partial ? 0.5 : 1,
-      segs: burnSeries.filter(s => d[s.key] > 0).map(s => ({ h: (d[s.key] / bMax * BH).toFixed(1), color: s.color })),
+      segs: burnShown.filter(s => d[s.key] > 0).map(s => ({ h: (d[s.key] / bMax * BH).toFixed(1), color: s.color })),
       bg: (hv && hv.c === 'burn' && hi === i) ? 'var(--accent-dim)' : 'transparent',
       onEnter: () => this.setState({ volHover: { c: 'burn', i } }),
     }));
@@ -1012,7 +1148,7 @@ class Component extends DCLogic {
       const d = days[hi];
       burnTip = {
         left: tipLeft(hi), date: dateOf(d),
-        rows: burnSeries.filter(s => d[s.key] > 0).map(s => ({ name: s.name, color: s.color, val: (s.approx ? '\u2248' : '') + d[s.key].toFixed(1) + ' MON' })),
+        rows: burnShown.filter(s => d[s.key] > 0).map(s => ({ name: s.name, color: s.color, val: (s.approx ? '\u2248' : '') + d[s.key].toFixed(1) + ' MON' })),
         total: Math.round(bTot[hi]).toLocaleString() + ' MON',
         usd: '~$' + (bTot[hi] * (this.mon || 0.0192)).toFixed(0),
       };
@@ -1021,7 +1157,7 @@ class Component extends DCLogic {
     const burnRows = burnSeries.map(s => {
       const tot = days.reduce((a, d) => a + d[s.key], 0);
       const ups = days.reduce((a, d) => a + d[s.ukey], 0);
-      return { name: s.name, color: s.color, burn: (s.approx ? '\u2248' : '') + fMON(tot), updates: ups.toLocaleString() };
+      return { name: s.name, color: s.color, burn: (s.approx ? '\u2248' : '') + fMON(tot), updates: ups.toLocaleString(), op: hidB[s.name] ? 0.4 : 1, onToggle: () => this.toggleHidden('hiddenBurn', s.name) };
     });
     const burnTotal = bTot.reduce((a, b) => a + b, 0);
     const burnPerM = allTot > 0 ? (burnTotal / allTot).toFixed(1) : '0';
@@ -1050,8 +1186,8 @@ class Component extends DCLogic {
       kAll: f(allTot), k7: f(last7), k7chg: (chg7 >= 0 ? '\u25B2 ' : '\u25BC ') + Math.abs(chg7).toFixed(0) + '%', k7css: 'color:' + (chg7 >= 0 ? 'var(--green)' : 'var(--red)'),
       kSwaps: swaps.toLocaleString(), kPeak: f(peakV), kPeakDay: peakDay,
       kToday: f(todayT), kTodayChg: (todayChg >= 0 ? '\u25B2 ' : '\u25BC ') + Math.abs(todayChg).toFixed(0) + '%', kTodaycss: 'color:' + (todayChg >= 0 ? 'var(--green)' : 'var(--red)'),
-      legRows: totals.map(t => ({ name: t.name, color: t.color, vol: f(t.tot), share: share(t.tot) })),
-      legTotal: f(allTot), cumLine, cumArea, cumSigma: f(allTot),
+      legRows: totals.map(t => ({ name: t.name, color: t.color, vol: f(t.tot), share: share(t.tot), op: hidV[t.name] ? 0.4 : 1, onToggle: () => this.toggleHidden('hiddenVol', t.name) })),
+      legTotal: f(allTot), cumLine, cumArea, cumVenueLines, cumSigma: f(allTot),
       msBands, msTopName: series[series.length - 1].name, msTopPct: (series[series.length - 1].val(days[nd - 1]) / lt * 100).toFixed(1) + '%', msTopColor: this.isLight ? 'rgb(252,251,248)' : series[series.length - 1].color,
       msBotName: series[0].name, msBotPct: (series[0].val(days[nd - 1]) / lt * 100).toFixed(1) + '%', msBotColor: this.isLight ? 'rgb(252,251,248)' : series[0].color,
       brk, brkTotalVol: f(allTot), brkTotalSwaps: swaps.toLocaleString(),

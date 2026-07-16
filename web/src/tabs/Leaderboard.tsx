@@ -88,7 +88,7 @@ export function LeaderboardTab() {
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '18px 18px 12px' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '18px 18px 12px' }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '.06em', color: C.text }}>MARKOUT LEADERBOARD</div>
           <div style={{ fontSize: 11, color: C.dim3, marginTop: 6, lineHeight: 1.55, maxWidth: 760 }}>
