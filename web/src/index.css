@@ -68,3 +68,4 @@ html, body { margin: 0; background: var(--bg); }
 /* Markouts rows (SWAP_TAPE + OUTLIER_FEED) link out to the tx on the explorer */
 .tx-row { text-decoration: none; color: inherit; }
 .tx-row:hover { background: var(--accent-row); }
+.tour-skip:hover { color: var(--text) !important; }

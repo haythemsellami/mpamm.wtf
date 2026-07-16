@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { TopBar } from './components/TopBar';
 import { BottomNav } from './components/BottomNav';
+import { Tour } from './components/Tour';
 import { useViewport } from './lib/viewport';
 import { useDashboard, type Tab } from './store';
 
@@ -28,6 +29,7 @@ export function App() {
   return (
     // bottom padding keeps the last panel clear of the fixed mobile nav.
     <div style={mobile ? { paddingBottom: 'calc(64px + env(safe-area-inset-bottom))' } : undefined}>
+      <Tour />
       <TopBar />
       {tab === 'exec' && <ExecutionTab />}
       {tab === 'volume' && <VolumeTab />}
