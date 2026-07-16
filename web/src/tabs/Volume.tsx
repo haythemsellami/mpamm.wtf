@@ -698,7 +698,9 @@ export function VolumeTab() {
               {vm.cumVenueLines.map((l, i) => (
                 <path key={i} d={l.path} fill="none" stroke={l.color} strokeOpacity="0.9" strokeWidth="1.3" vectorEffect="non-scaling-stroke" />
               ))}
-              <path d={vm.cumLine} fill="none" style={{ stroke: 'var(--accent2)', strokeWidth: 2 }} vectorEffect="non-scaling-stroke" />
+              {/* TOTAL in strong neutral ink — accent2 is nearly POE's orange in
+                  the bright theme, so a venue color it must never be. */}
+              <path d={vm.cumLine} fill="none" style={{ stroke: 'var(--text-strong)', strokeWidth: 2 }} vectorEffect="non-scaling-stroke" />
             </svg>
             {vm.cumTip && (
               <>
@@ -717,7 +719,7 @@ export function VolumeTab() {
                 </div>
               </>
             )}
-            <div style={{ position: 'absolute', top: 14, right: 16, fontSize: 11, color: C.purpleL }}>Σ {vm.cumSigma}</div>
+            <div style={{ position: 'absolute', top: 14, right: 16, fontSize: 11, color: C.textStrong, fontWeight: 600 }}>Σ {vm.cumSigma}</div>
           </div>
         </div>
         <div style={{ position: 'relative', border: `1px solid ${C.line}`, background: C.panel }}>
