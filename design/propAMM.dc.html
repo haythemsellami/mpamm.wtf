@@ -807,10 +807,10 @@ class Component extends DCLogic {
     if (!st.tour) return { tourShow: false, tourSlides: [], tourDots: [] };
     const C = this.COL, sem = this.SEM;
     const slides = [
-      { n: '01', title: 'EXECUTION', sub: 'live quote bands vs Bybit', body: 'Every block, each venue is quoted at your chosen size. Step bands show bid/ask per venue \u2014 propAMMs (LFJ, Clober, Vault) against the Bybit taker benchmark and a UNI-V4 band for standard-DEX comparison. Tightest spread is starred live.' },
-      { n: '02', title: 'VOLUME', sub: 'daily notional + quote-update burn', body: 'Daily filled volume by protocol with a draggable timeline brush, cumulative and market-share views, plus QUOTE_UPDATE_BURN \u2014 the MON each venue\u2019s makers spend keeping quotes fresh, normalized as burn per $1M volume.' },
-      { n: '03', title: 'MARKOUTS', sub: 'fill quality at 0\u201360s horizons', body: 'A live tape of on-chain swaps joined to the Bybit reference price. Markouts at 0/5/10/30/60s show whether takers got favorable or adverse fills; the outlier feed surfaces the biggest single-swap P&L.' },
-      { n: '04', title: 'LEADERBOARD', sub: 'who executes best', body: 'Percentile distributions of markouts grouped by protocol, pool, address, or category \u2014 with pool PnL sparklines and the top winning / losing swaps over 24h, 7d, or 30d windows.' },
+      { n: '01', title: 'EXECUTION', sub: 'live quote bands vs Bybit', body: 'Every block, each venue is quoted at the chosen size. Step bands show bid/ask per propAMMs against the CEX benchmark and a UNI-V4 band for standard-DEX comparison. Tightest spread is starred live.' },
+      { n: '02', title: 'VOLUME', sub: 'daily notional + quote-update burn', body: 'Daily filled volume by protocol, cumulative and market-share views, plus QUOTE_UPDATE_BURN' },
+      { n: '03', title: 'MARKOUTS', sub: 'fill quality at 0\u201360s horizons', body: 'A live tape of on-chain swaps joined to the CEX reference price. Markouts at 0/5/10/30/60s show whether takers got favorable or adverse fills; the outlier feed surfaces the biggest single-swap P&L.' },
+      { n: '04', title: 'LEADERBOARD', sub: 'who executes best', body: 'Percentile distributions of markouts grouped by protocol, pool, address, or category over 24h, 7d, or 30d windows.' },
     ];
     const i = st.tourSlide;
     const s = slides[i];

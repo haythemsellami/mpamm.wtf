@@ -20,22 +20,22 @@ const SLIDES = [
   {
     n: '01', title: 'EXECUTION', sub: 'live quote bands vs Bybit',
     caption: 'bid/ask bands · 60s · step quotes', src: '/tour/01-execution.webm',
-    body: 'Every block, each venue is quoted at your chosen size. Step bands show bid/ask per venue — propAMMs (LFJ, Clober, Vault) against the Bybit taker benchmark and a UNI-V4 band for standard-DEX comparison. Tightest spread is starred live.',
+    body: 'Every block, each venue is quoted at the chosen size. Step bands show bid/ask per propAMMs against the CEX benchmark and a UNI-V4 band for standard-DEX comparison. Tightest spread is starred live.',
   },
   {
     n: '02', title: 'VOLUME', sub: 'daily notional + quote-update burn',
     caption: 'daily volume · burn · share', src: '/tour/02-volume.webm',
-    body: 'Daily filled volume by protocol with a draggable timeline brush, cumulative and market-share views, plus QUOTE_UPDATE_BURN — the MON each venue’s makers spend keeping quotes fresh, normalized as burn per $1M volume.',
+    body: 'Daily filled volume by protocol, cumulative and market-share views, plus QUOTE_UPDATE_BURN',
   },
   {
     n: '03', title: 'MARKOUTS', sub: 'fill quality at 0–60s horizons',
     caption: 'markouts vs Bybit · 0–60s', src: '/tour/03-markouts.webm',
-    body: 'A live tape of on-chain swaps joined to the Bybit reference price. Markouts at 0/5/10/30/60s show whether takers got favorable or adverse fills; the outlier feed surfaces the biggest single-swap P&L.',
+    body: 'A live tape of on-chain swaps joined to the CEX reference price. Markouts at 0/5/10/30/60s show whether takers got favorable or adverse fills; the outlier feed surfaces the biggest single-swap P&L.',
   },
   {
     n: '04', title: 'LEADERBOARD', sub: 'who executes best',
     caption: 'percentiles · pool PnL · top swaps', src: '/tour/04-leaderboard.webm',
-    body: 'Percentile distributions of markouts grouped by protocol, pool, address, or category — with pool PnL sparklines and the top winning / losing swaps over 24h, 7d, or 30d windows.',
+    body: 'Percentile distributions of markouts grouped by protocol, pool, address, or category over 24h, 7d, or 30d windows.',
   },
 ] as const;
 
