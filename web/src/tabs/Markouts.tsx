@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Fill } from '@shared';
 import { useDashboard } from '../store';
+import { useViewport } from '../lib/viewport';
 import { C, venueColor } from '../theme';
 import { Pills, SideTag } from '../components/ui';
 import { fmtUsd, clockMs, clockSec, fmtInt, shortHex } from '../lib/format';
@@ -27,6 +28,7 @@ function catLabel(c: string, router?: string): string {
 
 export function MarkoutsTab() {
   const d = useDashboard();
+  const { mobile } = useViewport();
   const { venuesById, displayVenues, references } = d;
 
   // venue display name + colour, resolved from the registry by Fill.venueId.
@@ -124,6 +126,52 @@ export function MarkoutsTab() {
           </div>
         </div>
 
+        {mobile ? (
+          /* card tape (pamm.wtf pattern): one card per fill — side/pair/size,
+             protocol + attribution, time/tx, then the aged markout strip. */
+          <div style={{ maxHeight: 560, overflowY: 'auto' }}>
+            {rows.map((f) => {
+              const age = (Date.now() - f.ts) / 1000;
+              return (
+                <a key={f.id} href={`https://monadscan.com/tx/${f.txHash}`} target="_blank" rel="noopener noreferrer"
+                  title={f.txHash} className="tx-row"
+                  style={{ display: 'block', padding: '10px 14px', borderBottom: `1px solid ${C.hair}` }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <SideTag side={f.side} />
+                    <span style={{ color: C.text2, fontSize: 12, fontWeight: 600 }}>{f.market}</span>
+                    <span style={{ marginLeft: 'auto', color: C.text, fontSize: 12, fontWeight: 600 }}>{fmtUsd(f.usd)}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+                    <span style={{ color: venueColor(venuesById[f.venueId], d.theme), fontSize: 10.5, fontWeight: 600 }}>{venueNameUpper(f)}</span>
+                    <span style={{ color: catColor(f.category, f.router), fontSize: 9.5 }}>{catLabel(f.category, f.router)}</span>
+                    <span style={{ marginLeft: 'auto', color: C.dim, fontSize: 10 }}>{f.pxApprox ? '—' : f.execPx.toFixed(5)}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, fontSize: 9.5 }}>
+                    <span style={{ color: C.faint }}>{clockMs(f.ts)}</span>
+                    <span style={{ color: C.link }}>{shortHex(f.txHash)}</span>
+                    <span style={{ color: C.faint2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{f.to}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 0, marginTop: 7 }}>
+                    {H.map((h, i) => {
+                      const v = f.markoutsBps[i];
+                      const aged = age >= h && v != null;
+                      return (
+                        <div key={h} style={{ flex: 1, textAlign: 'center' }}>
+                          <div style={{ fontSize: 8, color: C.faint2, letterSpacing: '.04em' }}>MK-{h}S</div>
+                          <div style={{ fontSize: 10.5, marginTop: 2, color: !aged ? C.ghost : (v as number) >= 0 ? C.green : C.red }}>
+                            {!aged ? '·' : ((v as number) >= 0 ? '+' : '') + (v as number).toFixed(2)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </a>
+              );
+            })}
+          </div>
+        ) : (
+        <div style={{ overflowX: 'auto' }}>
+        <div style={{ minWidth: 1240 }}>
         <div style={{ display: 'grid', gridTemplateColumns: TAPE_GRID, gap: '0 6px', padding: '9px 14px', fontSize: 8.5, color: C.faint2, letterSpacing: '.04em', borderBottom: `1px solid ${C.line}` }}>
           <div>TS UTC</div><div>BLOCK</div><div>TX</div><div>TO</div><div>CATEGORY</div><div>PROTOCOL</div><div>PAIR</div><div>POOL</div><div>SIDE</div>
           <div style={{ textAlign: 'right' }}>SIZE USD</div><div style={{ textAlign: 'right' }}>EXEC PX</div>
@@ -164,6 +212,9 @@ export function MarkoutsTab() {
             );
           })}
         </div>
+        </div>
+        </div>
+        )}
 
         <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 14px', borderTop: `1px solid ${C.line2}`, fontSize: 9, color: C.faint2 }}>
           <span>showing {rows.length} rows</span><span>last refresh {clockSec()}</span>
@@ -181,6 +232,8 @@ export function MarkoutsTab() {
           <span style={{ color: C.faint }}>sorted by |mk-0s P&amp;L| desc &middot; last 24h</span>
         </div>
 
+        <div style={{ overflowX: 'auto' }}>
+        <div style={{ minWidth: 980 }}>
         <div style={{ display: 'grid', gridTemplateColumns: OUT_GRID, gap: '0 8px', padding: '9px 14px', fontSize: 8.5, color: C.faint2, letterSpacing: '.04em', borderBottom: `1px solid ${C.line}` }}>
           <div>WHEN</div><div>BLOCK</div><div>PROTOCOL</div><div>PAIR</div><div>POOL</div><div>SIDE</div>
           <div style={{ textAlign: 'right' }}>USD</div><div style={{ textAlign: 'right' }}>EXEC PX</div>
@@ -214,6 +267,8 @@ export function MarkoutsTab() {
             </a>
           );
         })}
+        </div>
+        </div>
       </div>
     </div>
   );

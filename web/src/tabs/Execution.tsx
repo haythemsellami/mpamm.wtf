@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { SIZES_USD, TOKENS, pairOf, wrapBasisFor, type VenueMeta, type QuoteRow } from '@shared';
 import { useDashboard } from '../store';
+import { useViewport } from '../lib/viewport';
 import { C, hexA, pill, venueColor } from '../theme';
 import { Panel, PanelHead, Field } from '../components/ui';
 import { QuoteCanvas } from '../components/QuoteCanvas';
@@ -11,6 +12,13 @@ const DEFAULT_MARKETS = ['MON/USDC', 'BTC/USDC', 'ETH/USDC'];
 
 export function ExecutionTab() {
   const d = useDashboard();
+  const { mobile } = useViewport();
+  // mobile control style — pill rows become compact native selects (pamm.wtf
+  // pattern): 7 asset pills never fit a phone row, a select always does.
+  const selStyle: React.CSSProperties = {
+    background: 'transparent', color: C.text, border: '1px solid var(--pill-border)',
+    borderRadius: 4, padding: '7px 8px', fontSize: 12, fontFamily: 'inherit',
+  };
   const pair = d.pair, size = d.size;
   const allMarkets = d.state?.markets ?? DEFAULT_MARKETS;
   // markets a display venue has EVER quoted this session — STICKY, so a momentary
@@ -175,20 +183,32 @@ export function ExecutionTab() {
       </div>
 
       {/* controls */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 22, flexWrap: 'wrap', padding: '6px 18px 16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: mobile ? 14 : 22, flexWrap: 'wrap', padding: '6px 18px 16px' }}>
         <Field label="ASSET">
-          <div style={{ display: 'flex', gap: 4 }}>
-            {markets.map((p) => <button key={p} type="button" aria-pressed={pair === p} onClick={() => d.set('pair', p)} style={pill(pair === p)}>{p}</button>)}
-          </div>
+          {mobile ? (
+            <select aria-label="Asset pair" value={pair} onChange={(e) => d.set('pair', e.target.value)} style={selStyle}>
+              {markets.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          ) : (
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {markets.map((p) => <button key={p} type="button" aria-pressed={pair === p} onClick={() => d.set('pair', p)} style={pill(pair === p)}>{p}</button>)}
+            </div>
+          )}
         </Field>
         <Field label="SIZE">
-          <div style={{ display: 'flex', gap: 4 }}>
-            {SIZES_USD.map((s) => <button key={s} type="button" aria-pressed={size === s} onClick={() => d.set('size', s)} style={pill(size === s)}>{sizeLabel(s)}</button>)}
-          </div>
+          {mobile ? (
+            <select aria-label="Trade size" value={size} onChange={(e) => d.set('size', Number(e.target.value))} style={selStyle}>
+              {SIZES_USD.map((s) => <option key={s} value={s}>{sizeLabel(s)}</option>)}
+            </select>
+          ) : (
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {SIZES_USD.map((s) => <button key={s} type="button" aria-pressed={size === s} onClick={() => d.set('size', s)} style={pill(size === s)}>{sizeLabel(s)}</button>)}
+            </div>
+          )}
         </Field>
-        <div style={{ marginLeft: 'auto' }}>
+        <div style={{ marginLeft: mobile ? 0 : 'auto' }}>
           <Field label="VENUES">
-            <div style={{ display: 'flex', gap: 4 }}>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
               {chips.map((v) => {
                 const on = d.venueToggles[v.id];
                 const color = venueColor(v, d.theme);
@@ -217,13 +237,13 @@ export function ExecutionTab() {
         {/* flex row: the plot ends where the legend column begins, so quotes can
             never render underneath it (no absolute overlay). The canvas re-measures
             its own clientWidth each repaint, so it adapts to the narrower slot. */}
-        <div style={{ display: 'flex', alignItems: 'flex-start', padding: '8px 8px 4px' }}>
+        <div style={{ display: 'flex', flexDirection: mobile ? 'column' : 'row', alignItems: mobile ? 'stretch' : 'flex-start', padding: '8px 8px 4px' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <QuoteCanvas />
           </div>
           {/* width/vs-CEX column is our approved divergence; venue names come
               straight from the registry. Layout matches the design. */}
-          <div style={{ flex: 'none', width: 382, margin: '6px 8px 0 14px', background: C.overlay, border: `1px solid ${C.line}`, padding: '8px 10px' }}>
+          <div style={{ flex: 'none', width: mobile ? 'auto' : 382, margin: mobile ? '10px 4px 4px' : '6px 8px 0 14px', background: C.overlay, border: `1px solid ${C.line}`, padding: '8px 10px' }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 42px 42px 42px 50px', gap: '2px 6px', fontSize: 8.5, color: C.faint2, letterSpacing: '.05em', paddingBottom: 5, borderBottom: `1px solid ${C.line}` }}>
               <div>VENUE</div><div style={{ textAlign: 'right' }}>SPREAD</div><div style={{ textAlign: 'right' }}>BID</div><div style={{ textAlign: 'right' }}>ASK</div><div style={{ textAlign: 'right' }}>vs CEX</div>
             </div>
@@ -295,7 +315,8 @@ export function ExecutionTab() {
       {/* ROLLING_STATS */}
       <Panel style={{ margin: '0 18px 14px' }}>
         <PanelHead icon="#" title="ROLLING_STATS" sub={`last 5m · spread distribution by venue · ${sizeLabel(size)} · ${pair}`} />
-        <div style={{ padding: '6px 14px 12px' }}>
+        <div style={{ padding: '6px 14px 12px', overflowX: 'auto' }}>
+          <div style={{ minWidth: 620 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(7, 1fr) 0.8fr', gap: 6, padding: '9px 6px', fontSize: 9, color: C.faint2, letterSpacing: '.05em', borderBottom: `1px solid ${C.line}` }}>
             <div>VENUE</div><div style={{ textAlign: 'right' }}>P5</div><div style={{ textAlign: 'right' }}>P25</div><div style={{ textAlign: 'right' }}>P50</div><div style={{ textAlign: 'right' }}>P75</div><div style={{ textAlign: 'right' }}>P95</div><div style={{ textAlign: 'right' }}>AVG</div><div style={{ textAlign: 'right' }}>σ</div><div style={{ textAlign: 'right' }}>N</div>
           </div>
@@ -317,6 +338,7 @@ export function ExecutionTab() {
             </div>
           ))}
           <div style={{ fontSize: 9, color: C.faint3, marginTop: 9 }}>p50 = median round-trip spread (bps, bid/ask vs the {refName} mid) · σ = spread stdev · ★ = tightest p50 in window</div>
+          </div>
         </div>
       </Panel>
     </div>
