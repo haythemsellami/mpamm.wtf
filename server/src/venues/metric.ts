@@ -42,6 +42,13 @@ const metricPoolAbi = parseAbi([
   'event Swap(address sender, address recipient, bool exactInput, int128 amount0Delta, int128 amount1Delta, int16 newTick, uint104 newPositionInBin)',
 ]);
 const priceProviderAbi = parseAbi(['function getBidAndAskPrice() view returns (uint128, uint128)']);
+// gas-burn derivation (see gasSources): each provider names the push oracle it
+// reads and its own feed id; the oracle exposes how many feeds it serves.
+const providerOracleAbi = parseAbi([
+  'function offchainOracle() view returns (address)',
+  'function offchainFeedId() view returns (bytes32)',
+]);
+const pushOracleAbi = parseAbi(['function getOracleCount() view returns (uint256)']);
 const metricRouterAbi = parseAbi([
   'function quoteSwap(address pool, bool zeroForOne, int128 amountSpecified, uint128 priceLimitX64, uint128 bidPriceX64, uint128 askPriceX64) returns (int128 amount0Delta, int128 amount1Delta)',
 ]);
@@ -67,6 +74,7 @@ export function createMetricAdapter(): VenueAdapter {
   let pools: MetricPool[] = [];
   let byAddr = new Map<string, MetricPool>();
   let discovered = false;
+  let pushOracle: `0x${string}` | null = null; // resolved at discovery (gasSources)
 
   return {
     venues: () => [METRIC_VENUE],
@@ -112,6 +120,45 @@ export function createMetricAdapter(): VenueAdapter {
       byAddr = new Map(pools.map((p) => [p.pool.toLowerCase(), p]));
       discovered = true;
       ctx.log(`Metric: ${pools.length} base/stable pool(s)`);
+
+      // Resolve the quote-freshness gas destination from the chain (never
+      // hardcoded): every provider names its push oracle + feed id. All
+      // providers must agree on ONE oracle; any failure leaves pushOracle
+      // null and gasSources() throws — the gas cursor holds and retries at
+      // the next discovery, quotes/fills are unaffected.
+      pushOracle = null;
+      if (pools.length) {
+        const res = await ctx.client.multicall({
+          contracts: pools.flatMap((p) => [
+            { address: p.priceProvider, abi: providerOracleAbi, functionName: 'offchainOracle' as const },
+            { address: p.priceProvider, abi: providerOracleAbi, functionName: 'offchainFeedId' as const },
+          ]),
+          allowFailure: true,
+        });
+        const oracles = new Set<string>();
+        const feedIds = new Set<string>();
+        for (let i = 0; i < pools.length; i++) {
+          const o = res[i * 2], f = res[i * 2 + 1];
+          if (o.status !== 'success' || f.status !== 'success') { oracles.clear(); break; }
+          oracles.add(String(o.result).toLowerCase());
+          feedIds.add(String(f.result).toLowerCase());
+        }
+        if (oracles.size === 1) {
+          const oracle = [...oracles][0] as `0x${string}`;
+          // exclusivity guard: we attribute the oracle's WHOLE burn to Metric,
+          // which is only sound while it serves exactly Metric's feeds (true at
+          // ship time: getOracleCount()==3 == our three pools). If the operator
+          // onboards another tenant on Monad, say so loudly — the number then
+          // overcounts until attribution is split per feed.
+          try {
+            const count = await ctx.client.readContract({ address: oracle, abi: pushOracleAbi, functionName: 'getOracleCount' });
+            if (Number(count) !== feedIds.size) {
+              ctx.log(`Metric: push oracle serves ${count} feed(s) but Metric uses ${feedIds.size} — burn attribution may overcount`);
+            }
+            pushOracle = oracle;
+          } catch { /* count probe failed — keep pushOracle null, retry next discovery */ }
+        }
+      }
     },
 
     async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
@@ -193,6 +240,24 @@ export function createMetricAdapter(): VenueAdapter {
     // flow is dominated by FastLane auctions + searcher bots (global registry /
     // UNKNOWN). Add Metric's official router here if the team publishes one.
     entryPoints: () => pools.map((p) => ({ address: p.pool })),
+
+    // QUOTE_UPDATE_BURN: Metric's quotes stay fresh via a dedicated push
+    // oracle (providers' offchainOracle(), resolved at discovery) fed by a
+    // rotating fleet of publisher EOAs — flat 150k limit, ~1.5 pushes/s, ONE
+    // feed per tx, NO logs (verified: receipts carry zero logs), so 'blocks'
+    // mode keyed on the destination, same pattern as Hanji's FastQuoter. The
+    // steady heartbeat cadence (staleness refreshes between price moves) is
+    // exactly what makes the sampled estimate sound.
+    // PROVENANCE (reverse-engineered 2026-07-17, bytecode unverified):
+    // selector extraction named the surface — getOracleData(bytes32) is the
+    // providers' read, getOracleCount()==3 == exactly Metric's three feeds on
+    // Monad (nobody else registered; re-checked at every discovery above).
+    // The publisher EOAs pay the gas — we count it as Metric's freshness
+    // burn, whole.
+    gasSources() {
+      if (!pushOracle) throw new Error('Metric push oracle not resolved yet'); // hold the gas cursor
+      return [{ mode: 'blocks' as const, address: pushOracle }];
+    },
 
     decode(_ctx: AdapterContext, logs: LogBundle, tsOf) {
       const out: Fill[] = [];
