@@ -82,7 +82,7 @@ export interface EntryPoint {
  */
 export type GasSource =
   | { mode: 'logs'; address: `0x${string}` | `0x${string}`[]; events?: readonly unknown[]; topic0?: `0x${string}` }
-  | { mode: 'blocks'; address: `0x${string}` };
+  | { mode: 'blocks'; address: `0x${string}` | `0x${string}`[] };
 
 /** Optional historical seed returned by `backfill()`. */
 export interface AdapterBackfill {
