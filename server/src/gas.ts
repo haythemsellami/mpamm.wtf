@@ -44,6 +44,32 @@ export function bootstrapRebuildDay(creationDays: string[], anchorDay: string): 
   return late[0] ?? null;
 }
 
+/** Evidence window for skipping a bootstrap rebuild: the 7 full UTC days
+ *  after the destination's creation day (creation day itself is excluded —
+ *  an older destination may own its burn). Clamped to closed days; empty
+ *  when the destination is too young to have a full week of evidence. */
+export function coverageEvidenceWindow(creationDay: string, todayDay: string): string[] {
+  const out: string[] = [];
+  const t = Date.parse(`${creationDay}T00:00:00Z`);
+  for (let i = 1; i <= 7; i++) {
+    const d = new Date(t + i * 86_400_000).toISOString().slice(0, 10);
+    if (d >= todayDay) break; // today is a partial bucket — not evidence
+    out.push(d);
+  }
+  return out;
+}
+
+/** True when every day of the evidence window has counted burn. ONLY valid
+ *  for a SINGLE-destination venue: with one destination, any counted burn
+ *  after its creation is necessarily its own, so a continuous nonzero week
+ *  proves the old scan was already covering it. Multi-destination venues
+ *  must never use this — an older destination's burn would mask the newer
+ *  one's hole (exactly the Hanji v1/v2 trap). An empty window is NOT
+ *  evidence (too young) — callers rebuild. */
+export function hasCoverageEvidence(window: string[], nonzeroDays: Set<string>): boolean {
+  return window.length > 0 && window.every((d) => nonzeroDays.has(d));
+}
+
 /**
  * GasTracker — QUOTE_UPDATE_BURN accrual: the MON each venue's own keeper
  * spends keeping its quotes fresh, bucketed per (UTC day, venue) into
@@ -236,10 +262,24 @@ export class GasTracker {
         }
         const day = bootstrapRebuildDay(days, anchor);
         if (day) {
-          const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
-          this.store.resetGasFrom(vid, day);
-          this.store.setMeta(cursorKey, String(startBlock));
-          this.note(`${name}: verifying quote-update coverage — rebuilding from ${day}`);
+          // coverage-evidence gate, SINGLE-destination venues only: with one
+          // destination, any counted burn after its creation is necessarily
+          // its own — a continuous nonzero week right after creation proves
+          // the old scan already covered it (Clober: strategy deployed 3.5
+          // weeks after the venue anchor but counted since day one — without
+          // this gate the epoch would wipe its whole series for nothing).
+          // Multi-destination venues always rebuild: an older destination's
+          // burn would mask the newer one's hole (the Hanji v1/v2 trap).
+          const single = sig.split(',').filter(Boolean).length === 1;
+          const window = coverageEvidenceWindow(day, utcDay());
+          const covered = single && window.length > 0
+            && hasCoverageEvidence(window, this.store.gasNonzeroDays(vid, window[0], window[window.length - 1]));
+          if (!covered) {
+            const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
+            this.store.resetGasFrom(vid, day);
+            this.store.setMeta(cursorKey, String(startBlock));
+            this.note(`${name}: verifying quote-update coverage — rebuilding from ${day}`);
+          }
         }
       } catch { return; }
     }

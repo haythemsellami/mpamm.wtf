@@ -210,6 +210,15 @@ export class VolumeStore {
     this.db.prepare(`DELETE FROM meta WHERE substr(key, 1, length(?)) = ?`).run(prefix, prefix);
   }
 
+  /** Days in [fromDay, toDay] where the venue has counted burn (gas.ts
+   *  bootstrap coverage evidence). */
+  gasNonzeroDays(venueId: string, fromDay: string, toDay: string): Set<string> {
+    const rows = this.db.prepare(
+      `SELECT utc_day FROM daily_gas WHERE venue_id = ? AND utc_day >= ? AND utc_day <= ? AND (mon > 0 OR txs > 0)`,
+    ).all(venueId, fromDay, toDay) as Array<{ utc_day: string }>;
+    return new Set(rows.map((r) => r.utc_day));
+  }
+
   upsert(d: DailyVolume): void { this.runDay(d); }
   upsertMany(days: DailyVolume[]): void { for (const d of days) this.runDay(d); }
 
