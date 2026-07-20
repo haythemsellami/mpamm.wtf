@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyGasSourceChange, gasSourcesSignature } from '../gas.js';
+import { bootstrapRebuildDay, classifyGasSourceChange, gasSourcesSignature } from '../gas.js';
 import { VolumeStore } from '../db.js';
 import type { GasSource } from '../venues/adapter.js';
 
@@ -59,6 +59,25 @@ describe('classifyGasSourceChange', () => {
 
   it('everything removed → full', () => {
     expect(classifyGasSourceChange(A, '')).toEqual({ kind: 'full', added: [] });
+  });
+});
+
+describe('bootstrapRebuildDay', () => {
+  it('all destinations predate the anchor → null (series covered them from birth)', () => {
+    expect(bootstrapRebuildDay(['2026-03-10', '2026-05-01'], '2026-06-05')).toBeNull();
+  });
+
+  it('creation ON the anchor day → null (scan started at the day open, inclusive)', () => {
+    expect(bootstrapRebuildDay(['2026-06-05'], '2026-06-05')).toBeNull();
+  });
+
+  it('picks the EARLIEST post-anchor creation so every younger destination is covered', () => {
+    expect(bootstrapRebuildDay(['2026-07-16', '2026-06-28', '2026-01-01'], '2026-06-05')).toBe('2026-06-28');
+  });
+
+  it('unsorted input is fine; no destinations at all → null', () => {
+    expect(bootstrapRebuildDay(['2026-07-19', '2026-07-16'], '2026-06-05')).toBe('2026-07-16');
+    expect(bootstrapRebuildDay([], '2026-06-05')).toBeNull();
   });
 });
 
