@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bootstrapRebuildDay, classifyGasSourceChange, gasSourcesSignature } from '../gas.js';
+import { bootstrapRebuildDay, classifyGasSourceChange, coverageEvidenceWindow, gasSourcesSignature, hasCoverageEvidence } from '../gas.js';
 import { VolumeStore } from '../db.js';
 import type { GasSource } from '../venues/adapter.js';
 
@@ -78,6 +78,85 @@ describe('bootstrapRebuildDay', () => {
   it('unsorted input is fine; no destinations at all → null', () => {
     expect(bootstrapRebuildDay(['2026-07-19', '2026-07-16'], '2026-06-05')).toBe('2026-07-16');
     expect(bootstrapRebuildDay([], '2026-06-05')).toBeNull();
+  });
+});
+
+describe('coverage-evidence gate (bootstrap skip for single-destination venues)', () => {
+  it('window = the 7 full days AFTER creation; creation day itself excluded (an older destination may own its burn)', () => {
+    expect(coverageEvidenceWindow('2025-11-22', '2026-07-20')).toEqual(
+      ['2025-11-23', '2025-11-24', '2025-11-25', '2025-11-26', '2025-11-27', '2025-11-28', '2025-11-29'],
+    );
+  });
+
+  it('window clamps at today (partial bucket is not evidence); too-young destination → empty window', () => {
+    expect(coverageEvidenceWindow('2026-07-16', '2026-07-20')).toEqual(['2026-07-17', '2026-07-18', '2026-07-19']);
+    expect(coverageEvidenceWindow('2026-07-19', '2026-07-20')).toEqual([]);
+    expect(coverageEvidenceWindow('2026-07-20', '2026-07-20')).toEqual([]);
+  });
+
+  it('clober shape: continuous nonzero week after creation → covered, skip the rebuild', () => {
+    const w = coverageEvidenceWindow('2025-11-22', '2026-07-20');
+    expect(hasCoverageEvidence(w, new Set(w))).toBe(true);
+  });
+
+  it('hanji-hole shape: zeros right after creation → NOT covered → rebuild', () => {
+    const w = coverageEvidenceWindow('2026-07-16', '2026-07-20');
+    expect(hasCoverageEvidence(w, new Set())).toBe(false);
+  });
+
+  it('a single gap day in the window → NOT covered (fail toward rebuild)', () => {
+    const w = coverageEvidenceWindow('2025-11-22', '2026-07-20');
+    const partial = new Set(w.slice(1)); // first day missing
+    expect(hasCoverageEvidence(w, partial)).toBe(false);
+  });
+
+  it('empty window is never evidence', () => {
+    expect(hasCoverageEvidence([], new Set(['2026-07-19']))).toBe(false);
+  });
+});
+
+describe('VolumeStore.gasNonzeroDays', () => {
+  it('returns only in-range days with counted burn; zero rows excluded', () => {
+    const path = join(tmpdir(), `gas-nz-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const store = new VolumeStore(path);
+    store.applyGas(
+      [
+        { utcDay: '2025-11-23', venueId: 'clober-vault', mon: 1.2, txs: 300 },
+        { utcDay: '2025-11-24', venueId: 'clober-vault', mon: 0, txs: 0 },
+        { utcDay: '2025-11-25', venueId: 'clober-vault', mon: 0, txs: 5 }, // txs>0 counts
+        { utcDay: '2025-12-01', venueId: 'clober-vault', mon: 9, txs: 900 }, // out of range
+        { utcDay: '2025-11-23', venueId: 'poe', mon: 7, txs: 70 }, // other venue
+      ],
+      'gas_cursor_clober-vault', '1000',
+    );
+    expect(store.gasNonzeroDays('clober-vault', '2025-11-23', '2025-11-29')).toEqual(new Set(['2025-11-23', '2025-11-25']));
+    unlinkSync(path);
+  });
+});
+
+describe('VolumeStore.deleteMetaPrefix', () => {
+  it('removes only keys with the prefix; epoch key named outside the prefix survives', () => {
+    const path = join(tmpdir(), `meta-prefix-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const store = new VolumeStore(path);
+    store.setMeta('gas_srcs_hanji', 'a');
+    store.setMeta('gas_srcs_poe', 'b');
+    store.setMeta('gas_cov_epoch', '1');
+    store.setMeta('gas_cursor_hanji', '123');
+    store.deleteMetaPrefix('gas_srcs_');
+    expect(store.getMeta('gas_srcs_hanji')).toBeUndefined();
+    expect(store.getMeta('gas_srcs_poe')).toBeUndefined();
+    expect(store.getMeta('gas_cov_epoch')).toBe('1');   // not under the prefix
+    expect(store.getMeta('gas_cursor_hanji')).toBe('123'); // cursors untouched
+    unlinkSync(path);
+  });
+
+  it('is literal, not a LIKE pattern: % and _ in the prefix do not wildcard', () => {
+    const path = join(tmpdir(), `meta-prefix2-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const store = new VolumeStore(path);
+    store.setMeta('gasXsrcsXhanji', 'a'); // would match 'gas_srcs_' if _ were a wildcard
+    store.deleteMetaPrefix('gas_srcs_');
+    expect(store.getMeta('gasXsrcsXhanji')).toBe('a');
+    unlinkSync(path);
   });
 });
 

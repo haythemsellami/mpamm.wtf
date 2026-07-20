@@ -203,6 +203,22 @@ export class VolumeStore {
   }
   setMeta(key: string, value: string): void { this.metaStmt.run(key, value); }
 
+  /** Remove every meta key starting with `prefix` (gas.ts coverage epoch).
+   *  substr comparison, not LIKE — the prefixes contain `_`, which LIKE
+   *  treats as a single-char wildcard. */
+  deleteMetaPrefix(prefix: string): void {
+    this.db.prepare(`DELETE FROM meta WHERE substr(key, 1, length(?)) = ?`).run(prefix, prefix);
+  }
+
+  /** Days in [fromDay, toDay] where the venue has counted burn (gas.ts
+   *  bootstrap coverage evidence). */
+  gasNonzeroDays(venueId: string, fromDay: string, toDay: string): Set<string> {
+    const rows = this.db.prepare(
+      `SELECT utc_day FROM daily_gas WHERE venue_id = ? AND utc_day >= ? AND utc_day <= ? AND (mon > 0 OR txs > 0)`,
+    ).all(venueId, fromDay, toDay) as Array<{ utc_day: string }>;
+    return new Set(rows.map((r) => r.utc_day));
+  }
+
   upsert(d: DailyVolume): void { this.runDay(d); }
   upsertMany(days: DailyVolume[]): void { for (const d of days) this.runDay(d); }
 
