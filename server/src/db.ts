@@ -203,6 +203,13 @@ export class VolumeStore {
   }
   setMeta(key: string, value: string): void { this.metaStmt.run(key, value); }
 
+  /** Remove every meta key starting with `prefix` (gas.ts coverage epoch).
+   *  substr comparison, not LIKE — the prefixes contain `_`, which LIKE
+   *  treats as a single-char wildcard. */
+  deleteMetaPrefix(prefix: string): void {
+    this.db.prepare(`DELETE FROM meta WHERE substr(key, 1, length(?)) = ?`).run(prefix, prefix);
+  }
+
   upsert(d: DailyVolume): void { this.runDay(d); }
   upsertMany(days: DailyVolume[]): void { for (const d of days) this.runDay(d); }
 

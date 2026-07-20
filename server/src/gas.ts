@@ -7,6 +7,9 @@ import type { GasSource, VenueAdapter } from './venues/adapter.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Bump to re-run the one-time bootstrap coverage verification (see pass()). */
+const GAS_COVERAGE_EPOCH = '2';
+
 /** Canonical fingerprint of a venue's declared gas destinations: lowercased,
  *  deduped, sorted, comma-joined — so reordering, checksum-casing, or listing
  *  an address twice is NOT a change. */
@@ -113,6 +116,18 @@ export class GasTracker {
     }
     this.running = true;
     try {
+      // COVERAGE EPOCH: stored destination fingerprints are only trustworthy
+      // if the build that stored them actually verified coverage. The first
+      // fingerprinting build did not (it stored the sig while skipping the
+      // empty-prevSig case), so sigs it wrote can mask holes — bumping the
+      // epoch clears all stored sigs exactly once, re-arming the per-venue
+      // bootstrap check below (which is cheap and provably-bounded for
+      // venues that were fine). Bump again only if sig trust is ever broken
+      // the same way.
+      if (this.store.getMeta('gas_cov_epoch') !== GAS_COVERAGE_EPOCH) {
+        this.store.deleteMetaPrefix('gas_srcs_');
+        this.store.setMeta('gas_cov_epoch', GAS_COVERAGE_EPOCH);
+      }
       // a venue whose adapter no longer declares gasSources must not keep a
       // stale (possibly misattributed) series — wipe rows + cursor once, so
       // dropping a wrong source self-heals on deploy.

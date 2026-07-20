@@ -81,6 +81,32 @@ describe('bootstrapRebuildDay', () => {
   });
 });
 
+describe('VolumeStore.deleteMetaPrefix', () => {
+  it('removes only keys with the prefix; epoch key named outside the prefix survives', () => {
+    const path = join(tmpdir(), `meta-prefix-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const store = new VolumeStore(path);
+    store.setMeta('gas_srcs_hanji', 'a');
+    store.setMeta('gas_srcs_poe', 'b');
+    store.setMeta('gas_cov_epoch', '1');
+    store.setMeta('gas_cursor_hanji', '123');
+    store.deleteMetaPrefix('gas_srcs_');
+    expect(store.getMeta('gas_srcs_hanji')).toBeUndefined();
+    expect(store.getMeta('gas_srcs_poe')).toBeUndefined();
+    expect(store.getMeta('gas_cov_epoch')).toBe('1');   // not under the prefix
+    expect(store.getMeta('gas_cursor_hanji')).toBe('123'); // cursors untouched
+    unlinkSync(path);
+  });
+
+  it('is literal, not a LIKE pattern: % and _ in the prefix do not wildcard', () => {
+    const path = join(tmpdir(), `meta-prefix2-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+    const store = new VolumeStore(path);
+    store.setMeta('gasXsrcsXhanji', 'a'); // would match 'gas_srcs_' if _ were a wildcard
+    store.deleteMetaPrefix('gas_srcs_');
+    expect(store.getMeta('gasXsrcsXhanji')).toBe('a');
+    unlinkSync(path);
+  });
+});
+
 describe('VolumeStore.resetGasFrom', () => {
   const freshStore = () => {
     const path = join(tmpdir(), `gas-reset-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
