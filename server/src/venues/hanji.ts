@@ -46,8 +46,19 @@ const FAST_QUOTER_HELPER = '0x237dB58fea34A35A8543b44C217d221606cE7788' as const
  *  gas tracking is destination-keyed. Updates emit NO logs (45k flat limit),
  *  and every direct tx to this contract is a price update (254/254 sampled),
  *  so blocks-mode tx counting is exact-in-kind. Provenance: team-provided
- *  update tx 0x2b17b095… decoded against their published packing. */
-const FAST_QUOTER = '0x04fdEAC24E4e57364B4F22844106583d88F747d7' as const;
+ *  update tx 0x2b17b095… decoded against their published packing.
+ *
+ *  GENERATIONS: Hanji migrated the FastQuoter on 2026-07-16 — the v1 keeper's
+ *  last push was 15:33:01 UTC, twelve seconds AFTER v2's deployment, and v2
+ *  carries the same owner (0xA24D2aF7…), the same updatePrices(uint256)
+ *  packed-word calldata, and the same 45k flat limit, now fed by a ~29-EOA
+ *  rotating fleet. Both addresses are listed so the burn series spans the
+ *  cutover; append here if they migrate again — the gas tracker re-scans the
+ *  venue lifetime whenever this set changes. */
+const FAST_QUOTERS = [
+  '0x04fdEAC24E4e57364B4F22844106583d88F747d7', // v1 — until 2026-07-16 15:33 UTC
+  '0x48cba27861983367c3fb063877b144a628e2b48b', // v2 — fleet-pushed, active
+] as const;
 
 /** Hanji markets (team-provided, tokens verified on-chain via getConfig).
  *  `market` is the @shared pair symbol; base/quote are TOKENS registry keys. */
@@ -220,7 +231,7 @@ export function createHanjiAdapter(): VenueAdapter {
     // build tracked 0x0000a8fd…8888 — another protocol's pool (mistaken
     // trace inference, since replaced by this team-confirmed destination).
     gasSources() {
-      return [{ mode: 'blocks' as const, address: FAST_QUOTER }];
+      return [{ mode: 'blocks' as const, address: [...FAST_QUOTERS] }];
     },
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {

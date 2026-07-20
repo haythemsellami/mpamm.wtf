@@ -146,6 +146,22 @@ export class GasTracker {
     // finality margin: Monad receipts/logs can mutate for ~2 blocks (~800ms).
     const head = (await this.client.getBlockNumber()) - 5n;
     const cursorKey = `gas_cursor_${vid}`;
+
+    // destination-set fingerprint: a venue that MIGRATES its update contract
+    // (Hanji's FastQuoter, 2026-07-16: new address, 12-second cutover) leaves
+    // a cursor that already walked past the new contract's first active days —
+    // additive accrual can't fill that hole, so wipe and re-scan the venue
+    // lifetime. Same self-healing shape as the sinceUtc deepening below.
+    const sig = sources
+      .flatMap((s) => (Array.isArray(s.address) ? s.address : [s.address]))
+      .map((x) => x.toLowerCase()).sort().join(',');
+    const sigKey = `gas_srcs_${vid}`;
+    const prevSig = this.store.getMeta(sigKey);
+    if (prevSig && prevSig !== sig && this.store.getMeta(cursorKey)) {
+      this.store.resetGas(vid);
+      this.note(`${name}: quote-update destination set changed — re-scanning venue lifetime`);
+    }
+    this.store.setMeta(sigKey, sig);
     // VENUE-LIFETIME series, same anchor as the volume backfill: the burn
     // history should start when the venue did, not at an arbitrary horizon.
     const sinceDay = a.venues()[0]?.sinceUtc ?? a.backfillFromUtc ?? utcDay();
@@ -172,7 +188,14 @@ export class GasTracker {
     if (cursor > head) return;
 
     if (mode === 'logs') await this.tailLogs(vid, name, sources, cursor, head, cursorKey);
-    else await this.tailBlocks(vid, sources[0].address as `0x${string}`, cursor, head, cursorKey);
+    else {
+      // one cursor, N destinations: a migrating venue lists old + new update
+      // contracts and the single block walk counts txs to any of them.
+      const addrs = new Set(sources
+        .flatMap((s) => (Array.isArray(s.address) ? s.address : [s.address]))
+        .map((x) => x.toLowerCase()));
+      await this.tailBlocks(vid, addrs, cursor, head, cursorKey);
+    }
   }
 
   // ── logs mode: events enumerate update txs; receipts price them ────────────
@@ -281,8 +304,7 @@ export class GasTracker {
   }
 
   // ── blocks mode: no events — sample block receipts, scale by stride ────────
-  private async tailBlocks(vid: string, address: `0x${string}`, cursor: bigint, head: bigint, cursorKey: string): Promise<void> {
-    const target = address.toLowerCase();
+  private async tailBlocks(vid: string, targets: ReadonlySet<string>, cursor: bigint, head: bigint, cursorKey: string): Promise<void> {
     const stride = BigInt(Math.max(1, config.gasSampleStrideBlocks));
     const acc = new Map<string, { mon: number; txs: number }>();
     let sinceCommit = 0;
@@ -298,7 +320,7 @@ export class GasTracker {
             this.client.getBlock({ blockNumber: cursor }),
           ]);
           // includes reverted txs on purpose — Monad charges their full limit too.
-          const mine = (receipts ?? []).filter((rc) => String(rc.to ?? '').toLowerCase() === target);
+          const mine = (receipts ?? []).filter((rc) => targets.has(String(rc.to ?? '').toLowerCase()));
           const mon = mine.reduce((a, rc) => a + Number(BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice)) / 1e18, 0);
           const day = utcDay(Number(block.timestamp) * 1000);
           const e = acc.get(day) ?? { mon: 0, txs: 0 };
