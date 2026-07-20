@@ -254,6 +254,24 @@ export class VolumeStore {
     }
   }
 
+  /** Partial variant of resetGas for destination ADDITIONS (gas.ts
+   *  reconcileSourceChange): history before `fromDay` is provably identical
+   *  under the old and new destination sets — the added contract didn't exist
+   *  yet — so only rows >= fromDay are wiped, with the cursor (the caller
+   *  re-seeds it at fromDay's first block). `gas_from` is kept: the series
+   *  anchor doesn't move. */
+  resetGasFrom(venueId: string, fromDay: string): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare(`DELETE FROM daily_gas WHERE venue_id = ? AND utc_day >= ?`).run(venueId, fromDay);
+      this.db.prepare(`DELETE FROM meta WHERE key = ?`).run(`gas_cursor_${venueId}`);
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
   /** Reconstruct GasDay[] (ascending). `today` marks the partial bucket. */
   gasDays(today: string): GasDay[] {
     const rows = this.db.prepare(`SELECT utc_day, venue_id, mon, txs FROM daily_gas ORDER BY utc_day ASC`).all() as Array<Record<string, any>>;

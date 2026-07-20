@@ -7,6 +7,31 @@ import type { GasSource, VenueAdapter } from './venues/adapter.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Canonical fingerprint of a venue's declared gas destinations: lowercased,
+ *  deduped, sorted, comma-joined — so reordering, checksum-casing, or listing
+ *  an address twice is NOT a change. */
+export function gasSourcesSignature(sources: GasSource[]): string {
+  const addrs = sources.flatMap((s) => (Array.isArray(s.address) ? s.address : [s.address]));
+  return [...new Set(addrs.map((x) => x.toLowerCase()))].sort().join(',');
+}
+
+/** How a destination-set change invalidates the accrued series.
+ *  - additions only → the past was merely INCOMPLETE: before the added
+ *    contract EXISTED no tx could target it, so rows up to its creation day
+ *    are still exact → 'partial' rebuild from that day (see
+ *    reconcileSourceChange for how the day is found).
+ *  - any removal → the past was WRONG: day rows are additive scaled sums, the
+ *    removed address's share can't be unmixed → 'full' lifetime rebuild. */
+export function classifyGasSourceChange(prevSig: string, sig: string): { kind: 'none' | 'partial' | 'full'; added: `0x${string}`[] } {
+  const prev = new Set(prevSig.split(',').filter(Boolean));
+  const next = new Set(sig.split(',').filter(Boolean));
+  const added = [...next].filter((x) => !prev.has(x)) as `0x${string}`[];
+  const removed = [...prev].filter((x) => !next.has(x));
+  if (!added.length && !removed.length) return { kind: 'none', added: [] };
+  if (removed.length || !added.length) return { kind: 'full', added: [] };
+  return { kind: 'partial', added };
+}
+
 /**
  * GasTracker — QUOTE_UPDATE_BURN accrual: the MON each venue's own keeper
  * spends keeping its quotes fresh, bucketed per (UTC day, venue) into
@@ -147,24 +172,25 @@ export class GasTracker {
     const head = (await this.client.getBlockNumber()) - 5n;
     const cursorKey = `gas_cursor_${vid}`;
 
-    // destination-set fingerprint: a venue that MIGRATES its update contract
-    // (Hanji's FastQuoter, 2026-07-16: new address, 12-second cutover) leaves
-    // a cursor that already walked past the new contract's first active days —
-    // additive accrual can't fill that hole, so wipe and re-scan the venue
-    // lifetime. Same self-healing shape as the sinceUtc deepening below.
-    const sig = sources
-      .flatMap((s) => (Array.isArray(s.address) ? s.address : [s.address]))
-      .map((x) => x.toLowerCase()).sort().join(',');
-    const sigKey = `gas_srcs_${vid}`;
-    const prevSig = this.store.getMeta(sigKey);
-    if (prevSig && prevSig !== sig && this.store.getMeta(cursorKey)) {
-      this.store.resetGas(vid);
-      this.note(`${name}: quote-update destination set changed — re-scanning venue lifetime`);
-    }
-    this.store.setMeta(sigKey, sig);
     // VENUE-LIFETIME series, same anchor as the volume backfill: the burn
     // history should start when the venue did, not at an arbitrary horizon.
     const sinceDay = a.venues()[0]?.sinceUtc ?? a.backfillFromUtc ?? utcDay();
+
+    // destination-set fingerprint: a venue that MIGRATES its update contract
+    // (Hanji's FastQuoter, 2026-07-16: new address, 12-second cutover) leaves
+    // a cursor that already walked past the new contract's first active days —
+    // additive accrual can't fill that hole. How much history the change
+    // invalidates depends on its shape (see classifyGasSourceChange): pure
+    // additions rebuild from the added contract's creation day, anything
+    // else re-scans the venue lifetime. Same self-healing shape as the
+    // sinceUtc deepening below.
+    const sig = gasSourcesSignature(sources);
+    const sigKey = `gas_srcs_${vid}`;
+    const prevSig = this.store.getMeta(sigKey);
+    if (prevSig && prevSig !== sig && this.store.getMeta(cursorKey)) {
+      await this.reconcileSourceChange(vid, name, prevSig, sig, sinceDay, head, cursorKey);
+    }
+    this.store.setMeta(sigKey, sig);
     // one-time migration: rows seeded before gas_from existed came from the
     // old shallow (30d) horizon — wipe them WITH their cursor and re-scan from
     // the venue's start (additive rows + a deeper scan would double-count).
@@ -196,6 +222,60 @@ export class GasTracker {
         .map((x) => x.toLowerCase()));
       await this.tailBlocks(vid, addrs, cursor, head, cursorKey);
     }
+  }
+
+  /** Apply a destination-set change with the least destructive rebuild that is
+   *  still correct. Pure additions pin the boundary to the added contracts'
+   *  CREATION day (bisected via getCode — no tx could target them earlier):
+   *  rows before it are kept, rows from it on are wiped and the cursor
+   *  re-seeded at the day's first block. Anything that blocks the inference —
+   *  a removal, a failed probe, or creation at/before the series anchor —
+   *  falls back to the conservative full lifetime rebuild (wrong history
+   *  can't be unmixed; missing history can't be patched behind a cursor). */
+  private async reconcileSourceChange(vid: string, name: string, prevSig: string, sig: string, sinceDay: string, head: bigint, cursorKey: string): Promise<void> {
+    const change = classifyGasSourceChange(prevSig, sig);
+    if (change.kind === 'none') return;
+    if (change.kind === 'partial') {
+      try {
+        let earliest: bigint | null = null;
+        for (const addr of change.added) {
+          const cb = await this.creationBlock(addr, head);
+          if (cb === null) { earliest = null; break; } // undeployed address → can't bound it
+          if (earliest === null || cb < earliest) earliest = cb;
+        }
+        if (earliest !== null) {
+          const blk = await this.client.getBlock({ blockNumber: earliest });
+          const day = utcDay(Number(blk.timestamp) * 1000);
+          if (day > sinceDay) {
+            const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
+            this.store.resetGasFrom(vid, day);
+            this.store.setMeta(cursorKey, String(startBlock));
+            this.note(`${name}: quote-update destination added — rebuilding from ${day} (earlier history unaffected)`);
+            return;
+          }
+        }
+      } catch { /* probe/anchor failure — fall through to the full rebuild */ }
+    }
+    this.store.resetGas(vid);
+    this.note(`${name}: quote-update destination set changed — re-scanning venue lifetime`);
+  }
+
+  /** First block where `addr` has code (its deployment), or null when it has
+   *  no code at head. Bisection is sound because code existence is monotonic
+   *  (post-Cancun there is no selfdestruct-and-redeploy). A failed probe
+   *  THROWS rather than returning a guess: treating "probe failed" as "no
+   *  code yet" would push the boundary later and silently lose burn days —
+   *  the caller's fallback (full rebuild) is the safe shape. */
+  private async creationBlock(addr: `0x${string}`, head: bigint): Promise<bigint | null> {
+    const has = async (bn: bigint) => ((await this.client.getCode({ address: addr, blockNumber: bn })) ?? '0x') !== '0x';
+    if (!(await has(head))) return null;
+    let lo = 0n, hi = head; // invariant: !has(lo) … has(hi)
+    if (await has(lo)) return lo;
+    while (hi - lo > 1n) {
+      const mid = (lo + hi) / 2n;
+      if (await has(mid)) hi = mid; else lo = mid;
+    }
+    return hi;
   }
 
   // ── logs mode: events enumerate update txs; receipts price them ────────────
