@@ -32,6 +32,15 @@ export function classifyGasSourceChange(prevSig: string, sig: string): { kind: '
   return { kind: 'partial', added };
 }
 
+/** Bootstrap boundary for a series that predates destination fingerprinting:
+ *  the earliest creation day strictly after the series anchor — everything
+ *  from there must be re-scanned to be provably complete. Null when every
+ *  destination predates the anchor (the scan covered them from birth). */
+export function bootstrapRebuildDay(creationDays: string[], anchorDay: string): string | null {
+  const late = creationDays.filter((d) => d > anchorDay).sort();
+  return late[0] ?? null;
+}
+
 /**
  * GasTracker — QUOTE_UPDATE_BURN accrual: the MON each venue's own keeper
  * spends keeping its quotes fresh, bucketed per (UTC day, venue) into
@@ -186,9 +195,38 @@ export class GasTracker {
     // sinceUtc deepening below.
     const sig = gasSourcesSignature(sources);
     const sigKey = `gas_srcs_${vid}`;
+    const fromKey = `gas_from_${vid}`;
     const prevSig = this.store.getMeta(sigKey);
-    if (prevSig && prevSig !== sig && this.store.getMeta(cursorKey)) {
+    const hasCursor = !!this.store.getMeta(cursorKey);
+    if (prevSig && prevSig !== sig && hasCursor) {
       await this.reconcileSourceChange(vid, name, prevSig, sig, sinceDay, head, cursorKey);
+    } else if (!prevSig && hasCursor) {
+      // BOOTSTRAP: the series predates destination fingerprinting (the sig
+      // key shipped after this venue's scan began), so we can't know which
+      // destinations built it — a source added before fingerprinting existed
+      // would leave an invisible hole (Hanji's v2, Jul 2026). Rebuild from
+      // the earliest listed-address creation that postdates the series
+      // anchor; a venue whose destinations all predate its anchor was
+      // necessarily covered from birth and is left untouched. At worst this
+      // re-scans a bounded, provably-sufficient tail once. Probe failure →
+      // return WITHOUT storing the fingerprint so the next tick retries.
+      try {
+        const anchor = this.store.getMeta(fromKey) ?? sinceDay;
+        const days: string[] = [];
+        for (const addr of sig.split(',').filter(Boolean)) {
+          const cb = await this.creationBlock(addr as `0x${string}`, head);
+          if (cb === null) continue; // undeployed → contributes no txs
+          const blk = await this.client.getBlock({ blockNumber: cb });
+          days.push(utcDay(Number(blk.timestamp) * 1000));
+        }
+        const day = bootstrapRebuildDay(days, anchor);
+        if (day) {
+          const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
+          this.store.resetGasFrom(vid, day);
+          this.store.setMeta(cursorKey, String(startBlock));
+          this.note(`${name}: verifying quote-update coverage — rebuilding from ${day}`);
+        }
+      } catch { return; }
     }
     this.store.setMeta(sigKey, sig);
     // one-time migration: rows seeded before gas_from existed came from the
@@ -196,7 +234,6 @@ export class GasTracker {
     // the venue's start (additive rows + a deeper scan would double-count).
     // Self-healing for the future too: if a venue's start ever moves EARLIER,
     // the same wipe-and-rescan deepens its series on the next boot.
-    const fromKey = `gas_from_${vid}`;
     const seededFrom = this.store.getMeta(fromKey);
     if (this.store.getMeta(cursorKey) && (!seededFrom || seededFrom > sinceDay)) {
       this.store.resetGas(vid);
