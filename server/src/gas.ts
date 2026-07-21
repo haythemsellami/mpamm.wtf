@@ -111,6 +111,8 @@ export class GasTracker {
     /** RPC failover state — gas accrual pauses on a backup endpoint (cursors
      *  hold exactly, so the series catches up losslessly on the primary). */
     private degraded: () => boolean = () => false,
+    /** per-pass tail budget override (tests); production uses the config knob. */
+    private sliceChunks: number = config.gasSliceChunks,
   ) {
     for (const a of adapters) {
       const vid = a.venues()[0]?.id;
@@ -377,6 +379,14 @@ export class GasTracker {
     let chunk = maxChunk;
     const acc = new Map<string, { mon: number; txs: number }>();
     let sinceCommit = 0;
+    // TIME SLICE: a deep rebuild yields after `sliceChunks` ADVANCING
+    // iterations so the pass loop can serve every other venue's accrual
+    // (shrink/retry attempts don't count — they make no progress, and their
+    // own bounded back-off already prevents a stall). The trailing commit
+    // persists acc + cursor, so an exhausted slice is indistinguishable from
+    // a crash-resume — the next pass continues exactly where this one ended.
+    const budget = Math.max(1, this.sliceChunks);
+    let sliced = 0;
 
     const fetchLogs = async (from: bigint, to: bigint): Promise<any[]> => {
       const batches = await Promise.all(sources.map((s) => {
@@ -470,6 +480,7 @@ export class GasTracker {
         this.commit(vid, acc, cursorKey, cursor);
         sinceCommit = 0;
       }
+      if (++sliced >= budget) break; // slice spent — trailing commit persists, next pass resumes
       await sleep(config.backfillPaceMs);
     }
     this.commit(vid, acc, cursorKey, cursor);
@@ -480,6 +491,10 @@ export class GasTracker {
     const stride = BigInt(Math.max(1, config.gasSampleStrideBlocks));
     const acc = new Map<string, { mon: number; txs: number }>();
     let sinceCommit = 0;
+    // TIME SLICE — same contract as tailLogs: yield after `budget` segments,
+    // trailing commit persists, next pass resumes from the stored cursor.
+    const budget = Math.max(1, this.sliceChunks);
+    let sliced = 0;
 
     while (cursor <= head && !this.stopped) {
       const segEnd = cursor + stride - 1n > head ? head : cursor + stride - 1n;
@@ -508,6 +523,7 @@ export class GasTracker {
         this.commit(vid, acc, cursorKey, cursor);
         sinceCommit = 0;
       }
+      if (++sliced >= budget) break; // slice spent — trailing commit persists, next pass resumes
       await sleep(config.backfillPaceMs);
     }
     this.commit(vid, acc, cursorKey, cursor);

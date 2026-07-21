@@ -126,6 +126,12 @@ export const config = {
    *  N blocks via eth_getBlockReceipts and scale by the stride. Only sound for
    *  near-constant-cadence keepers — POE pushes exactly once per block. */
   gasSampleStrideBlocks: num('GAS_SAMPLE_STRIDE_BLOCKS', 1000),
+  /** max tail-loop iterations (logs: chunks, blocks: sampled strides) one venue
+   *  may run per gas pass — a TIME SLICE, so a months-deep rebuild can't starve
+   *  the other venues' today-accrual for hours (the pass loop round-robins;
+   *  cursors commit at slice end, so slicing is exactly as crash-safe as the
+   *  loops already were). ~600 ≈ 1-2 min of paced work. */
+  gasSliceChunks: num('GAS_SLICE_CHUNKS', 600),
   /** idle sleep between gas tail passes once caught up to head (ms). */
   gasTailMs: num('GAS_TAIL_MS', 60_000),
 } as const;
