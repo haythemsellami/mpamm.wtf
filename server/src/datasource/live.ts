@@ -9,7 +9,7 @@ import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
 import { GasTracker } from '../gas.js';
 import { config } from '../config.js';
-import { publicClient, getLogsChunked, probeChain, blockAtOrAfter, onRpcEvent, rpcStatus } from '../chain/rpc.js';
+import { publicClient, backgroundClient, getLogsChunked, probeChain, blockAtOrAfter, onRpcEvent, rpcStatus } from '../chain/rpc.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore } from '../db.js';
 import { utcDay, annotateCex } from '../util.js';
@@ -47,7 +47,12 @@ export class LiveDataSource extends BaseSource {
   private pricer = new UsdPricer((key) => REFERENCES.assetUsd(key), (market) => REFERENCES.midForPair(market));
   private store = new VolumeStore(config.dbPath);
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
-  private gas = new GasTracker(publicClient, this.store, ADAPTERS, (m) => this.noteOnce(m), () => rpcStatus().degraded);
+  // gas crawls on the BACKGROUND client (RPC_SCAN_URL) so its receipt storms
+  // never queue the quote tick / fills tail. The degraded() gate still tracks
+  // the PRIMARY breaker on purpose: with no scan endpoint configured they are
+  // the same endpoint, and with one configured pausing on primary brownouts is
+  // merely conservative (cursors hold; nothing is lost).
+  private gas = new GasTracker(backgroundClient, this.store, ADAPTERS, (m) => this.noteOnce(m), () => rpcStatus().degraded);
   /** fill attribution — UNKNOWN → DIRECT / "Router - X" from tx.to (best-effort;
    *  stays on during failover — per-fill lookups are live-path cheap, unlike crawls). */
   private attributor = new FillAttributor(publicClient, ADAPTERS);
@@ -84,6 +89,7 @@ export class LiveDataSource extends BaseSource {
   private tailTimer?: ReturnType<typeof setTimeout>;
   private loopsStopped = false;
   private persistTimer?: ReturnType<typeof setInterval>;
+  private ageTimer?: ReturnType<typeof setInterval>;
   private rediscoverTimer?: ReturnType<typeof setInterval>;
   private remarkTimer?: ReturnType<typeof setInterval>;
   /** re-entrancy guard shared by the boot onboarding chain and the retry timer
@@ -128,6 +134,10 @@ export class LiveDataSource extends BaseSource {
     this.scheduleLoop('quote');
     this.scheduleLoop('tail');
     this.persistTimer = setInterval(() => this.persist(), config.persistMs);
+    // markout aging is in-memory bookkeeping — on its own clock so its cost
+    // never stretches the quote cadence (it used to ride the quote loop's
+    // measured span; sync, so no interleaving with an in-flight poll()).
+    this.ageTimer = setInterval(() => this.ageMarkouts(), 500);
     this.rediscoverTimer = setInterval(() => { void this.rediscover(); }, config.rediscoverMs);
     // seed deep history in the BACKGROUND — never blocks boot or the live tail.
     if (config.backfillEnabled || config.markoutBackfill) void this.backgroundHistory();
@@ -181,6 +191,7 @@ export class LiveDataSource extends BaseSource {
     if (this.persistTimer) clearInterval(this.persistTimer);
     if (this.rediscoverTimer) clearInterval(this.rediscoverTimer);
     if (this.remarkTimer) clearInterval(this.remarkTimer);
+    if (this.ageTimer) clearInterval(this.ageTimer);
     this.gas.stop();
     this.persist();
     REFERENCES.stop();
@@ -505,9 +516,11 @@ export class LiveDataSource extends BaseSource {
     const maxChunk = BigInt(config.backfillChunk);
     this.noteOnce(`${name}: on-chain backfill ${sinceUtc} — blocks ${from}→${end}`);
 
-    /** one getLogs across every fill source over [cursor, t]; throws on failure. */
+    /** one getLogs across every fill source over [cursor, t]; throws on failure.
+     *  Runs on the background client — deep replays must not contend with the
+     *  live tick's rate budget (see chain/rpc.ts backgroundClient). */
     const fetchRange = (t: bigint) => Promise.all(sources.map((s) =>
-      publicClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
+      backgroundClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
 
     while (cursor <= end) {
       if (await holdWhileDegraded()) this.noteOnce(`${name} backfill held while on backup RPC — resumed on primary`);
@@ -909,7 +922,6 @@ export class LiveDataSource extends BaseSource {
       const t0 = Date.now();
       if (kind === 'quote') {
         try { await this.poll(); } catch { /* keep ticking */ }
-        this.ageMarkouts();
       } else {
         try { await this.tailFills(); } catch (e) { this.noteOnce(`tail failed — holding cursor, retrying: ${(e as Error).message}`); }
         this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) });

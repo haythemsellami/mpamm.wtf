@@ -55,6 +55,19 @@ export const publicClient: PublicClient = createPublicClient({
   transport: failoverTransport,
 });
 
+/** Client for BACKGROUND crawlers (gas tracker, volume backfill). With
+ *  RPC_SCAN_URL set, their receipt/log storms run on their own endpoint and
+ *  rate budget — deliberately NO failover into the primary: a dead scan
+ *  endpoint must hold the crawlers' cursors (fail-closed, self-healing),
+ *  not silently re-contend the latency-critical path it exists to protect.
+ *  Unset → alias of the primary client (previous behavior, zero change). */
+export const backgroundClient: PublicClient = config.rpcScanUrl
+  ? createPublicClient({
+      chain: monad,
+      transport: http(config.rpcScanUrl, { batch: { batchSize: 256, wait: 8 }, retryCount: 2, timeout: 20_000 }),
+    })
+  : publicClient;
+
 /** Failover status for /api/markets (labels only) + event sink for state.notes. */
 export const rpcStatus = (): RpcStatusView => breaker.status();
 export const onRpcEvent = (cb: (msg: string) => void): void => breaker.subscribe(cb);

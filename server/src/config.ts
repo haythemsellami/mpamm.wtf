@@ -24,6 +24,11 @@ export const config = {
 
   rpcHttp: env.RPC_HTTP_URL ?? 'https://rpc.monad.xyz',
   rpcWs: env.RPC_WS_URL ?? 'wss://rpc.monad.xyz',
+  /** optional dedicated endpoint for BACKGROUND crawlers (gas tracker, volume
+   *  backfill) so their receipt/log storms never queue the latency-critical
+   *  quote tick + fills tail behind them on one rate budget. Unset → crawlers
+   *  share the primary (previous behavior). */
+  rpcScanUrl: env.RPC_SCAN_URL ?? '',
   /** Ordered failover RPCs behind the primary (comma-separated). Default: the
    *  public RPC, so every deployment survives a provider outage with zero
    *  config. Set RPC_BACKUP_URLS="" to opt out (single-endpoint behavior). */
@@ -50,7 +55,7 @@ export const config = {
   takerBps: num('TAKER_BPS', 4.5),
   /** Binance taker fee (bps) for the BTC/ETH benchmark — default VIP9 (2.25 bps). */
   binanceTakerBps: num('BINANCE_TAKER_BPS', 2.25),
-  quoteIntervalMs: num('QUOTE_INTERVAL_MS', 500),
+  quoteIntervalMs: num('QUOTE_INTERVAL_MS', 400), // block-paced (Monad ~400ms)
   /** fills-tail loop cadence (ms) — independent of the quote loop, so log
    *  tailing never stretches the quote cadence (and vice versa). */
   tailIntervalMs: num('TAIL_INTERVAL_MS', 500),
