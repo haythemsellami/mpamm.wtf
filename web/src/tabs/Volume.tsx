@@ -75,6 +75,7 @@ export function VolumeTab() {
     return next;
   };
   const brushRef = useRef<HTMLDivElement | null>(null);
+  const burnBrushRef = useRef<HTMLDivElement | null>(null);
   // active drag's window-listener cleanup — run on unmount so a mid-drag tab
   // switch can't leak window listeners.
   const dragCleanup = useRef<(() => void) | null>(null);
@@ -96,6 +97,19 @@ export function VolumeTab() {
   };
   const [wS, wE] = winDaily();
 
+  /** BURN chart's brush window — same shape as the daily brush but its own
+   *  independent indexes (burnStart/burnEnd; null ⇒ full history). */
+  const winBurn = (): [number, number] => {
+    const n = nAll;
+    if (n <= 1) return [0, Math.max(0, n - 1)];
+    if (d.burnStart != null && d.burnEnd != null && n >= MIN_WIN + 1) {
+      const s = Math.max(0, Math.min(n - 1 - MIN_WIN, d.burnStart));
+      return [s, Math.max(s + MIN_WIN, Math.min(n - 1, d.burnEnd))];
+    }
+    return [0, n - 1];
+  };
+  const [bWS, bWE] = winBurn();
+
   /** every other chart's window: from→to ISO bounds over the full history
    *  (design isoWin). Null bound = open ⇒ that side of the full range; an
    *  inverted pair collapses to a single day rather than inverting. */
@@ -109,43 +123,31 @@ export function VolumeTab() {
   const [cS, cE] = isoWin(d.cumFrom, d.cumTo);
   const [mS, mE] = isoWin(d.msFrom, d.msTo);
   const [kS, kE] = isoWin(d.brkFrom, d.brkTo);
-  const [bWS, bWE] = isoWin(d.burnFrom, d.burnTo);
 
-  const setWin = (s: number, e: number) => {
-    d.set('volStart', s); d.set('volEnd', e);
-    setHover(null);
-  };
   // per-chart from→to inputs (design dcSet): clearing a bound re-opens it to
-  // the full range. The DAILY pair instead maps ISO → brush indexes, so the
-  // brush and its date inputs stay two views of one window (empty = ignored,
-  // the brush owns resets).
-  const dcSet = (k: 'burnFrom' | 'burnTo' | 'cumFrom' | 'cumTo' | 'msFrom' | 'msTo' | 'brkFrom' | 'brkTo') =>
+  // the full range; the ↺ reset clears both.
+  const dcSet = (k: 'cumFrom' | 'cumTo' | 'msFrom' | 'msTo' | 'brkFrom' | 'brkTo') =>
     (e: React.ChangeEvent<HTMLInputElement>) => { d.set(k, e.target.value || null); setHover(null); };
-  const dailyFromCh = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = e.target.value;
-    if (!v || nAll === 0) return;
-    let i = allDays.findIndex((x) => x.utcDay >= v);
-    if (i < 0) i = nAll - 1;
-    setWin(Math.min(i, wE), wE);
-  };
-  const dailyToCh = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const v = e.target.value;
-    if (!v || nAll === 0) return;
-    let i = -1;
-    for (let k = nAll - 1; k >= 0; k--) { if (allDays[k].utcDay <= v) { i = k; break; } }
-    if (i < 0) i = 0;
-    setWin(wS, Math.max(i, wS));
-  };
+  const dcReset = (fk: 'cumFrom' | 'msFrom' | 'brkFrom', tk: 'cumTo' | 'msTo' | 'brkTo') =>
+    () => { d.set(fk, null); d.set(tk, null); setHover(null); };
 
-  // ── brush interactions (port of the design's brushDown): edge-grab resizes,
-  // inside-grab pans, outside-click re-centers then pans from the NEW window.
-  const brushDown = (e: React.PointerEvent) => {
-    const el = brushRef.current;
+  // ── brush interactions (design brushDrag): edge-grab resizes, inside-grab
+  // pans, outside-click re-centers then pans from the NEW window. Shared by
+  // both bar-chart brushes — parameterized by (element, current window, apply
+  // callback), so the daily and burn brushes are the same code with different
+  // state. Redundant state writes during a drag are suppressed (apply only
+  // when the indexes actually change).
+  const brushDrag = (
+    e: React.PointerEvent,
+    el: HTMLDivElement | null,
+    win: [number, number],
+    apply: (s: number, en: number) => void,
+  ) => {
     if (!el || nAll < MIN_WIN + 1) return;
     e.preventDefault();
     const r = el.getBoundingClientRect();
     const n = nAll;
-    const [s0, e0] = winDaily();
+    const [s0, e0] = win;
     const fr = (e.clientX - r.left) / r.width;
     const fs = s0 / (n - 1), fe = e0 / (n - 1);
     const grab = Math.max(0.02, 9 / r.width); // ~9px edge-handle tolerance
@@ -160,7 +162,7 @@ export function VolumeTab() {
       const c = Math.round(fr * (n - 1));
       ds = Math.max(0, Math.min(n - 1 - w, c - half));
       de = ds + w;
-      setWin(ds, de);
+      apply(ds, de);
     }
     const drag = { mode, fr0: fr, s0: ds, e0: de };
     let cur: [number, number] = [ds, de];
@@ -171,7 +173,7 @@ export function VolumeTab() {
       if (drag.mode === 'move') { const w = drag.e0 - drag.s0; s = Math.max(0, Math.min(n - 1 - w, drag.s0 + di)); en = s + w; }
       else if (drag.mode === 'l') { s = Math.max(0, Math.min(drag.e0 - MIN_WIN, drag.s0 + di)); }
       else { en = Math.max(drag.s0 + MIN_WIN, Math.min(n - 1, drag.e0 + di)); }
-      if (s !== cur[0] || en !== cur[1]) { cur = [s, en]; setWin(s, en); }
+      if (s !== cur[0] || en !== cur[1]) { cur = [s, en]; apply(s, en); }
     };
     const up = () => {
       window.removeEventListener('pointermove', mv);
@@ -184,6 +186,10 @@ export function VolumeTab() {
     window.addEventListener('pointercancel', up);
     dragCleanup.current = up;
   };
+  const brushDown = (e: React.PointerEvent) =>
+    brushDrag(e, brushRef.current, winDaily(), (s, en) => { d.set('volStart', s); d.set('volEnd', en); setHover(null); });
+  const burnBrushDown = (e: React.PointerEvent) =>
+    brushDrag(e, burnBrushRef.current, winBurn(), (s, en) => { d.set('burnStart', s); d.set('burnEnd', en); setHover(null); });
 
   const vm = useMemo(() => {
     const nd = nAll;
@@ -252,6 +258,8 @@ export function VolumeTab() {
         burnTip: null as null | { left: string; date: string; total: string; usd: string; rows: { name: string; color: string; val: string }[] },
         burnRows: [] as { id: string; name: string; color: string; burn: string; updates: string; hidden: boolean }[],
         burnTotal: '0 MON', burnUpdatesTotal: '0', burnColHdr: 'ALL-TIME BURN', burnPerM: '0',
+        burnBrushBars: [] as { h: string; color: string }[],
+        burnBrushLeft: '0', burnBrushWidth: '100', burnBrushStartLbl: '—', burnBrushEndLbl: '—',
       };
     }
 
@@ -516,6 +524,20 @@ export function VolumeTab() {
     const brushStartLbl = mmdd(allDays[wS].utcDay);
     const brushEndLbl = mmdd(allDays[wE].utcDay) + (allDays[wE].partial ? ' · now' : '');
 
+    // burn brush minimap: full-history TOTAL daily MON burn across all burn
+    // series (not just shown ones — the minimap is context, not a lens),
+    // tinted by the burn window. Same construction as the daily brush.
+    const bAllTot = allDays.map((x) => burnSeries.reduce((a, s) => a + gVal(x.utcDay, s.id), 0));
+    const bAllMax = Math.max(...bAllTot, 0) || 1;
+    const burnBrushBars = allDays.map((_, i) => ({
+      h: Math.max(4, bAllTot[i] / bAllMax * 100).toFixed(1), // min height so quiet days stay visible
+      color: i >= bWS && i <= bWE ? 'var(--accent)' : 'var(--faint2)',
+    }));
+    const burnBrushLeft = (nd > 1 ? bWS / (nd - 1) * 100 : 0).toFixed(2);
+    const burnBrushWidth = Math.max(1.5, nd > 1 ? (bWE - bWS) / (nd - 1) * 100 : 100).toFixed(2);
+    const burnBrushStartLbl = mmdd(allDays[bWS].utcDay);
+    const burnBrushEndLbl = mmdd(allDays[bWE].utcDay) + (allDays[bWE].partial ? ' · now' : '');
+
     return {
       volBars, volMaxLabel: f(maxT), volMidLabel: f(maxT / 2), volAxis: axis,
       kAll: f(allTot), k7: f(last7),
@@ -546,6 +568,7 @@ export function VolumeTab() {
       burnTip, burnRows,
       burnTotal: fMON(burnTotal), burnUpdatesTotal: burnUpdatesTotal.toLocaleString(),
       burnColHdr, burnPerM,
+      burnBrushBars, burnBrushLeft, burnBrushWidth, burnBrushStartLbl, burnBrushEndLbl,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [d.volume, d.gas, d.theme, d.displayVenues, wS, wE, cS, cE, mS, mE, kS, kE, bWS, bWE, d.volGran, d.burnGran, hover, hiddenVol, hiddenBurn]);
@@ -581,11 +604,12 @@ export function VolumeTab() {
   };
   const volMinIso = nAll ? allDays[0].utcDay : '';
   const volMaxIso = nAll ? allDays[nAll - 1].utcDay : '';
-  const dateRange = (from: string, to: string, onFrom: (e: React.ChangeEvent<HTMLInputElement>) => void, onTo: (e: React.ChangeEvent<HTMLInputElement>) => void) => (
+  const dateRange = (from: string, to: string, onFrom: (e: React.ChangeEvent<HTMLInputElement>) => void, onTo: (e: React.ChangeEvent<HTMLInputElement>) => void, onReset: () => void) => (
     <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 9, color: C.faint2 }}>
       <input type="date" value={from} min={volMinIso} max={volMaxIso} onChange={onFrom} style={dateStyle} />
       <span>→</span>
       <input type="date" value={to} min={volMinIso} max={volMaxIso} onChange={onTo} style={dateStyle} />
+      <button type="button" className="reset-pill" title="Reset to full range" onClick={onReset}>↺</button>
     </div>
   );
   const granPills = (key: 'volGran' | 'burnGran') => (
@@ -645,10 +669,7 @@ export function VolumeTab() {
           <div>
             <span style={{ color: C.purple }}>~</span> <span style={{ color: C.text, fontWeight: 600 }}>DAILY_VOLUME</span> <span style={{ color: C.faint }}>USD notional by venue · UTC buckets · {vm.volScopeNote}</span>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            {granPills('volGran')}
-            {dateRange(isoAt(wS), isoAt(wE), dailyFromCh, dailyToCh)}
-          </div>
+          {granPills('volGran')}
         </div>
         {/* flex row: the bars end where the summary column begins, so the newest
             (right-most) bars never render underneath it — no absolute overlay. */}
@@ -742,10 +763,7 @@ export function VolumeTab() {
             <div>
               <span style={{ color: C.purple }}>~</span> <span style={{ color: C.text, fontWeight: 600 }}>QUOTE_UPDATE_BURN</span> <span style={{ color: C.faint }}>gas burned keeping quotes fresh · MON · tracked venues</span>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              {granPills('burnGran')}
-              {dateRange(d.burnFrom ?? isoAt(0), d.burnTo ?? isoAt(nAll - 1), dcSet('burnFrom'), dcSet('burnTo'))}
-            </div>
+            {granPills('burnGran')}
           </div>
           <div style={{ display: 'flex', flexDirection: mobile ? 'column' : 'row', alignItems: mobile ? 'stretch' : 'flex-start', gap: 14, padding: mobile ? '16px 12px 8px' : '16px 18px 8px' }}>
             <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
@@ -780,6 +798,21 @@ export function VolumeTab() {
                 {vm.burnAxis.map((a, i) => (
                   <div key={i} style={{ position: 'absolute', left: a.left, transform: 'translateX(-50%)', fontSize: 8.5, color: C.faint2 }}>{a.label}</div>
                 ))}
+              </div>
+              {/* burn timeline brush: full-history burn minimap, independent of the daily brush */}
+              <div ref={burnBrushRef} onPointerDown={burnBrushDown}
+                style={{ position: 'relative', height: 40, margin: '12px 2px 2px 42px', border: `1px solid ${C.line2}`, background: C.panel, cursor: 'grab', userSelect: 'none', touchAction: 'none' }}>
+                <div style={{ position: 'absolute', left: 3, right: 3, top: 3, bottom: 3, display: 'flex', alignItems: 'flex-end', gap: 1, pointerEvents: 'none' }}>
+                  {vm.burnBrushBars.map((b, i) => <div key={i} style={{ flex: 1, height: `${b.h}%`, background: b.color, opacity: 0.55 }} />)}
+                </div>
+                <div style={{ position: 'absolute', top: -1, bottom: -1, left: `${vm.burnBrushLeft}%`, width: `${vm.burnBrushWidth}%`, background: 'var(--accent-dim)', border: '1px solid var(--accent-border)', pointerEvents: 'none' }}>
+                  <div style={{ position: 'absolute', left: -3, top: '50%', transform: 'translateY(-50%)', width: 5, height: 18, background: 'var(--accent)', borderRadius: 2 }} />
+                  <div style={{ position: 'absolute', right: -3, top: '50%', transform: 'translateY(-50%)', width: 5, height: 18, background: 'var(--accent)', borderRadius: 2 }} />
+                </div>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', margin: '4px 2px 0 42px', fontSize: 8.5, color: C.faint2 }}>
+                <span>window: {vm.burnBrushStartLbl} → {vm.burnBrushEndLbl}</span>
+                <span>drag to pan · edges to resize · click outside to jump</span>
               </div>
             </div>
             {/* summary column — VENUE / window burn / update-tx counts */}
@@ -817,7 +850,7 @@ export function VolumeTab() {
           <i style={{ position: 'absolute', top: -1, left: -1, width: 8, height: 8, borderTop: `1px solid ${C.purple}`, borderLeft: `1px solid ${C.purple}` }} />
           <div style={panelHdr}>
             <div><span style={{ color: C.purple }}>■</span> <span style={{ color: C.text, fontWeight: 600 }}>CUMULATIVE_VOLUME</span></div>
-            {dateRange(d.cumFrom ?? isoAt(0), d.cumTo ?? isoAt(nAll - 1), dcSet('cumFrom'), dcSet('cumTo'))}
+            {dateRange(d.cumFrom ?? isoAt(0), d.cumTo ?? isoAt(nAll - 1), dcSet('cumFrom'), dcSet('cumTo'), dcReset('cumFrom', 'cumTo'))}
           </div>
           <div onMouseMove={svgHover('cum')} onMouseLeave={leave} style={{ position: 'relative', padding: '14px 14px 10px' }}>
             <svg viewBox="0 0 1000 260" preserveAspectRatio="none" style={{ display: 'block', width: '100%', height: 230 }}>
@@ -861,7 +894,7 @@ export function VolumeTab() {
           <i style={{ position: 'absolute', top: -1, left: -1, width: 8, height: 8, borderTop: `1px solid ${C.purple}`, borderLeft: `1px solid ${C.purple}` }} />
           <div style={panelHdr}>
             <div><span style={{ color: C.purple }}>◆</span> <span style={{ color: C.text, fontWeight: 600 }}>MARKET_SHARE</span> <span style={{ color: C.faint }}>% of daily volume</span></div>
-            {dateRange(d.msFrom ?? isoAt(0), d.msTo ?? isoAt(nAll - 1), dcSet('msFrom'), dcSet('msTo'))}
+            {dateRange(d.msFrom ?? isoAt(0), d.msTo ?? isoAt(nAll - 1), dcSet('msFrom'), dcSet('msTo'), dcReset('msFrom', 'msTo'))}
           </div>
           <div onMouseMove={svgHover('ms')} onMouseLeave={leave} style={{ position: 'relative', padding: '14px 14px 10px' }}>
             <svg viewBox="0 0 1000 260" preserveAspectRatio="none" style={{ display: 'block', width: '100%', height: 230 }}>
@@ -895,7 +928,7 @@ export function VolumeTab() {
         <i style={{ position: 'absolute', bottom: -1, right: -1, width: 8, height: 8, borderBottom: `1px solid ${C.purple}`, borderRight: `1px solid ${C.purple}` }} />
         <div style={panelHdr}>
           <div><span style={{ color: C.purple }}>#</span> <span style={{ color: C.text, fontWeight: 600 }}>VENUE_BREAKDOWN</span></div>
-          {dateRange(d.brkFrom ?? isoAt(0), d.brkTo ?? isoAt(nAll - 1), dcSet('brkFrom'), dcSet('brkTo'))}
+          {dateRange(d.brkFrom ?? isoAt(0), d.brkTo ?? isoAt(nAll - 1), dcSet('brkFrom'), dcSet('brkTo'), dcReset('brkFrom', 'brkTo'))}
         </div>
         <div style={{ padding: '6px 14px 12px', overflowX: 'auto' }}>
           <div style={{ minWidth: 640 }}>

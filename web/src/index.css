@@ -74,3 +74,11 @@ html, body { margin: 0; background: var(--bg); }
 input[type="date"] { color-scheme: light; }
 :root[data-theme="dark"] input[type="date"] { color-scheme: dark; }
 input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.55; cursor: pointer; }
+
+/* ↺ window-reset pill (Volume tab date-windowed charts) */
+.reset-pill {
+  cursor: pointer; padding: 2px 5px; border: 1px solid var(--pill-border);
+  border-radius: 4px; color: var(--dim); font-size: 10px; line-height: 1;
+  background: transparent; font-family: inherit;
+}
+.reset-pill:hover { color: var(--accent); border-color: var(--accent-border); }

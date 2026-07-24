@@ -24,14 +24,14 @@ interface UiState {
   venueToggles: Record<string, boolean>;
   // markouts
   mkProto: string; mkSide: string; mkSize: string; mkPaused: boolean;
-  // Volume tab windows — per chart, per the design. The DAILY chart's window is
-  // the brush (volStart/volEnd = day indexes into d.volume; its date inputs are
-  // another view of the same window). Every other chart owns an independent
-  // from→to ISO pair (null = that bound open ⇒ full range). Granularities
-  // re-bucket the two bar charts ('D'|'W'|'M').
+  // Volume tab windows — per chart, per the design. The two BAR charts are
+  // brush-windowed (start/end = day indexes into d.volume; null = full
+  // history), each with its own independent brush. The three date-windowed
+  // charts own from→to ISO pairs (null = that bound open ⇒ full range).
+  // Granularities re-bucket the two bar charts ('D'|'W'|'M').
   volStart: number | null; volEnd: number | null;
+  burnStart: number | null; burnEnd: number | null;
   volGran: string; burnGran: string;
-  burnFrom: string | null; burnTo: string | null;
   cumFrom: string | null; cumTo: string | null;
   msFrom: string | null; msTo: string | null;
   brkFrom: string | null; brkTo: string | null;
@@ -93,10 +93,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     tab: 'exec', theme: initialTheme(), pair: 'MON/USDC', size: 100,
     venueToggles: {},
     mkProto: 'ALL', mkSide: 'ALL', mkSize: 'ANY', mkPaused: false,
-    volStart: null, volEnd: null,
+    volStart: null, volEnd: null, burnStart: null, burnEnd: null,
     volGran: 'D', burnGran: 'D',
-    burnFrom: null, burnTo: null, cumFrom: null, cumTo: null,
-    msFrom: null, msTo: null, brkFrom: null, brkTo: null,
+    cumFrom: null, cumTo: null, msFrom: null, msTo: null, brkFrom: null, brkTo: null,
     lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbMk: 'MAKER', lbWinners: true, lbTop: 25,
   });
   const [conn, setConn] = useState<'connecting' | 'live' | 'reconnecting'>('connecting');
