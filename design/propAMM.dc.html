@@ -26,6 +26,9 @@
     --red: rgb(201,43,72); --red-border: rgba(201,43,72,0.5); --red-bg: rgba(201,43,72,0.1);
     --amber: rgb(163,101,10); --link: rgb(214,62,0);
   }
+  input[type="date"] { color-scheme: light; }
+  :root[data-theme="dark"] input[type="date"] { color-scheme: dark; }
+  input[type="date"]::-webkit-calendar-picker-indicator { opacity: .55; cursor: pointer; }
   /* ===== DARK — unchanged Monad terminal ===== */
   :root[data-theme="dark"] {
     --bg: rgb(8,9,11); --panel: rgb(10,12,16); --overlay: rgba(10,12,16,0.82);
@@ -279,10 +282,6 @@
         <div style="font-size:14px; font-weight:600; letter-spacing:.06em; color:var(--text)">PROPAMM VOLUME</div>
         <div style="font-size:11px; color:var(--dim); margin-top:6px; line-height:1.55; max-width:760px">All-time daily notional traded on tracked propAMM pools, split by protocol. Volume is the USD-stable quote leg of each landed swap; buckets are UTC days and today's bucket is partial. Vault = Clober's oracle-vault (propAMM) cut.</div>
       </div>
-      <div style="display:flex; align-items:center; gap:8px; font-size:10px; color:var(--dim)">
-        <span style="color:var(--faint); letter-spacing:.06em">RANGE</span>
-        <div style="display:flex; gap:3px"><sc-for list="{{ volRangePills }}" as="p" hint-placeholder-count="4"><div onClick="{{ p.onClick }}" style="{{ p.style }}">{{ p.label }}</div></sc-for></div>
-      </div>
     </div>
 
     <!-- KPI row -->
@@ -318,7 +317,13 @@
     <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
       <div style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></div>
       <div style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></div>
-      <div style="padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em"><span style="color:var(--accent)">~</span> <span style="color:var(--text); font-weight:600">DAILY_VOLUME</span> <span style="color:var(--dim2)">USD notional by protocol · UTC days · {{ volScopeNote }}</span></div>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:6px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em" data-comment-anchor="213002ff23-div">
+        <div><span style="color:var(--accent)">~</span> <span style="color:var(--text); font-weight:600">DAILY_VOLUME</span> <span style="color:var(--dim2)">USD notional by protocol · UTC buckets · {{ volScopeNote }}</span></div>
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+          <div style="display:flex; gap:3px"><sc-for list="{{ volGranPills }}" as="p" hint-placeholder-count="3"><div onClick="{{ p.onClick }}" style="{{ p.style }}">{{ p.label }}</div></sc-for></div>
+          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ dailyCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ dailyCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ dailyCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ dailyCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
+        </div>
+      </div>
       <div style="display:flex; align-items:flex-start; gap:16px; padding:16px 18px 8px">
        <div style="position:relative; flex:1; min-width:0">
         <div style="position:absolute; top:-2px; left:0; font-size:8.5px; color:var(--faint)">{{ volMaxLabel }}</div>
@@ -380,7 +385,13 @@
     <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
       <div style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></div>
       <div style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></div>
-      <div style="padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em"><span style="color:var(--accent)">~</span> <span style="color:var(--text); font-weight:600">QUOTE_UPDATE_BURN</span> <span style="color:var(--dim2)">gas burned keeping quotes fresh · MON · UTC days · tracked venues</span></div>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:6px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em" data-comment-anchor="63c76daf94-div">
+        <div><span style="color:var(--accent)">~</span> <span style="color:var(--text); font-weight:600">QUOTE_UPDATE_BURN</span> <span style="color:var(--dim2)">gas burned keeping quotes fresh · MON · tracked venues</span></div>
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+          <div style="display:flex; gap:3px"><sc-for list="{{ burnGranPills }}" as="p" hint-placeholder-count="3"><div onClick="{{ p.onClick }}" style="{{ p.style }}">{{ p.label }}</div></sc-for></div>
+          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ burnCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ burnCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ burnCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ burnCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
+        </div>
+      </div>
       <div style="display:flex; align-items:flex-start; gap:16px; padding:16px 18px 8px">
        <div style="position:relative; flex:1; min-width:0">
         <div style="position:absolute; top:-2px; left:0; font-size:8.5px; color:var(--faint)">{{ burnMaxLabel }}</div>
@@ -408,7 +419,7 @@
           </div>
         </sc-if>
         <div style="position:relative; height:14px; margin-top:4px; margin-left:42px">
-          <sc-for list="{{ volAxis }}" as="a" hint-placeholder-count="5"><div style="position:absolute; left:{{ a.left }}; transform:translateX(-50%); font-size:8.5px; color:var(--faint)">{{ a.label }}</div></sc-for>
+          <sc-for list="{{ burnAxis }}" as="a" hint-placeholder-count="5"><div style="position:absolute; left:{{ a.left }}; transform:translateX(-50%); font-size:8.5px; color:var(--faint)">{{ a.label }}</div></sc-for>
         </div>
         <div style="margin:8px 2px 4px 42px; font-size:10px; color:var(--faint)"><br></div>
        </div>
@@ -429,7 +440,10 @@
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:0 18px 14px">
       <div style="position:relative; border:1px solid var(--border); background:var(--panel)">
         <div style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></div>
-        <div style="padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em"><span style="color:var(--accent)">■</span> <span style="color:var(--text); font-weight:600">CUMULATIVE_VOLUME</span></div>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:6px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em" data-comment-anchor="dfce0d79dd-div">
+          <div><span style="color:var(--accent)">■</span> <span style="color:var(--text); font-weight:600">CUMULATIVE_VOLUME</span></div>
+          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ cumCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ cumCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ cumCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ cumCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
+        </div>
         <div onMouseMove="{{ cumMove }}" onMouseLeave="{{ volLeave }}" style="position:relative; padding:14px 14px 10px">
           <svg viewBox="0 0 1000 260" preserveAspectRatio="none" style="display:block; width:100%; height:230px">
             <defs><linearGradient id="cumg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" style="stop-color:var(--accent)" stop-opacity="0.32"></stop><stop offset="100%" style="stop-color:var(--accent)" stop-opacity="0.02"></stop></linearGradient></defs>
@@ -455,7 +469,10 @@
       </div>
       <div style="position:relative; border:1px solid var(--border); background:var(--panel)">
         <div style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></div>
-        <div style="padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em"><span style="color:var(--accent)">◆</span> <span style="color:var(--text); font-weight:600">MARKET_SHARE</span> <span style="color:var(--dim2)">% of daily volume</span></div>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:6px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em" data-comment-anchor="bf122bac43-div">
+          <div><span style="color:var(--accent)">◆</span> <span style="color:var(--text); font-weight:600">MARKET_SHARE</span> <span style="color:var(--dim2)">% of daily volume</span></div>
+          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ msCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ msCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ msCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ msCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
+        </div>
         <div onMouseMove="{{ msMove }}" onMouseLeave="{{ volLeave }}" style="position:relative; padding:14px 14px 10px">
           <svg viewBox="0 0 1000 260" preserveAspectRatio="none" style="display:block; width:100%; height:230px">
             <sc-for list="{{ msBands }}" as="band" hint-placeholder-count="2"><path d="{{ band.path }}" fill="{{ band.color }}" fill-opacity="0.82" data-comment-anchor="47079c0a3f-path"></path></sc-for>
@@ -484,7 +501,10 @@
     <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
       <div style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></div>
       <div style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></div>
-      <div style="padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em"><span style="color:var(--accent)">#</span> <span style="color:var(--text); font-weight:600">PROTOCOL_BREAKDOWN</span></div>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:6px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em" data-comment-anchor="c30f1aa17b-div">
+        <div><span style="color:var(--accent)">#</span> <span style="color:var(--text); font-weight:600">PROTOCOL_BREAKDOWN</span></div>
+        <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ brkCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ brkCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ brkCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ brkCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
+      </div>
       <div style="padding:6px 14px 12px">
         <div style="display:grid; grid-template-columns:1.4fr 1fr 1.4fr 1fr 1.2fr 1fr; gap:8px; padding:9px 6px; font-size:9px; color:var(--faint); letter-spacing:.05em; border-bottom:1px solid var(--border)"><div>PROTOCOL</div><div style="text-align:right">ALL-TIME VOL</div><div>SHARE</div><div style="text-align:right">SWAPS</div><div style="text-align:right">PEAK DAY</div><div style="text-align:right">FIRST ACTIVE</div></div>
         <sc-for list="{{ brk }}" as="r" hint-placeholder-count="3">
@@ -924,7 +944,8 @@ class Component extends DCLogic {
   _svgHover(chart, e) {
     const r = e.currentTarget.getBoundingClientRect();
     const fr = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-    const i = Math.round(fr * ((this._volN || 1) - 1));
+    const n = (this._chartN && this._chartN[chart]) || this._volN || 1;
+    const i = Math.round(fr * (n - 1));
     const h = this.state.volHover;
     if (!h || h.c !== chart || h.i !== i) this.setState({ volHover: { c: chart, i } });
   }
@@ -1087,6 +1108,7 @@ class Component extends DCLogic {
     for (let i = 0; i < n; i++) {
       const dt = new Date(start + i * 86400000);
       const mmdd = ('0' + (dt.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + dt.getUTCDate()).slice(-2);
+      const iso = dt.toISOString().slice(0, 10);
       const ramp = Math.min(1, i / 20);
       let total = (0.06 + ramp * ramp * (3.2 + Math.random() * 1.8));
       if (Math.random() < 0.13) total *= (1.5 + Math.random() * 1.5);
@@ -1104,7 +1126,7 @@ class Component extends DCLogic {
       let bPoe = 810 * j() * onr, bClob = 660 * j() * onr, bHanji = hanjiOn ? 425 * j() : 0, bMet = 2350 * j() * onr;
       let uPoe = Math.round(3100 * j() * onr), uClob = Math.round(2600 * j() * onr), uHanji = hanjiOn ? Math.round(1700 * j()) : 0, uMet = Math.round(138000 * j() * onr);
       if (partial) { bPoe *= 0.42; bClob *= 0.42; bHanji *= 0.42; bMet *= 0.42; uPoe = Math.round(uPoe * 0.42); uClob = Math.round(uClob * 0.42); uHanji = Math.round(uHanji * 0.42); uMet = Math.round(uMet * 0.42); }
-      days.push({ mmdd, total, lfj, clob, vault, sw, partial, bPoe, bClob, bHanji, bMet, uPoe, uClob, uHanji, uMet, hanjiOn });
+      days.push({ mmdd, iso, total, lfj, clob, vault, sw, partial, bPoe, bClob, bHanji, bMet, uPoe, uClob, uHanji, uMet, hanjiOn });
     }
     this.vol = { days, swaps };
   }
@@ -1120,6 +1142,30 @@ class Component extends DCLogic {
     if (Math.random() < 0.5) { d.uPoe += 1; } if (Math.random() < 0.4) { d.uClob += 1; } if (Math.random() < 0.3) { d.uHanji += 1; } if (Math.random() < 0.7) { d.uMet += 1; }
   }
   f$(m) { return m >= 1 ? '$' + m.toFixed(2) + 'M' : '$' + (m * 1000).toFixed(0) + 'k'; }
+  // per-chart from→to window: state holds ISO strings (null = full range)
+  isoWin(fromKey, toKey) {
+    const days = this.vol.days, n = days.length;
+    let s = 0, e = n - 1;
+    const f = this.state[fromKey], t = this.state[toKey];
+    if (f) { const i = days.findIndex(d => d.iso >= f); if (i >= 0) s = i; }
+    if (t) { for (let i = n - 1; i >= 0; i--) { if (days[i].iso <= t) { e = i; break; } } }
+    if (e < s) e = s;
+    return [s, e];
+  }
+  // aggregate daily rows into weekly / monthly buckets (sums all numeric series)
+  bucket(days, gran) {
+    if (!gran || gran === 'D') return days;
+    const keys = ['total', 'lfj', 'clob', 'vault', 'sw', 'bPoe', 'bClob', 'bHanji', 'bMet', 'uPoe', 'uClob', 'uHanji', 'uMet'];
+    const keyOf = d => gran === 'M' ? d.iso.slice(0, 7) : String(Math.floor(Date.parse(d.iso) / 604800000));
+    const out = []; let k0 = null, cur = null;
+    days.forEach(d => {
+      const k = keyOf(d);
+      if (k !== k0) { k0 = k; cur = Object.assign({}, d); cur.iso0 = d.iso; cur.isoEnd = d.iso; out.push(cur); }
+      else { keys.forEach(key => { cur[key] += d[key]; }); cur.partial = cur.partial || d.partial; cur.isoEnd = d.iso; }
+    });
+    out.forEach(b => { b.mmdd = gran === 'M' ? b.iso0.slice(0, 7) : b.iso0.slice(5); });
+    return out;
+  }
   volWin() {
     const n = this.vol.days.length;
     const st = this.state;
@@ -1171,7 +1217,9 @@ class Component extends DCLogic {
     const days = allDays.slice(wS, wE + 1);
     const nd = days.length;
     this._volN = nd;
-    const scope = this.state.clScope || 'venue';
+    const st = this.state;
+    const dGran = st.volGran || 'D';
+    const scope = st.clScope || 'venue';
     const C = this.COL;
     const series = scope === 'vault'
       ? [{ name: 'LFJ', color: C.LFJ, val: d => d.lfj }, { name: 'Clober \u00b7 Vault', color: C.Vault, val: d => d.vault }]
@@ -1182,14 +1230,16 @@ class Component extends DCLogic {
     const hidV = this.state.hiddenVol || {};
     const volShown = series.filter(s => !hidV[s.name]);
     const grand = days.reduce((a, d) => a + d.lfj + d.clob + d.vault, 0);
-    const maxT = Math.max(...days.map(d => volShown.reduce((a, s) => a + s.val(d), 0))) || 1;
+    const dB = this.bucket(days, dGran);
+    const ndB = dB.length;
+    const maxT = Math.max(...dB.map(d => volShown.reduce((a, s) => a + s.val(d), 0))) || 1;
     const H = 150;
-    const hv = this.state.volHover;
-    const hi = hv ? Math.min(hv.i, nd - 1) : -1;
-    const volBars = days.map((d, i) => ({
+    const hv = st.volHover;
+    const hiD = (hv && hv.c === 'daily') ? Math.min(hv.i, ndB - 1) : -1;
+    const volBars = dB.map((d, i) => ({
       op: d.partial ? 0.5 : 1,
       segs: volShown.map(s => ({ h: (s.val(d) / maxT * H).toFixed(1), color: s.color })),
-      bg: (hv && hv.c === 'daily' && hi === i) ? 'var(--accent-dim)' : 'transparent',
+      bg: hiD === i ? 'var(--accent-dim)' : 'transparent',
       onEnter: () => this.setState({ volHover: { c: 'daily', i } }),
     }));
     const f = m => this.f$(m);
@@ -1204,42 +1254,63 @@ class Component extends DCLogic {
     const todayChg = prevT ? (todayT - prevT) / prevT * 100 : 0;
     const swaps = Math.round(this.vol.swaps * allTot / grand);
     const W = 1000, HC = 260;
-    let cum = 0; const pts = days.map((d, i) => { cum += dTot[i]; return [i / (nd - 1) * W, cum]; });
+    // CUMULATIVE_VOLUME: own from→to window
+    const [cS, cE] = this.isoWin('cumFrom', 'cumTo');
+    const cDays = allDays.slice(cS, cE + 1);
+    const cTot = cDays.map(dayTotal);
+    const ncd = cDays.length;
+    let cum = 0; const pts = cDays.map((d, i) => { cum += cTot[i]; return [(ncd > 1 ? i / (ncd - 1) : 0) * W, cum]; });
     const cy = y => HC - y / cum * HC;
     const cumLine = 'M' + pts.map(p => p[0].toFixed(1) + ',' + cy(p[1]).toFixed(1)).join(' L');
     const cumArea = cumLine + ' L' + W + ',' + HC + ' L0,' + HC + ' Z';
     // per-venue cumulative lines on the SAME y-scale as the total
     const cumVenueLines = series.map(s => {
       let cv = 0;
-      const vp = days.map((d, i) => { cv += s.val(d); return [(nd > 1 ? i / (nd - 1) : 0) * W, cv]; });
+      const vp = cDays.map((d, i) => { cv += s.val(d); return [(ncd > 1 ? i / (ncd - 1) : 0) * W, cv]; });
       return { color: s.color, path: 'M' + vp.map(p => p[0].toFixed(1) + ',' + cy(p[1]).toFixed(1)).join(' L') };
     });
-    const xs = i => i / (nd - 1) * W;
+    // MARKET_SHARE: own from→to window
+    const [mS, mE] = this.isoWin('msFrom', 'msTo');
+    const mDays = allDays.slice(mS, mE + 1);
+    const mTot = mDays.map(dayTotal);
+    const nmd = mDays.length;
+    this._chartN = { cum: ncd, ms: nmd };
+    const xs = i => (nmd > 1 ? i / (nmd - 1) : 0) * W;
     const bands = series.map(() => ({ top: [], bot: [] }));
-    days.forEach((d, i) => { const t = dTot[i] || 1; let below = 0; for (let k = 0; k < series.length; k++) { const fr = series[k].val(d) / t; bands[k].bot.push([xs(i), HC * (1 - below)]); bands[k].top.push([xs(i), HC * (1 - below - fr)]); below += fr; } });
+    mDays.forEach((d, i) => { const t = mTot[i] || 1; let below = 0; for (let k = 0; k < series.length; k++) { const fr = series[k].val(d) / t; bands[k].bot.push([xs(i), HC * (1 - below)]); bands[k].top.push([xs(i), HC * (1 - below - fr)]); below += fr; } });
     const band = (t, b) => 'M' + t.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L') + ' L' + b.slice().reverse().map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L') + ' Z';
     const msBands = series.map((s, k) => ({ path: band(bands[k].top, bands[k].bot), color: s.color }));
-    const lt = dTot[nd - 1] || 1;
-    const pPeak = s => { let pv = -1, pd = ''; days.forEach(d => { const v = s.val(d); if (v > pv) { pv = v; pd = d.mmdd; } }); return { v: f(pv), day: pd }; };
-    const brk = series.map(s => { const tot = days.reduce((a, d) => a + s.val(d), 0); const pk = pPeak(s); return { name: s.name, color: s.color, vol: f(tot), share: share(tot), shareW: (tot / allTot * 100).toFixed(1), swaps: Math.round(swaps * tot / allTot).toLocaleString(), peakV: pk.v, peakDay: pk.day, first: s.name.indexOf('Vault') >= 0 ? '2026-05-15' : '2026-05-13' }; });
-    const axis = [0, Math.floor(nd * 0.25), Math.floor(nd * 0.5), Math.floor(nd * 0.75), nd - 1].map(i => ({ label: days[i].mmdd, left: (i / (nd - 1) * 100).toFixed(1) + '%' }));
-    // ---- hover tooltips ----
-    const tipLeft = i => Math.max(9, Math.min(88, ((i + 0.5) / nd) * 100)).toFixed(1);
-    const guideLeft = i => ((i / (nd - 1)) * 100).toFixed(1);
-    const dateOf = d => '2026-' + d.mmdd + (d.partial ? ' (today, partial)' : '');
+    const mLast = mDays[nmd - 1], mlt = mTot[nmd - 1] || 1;
+    // PROTOCOL_BREAKDOWN: own from→to window
+    const [kS, kE] = this.isoWin('brkFrom', 'brkTo');
+    const kDays = allDays.slice(kS, kE + 1);
+    const kAllTot = kDays.reduce((a, d) => a + dayTotal(d), 0) || 1;
+    const kSwaps = kDays.reduce((a, d) => a + d.sw, 0);
+    const pPeak = (s, arr) => { let pv = -1, pd = ''; arr.forEach(d => { const v = s.val(d); if (v > pv) { pv = v; pd = d.mmdd; } }); return { v: f(pv), day: pd }; };
+    const brk = series.map(s => { const tot = kDays.reduce((a, d) => a + s.val(d), 0); const pk = pPeak(s, kDays); return { name: s.name, color: s.color, vol: f(tot), share: (tot / kAllTot * 100).toFixed(1) + '%', shareW: (tot / kAllTot * 100).toFixed(1), swaps: Math.round(kSwaps * tot / kAllTot).toLocaleString(), peakV: pk.v, peakDay: pk.day, first: s.name.indexOf('Vault') >= 0 ? '2026-05-15' : '2026-05-13' }; });
+    const axisOf = arr => { const n2 = arr.length; if (n2 < 2) return [{ label: arr[0] ? arr[0].mmdd : '', left: '50%' }]; const idx = Array.from(new Set([0, Math.floor((n2 - 1) * 0.25), Math.floor((n2 - 1) * 0.5), Math.floor((n2 - 1) * 0.75), n2 - 1])); return idx.map(i => ({ label: arr[i].mmdd, left: (i / (n2 - 1) * 100).toFixed(1) + '%' })); };
+    const axis = axisOf(dB);
+    // ---- hover tooltips (per-chart indices) ----
+    const tipLeft = (i, n2) => Math.max(9, Math.min(88, ((i + 0.5) / n2) * 100)).toFixed(1);
+    const guideLeft = (i, n2) => ((n2 > 1 ? i / (n2 - 1) : 0.5) * 100).toFixed(1);
+    const dateOf = d => (d.iso0 && d.isoEnd && d.isoEnd !== d.iso0) ? (d.iso0 + ' \u2192 ' + d.isoEnd + (d.partial ? ' (partial)' : '')) : ('2026-' + (d.iso ? d.iso.slice(5) : d.mmdd) + (d.partial ? ' (today, partial)' : ''));
     let dailyTip = null, cumTip = null, msTip = null;
-    if (hv && hi >= 0) {
-      const d = days[hi];
-      if (hv.c === 'daily') {
-        dailyTip = { left: tipLeft(hi), date: dateOf(d), total: f(dTot[hi]), rows: volShown.map(s => ({ name: s.name, color: s.color, val: f(s.val(d)) })) };
-      } else if (hv.c === 'cum') {
-        let c2 = 0; for (let k = 0; k <= hi; k++) c2 += dTot[k];
-        const vRows = series.map(s => { let cv = 0; for (let k = 0; k <= hi; k++) cv += s.val(days[k]); return { name: s.name, color: s.color, cum: f(cv) }; });
-        cumTip = { left: tipLeft(hi), guide: guideLeft(hi), date: dateOf(d), cum: f(c2), day: f(dTot[hi]), rows: vRows };
-      } else if (hv.c === 'ms') {
-        const t = dTot[hi] || 1;
-        msTip = { left: tipLeft(hi), guide: guideLeft(hi), date: dateOf(d), rows: series.map(s => ({ name: s.name, color: s.color, pct: (s.val(d) / t * 100).toFixed(1) + '%', val: f(s.val(d)) })) };
-      }
+    if (hiD >= 0) {
+      const d = dB[hiD];
+      const t2 = volShown.reduce((a, s) => a + s.val(d), 0);
+      dailyTip = { left: tipLeft(hiD, ndB), date: dateOf(d), total: f(t2), rows: volShown.map(s => ({ name: s.name, color: s.color, val: f(s.val(d)) })) };
+    }
+    const hiC = (hv && hv.c === 'cum') ? Math.min(hv.i, ncd - 1) : -1;
+    if (hiC >= 0) {
+      const d = cDays[hiC];
+      let c2 = 0; for (let k = 0; k <= hiC; k++) c2 += cTot[k];
+      const vRows = series.map(s => { let cv = 0; for (let k = 0; k <= hiC; k++) cv += s.val(cDays[k]); return { name: s.name, color: s.color, cum: f(cv) }; });
+      cumTip = { left: tipLeft(hiC, ncd), guide: guideLeft(hiC, ncd), date: dateOf(d), cum: f(c2), day: f(cTot[hiC]), rows: vRows };
+    }
+    const hiM = (hv && hv.c === 'ms') ? Math.min(hv.i, nmd - 1) : -1;
+    if (hiM >= 0) {
+      const d = mDays[hiM]; const t3 = mTot[hiM] || 1;
+      msTip = { left: tipLeft(hiM, nmd), guide: guideLeft(hiM, nmd), date: dateOf(d), rows: series.map(s => ({ name: s.name, color: s.color, pct: (s.val(d) / t3 * 100).toFixed(1) + '%', val: f(s.val(d)) })) };
     }
     // ---- QUOTE_UPDATE_BURN (MON, not USD) ----
     const fMON = m => (m >= 1000 ? (m / 1000).toFixed(1) + 'K' : Math.round(m).toLocaleString()) + ' MON';
@@ -1250,38 +1321,48 @@ class Component extends DCLogic {
       { name: 'Clober', key: 'bClob', ukey: 'uClob', color: C2.Clober, approx: false },
       { name: 'Hanji', key: 'bHanji', ukey: 'uHanji', color: C2.Hanji, approx: true },
     ];
+    // QUOTE_UPDATE_BURN: own from→to window + D/W/M granularity
+    const [bWS, bWE] = this.isoWin('burnFrom', 'burnTo');
+    const bDays = allDays.slice(bWS, bWE + 1);
+    const bB = this.bucket(bDays, st.burnGran || 'D');
+    const nbB = bB.length;
+    const burnAxis = axisOf(bB);
     const hidB = this.state.hiddenBurn || {};
     const burnShown = burnSeries.filter(s => !hidB[s.name]);
-    const bTot = days.map(d => burnSeries.reduce((a, s) => a + d[s.key], 0));
-    const bMax = Math.max(...days.map(d => burnShown.reduce((a, s) => a + d[s.key], 0))) || 1;
+    const bTot = bB.map(d => burnSeries.reduce((a, s) => a + d[s.key], 0));
+    const bMax = Math.max(...bB.map(d => burnShown.reduce((a, s) => a + d[s.key], 0))) || 1;
     const BH = 150;
-    const burnBars = days.map((d, i) => ({
+    const hiB = (hv && hv.c === 'burn') ? Math.min(hv.i, nbB - 1) : -1;
+    const burnBars = bB.map((d, i) => ({
       op: d.partial ? 0.5 : 1,
       segs: burnShown.filter(s => d[s.key] > 0).map(s => ({ h: (d[s.key] / bMax * BH).toFixed(1), color: s.color })),
-      bg: (hv && hv.c === 'burn' && hi === i) ? 'var(--accent-dim)' : 'transparent',
+      bg: hiB === i ? 'var(--accent-dim)' : 'transparent',
       onEnter: () => this.setState({ volHover: { c: 'burn', i } }),
     }));
     let burnTip = null;
-    if (hv && hv.c === 'burn' && hi >= 0) {
-      const d = days[hi];
+    if (hiB >= 0) {
+      const d = bB[hiB];
       burnTip = {
-        left: tipLeft(hi), date: dateOf(d),
+        left: tipLeft(hiB, nbB), date: dateOf(d),
         rows: burnShown.filter(s => d[s.key] > 0).map(s => ({ name: s.name, color: s.color, val: (s.approx ? '\u2248' : '') + d[s.key].toFixed(1) + ' MON' })),
-        total: Math.round(bTot[hi]).toLocaleString() + ' MON',
-        usd: '~$' + (bTot[hi] * (this.mon || 0.0192)).toFixed(0),
+        total: Math.round(bTot[hiB]).toLocaleString() + ' MON',
+        usd: '~$' + (bTot[hiB] * (this.mon || 0.0192)).toFixed(0),
       };
     }
-    const isWindowed = days.length < allDays.length;
+    const isWindowed = bDays.length < allDays.length;
     const burnRows = burnSeries.map(s => {
-      const tot = days.reduce((a, d) => a + d[s.key], 0);
-      const ups = days.reduce((a, d) => a + d[s.ukey], 0);
+      const tot = bDays.reduce((a, d) => a + d[s.key], 0);
+      const ups = bDays.reduce((a, d) => a + d[s.ukey], 0);
       return { name: s.name, color: s.color, burn: (s.approx ? '\u2248' : '') + fMON(tot), updates: ups.toLocaleString(), op: hidB[s.name] ? 0.4 : 1, onToggle: () => this.toggleHidden('hiddenBurn', s.name) };
     });
     const burnTotal = bTot.reduce((a, b) => a + b, 0);
-    const burnPerM = allTot > 0 ? (burnTotal / allTot).toFixed(1) : '0';
+    const bVol = bDays.reduce((a, d) => a + d.lfj + d.clob + d.vault, 0);
+    const burnPerM = bVol > 0 ? (burnTotal / bVol).toFixed(1) : '0';
     const rOn = 'background:var(--accent);color:var(--accent-fg);border:1px solid var(--accent);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;white-space:nowrap';
     const rOff = 'background:transparent;color:var(--dim);border:1px solid var(--pill-border);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;white-space:nowrap';
-    const volRangePills = ['7D', '14D', '30D', 'ALL'].map(o => ({ label: o, onClick: () => this.setState({ volRange: o, volStart: null, volEnd: null, volHover: null }), style: this.state.volRange === o ? rOn : rOff }));
+    const granPill = (key, cur) => ['D', 'W', 'M'].map(o => ({ label: o, onClick: () => this.setState({ [key]: o, volHover: null }), style: cur === o ? rOn : rOff }));
+    const volGranPills = granPill('volGran', dGran);
+    const burnGranPills = granPill('burnGran', st.burnGran || 'D');
     // ---- brush / minimap (full history, scope-aware) ----
     const aTot = allDays.map(d => scope === 'vault' ? d.lfj + d.vault : d.lfj + d.clob + d.vault);
     const aMax = Math.max(...aTot) || 1;
@@ -1290,8 +1371,19 @@ class Component extends DCLogic {
     const brushLeft = (wS / (nAll - 1) * 100).toFixed(2);
     const brushWidth = Math.max(1.5, ((wE - wS) / (nAll - 1) * 100)).toFixed(2);
     const brushStartLbl = allDays[wS].mmdd, brushEndLbl = allDays[wE].mmdd + (allDays[wE].partial ? ' \u00b7 now' : '');
+    // per-chart from→to date controls
+    const dcSet = k => e => this.setState({ [k]: e.target.value || null, volHover: null });
+    const ctl = (fk, tk, s, e) => ({ from: st[fk] || allDays[s].iso, to: st[tk] || allDays[e].iso, fromCh: dcSet(fk), toCh: dcSet(tk) });
+    const cumCtl = ctl('cumFrom', 'cumTo', cS, cE), msCtl = ctl('msFrom', 'msTo', mS, mE), brkCtl = ctl('brkFrom', 'brkTo', kS, kE), burnCtl = ctl('burnFrom', 'burnTo', bWS, bWE);
+    const dailyCtl = {
+      from: allDays[wS].iso, to: allDays[wE].iso,
+      fromCh: e => { const v = e.target.value; if (!v) return; let i = allDays.findIndex(d2 => d2.iso >= v); if (i < 0) i = nAll - 1; this.setState({ volStart: Math.min(i, wE), volEnd: wE, volRange: 'CUSTOM', volHover: null }); },
+      toCh: e => { const v = e.target.value; if (!v) return; let i = -1; for (let k = nAll - 1; k >= 0; k--) { if (allDays[k].iso <= v) { i = k; break; } } if (i < 0) i = 0; this.setState({ volStart: wS, volEnd: Math.max(i, wS), volRange: 'CUSTOM', volHover: null }); },
+    };
     return {
-      volRangePills, volLeave: this.volLeave, cumMove: this.cumMove, msMove: this.msMove,
+      volGranPills, burnGranPills, dailyCtl, burnCtl, cumCtl, msCtl, brkCtl,
+      volMinIso: allDays[0].iso, volMaxIso: allDays[nAll - 1].iso, burnAxis,
+      volLeave: this.volLeave, cumMove: this.cumMove, msMove: this.msMove,
       brushBars, brushLeft, brushWidth, brushStartLbl, brushEndLbl,
       setBrush: this.setBrush, brushDown: this.brushDown,
       dailyTipShow: !!dailyTip, dailyTip: dailyTip || {}, cumTipShow: !!cumTip, cumTip: cumTip || {}, msTipShow: !!msTip, msTip: msTip || {},
@@ -1305,10 +1397,10 @@ class Component extends DCLogic {
       kSwaps: swaps.toLocaleString(), kPeak: f(peakV), kPeakDay: peakDay,
       kToday: f(todayT), kTodayChg: (todayChg >= 0 ? '\u25B2 ' : '\u25BC ') + Math.abs(todayChg).toFixed(0) + '%', kTodaycss: 'color:' + (todayChg >= 0 ? 'var(--green)' : 'var(--red)'),
       legRows: totals.map(t => ({ name: t.name, color: t.color, vol: f(t.tot), share: share(t.tot), op: hidV[t.name] ? 0.4 : 1, onToggle: () => this.toggleHidden('hiddenVol', t.name) })),
-      legTotal: f(allTot), cumLine, cumArea, cumVenueLines, cumSigma: f(allTot),
-      msBands, msTopName: series[series.length - 1].name, msTopPct: (series[series.length - 1].val(days[nd - 1]) / lt * 100).toFixed(1) + '%', msTopColor: this.isLight ? 'rgb(252,251,248)' : series[series.length - 1].color,
-      msBotName: series[0].name, msBotPct: (series[0].val(days[nd - 1]) / lt * 100).toFixed(1) + '%', msBotColor: this.isLight ? 'rgb(252,251,248)' : series[0].color,
-      brk, brkTotalVol: f(allTot), brkTotalSwaps: swaps.toLocaleString(),
+      legTotal: f(allTot), cumLine, cumArea, cumVenueLines, cumSigma: f(cum),
+      msBands, msTopName: series[series.length - 1].name, msTopPct: (series[series.length - 1].val(mLast) / mlt * 100).toFixed(1) + '%', msTopColor: this.isLight ? 'rgb(252,251,248)' : series[series.length - 1].color,
+      msBotName: series[0].name, msBotPct: (series[0].val(mLast) / mlt * 100).toFixed(1) + '%', msBotColor: this.isLight ? 'rgb(252,251,248)' : series[0].color,
+      brk, brkTotalVol: f(kAllTot), brkTotalSwaps: kSwaps.toLocaleString(),
       volScopeNote: scope === 'vault' ? 'Clober = vault (propAMM) cut' : 'Clober = whole-venue',
     };
   }
