@@ -402,11 +402,6 @@
                 <span style="margin-left:auto; color:var(--text)">{{ r.val }}</span>
               </div>
             </sc-for>
-            <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; padding:4px 0 0">
-              <span style="width:8px; height:8px; border-radius:2px; background:var(--faint2); flex:none"></span>
-              <span style="color:var(--text2)">Metric</span>
-              <span style="margin-left:auto; color:var(--faint); font-size:9px">external oracle</span>
-            </div>
             <div style="display:flex; align-items:baseline; font-size:10.5px; padding-top:5px; margin-top:5px; border-top:1px solid var(--border2)">
               <span style="color:var(--dim)">TOTAL</span><span style="margin-left:auto; color:var(--text); font-weight:600">{{ burnTip.total }}</span><span style="color:var(--faint); font-size:9px; margin-left:6px">{{ burnTip.usd }}</span>
             </div>
@@ -424,7 +419,6 @@
           <sc-for list="{{ burnRows }}" as="r" hint-placeholder-count="3">
             <div onClick="{{ r.onToggle }}" style="display:grid; grid-template-columns:1fr 84px 58px; gap:3px 8px; font-size:10.5px; padding:4px 0; align-items:center; cursor:pointer; opacity:{{ r.op }}"><div style="display:flex; align-items:center; gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:{{ r.color }}"></span><span style="color:var(--text2)">{{ r.name }}</span></div><div style="text-align:right; color:var(--text)">{{ r.burn }}</div><div style="text-align:right; color:var(--text4)">{{ r.updates }}</div></div>
           </sc-for>
-          <div style="display:grid; grid-template-columns:1fr 84px 58px; gap:3px 8px; font-size:10.5px; padding:4px 0; align-items:center"><div style="display:flex; align-items:center; gap:6px"><span style="width:8px;height:8px;border-radius:2px;background:var(--faint2)"></span><span style="color:var(--text2)">Metric</span></div><div style="text-align:right; color:var(--faint); font-size:9px">external oracle</div><div style="text-align:right; color:var(--faint)">—</div></div>
           <div style="display:grid; grid-template-columns:1fr 84px 58px; gap:3px 8px; font-size:10.5px; padding-top:6px; margin-top:3px; border-top:1px solid var(--border)"><div style="color:var(--dim)">TOTAL</div><div style="text-align:right; color:var(--text); font-weight:600">{{ burnTotal }}</div><div style="text-align:right; color:var(--text4)">{{ burnUpdatesTotal }}</div></div>
           <div style="font-size:9px; color:var(--faint); margin-top:5px; text-align:right">burn per $1M volume: {{ burnPerM }} MON</div>
         </div>
@@ -771,8 +765,8 @@ class Component extends DCLogic {
     // implementation-owned palette (CVD/contrast-validated, one hue family per
     // venue across both themes) — source of truth is each adapter's VenueMeta.color
     return this.isLight
-      ? { LFJ: '#FF4D00', Clober: '#0284C7', Vault: '#9C6B16', Bybit: '#8A8375', UniV4: '#3F6212' }
-      : { LFJ: '#EA580C', Clober: '#0284C7', Vault: '#9A88FF', Bybit: '#B9BCC6', UniV4: '#4D7C0F' };
+      ? { LFJ: '#FF4D00', Clober: '#0284C7', Vault: '#9C6B16', Bybit: '#8A8375', UniV4: '#3F6212', Metric: '#0F9D8C', Hanji: '#A21CAF' }
+      : { LFJ: '#EA580C', Clober: '#0284C7', Vault: '#9A88FF', Bybit: '#B9BCC6', UniV4: '#4D7C0F', Metric: '#0D9488', Hanji: '#C026D3' };
   }
   get SEM() {
     return this.isLight
@@ -1107,10 +1101,10 @@ class Component extends DCLogic {
       const j = () => 0.94 + Math.random() * 0.12;
       const onr = Math.min(1, (i + 1) / 4);                    // short come-online ramp
       const hanjiOn = i >= 8;                                   // Hanji tracked from 2026-05-21
-      let bPoe = 810 * j() * onr, bClob = 660 * j() * onr, bHanji = hanjiOn ? 425 * j() : 0;
-      let uPoe = Math.round(3100 * j() * onr), uClob = Math.round(2600 * j() * onr), uHanji = hanjiOn ? Math.round(1700 * j()) : 0;
-      if (partial) { bPoe *= 0.42; bClob *= 0.42; bHanji *= 0.42; uPoe = Math.round(uPoe * 0.42); uClob = Math.round(uClob * 0.42); uHanji = Math.round(uHanji * 0.42); }
-      days.push({ mmdd, total, lfj, clob, vault, sw, partial, bPoe, bClob, bHanji, uPoe, uClob, uHanji, hanjiOn });
+      let bPoe = 810 * j() * onr, bClob = 660 * j() * onr, bHanji = hanjiOn ? 425 * j() : 0, bMet = 2350 * j() * onr;
+      let uPoe = Math.round(3100 * j() * onr), uClob = Math.round(2600 * j() * onr), uHanji = hanjiOn ? Math.round(1700 * j()) : 0, uMet = Math.round(138000 * j() * onr);
+      if (partial) { bPoe *= 0.42; bClob *= 0.42; bHanji *= 0.42; bMet *= 0.42; uPoe = Math.round(uPoe * 0.42); uClob = Math.round(uClob * 0.42); uHanji = Math.round(uHanji * 0.42); uMet = Math.round(uMet * 0.42); }
+      days.push({ mmdd, total, lfj, clob, vault, sw, partial, bPoe, bClob, bHanji, bMet, uPoe, uClob, uHanji, uMet, hanjiOn });
     }
     this.vol = { days, swaps };
   }
@@ -1122,8 +1116,8 @@ class Component extends DCLogic {
     d.vault += v; d.clob += c; d.lfj += l; d.total += add; d.sw += Math.round(1 + Math.random() * 2);
     this.vol.swaps += Math.round(1 + Math.random() * 2);
     // burn ticks up steadily with each quote refresh
-    d.bPoe += 0.006; d.bClob += 0.005; d.bHanji += 0.003;
-    if (Math.random() < 0.5) { d.uPoe += 1; } if (Math.random() < 0.4) { d.uClob += 1; } if (Math.random() < 0.3) { d.uHanji += 1; }
+    d.bPoe += 0.006; d.bClob += 0.005; d.bHanji += 0.003; d.bMet += 0.02;
+    if (Math.random() < 0.5) { d.uPoe += 1; } if (Math.random() < 0.4) { d.uClob += 1; } if (Math.random() < 0.3) { d.uHanji += 1; } if (Math.random() < 0.7) { d.uMet += 1; }
   }
   f$(m) { return m >= 1 ? '$' + m.toFixed(2) + 'M' : '$' + (m * 1000).toFixed(0) + 'k'; }
   volWin() {
@@ -1251,9 +1245,10 @@ class Component extends DCLogic {
     const fMON = m => (m >= 1000 ? (m / 1000).toFixed(1) + 'K' : Math.round(m).toLocaleString()) + ' MON';
     const C2 = this.COL;
     const burnSeries = [
+      { name: 'Metric', key: 'bMet', ukey: 'uMet', color: C2.Metric, approx: true },
       { name: 'LFJ POE', key: 'bPoe', ukey: 'uPoe', color: C2.LFJ, approx: true },
       { name: 'Clober', key: 'bClob', ukey: 'uClob', color: C2.Clober, approx: false },
-      { name: 'Hanji', key: 'bHanji', ukey: 'uHanji', color: C2.Vault, approx: false },
+      { name: 'Hanji', key: 'bHanji', ukey: 'uHanji', color: C2.Hanji, approx: true },
     ];
     const hidB = this.state.hiddenBurn || {};
     const burnShown = burnSeries.filter(s => !hidB[s.name]);
