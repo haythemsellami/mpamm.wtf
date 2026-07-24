@@ -20,12 +20,43 @@ interface SeriesDef {
   since?: string;
 }
 
-/** which chart the pointer is over + the hovered day index within THAT chart's window. */
+/** which chart the pointer is over + the hovered point index within THAT chart's window. */
 type HoverState = { c: 'daily' | 'burn' | 'cum' | 'ms'; i: number } | null;
 
-const RANGE_PRESETS = ['7D', '14D', '30D', 'ALL'] as const;
-const RANGE_DAYS: Record<string, number> = { '7D': 7, '14D': 14, '30D': 30 };
 const MIN_WIN = 3; // brush minimum window (days), per the design
+const GRANS = ['D', 'W', 'M'] as const;
+
+/** One rendered bar of a D/W/M-bucketed chart: the member days plus the span
+ *  metadata the axis/tooltips need. 'D' produces single-day buckets so every
+ *  consumer renders one uniform shape. Weeks are epoch weeks and months are
+ *  calendar months, exactly as the design reference buckets them. */
+interface Bucket { iso0: string; isoEnd: string; partial: boolean; days: DailyVolume[] }
+const bucketDays = (days: DailyVolume[], gran: string): Bucket[] => {
+  const keyOf = (iso: string) => (gran === 'M' ? iso.slice(0, 7) : String(Math.floor(Date.parse(iso) / 604_800_000)));
+  if (gran !== 'W' && gran !== 'M') return days.map((x) => ({ iso0: x.utcDay, isoEnd: x.utcDay, partial: !!x.partial, days: [x] }));
+  const out: Bucket[] = [];
+  let k0: string | null = null;
+  for (const x of days) {
+    const k = keyOf(x.utcDay);
+    if (k !== k0) { k0 = k; out.push({ iso0: x.utcDay, isoEnd: x.utcDay, partial: !!x.partial, days: [x] }); }
+    else { const b = out[out.length - 1]; b.days.push(x); b.isoEnd = x.utcDay; b.partial = b.partial || !!x.partial; }
+  }
+  return out;
+};
+/** x-axis label: the bucket's start date (design: month key for 'M'). */
+const bucketLabel = (b: Bucket, gran: string) => (gran === 'M' ? b.iso0.slice(0, 7) : mmdd(b.iso0));
+/** tooltip date line: single day, or the covered span for a multi-day bucket. */
+const bucketDate = (b: Bucket) => b.iso0 === b.isoEnd
+  ? b.iso0 + (b.partial ? ' (today, partial)' : '')
+  : `${b.iso0} → ${b.isoEnd}${b.partial ? ' (partial)' : ''}`;
+/** ≤5 axis ticks across a bucket array (deduped — short windows repeat indexes). */
+const axisOf = (arr: Bucket[], gran: string): { label: string; left: string }[] => {
+  const n = arr.length;
+  if (n === 0) return [];
+  if (n < 2) return [{ label: bucketLabel(arr[0], gran), left: '50%' }];
+  const idx = [...new Set([0, Math.floor((n - 1) * 0.25), Math.floor((n - 1) * 0.5), Math.floor((n - 1) * 0.75), n - 1])];
+  return idx.map((i) => ({ label: bucketLabel(arr[i], gran), left: (i / (n - 1) * 100).toFixed(1) + '%' }));
+};
 
 export function VolumeTab() {
   const d = useDashboard();
@@ -52,31 +83,58 @@ export function VolumeTab() {
   const allDays = d.volume;
   const nAll = allDays.length;
 
-  /** Resolve the visible window (design volWin): the hand-drawn brush window
-   *  wins when `custom` is allowed; else the RANGE preset (ALL/CUSTOM → full). */
-  const winFor = (custom: boolean): [number, number] => {
+  /** DAILY window (design volWin): the hand-drawn brush window, else full
+   *  history. Ranges are per-chart now — there is no page-level preset. */
+  const winDaily = (): [number, number] => {
     const n = nAll;
     if (n <= 1) return [0, Math.max(0, n - 1)];
-    if (custom && d.volStart != null && d.volEnd != null && n >= MIN_WIN + 1) {
+    if (d.volStart != null && d.volEnd != null && n >= MIN_WIN + 1) {
       const s = Math.max(0, Math.min(n - 1 - MIN_WIN, d.volStart));
       return [s, Math.max(s + MIN_WIN, Math.min(n - 1, d.volEnd))];
     }
-    const rangeN = RANGE_DAYS[d.volRange];
-    return rangeN ? [Math.max(0, n - rangeN), n - 1] : [0, n - 1];
+    return [0, n - 1];
   };
-  const [wS, wE] = winFor(true);   // daily chart + brush follow presets AND the brush
-  // ONE window below the KPI tiles: cumulative, market-share, the daily legend
-  // and the venue breakdown all follow the same selected range (presets AND the
-  // hand-drawn brush). Only the top tiles keep all-time/7d/today semantics.
-  const [pS, pE] = winFor(true);
+  const [wS, wE] = winDaily();
+
+  /** every other chart's window: from→to ISO bounds over the full history
+   *  (design isoWin). Null bound = open ⇒ that side of the full range; an
+   *  inverted pair collapses to a single day rather than inverting. */
+  const isoWin = (from: string | null, to: string | null): [number, number] => {
+    let s = 0, e = nAll - 1;
+    if (from) { const i = allDays.findIndex((x) => x.utcDay >= from); if (i >= 0) s = i; }
+    if (to) { for (let i = nAll - 1; i >= 0; i--) { if (allDays[i].utcDay <= to) { e = i; break; } } }
+    if (e < s) e = s;
+    return [s, e];
+  };
+  const [cS, cE] = isoWin(d.cumFrom, d.cumTo);
+  const [mS, mE] = isoWin(d.msFrom, d.msTo);
+  const [kS, kE] = isoWin(d.brkFrom, d.brkTo);
+  const [bWS, bWE] = isoWin(d.burnFrom, d.burnTo);
 
   const setWin = (s: number, e: number) => {
-    d.set('volStart', s); d.set('volEnd', e); d.set('volRange', 'CUSTOM');
+    d.set('volStart', s); d.set('volEnd', e);
     setHover(null);
   };
-  const pickRange = (r: string) => {
-    d.set('volRange', r); d.set('volStart', null); d.set('volEnd', null);
-    setHover(null);
+  // per-chart from→to inputs (design dcSet): clearing a bound re-opens it to
+  // the full range. The DAILY pair instead maps ISO → brush indexes, so the
+  // brush and its date inputs stay two views of one window (empty = ignored,
+  // the brush owns resets).
+  const dcSet = (k: 'burnFrom' | 'burnTo' | 'cumFrom' | 'cumTo' | 'msFrom' | 'msTo' | 'brkFrom' | 'brkTo') =>
+    (e: React.ChangeEvent<HTMLInputElement>) => { d.set(k, e.target.value || null); setHover(null); };
+  const dailyFromCh = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = e.target.value;
+    if (!v || nAll === 0) return;
+    let i = allDays.findIndex((x) => x.utcDay >= v);
+    if (i < 0) i = nAll - 1;
+    setWin(Math.min(i, wE), wE);
+  };
+  const dailyToCh = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = e.target.value;
+    if (!v || nAll === 0) return;
+    let i = -1;
+    for (let k = nAll - 1; k >= 0; k--) { if (allDays[k].utcDay <= v) { i = k; break; } }
+    if (i < 0) i = 0;
+    setWin(wS, Math.max(i, wS));
   };
 
   // ── brush interactions (port of the design's brushDown): edge-grab resizes,
@@ -87,7 +145,7 @@ export function VolumeTab() {
     e.preventDefault();
     const r = el.getBoundingClientRect();
     const n = nAll;
-    const [s0, e0] = winFor(true);
+    const [s0, e0] = winDaily();
     const fr = (e.clientX - r.left) / r.width;
     const fs = s0 / (n - 1), fe = e0 / (n - 1);
     const grab = Math.max(0.02, 9 / r.width); // ~9px edge-handle tolerance
@@ -174,14 +232,14 @@ export function VolumeTab() {
         since: '—',
         legRows: series.map((s) => ({ id: s.id, name: s.name, color: s.color, vol: f(0), share: '0.0%', hidden: false })),
         legTotal: f(0), cumLine: '', cumArea: '', cumVenueLines: [] as { color: string; path: string }[], cumSigma: f(0),
-        rangeLabel: 'ALL-TIME', rangeCaption: '',
+        rangeLabel: 'ALL-TIME', brkLabel: 'ALL-TIME',
         msBands: [] as { path: string; color: string }[],
         msTopName: '—', msTopPct: '0.0%', msTopColor: msLabelColor(C.faint2),
         msBotName: '—', msBotPct: '0.0%', msBotColor: msLabelColor(C.faint2),
         brk: [] as { name: string; color: string; vol: string; share: string; shareW: string; swaps: string; peakV: string; peakDay: string; first: string }[],
         brkTotalVol: f(0), brkTotalSwaps: '0',
         volScopeNote: scopeNote,
-        ndPreset: 0,
+        ndCum: 0, ndMs: 0,
         dailyTip: null as null | { left: string; date: string; total: string; rows: { name: string; color: string; val: string }[] },
         cumTip: null as null | { left: string; guide: string; date: string; cum: string; day: string; rows: { name: string; color: string; cum: string }[] },
         msTip: null as null | { left: string; guide: string; date: string; rows: { name: string; color: string; pct: string; val: string }[] },
@@ -189,6 +247,7 @@ export function VolumeTab() {
         brushLeft: '0', brushWidth: '100', brushStartLbl: '—', brushEndLbl: '—',
         hasBurn: false,
         burnBars: [] as { op: number; segs: { h: string; color: string }[]; bg: string; onEnter: () => void }[],
+        burnAxis: [] as { label: string; left: string }[],
         burnMaxLabel: '0 MON', burnMidLabel: '0 MON',
         burnTip: null as null | { left: string; date: string; total: string; usd: string; rows: { name: string; color: string; val: string }[] },
         burnRows: [] as { id: string; name: string; color: string; burn: string; updates: string; hidden: boolean }[],
@@ -197,27 +256,38 @@ export function VolumeTab() {
     }
 
     const dayTotal = (x: DailyVolume) => series.reduce((a, s) => a + s.val(x), 0);
+    /** a series' sum over one bucket's member days. */
+    const bSum = (b: Bucket, fn: (x: DailyVolume) => number) => b.days.reduce((a, x) => a + fn(x), 0);
 
-    // ── windowed slices: daily chart follows the brush; cum/ms follow presets only.
+    // ── windowed slices: every chart owns its window. The daily chart follows
+    // the brush (⇄ its date inputs); cum/ms/breakdown/burn each follow their
+    // own from→to pair resolved in the component body.
     const wDays = allDays.slice(wS, wE + 1);
     const ndW = wDays.length;
-    const pDays = allDays.slice(pS, pE + 1);
-    const ndP = pDays.length;
+    const cDays = allDays.slice(cS, cE + 1);
+    const ncd = cDays.length;
+    const mDays = allDays.slice(mS, mE + 1);
+    const nmd = mDays.length;
+    const kDays = allDays.slice(kS, kE + 1);
 
     // chart-only subset: legend-hidden venues drop out of the stacks and the
     // y-scale renormalizes; every OTHER consumer (KPIs, cum/ms, breakdown)
     // stays full-series — the toggle is a lens, not a data filter.
     const volShown = series.filter((s) => !hiddenVol.has(s.id));
     const shownTotal = (x: DailyVolume) => volShown.reduce((a, s) => a + s.val(x), 0);
-    const maxT = Math.max(...wDays.map(shownTotal)) || 1;
+    // D/W/M granularity re-buckets the WINDOWED days; bars/axis/tooltips all
+    // render buckets from here on ('D' = one-day buckets, same shape).
+    const dGran = d.volGran;
+    const dB = bucketDays(wDays, dGran);
+    const ndB = dB.length;
+    const maxT = Math.max(...dB.map((b) => bSum(b, shownTotal))) || 1;
     const H = 150;
     const hv = hover;
-    const hiW = hv && hv.c === 'daily' ? Math.min(hv.i, ndW - 1) : -1;
-    const hiP = hv && hv.c !== 'daily' ? Math.min(hv.i, ndP - 1) : -1;
-    const volBars = wDays.map((x, i) => ({
-      op: x.partial ? 0.5 : 1,
-      segs: volShown.map((s) => ({ h: (s.val(x) / maxT * H).toFixed(1), color: s.color })),
-      // full-height accent wash behind the hovered day's stack
+    const hiW = hv && hv.c === 'daily' ? Math.min(hv.i, ndB - 1) : -1;
+    const volBars = dB.map((b, i) => ({
+      op: b.partial ? 0.5 : 1,
+      segs: volShown.map((s) => ({ h: (bSum(b, s.val) / maxT * H).toFixed(1), color: s.color })),
+      // full-height accent wash behind the hovered bucket's stack
       bg: hiW === i ? 'var(--accent-dim)' : 'transparent',
       onEnter: () => setHover({ c: 'daily', i }),
     }));
@@ -228,7 +298,6 @@ export function VolumeTab() {
     const allTot = allDays.reduce((a, x) => a + dayTotal(x), 0);
     const isFullWindow = wS === 0 && wE === nd - 1;
     const rangeLabel = isFullWindow ? 'ALL-TIME' : 'WINDOW';
-    const rangeCaption = isFullWindow ? '' : `${mmdd(wDays[0].utcDay)} → ${mmdd(wDays[ndW - 1].utcDay)}`;
     const winEndDay = wDays[ndW - 1].utcDay;
     // window totals per venue — venues that didn't EXIST during any part of the
     // window are omitted (same honesty rule as the per-day tooltips).
@@ -262,11 +331,12 @@ export function VolumeTab() {
     const swaps = allDays.reduce((a, x) => a + series.reduce((b, s) => b + s.swaps(x), 0), 0);
     const since = earliestActive();
 
-    // ── cumulative + market-share (preset window) ──────────────────────────────
-    const pTot = pDays.map(dayTotal);
+    // ── CUMULATIVE_VOLUME (own window): Σ and every line re-baseline to the
+    // window start.
+    const cTot = cDays.map(dayTotal);
     const W = 1000, HC = 260;
     let cum = 0;
-    const pts = pDays.map((_, i) => { cum += pTot[i]; return [ndP > 1 ? i / (ndP - 1) * W : 0, cum] as [number, number]; });
+    const pts = cDays.map((_, i) => { cum += cTot[i]; return [ncd > 1 ? i / (ncd - 1) * W : 0, cum] as [number, number]; });
     const cy = (y: number) => (cum ? HC - y / cum * HC : HC); // zero window ⇒ flat at the BOTTOM
     const cumLine = 'M' + pts.map((p) => p[0].toFixed(1) + ',' + cy(p[1]).toFixed(1)).join(' L');
     const cumArea = cumLine + ' L' + W + ',' + HC + ' L0,' + HC + ' Z';
@@ -276,10 +346,10 @@ export function VolumeTab() {
     const cumVenue = series.map((s2) => {
       let c2 = 0;
       const vpts: [number, number][] = [];
-      pDays.forEach((x, i) => {
+      cDays.forEach((x, i) => {
         if (!existsOn(s2, x)) return;
         c2 += s2.val(x);
-        vpts.push([ndP > 1 ? i / (ndP - 1) * W : 0, c2]);
+        vpts.push([ncd > 1 ? i / (ncd - 1) * W : 0, c2]);
       });
       return { name: s2.name, color: s2.color, cum: c2, pts: vpts };
     });
@@ -288,10 +358,13 @@ export function VolumeTab() {
       path: 'M' + v.pts.map((pt) => pt[0].toFixed(1) + ',' + cy(pt[1]).toFixed(1)).join(' L'),
     }));
 
-    const xs = (i: number) => (ndP > 1 ? i / (ndP - 1) * W : 0);
+    // ── MARKET_SHARE (own window): bands + the top/bottom badges read from
+    // THIS window's last day.
+    const mTot = mDays.map(dayTotal);
+    const xs = (i: number) => (nmd > 1 ? i / (nmd - 1) * W : 0);
     const bands = series.map(() => ({ top: [] as [number, number][], bot: [] as [number, number][] }));
-    pDays.forEach((x, i) => {
-      const t = pTot[i] || 1;
+    mDays.forEach((x, i) => {
+      const t = mTot[i] || 1;
       let below = 0;
       for (let k = 0; k < series.length; k++) {
         const fr = series[k].val(x) / t;
@@ -304,69 +377,82 @@ export function VolumeTab() {
       'M' + top.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L')
       + ' L' + bot.slice().reverse().map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L') + ' Z';
     const msBands = series.map((s, k) => ({ path: band(bands[k].top, bands[k].bot), color: s.color }));
+    const mLast = mDays[nmd - 1];
+    const lt = mTot[nmd - 1] || 1;
 
-    const lt = pTot[ndP - 1] || 1;
+    // ── VENUE_BREAKDOWN (own window): every column window-scoped.
+    const brkEndDay = kDays[kDays.length - 1]?.utcDay ?? '';
+    const brkSeries = series.filter((s) => !s.since || s.since <= brkEndDay);
+    const brkTots = brkSeries.map((s) => kDays.reduce((a, x) => a + s.val(x), 0));
+    const kTot = brkTots.reduce((a, b) => a + b, 0);
     const pPeak = (s: SeriesDef) => {
       let pv = -1, pd = '';
-      wDays.forEach((x) => { const v = s.val(x); if (v > pv) { pv = v; pd = mmdd(x.utcDay); } });
+      kDays.forEach((x) => { const v = s.val(x); if (v > pv) { pv = v; pd = mmdd(x.utcDay); } });
       return { v: f(pv), day: pd };
     };
     // real per-source swap counts (no USD proration): each venue counts its own takes.
-    const brkSwaps = winSeries.map((s) => wDays.reduce((a, x) => a + s.swaps(x), 0));
+    const brkSwaps = brkSeries.map((s) => kDays.reduce((a, x) => a + s.swaps(x), 0));
     const brkSwapTotal = brkSwaps.reduce((a, b) => a + b, 0);
-    const brk = winSeries.map((s, k) => {
-      const tot = totals[k].tot;
+    const brk = brkSeries.map((s, k) => {
+      const tot = brkTots[k];
       const pk = pPeak(s);
       // first day IN THE WINDOW with any notional (the venue's true first-active
       // still anchors the all-time tile's "since" line).
-      const firstInWin = wDays.find((x) => s.val(x) > 0)?.utcDay ?? '—';
+      const firstInWin = kDays.find((x) => s.val(x) > 0)?.utcDay ?? '—';
       return {
-        name: s.name, color: s.color, vol: f(tot), share: share(tot),
-        shareW: (winTot ? tot / winTot * 100 : 0).toFixed(1),
+        name: s.name, color: s.color, vol: f(tot),
+        share: (kTot ? tot / kTot * 100 : 0).toFixed(1) + '%',
+        shareW: (kTot ? tot / kTot * 100 : 0).toFixed(1),
         swaps: brkSwaps[k].toLocaleString(),
         peakV: pk.v, peakDay: pk.day,
         first: firstInWin,
       };
     });
+    const brkLabel = kS === 0 && kE === nd - 1 ? 'ALL-TIME' : 'WINDOW';
 
-    const axis = [0, Math.floor(ndW * 0.25), Math.floor(ndW * 0.5), Math.floor(ndW * 0.75), ndW - 1]
-      .map((i) => ({ label: mmdd(wDays[i].utcDay), left: (ndW > 1 ? i / (ndW - 1) * 100 : 0).toFixed(1) + '%' }));
+    const axis = axisOf(dB, dGran);
 
     // ── hover tooltips (design: clamp x so the tip never clips the panel) ──────
     const tipLeft = (i: number, n: number) => Math.max(9, Math.min(88, ((i + 0.5) / n) * 100)).toFixed(1);
     const guideLeft = (i: number, n: number) => (n > 1 ? (i / (n - 1)) * 100 : 0).toFixed(1);
     const dateOf = (x: DailyVolume) => x.utcDay + (x.partial ? ' (today, partial)' : '');
+    // a venue belongs in a BUCKET's tooltip if it existed for any part of it.
+    const existsInBucket = (s: SeriesDef, b: Bucket) => !s.since || b.isoEnd >= s.since;
     let dailyTip = null, cumTip = null, msTip = null;
     if (hiW >= 0) {
-      const x = wDays[hiW];
+      const b = dB[hiW];
       dailyTip = {
-        left: tipLeft(hiW, ndW), date: dateOf(x), total: f(shownTotal(x)),
-        rows: volShown.filter((s) => existsOn(s, x)).map((s) => ({ name: s.name, color: s.color, val: f(s.val(x)) })),
+        left: tipLeft(hiW, ndB), date: bucketDate(b), total: f(bSum(b, shownTotal)),
+        rows: volShown.filter((s) => existsInBucket(s, b)).map((s) => ({ name: s.name, color: s.color, val: f(bSum(b, s.val)) })),
       };
-    } else if (hiP >= 0) {
-      const x = pDays[hiP];
-      if (hv!.c === 'cum') {
-        let c2 = 0; for (let k = 0; k <= hiP; k++) c2 += pTot[k];
-        const rows = series.filter((s2) => existsOn(s2, x)).map((s2) => {
-          let cv = 0;
-          for (let k = 0; k <= hiP; k++) if (existsOn(s2, pDays[k])) cv += s2.val(pDays[k]);
-          return { name: s2.name, color: s2.color, cum: f(cv) };
-        }).filter((r2) => r2.cum !== f(0));
-        cumTip = { left: tipLeft(hiP, ndP), guide: guideLeft(hiP, ndP), date: dateOf(x), cum: f(c2), day: f(pTot[hiP]), rows };
-      } else {
-        const t = pTot[hiP] || 1;
-        msTip = {
-          left: tipLeft(hiP, ndP), guide: guideLeft(hiP, ndP), date: dateOf(x),
-          rows: series.filter((s) => existsOn(s, x)).map((s) => ({ name: s.name, color: s.color, pct: (s.val(x) / t * 100).toFixed(1) + '%', val: f(s.val(x)) })),
-        };
-      }
+    }
+    const hiC = hv && hv.c === 'cum' ? Math.min(hv.i, ncd - 1) : -1;
+    if (hiC >= 0) {
+      const x = cDays[hiC];
+      let c2 = 0; for (let k = 0; k <= hiC; k++) c2 += cTot[k];
+      const rows = series.filter((s2) => existsOn(s2, x)).map((s2) => {
+        let cv = 0;
+        for (let k = 0; k <= hiC; k++) if (existsOn(s2, cDays[k])) cv += s2.val(cDays[k]);
+        return { name: s2.name, color: s2.color, cum: f(cv) };
+      }).filter((r2) => r2.cum !== f(0));
+      cumTip = { left: tipLeft(hiC, ncd), guide: guideLeft(hiC, ncd), date: dateOf(x), cum: f(c2), day: f(cTot[hiC]), rows };
+    }
+    const hiM = hv && hv.c === 'ms' ? Math.min(hv.i, nmd - 1) : -1;
+    if (hiM >= 0) {
+      const x = mDays[hiM];
+      const t = mTot[hiM] || 1;
+      msTip = {
+        left: tipLeft(hiM, nmd), guide: guideLeft(hiM, nmd), date: dateOf(x),
+        rows: series.filter((s) => existsOn(s, x)).map((s) => ({ name: s.name, color: s.color, pct: (s.val(x) / t * 100).toFixed(1) + '%', val: f(s.val(x)) })),
+      };
     }
 
     // ── QUOTE_UPDATE_BURN (MON, not USD): the gas each venue's own keeper
-    // spends keeping quotes fresh. Same window + x-domain as the daily chart
-    // (reuses volAxis, no brush of its own). Venues appear only when the
-    // server tracks a series for them — a venue that doesn't self-fund its
-    // price updates (external oracle / taker-paid JIT) has no row, on purpose.
+    // spends keeping quotes fresh. Owns its OWN from→to window + D/W/M
+    // granularity + x-axis — fully independent of the daily chart. Venues
+    // appear only when the server tracks a series for them — a venue that
+    // doesn't self-fund its price updates (taker-paid JIT) has no row, on
+    // purpose.
     const gasByDay = new Map((d.gas?.days ?? []).map((g) => [g.utcDay, g.byVenue]));
     const approx = new Set(d.gas?.approx ?? []);
     const gasVenueIds = new Set<string>();
@@ -376,40 +462,48 @@ export function VolumeTab() {
     const gVal = (utc: string, vid: string) => gasByDay.get(utc)?.[vid]?.mon ?? 0;
     const gTxs = (utc: string, vid: string) => gasByDay.get(utc)?.[vid]?.txs ?? 0;
     const fMON = (m: number) => (m >= 1000 ? (m / 1000).toFixed(1) + 'K' : Math.round(m).toLocaleString()) + ' MON';
+    const bDaysW = allDays.slice(bWS, bWE + 1);
+    const bB = bucketDays(bDaysW, d.burnGran);
+    const nbB = bB.length;
     const burnShown = burnSeries.filter((s) => !hiddenBurn.has(s.id));
-    const bTot = wDays.map((x) => burnShown.reduce((a, s) => a + gVal(x.utcDay, s.id), 0));
+    const bGas = (b: Bucket, vid: string) => bSum(b, (x) => gVal(x.utcDay, vid));
+    const bTot = bB.map((b) => burnShown.reduce((a, s) => a + bGas(b, s.id), 0));
     const bMax = Math.max(...bTot, 0) || 1;
-    const hiB = hv && hv.c === 'burn' ? Math.min(hv.i, ndW - 1) : -1;
-    const burnBars = wDays.map((x, i) => ({
-      op: x.partial ? 0.5 : 1,
-      segs: burnShown.filter((s) => gVal(x.utcDay, s.id) > 0).map((s) => ({ h: (gVal(x.utcDay, s.id) / bMax * H).toFixed(1), color: s.color })),
+    const hiB = hv && hv.c === 'burn' ? Math.min(hv.i, nbB - 1) : -1;
+    const burnBars = bB.map((b, i) => ({
+      op: b.partial ? 0.5 : 1,
+      segs: burnShown.filter((s) => bGas(b, s.id) > 0).map((s) => ({ h: (bGas(b, s.id) / bMax * H).toFixed(1), color: s.color })),
       bg: hiB === i ? 'var(--accent-dim)' : 'transparent',
       onEnter: () => setHover({ c: 'burn', i }),
     }));
+    const burnAxis = axisOf(bB, d.burnGran);
     let burnTip = null;
     if (hiB >= 0) {
-      const x = wDays[hiB];
+      const b = bB[hiB];
       const monUsd = d.state?.monUsd ?? 0;
       burnTip = {
-        left: tipLeft(hiB, ndW), date: dateOf(x),
-        rows: burnShown.filter((s) => gVal(x.utcDay, s.id) > 0)
-          .map((s) => ({ name: s.name, color: s.color, val: (approx.has(s.id) ? '≈' : '') + gVal(x.utcDay, s.id).toFixed(1) + ' MON' })),
+        left: tipLeft(hiB, nbB), date: bucketDate(b),
+        rows: burnShown.filter((s) => bGas(b, s.id) > 0)
+          .map((s) => ({ name: s.name, color: s.color, val: (approx.has(s.id) ? '≈' : '') + bGas(b, s.id).toFixed(1) + ' MON' })),
         total: Math.round(bTot[hiB]).toLocaleString() + ' MON',
         usd: monUsd > 0 ? '~$' + (bTot[hiB] * monUsd).toFixed(0) : '',
       };
     }
+    // summary table: totals over the burn window's DAYS (bucketing changes the
+    // bars, never the sums).
     const burnRows = burnSeries.map((s) => {
-      const tot = wDays.reduce((a, x) => a + gVal(x.utcDay, s.id), 0);
-      const ups = wDays.reduce((a, x) => a + gTxs(x.utcDay, s.id), 0);
+      const tot = bDaysW.reduce((a, x) => a + gVal(x.utcDay, s.id), 0);
+      const ups = bDaysW.reduce((a, x) => a + gTxs(x.utcDay, s.id), 0);
       return { id: s.id, name: s.name, color: s.color, burn: (approx.has(s.id) ? '≈' : '') + fMON(tot), updates: ups.toLocaleString(), hidden: hiddenBurn.has(s.id) };
     });
-    const burnTotal = burnSeries.reduce((a, s) => a + wDays.reduce((x, y) => x + gVal(y.utcDay, s.id), 0), 0);
-    const burnUpdatesTotal = burnSeries.reduce((a, s) => a + wDays.reduce((x, y) => x + gTxs(y.utcDay, s.id), 0), 0);
-    // burn per $1M of volume, over only the days that HAVE a gas series — the
-    // burn history is deliberately shallow (~30d), so dividing by the window's
-    // FULL volume would understate the ratio on wide windows.
-    const volOnGasDays = wDays.reduce((a, x) => a + (gasByDay.has(x.utcDay) ? dayTotal(x) : 0), 0);
-    const burnPerM = volOnGasDays > 0 ? (burnTotal / (volOnGasDays / 1e6)).toFixed(1) : '0';
+    const burnTotal = burnSeries.reduce((a, s) => a + bDaysW.reduce((x, y) => x + gVal(y.utcDay, s.id), 0), 0);
+    const burnUpdatesTotal = burnSeries.reduce((a, s) => a + bDaysW.reduce((x, y) => x + gTxs(y.utcDay, s.id), 0), 0);
+    // burn per $1M of volume over the SAME window (design: the ratio's
+    // denominator is this chart's own window volume). Every gas series is
+    // venue-lifetime, so the window's full volume is the honest denominator.
+    const bVol = bDaysW.reduce((a, x) => a + dayTotal(x), 0);
+    const burnPerM = bVol > 0 ? (burnTotal / (bVol / 1e6)).toFixed(1) : '0';
+    const burnColHdr = bDaysW.length < nd ? 'WINDOW BURN' : 'ALL-TIME BURN';
 
     // ── brush / minimap: the FULL history as miniature total bars, window-tinted.
     const aMax = Math.max(...aTot) || 1;
@@ -433,33 +527,34 @@ export function VolumeTab() {
       kTodaycss: todayChg == null ? (todayT > 0 ? C.green : C.faint2) : (todayChg >= 0 ? C.green : C.red),
       since,
       legRows: totals.map((t) => ({ id: t.id, name: t.name, color: t.color, vol: f(t.tot), share: share(t.tot), hidden: hiddenVol.has(t.id) })),
-      legTotal: f(winTot), cumLine, cumArea, cumVenueLines, cumSigma: f(cum || winTot),
-      rangeLabel, rangeCaption,
+      legTotal: f(winTot), cumLine, cumArea, cumVenueLines, cumSigma: f(cum),
+      rangeLabel, brkLabel,
       msBands,
       msTopName: series[series.length - 1].name,
-      msTopPct: (series[series.length - 1].val(pDays[ndP - 1]) / lt * 100).toFixed(1) + '%',
+      msTopPct: (series[series.length - 1].val(mLast) / lt * 100).toFixed(1) + '%',
       msTopColor: msLabelColor(series[series.length - 1].color),
       msBotName: series[0].name,
-      msBotPct: (series[0].val(pDays[ndP - 1]) / lt * 100).toFixed(1) + '%',
+      msBotPct: (series[0].val(mLast) / lt * 100).toFixed(1) + '%',
       msBotColor: msLabelColor(series[0].color),
-      brk, brkTotalVol: f(winTot), brkTotalSwaps: brkSwapTotal.toLocaleString(),
+      brk, brkTotalVol: f(kTot), brkTotalSwaps: brkSwapTotal.toLocaleString(),
       volScopeNote: scopeNote,
-      ndPreset: ndP,
+      ndCum: ncd, ndMs: nmd,
       dailyTip, cumTip, msTip,
       brushBars, brushLeft, brushWidth, brushStartLbl, brushEndLbl,
-      hasBurn, burnBars,
+      hasBurn, burnBars, burnAxis,
       burnMaxLabel: fMON(bMax), burnMidLabel: fMON(bMax / 2),
       burnTip, burnRows,
       burnTotal: fMON(burnTotal), burnUpdatesTotal: burnUpdatesTotal.toLocaleString(),
-      burnColHdr: `${rangeLabel} BURN`, burnPerM,
+      burnColHdr, burnPerM,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d.volume, d.gas, d.theme, d.displayVenues, wS, wE, pS, pE, hover, hiddenVol, hiddenBurn]);
+  }, [d.volume, d.gas, d.theme, d.displayVenues, wS, wE, cS, cE, mS, mE, kS, kE, bWS, bWE, d.volGran, d.burnGran, hover, hiddenVol, hiddenBurn]);
 
-  // svg charts: cursor-x → nearest day index (round(frac × (n−1))); only
-  // re-render when the index or chart changes, not on every mousemove pixel.
+  // svg charts: cursor-x → nearest day index (round(frac × (n−1))) using EACH
+  // chart's own point count (their windows differ in length); only re-render
+  // when the index or chart changes, not on every mousemove pixel.
   const svgHover = (chart: 'cum' | 'ms') => (e: React.MouseEvent) => {
-    const n = vm.ndPreset;
+    const n = chart === 'cum' ? vm.ndCum : vm.ndMs;
     if (!n) return;
     const r = e.currentTarget.getBoundingClientRect();
     const fr = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
@@ -474,6 +569,34 @@ export function VolumeTab() {
     border: `1px solid ${C.line}`, padding: '8px 10px', zIndex: 10, pointerEvents: 'none',
   };
 
+  // ── per-chart header controls (design: title left, controls right; gran
+  // pills BEFORE the dates on the two bar charts) ────────────────────────────
+  const panelHdr: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
+    padding: '6px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em',
+  };
+  const dateStyle: React.CSSProperties = {
+    background: 'transparent', border: '1px solid var(--pill-border)', color: C.text2,
+    fontFamily: 'inherit', fontSize: 9.5, padding: '2px 5px', borderRadius: 4,
+  };
+  const volMinIso = nAll ? allDays[0].utcDay : '';
+  const volMaxIso = nAll ? allDays[nAll - 1].utcDay : '';
+  const dateRange = (from: string, to: string, onFrom: (e: React.ChangeEvent<HTMLInputElement>) => void, onTo: (e: React.ChangeEvent<HTMLInputElement>) => void) => (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 9, color: C.faint2 }}>
+      <input type="date" value={from} min={volMinIso} max={volMaxIso} onChange={onFrom} style={dateStyle} />
+      <span>→</span>
+      <input type="date" value={to} min={volMinIso} max={volMaxIso} onChange={onTo} style={dateStyle} />
+    </div>
+  );
+  const granPills = (key: 'volGran' | 'burnGran') => (
+    <div style={{ display: 'flex', gap: 3 }}>
+      {GRANS.map((g) => (
+        <button key={g} type="button" aria-pressed={d[key] === g} onClick={() => { d.set(key, g); setHover(null); }} style={pill(d[key] === g, true)}>{g}</button>
+      ))}
+    </div>
+  );
+  const isoAt = (i: number) => (nAll ? allDays[Math.max(0, Math.min(nAll - 1, i))].utcDay : '');
+
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '18px 18px 14px' }}>
@@ -481,15 +604,6 @@ export function VolumeTab() {
           <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '.06em', color: C.text }}>PROPAMM VOLUME</div>
           <div style={{ fontSize: 11, color: C.dim3, marginTop: 6, lineHeight: 1.55, maxWidth: 760 }}>
             All-time daily notional traded on tracked propAMM venues, split by venue. Volume is the USD-stable quote leg of each landed swap; buckets are UTC days and today's bucket is partial.
-          </div>
-        </div>
-        {/* RANGE presets — quick windows for the charts; the brush sets CUSTOM (none lit). */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: C.dim3 }}>
-          <span style={{ color: C.faint2, letterSpacing: '.06em' }}>RANGE</span>
-          <div style={{ display: 'flex', gap: 3 }}>
-            {RANGE_PRESETS.map((r) => (
-              <button key={r} type="button" aria-pressed={d.volRange === r} onClick={() => pickRange(r)} style={pill(d.volRange === r, true)}>{r}</button>
-            ))}
           </div>
         </div>
       </div>
@@ -527,8 +641,14 @@ export function VolumeTab() {
       <div style={{ position: 'relative', border: `1px solid ${C.line}`, background: C.panel, margin: '0 18px 14px' }}>
         <i style={{ position: 'absolute', top: -1, left: -1, width: 8, height: 8, borderTop: `1px solid ${C.purple}`, borderLeft: `1px solid ${C.purple}` }} />
         <i style={{ position: 'absolute', bottom: -1, right: -1, width: 8, height: 8, borderBottom: `1px solid ${C.purple}`, borderRight: `1px solid ${C.purple}` }} />
-        <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em' }}>
-          <span style={{ color: C.purple }}>~</span> <span style={{ color: C.text, fontWeight: 600 }}>DAILY_VOLUME</span> <span style={{ color: C.faint }}>USD notional by venue · UTC days · {vm.volScopeNote}</span>
+        <div style={panelHdr}>
+          <div>
+            <span style={{ color: C.purple }}>~</span> <span style={{ color: C.text, fontWeight: 600 }}>DAILY_VOLUME</span> <span style={{ color: C.faint }}>USD notional by venue · UTC buckets · {vm.volScopeNote}</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            {granPills('volGran')}
+            {dateRange(isoAt(wS), isoAt(wE), dailyFromCh, dailyToCh)}
+          </div>
         </div>
         {/* flex row: the bars end where the summary column begins, so the newest
             (right-most) bars never render underneath it — no absolute overlay. */}
@@ -611,15 +731,21 @@ export function VolumeTab() {
         </div>
       </div>
 
-      {/* QUOTE_UPDATE_BURN — same window + x-domain as DAILY_VOLUME (no brush of
-          its own; the one above is the page's single range control). Rendered
-          only once the server has a burn series for at least one venue. */}
+      {/* QUOTE_UPDATE_BURN — its OWN from→to window + D/W/M granularity + x-axis,
+          independent of DAILY_VOLUME. Rendered only once the server has a burn
+          series for at least one venue. */}
       {vm.hasBurn && (
         <div style={{ position: 'relative', border: `1px solid ${C.line}`, background: C.panel, margin: '0 18px 14px' }}>
           <i style={{ position: 'absolute', top: -1, left: -1, width: 8, height: 8, borderTop: `1px solid ${C.purple}`, borderLeft: `1px solid ${C.purple}` }} />
           <i style={{ position: 'absolute', bottom: -1, right: -1, width: 8, height: 8, borderBottom: `1px solid ${C.purple}`, borderRight: `1px solid ${C.purple}` }} />
-          <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em' }}>
-            <span style={{ color: C.purple }}>~</span> <span style={{ color: C.text, fontWeight: 600 }}>QUOTE_UPDATE_BURN</span> <span style={{ color: C.faint }}>gas burned keeping quotes fresh · MON · UTC days · tracked venues</span>
+          <div style={panelHdr}>
+            <div>
+              <span style={{ color: C.purple }}>~</span> <span style={{ color: C.text, fontWeight: 600 }}>QUOTE_UPDATE_BURN</span> <span style={{ color: C.faint }}>gas burned keeping quotes fresh · MON · tracked venues</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              {granPills('burnGran')}
+              {dateRange(d.burnFrom ?? isoAt(0), d.burnTo ?? isoAt(nAll - 1), dcSet('burnFrom'), dcSet('burnTo'))}
+            </div>
           </div>
           <div style={{ display: 'flex', flexDirection: mobile ? 'column' : 'row', alignItems: mobile ? 'stretch' : 'flex-start', gap: 14, padding: mobile ? '16px 12px 8px' : '16px 18px 8px' }}>
             <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
@@ -651,7 +777,7 @@ export function VolumeTab() {
                 </div>
               )}
               <div style={{ position: 'relative', height: 14, marginTop: 4, marginLeft: 42 }}>
-                {vm.volAxis.map((a, i) => (
+                {vm.burnAxis.map((a, i) => (
                   <div key={i} style={{ position: 'absolute', left: a.left, transform: 'translateX(-50%)', fontSize: 8.5, color: C.faint2 }}>{a.label}</div>
                 ))}
               </div>
@@ -689,8 +815,9 @@ export function VolumeTab() {
       <div style={{ display: 'grid', gridTemplateColumns: mobile ? '1fr' : '1fr 1fr', gap: 14, margin: '0 18px 14px' }}>
         <div style={{ position: 'relative', border: `1px solid ${C.line}`, background: C.panel }}>
           <i style={{ position: 'absolute', top: -1, left: -1, width: 8, height: 8, borderTop: `1px solid ${C.purple}`, borderLeft: `1px solid ${C.purple}` }} />
-          <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em' }}>
-            <span style={{ color: C.purple }}>■</span> <span style={{ color: C.text, fontWeight: 600 }}>CUMULATIVE_VOLUME</span>
+          <div style={panelHdr}>
+            <div><span style={{ color: C.purple }}>■</span> <span style={{ color: C.text, fontWeight: 600 }}>CUMULATIVE_VOLUME</span></div>
+            {dateRange(d.cumFrom ?? isoAt(0), d.cumTo ?? isoAt(nAll - 1), dcSet('cumFrom'), dcSet('cumTo'))}
           </div>
           <div onMouseMove={svgHover('cum')} onMouseLeave={leave} style={{ position: 'relative', padding: '14px 14px 10px' }}>
             <svg viewBox="0 0 1000 260" preserveAspectRatio="none" style={{ display: 'block', width: '100%', height: 230 }}>
@@ -732,8 +859,9 @@ export function VolumeTab() {
         </div>
         <div style={{ position: 'relative', border: `1px solid ${C.line}`, background: C.panel }}>
           <i style={{ position: 'absolute', top: -1, left: -1, width: 8, height: 8, borderTop: `1px solid ${C.purple}`, borderLeft: `1px solid ${C.purple}` }} />
-          <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em' }}>
-            <span style={{ color: C.purple }}>◆</span> <span style={{ color: C.text, fontWeight: 600 }}>MARKET_SHARE</span> <span style={{ color: C.faint }}>% of daily volume</span>
+          <div style={panelHdr}>
+            <div><span style={{ color: C.purple }}>◆</span> <span style={{ color: C.text, fontWeight: 600 }}>MARKET_SHARE</span> <span style={{ color: C.faint }}>% of daily volume</span></div>
+            {dateRange(d.msFrom ?? isoAt(0), d.msTo ?? isoAt(nAll - 1), dcSet('msFrom'), dcSet('msTo'))}
           </div>
           <div onMouseMove={svgHover('ms')} onMouseLeave={leave} style={{ position: 'relative', padding: '14px 14px 10px' }}>
             <svg viewBox="0 0 1000 260" preserveAspectRatio="none" style={{ display: 'block', width: '100%', height: 230 }}>
@@ -765,13 +893,14 @@ export function VolumeTab() {
       <div style={{ position: 'relative', border: `1px solid ${C.line}`, background: C.panel, margin: '0 18px 14px' }}>
         <i style={{ position: 'absolute', top: -1, left: -1, width: 8, height: 8, borderTop: `1px solid ${C.purple}`, borderLeft: `1px solid ${C.purple}` }} />
         <i style={{ position: 'absolute', bottom: -1, right: -1, width: 8, height: 8, borderBottom: `1px solid ${C.purple}`, borderRight: `1px solid ${C.purple}` }} />
-        <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em' }}>
-          <span style={{ color: C.purple }}>#</span> <span style={{ color: C.text, fontWeight: 600 }}>VENUE_BREAKDOWN</span>{vm.rangeCaption ? <span style={{ color: C.faint }}> {vm.rangeCaption}</span> : null}
+        <div style={panelHdr}>
+          <div><span style={{ color: C.purple }}>#</span> <span style={{ color: C.text, fontWeight: 600 }}>VENUE_BREAKDOWN</span></div>
+          {dateRange(d.brkFrom ?? isoAt(0), d.brkTo ?? isoAt(nAll - 1), dcSet('brkFrom'), dcSet('brkTo'))}
         </div>
         <div style={{ padding: '6px 14px 12px', overflowX: 'auto' }}>
           <div style={{ minWidth: 640 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 1.4fr 1fr 1.2fr 1fr', gap: 8, padding: '9px 6px', fontSize: 9, color: C.faint2, letterSpacing: '.05em', borderBottom: `1px solid ${C.line}` }}>
-            <div>VENUE</div><div style={{ textAlign: 'right' }}>{vm.rangeLabel} VOL</div><div style={{ textAlign: 'right' }}>SHARE</div><div style={{ textAlign: 'right' }}>SWAPS</div><div style={{ textAlign: 'right' }}>PEAK DAY</div><div style={{ textAlign: 'right' }}>FIRST ACTIVE</div>
+            <div>VENUE</div><div style={{ textAlign: 'right' }}>{vm.brkLabel} VOL</div><div style={{ textAlign: 'right' }}>SHARE</div><div style={{ textAlign: 'right' }}>SWAPS</div><div style={{ textAlign: 'right' }}>PEAK DAY</div><div style={{ textAlign: 'right' }}>FIRST ACTIVE</div>
           </div>
           {vm.brk.map((r) => (
             <div key={r.name} style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr 1.4fr 1fr 1.2fr 1fr', gap: 8, padding: '10px 6px', fontSize: 11.5, borderBottom: `1px solid ${C.line3}`, alignItems: 'center' }}>

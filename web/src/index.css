@@ -69,3 +69,8 @@ html, body { margin: 0; background: var(--bg); }
 .tx-row { text-decoration: none; color: inherit; }
 .tx-row:hover { background: var(--accent-row); }
 .tour-skip:hover { color: var(--text) !important; }
+
+/* native date inputs (Volume tab per-chart windows): picker follows the theme */
+input[type="date"] { color-scheme: light; }
+:root[data-theme="dark"] input[type="date"] { color-scheme: dark; }
+input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.55; cursor: pointer; }
