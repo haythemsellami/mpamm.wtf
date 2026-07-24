@@ -321,7 +321,6 @@
         <div><span style="color:var(--accent)">~</span> <span style="color:var(--text); font-weight:600">DAILY_VOLUME</span> <span style="color:var(--dim2)">USD notional by protocol · UTC buckets · {{ volScopeNote }}</span></div>
         <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
           <div style="display:flex; gap:3px"><sc-for list="{{ volGranPills }}" as="p" hint-placeholder-count="3"><div onClick="{{ p.onClick }}" style="{{ p.style }}">{{ p.label }}</div></sc-for></div>
-          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ dailyCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ dailyCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ dailyCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ dailyCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
         </div>
       </div>
       <div style="display:flex; align-items:flex-start; gap:16px; padding:16px 18px 8px">
@@ -389,7 +388,6 @@
         <div><span style="color:var(--accent)">~</span> <span style="color:var(--text); font-weight:600">QUOTE_UPDATE_BURN</span> <span style="color:var(--dim2)">gas burned keeping quotes fresh · MON · tracked venues</span></div>
         <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
           <div style="display:flex; gap:3px"><sc-for list="{{ burnGranPills }}" as="p" hint-placeholder-count="3"><div onClick="{{ p.onClick }}" style="{{ p.style }}">{{ p.label }}</div></sc-for></div>
-          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ burnCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ burnCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ burnCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ burnCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
         </div>
       </div>
       <div style="display:flex; align-items:flex-start; gap:16px; padding:16px 18px 8px">
@@ -421,7 +419,22 @@
         <div style="position:relative; height:14px; margin-top:4px; margin-left:42px">
           <sc-for list="{{ burnAxis }}" as="a" hint-placeholder-count="5"><div style="position:absolute; left:{{ a.left }}; transform:translateX(-50%); font-size:8.5px; color:var(--faint)">{{ a.label }}</div></sc-for>
         </div>
-        <div style="margin:8px 2px 4px 42px; font-size:10px; color:var(--faint)"><br></div>
+        <div data-comment-anchor="cdde26155b-div">
+          <!-- burn timeline brush: full history minimap -->
+          <div ref="{{ setBurnBrush }}" onMouseDown="{{ burnBrushDown }}" style="position:relative; height:40px; margin:12px 2px 2px 42px; border:1px solid var(--border2); background:var(--panel); cursor:grab; user-select:none">
+            <div style="position:absolute; left:3px; right:3px; top:3px; bottom:3px; display:flex; align-items:flex-end; gap:1px; pointer-events:none">
+              <sc-for list="{{ burnBrushBars }}" as="b" hint-placeholder-count="47"><div style="flex:1; height:{{ b.h }}%; background:{{ b.color }}; opacity:.55"></div></sc-for>
+            </div>
+            <div style="position:absolute; top:-1px; bottom:-1px; left:{{ burnBrushLeft }}%; width:{{ burnBrushWidth }}%; background:var(--accent-dim); border:1px solid var(--accent-border); pointer-events:none">
+              <div style="position:absolute; left:-3px; top:50%; transform:translateY(-50%); width:5px; height:18px; background:var(--accent); border-radius:2px"></div>
+              <div style="position:absolute; right:-3px; top:50%; transform:translateY(-50%); width:5px; height:18px; background:var(--accent); border-radius:2px"></div>
+            </div>
+          </div>
+          <div style="display:flex; justify-content:space-between; margin:4px 2px 0 42px; font-size:8.5px; color:var(--faint)">
+            <span>window: {{ burnBrushStartLbl }} → {{ burnBrushEndLbl }}</span>
+            <span>drag to pan · edges to resize · click outside to jump</span>
+          </div>
+        </div>
        </div>
         <!-- summary column (dedicated, never overlaps the chart) -->
         <div style="flex:none; width:248px; background:var(--overlay); border:1px solid var(--border); padding:8px 10px">
@@ -442,7 +455,7 @@
         <div style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></div>
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:6px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em" data-comment-anchor="dfce0d79dd-div">
           <div><span style="color:var(--accent)">■</span> <span style="color:var(--text); font-weight:600">CUMULATIVE_VOLUME</span></div>
-          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ cumCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ cumCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ cumCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ cumCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
+          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ cumCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ cumCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ cumCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ cumCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><div onClick="{{ cumCtl.reset }}" title="Reset to full range" style="cursor:pointer; padding:2px 5px; border:1px solid var(--pill-border); border-radius:4px; color:var(--dim); font-size:10px; line-height:1" style-hover="color:var(--accent); border-color:var(--accent-border)">↺</div></div>
         </div>
         <div onMouseMove="{{ cumMove }}" onMouseLeave="{{ volLeave }}" style="position:relative; padding:14px 14px 10px">
           <svg viewBox="0 0 1000 260" preserveAspectRatio="none" style="display:block; width:100%; height:230px">
@@ -471,7 +484,7 @@
         <div style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></div>
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:6px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em" data-comment-anchor="bf122bac43-div">
           <div><span style="color:var(--accent)">◆</span> <span style="color:var(--text); font-weight:600">MARKET_SHARE</span> <span style="color:var(--dim2)">% of daily volume</span></div>
-          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ msCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ msCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ msCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ msCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
+          <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ msCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ msCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ msCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ msCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><div onClick="{{ msCtl.reset }}" title="Reset to full range" style="cursor:pointer; padding:2px 5px; border:1px solid var(--pill-border); border-radius:4px; color:var(--dim); font-size:10px; line-height:1" style-hover="color:var(--accent); border-color:var(--accent-border)">↺</div></div>
         </div>
         <div onMouseMove="{{ msMove }}" onMouseLeave="{{ volLeave }}" style="position:relative; padding:14px 14px 10px">
           <svg viewBox="0 0 1000 260" preserveAspectRatio="none" style="display:block; width:100%; height:230px">
@@ -503,7 +516,7 @@
       <div style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></div>
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:6px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em" data-comment-anchor="c30f1aa17b-div">
         <div><span style="color:var(--accent)">#</span> <span style="color:var(--text); font-weight:600">PROTOCOL_BREAKDOWN</span></div>
-        <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ brkCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ brkCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ brkCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ brkCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"></div>
+        <div style="display:flex; align-items:center; gap:5px; font-size:9px; color:var(--faint)"><input type="date" value="{{ brkCtl.from }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ brkCtl.fromCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><span>→</span><input type="date" value="{{ brkCtl.to }}" min="{{ volMinIso }}" max="{{ volMaxIso }}" onChange="{{ brkCtl.toCh }}" style="background:transparent; border:1px solid var(--pill-border); color:var(--text2); font-family:inherit; font-size:9.5px; padding:2px 5px; border-radius:4px"><div onClick="{{ brkCtl.reset }}" title="Reset to full range" style="cursor:pointer; padding:2px 5px; border:1px solid var(--pill-border); border-radius:4px; color:var(--dim); font-size:10px; line-height:1" style-hover="color:var(--accent); border-color:var(--accent-border)">↺</div></div>
       </div>
       <div style="padding:6px 14px 12px">
         <div style="display:grid; grid-template-columns:1.4fr 1fr 1.4fr 1fr 1.2fr 1fr; gap:8px; padding:9px 6px; font-size:9px; color:var(--faint); letter-spacing:.05em; border-bottom:1px solid var(--border)"><div>PROTOCOL</div><div style="text-align:right">ALL-TIME VOL</div><div>SHARE</div><div style="text-align:right">SWAPS</div><div style="text-align:right">PEAK DAY</div><div style="text-align:right">FIRST ACTIVE</div></div>
@@ -1177,12 +1190,24 @@ class Component extends DCLogic {
     return rangeN ? [Math.max(0, n - rangeN), n - 1] : [0, n - 1];
   }
   setBrush = (el) => { this.brushEl = el; };
-  brushDown = (e) => {
-    if (!this.brushEl || !this.vol) return;
-    e.preventDefault();
-    const r = this.brushEl.getBoundingClientRect();
+  setBurnBrush = (el) => { this.burnBrushEl = el; };
+  burnWin() {
     const n = this.vol.days.length;
-    const [s0, e0] = this.volWin();
+    const st = this.state;
+    if (st.burnStart != null && st.burnEnd != null) {
+      const s = Math.max(0, Math.min(n - 4, st.burnStart));
+      return [s, Math.max(s + 3, Math.min(n - 1, st.burnEnd))];
+    }
+    return [0, n - 1];
+  }
+  brushDown = (e) => this.brushDrag(e, this.brushEl, this.volWin(), (s, en) => this.setState({ volStart: s, volEnd: en, volRange: 'CUSTOM', volHover: null }));
+  burnBrushDown = (e) => this.brushDrag(e, this.burnBrushEl, this.burnWin(), (s, en) => this.setState({ burnStart: s, burnEnd: en, volHover: null }));
+  brushDrag = (e, el, win, apply) => {
+    if (!el || !this.vol) return;
+    e.preventDefault();
+    const r = el.getBoundingClientRect();
+    const n = this.vol.days.length;
+    const [s0, e0] = win;
     const fr = (e.clientX - r.left) / r.width;
     const fs = s0 / (n - 1), fe = e0 / (n - 1);
     const grab = Math.max(0.02, 9 / r.width);
@@ -1193,7 +1218,7 @@ class Component extends DCLogic {
       const w = e0 - s0, half = Math.round(w / 2);
       const c = Math.round(fr * (n - 1));
       ds = Math.max(0, Math.min(n - 1 - w, c - half)); de = ds + w;
-      this.setState({ volStart: ds, volEnd: de, volRange: 'CUSTOM', volHover: null });
+      apply(ds, de);
     }
     this._drag = { mode, fr0: fr, s0: ds, e0: de };
     const mv = (ev) => {
@@ -1204,7 +1229,7 @@ class Component extends DCLogic {
       if (d.mode === 'move') { const w = d.e0 - d.s0; s = Math.max(0, Math.min(n - 1 - w, d.s0 + di)); en = s + w; }
       else if (d.mode === 'l') { s = Math.max(0, Math.min(d.e0 - 3, d.s0 + di)); }
       else { en = Math.max(d.s0 + 3, Math.min(n - 1, d.e0 + di)); }
-      if (s !== this.state.volStart || en !== this.state.volEnd) this.setState({ volStart: s, volEnd: en, volRange: 'CUSTOM', volHover: null });
+      if (s !== d.sPrev || en !== d.ePrev) { d.sPrev = s; d.ePrev = en; apply(s, en); }
     };
     const up = () => { this._drag = null; window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); };
     window.addEventListener('mousemove', mv);
@@ -1322,7 +1347,7 @@ class Component extends DCLogic {
       { name: 'Hanji', key: 'bHanji', ukey: 'uHanji', color: C2.Hanji, approx: true },
     ];
     // QUOTE_UPDATE_BURN: own from→to window + D/W/M granularity
-    const [bWS, bWE] = this.isoWin('burnFrom', 'burnTo');
+    const [bWS, bWE] = this.burnWin();
     const bDays = allDays.slice(bWS, bWE + 1);
     const bB = this.bucket(bDays, st.burnGran || 'D');
     const nbB = bB.length;
@@ -1373,15 +1398,19 @@ class Component extends DCLogic {
     const brushStartLbl = allDays[wS].mmdd, brushEndLbl = allDays[wE].mmdd + (allDays[wE].partial ? ' \u00b7 now' : '');
     // per-chart from→to date controls
     const dcSet = k => e => this.setState({ [k]: e.target.value || null, volHover: null });
-    const ctl = (fk, tk, s, e) => ({ from: st[fk] || allDays[s].iso, to: st[tk] || allDays[e].iso, fromCh: dcSet(fk), toCh: dcSet(tk) });
-    const cumCtl = ctl('cumFrom', 'cumTo', cS, cE), msCtl = ctl('msFrom', 'msTo', mS, mE), brkCtl = ctl('brkFrom', 'brkTo', kS, kE), burnCtl = ctl('burnFrom', 'burnTo', bWS, bWE);
-    const dailyCtl = {
-      from: allDays[wS].iso, to: allDays[wE].iso,
-      fromCh: e => { const v = e.target.value; if (!v) return; let i = allDays.findIndex(d2 => d2.iso >= v); if (i < 0) i = nAll - 1; this.setState({ volStart: Math.min(i, wE), volEnd: wE, volRange: 'CUSTOM', volHover: null }); },
-      toCh: e => { const v = e.target.value; if (!v) return; let i = -1; for (let k = nAll - 1; k >= 0; k--) { if (allDays[k].iso <= v) { i = k; break; } } if (i < 0) i = 0; this.setState({ volStart: wS, volEnd: Math.max(i, wS), volRange: 'CUSTOM', volHover: null }); },
-    };
+    const ctl = (fk, tk, s, e) => ({ from: st[fk] || allDays[s].iso, to: st[tk] || allDays[e].iso, fromCh: dcSet(fk), toCh: dcSet(tk), reset: () => this.setState({ [fk]: null, [tk]: null, volHover: null }) });
+    const cumCtl = ctl('cumFrom', 'cumTo', cS, cE), msCtl = ctl('msFrom', 'msTo', mS, mE), brkCtl = ctl('brkFrom', 'brkTo', kS, kE);
+    // burn brush minimap (full burn history)
+    const bAllTot = allDays.map(d => burnSeries.reduce((a, s2) => a + d[s2.key], 0));
+    const bAllMax = Math.max(...bAllTot) || 1;
+    const burnBrushBars = allDays.map((d, i) => ({ h: Math.max(4, (bAllTot[i] / bAllMax * 100)).toFixed(1), color: (i >= bWS && i <= bWE) ? 'var(--accent)' : 'var(--faint2)' }));
+    const burnBrushLeft = (bWS / (nAll - 1) * 100).toFixed(2);
+    const burnBrushWidth = Math.max(1.5, ((bWE - bWS) / (nAll - 1) * 100)).toFixed(2);
+    const burnBrushStartLbl = allDays[bWS].mmdd, burnBrushEndLbl = allDays[bWE].mmdd + (allDays[bWE].partial ? ' \u00b7 now' : '');
     return {
-      volGranPills, burnGranPills, dailyCtl, burnCtl, cumCtl, msCtl, brkCtl,
+      volGranPills, burnGranPills, cumCtl, msCtl, brkCtl,
+      burnBrushBars, burnBrushLeft, burnBrushWidth, burnBrushStartLbl, burnBrushEndLbl,
+      setBurnBrush: this.setBurnBrush, burnBrushDown: this.burnBrushDown,
       volMinIso: allDays[0].iso, volMaxIso: allDays[nAll - 1].iso, burnAxis,
       volLeave: this.volLeave, cumMove: this.cumMove, msMove: this.msMove,
       brushBars, brushLeft, brushWidth, brushStartLbl, brushEndLbl,
