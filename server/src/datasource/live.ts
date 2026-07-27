@@ -19,6 +19,43 @@ import type { AdapterContext, LogBundle, LogSource, VenueAdapter } from '../venu
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Reference-feed starvation lifecycle for the base assets.
+ *
+ * A starved base asset hides its pairs (no reference rows, no bps anchors, no
+ * markouts), so the warning must be LOUD — but it must also CLEAR when the feed
+ * recovers. It previously did not: `noteOnce` is sticky for the process
+ * lifetime, so one transient Bybit blip left prod serving "MON pairs are
+ * hidden" for hours while MON quotes were visibly live. Recovery now drops the
+ * stale warning and announces, same shape as the RPC breaker's snap-back note.
+ *
+ * Control flow is pure with injected note sinks so the transitions are
+ * unit-tested without standing up a live source (see reference-notes.test.ts).
+ */
+export function checkReferenceStarvation(
+  assets: readonly { key: string; cex: string; cexSymbol: string; symbol: string }[],
+  midOf: (key: string) => number,
+  starvedSince: Map<string, number>,
+  now: number,
+  io: { warn: (m: string) => void; clear: (m: string) => void; announce: (m: string) => void },
+): void {
+  for (const a of assets) {
+    const warning = `${a.cex} feed has no ${a.cexSymbol} mid — ${a.symbol} pairs are hidden (reference/markouts unavailable)`;
+    if (midOf(a.key) <= 0) {
+      if (!starvedSince.has(a.key)) starvedSince.set(a.key, now);
+      io.warn(warning);
+      continue;
+    }
+    const since = starvedSince.get(a.key);
+    if (since === undefined) continue; // healthy all along — nothing to say
+    starvedSince.delete(a.key);
+    // clear() must be handed the EXACT string warn() emitted, or the stale
+    // warning survives the recovery — that is the bug this function exists for.
+    io.clear(warning);
+    const mins = Math.max(1, Math.round((now - since) / 60_000));
+    io.announce(`${a.cex} feed recovered: ${a.cexSymbol} mid is back — ${a.symbol} pairs visible again (hidden for ~${mins}m)`);
+  }
+}
+
 /** Hold a deep history crawl while the RPC runs on a backup: the live tail and
  *  quote ticks keep the backup's rate budget; crawls resume on the primary.
  *  (Cursors/accumulators simply wait — nothing is lost or restarted.) */
@@ -90,6 +127,8 @@ export class LiveDataSource extends BaseSource {
    *  — two remark walks over the same cursors must never interleave. */
   private remarkRunning = false;
   private notes: string[] = [];
+  /** base asset key → when its reference mid went dark (checkReferenceStarvation). */
+  private starvedSince = new Map<string, number>();
   private block = 0;
   /** all registered venue ids — a fill/quote carrying an unknown id is dropped
    *  (a plugin bug must not silently store data the UI can't render). */
@@ -381,6 +420,12 @@ export class LiveDataSource extends BaseSource {
   private noteOnce(msg: string): void {
     const s = this.scrubNote(msg);
     if (!this.notes.includes(s)) this.note(s);
+  }
+  /** retract a note that no longer describes reality (a recovered degradation).
+   *  Scrubbed the same way it was pushed, so the strings actually match. */
+  private dropNote(msg: string): void {
+    const s = this.scrubNote(msg);
+    for (let i = this.notes.length - 1; i >= 0; i--) if (this.notes[i] === s) this.notes.splice(i, 1);
   }
 
   /** keep only items whose venueId is one this adapter declared — a foreign id
@@ -929,11 +974,11 @@ export class LiveDataSource extends BaseSource {
     // own connection errors, so the mid is the observable signal). Grace period
     // covers the normal cold-start warmup.
     if (now - this.bootMs > 60_000) {
-      for (const a of Object.values(ASSETS)) {
-        if (REFERENCES.assetUsd(a.key) <= 0) {
-          this.noteOnce(`${a.cex} feed has no ${a.cexSymbol} mid — ${a.symbol} pairs are hidden (reference/markouts unavailable)`);
-        }
-      }
+      checkReferenceStarvation(Object.values(ASSETS), (k) => REFERENCES.assetUsd(k), this.starvedSince, now, {
+        warn: (m) => this.noteOnce(m),
+        clear: (m) => this.dropNote(m),
+        announce: (m) => this.note(m),
+      });
     }
     // record each PAIR's CEX mid history in its own terms (the markout anchors).
     for (const pair of PAIRS) {
