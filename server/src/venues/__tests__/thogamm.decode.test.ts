@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { TOKENS } from '@shared';
 import {
   THOGAMM_ADDRESS,
+  createThogammAdapter,
   decodeThogammSwap,
   indexThogammMarkets,
   selectThogammPoolId,
@@ -128,5 +129,74 @@ describe('decodeThogammSwap (real Monad fixture)', () => {
       ...REAL_MON_USDC_FILL,
       blockNumber: 'not-a-block',
     }, BY_DIRECTION, 0, usdForToken)).toBeNull();
+  });
+});
+
+/** Minimal ctx: discovery reads are stubbed to the live 7-token registry, so
+ *  decode() can exercise the upgrade path with no network. */
+const stubCtx = (notes: string[]) => ({
+  client: {
+    getBlockNumber: async () => 91_000_000n,
+    readContract: async ({ functionName }: any) =>
+      functionName === 'getPoolIds'
+        ? ['0xce389e78282dedac7b18ba7f775b7602d2ab3ab171bbd6711eb0239be6ef4dcc']
+        : LIVE_TOKEN_ADDRESSES,
+    multicall: async ({ contracts }: any) =>
+      contracts.map((c: any) => ({
+        status: 'success',
+        result: Object.values(TOKENS).find((t) => t.address.toLowerCase() === String(c.address).toLowerCase())!.decimals,
+      })),
+  },
+  pricer: { usdForToken: (key: string, amount: number) => usdForToken(key, amount) },
+  log: (m: string) => notes.push(m),
+}) as any;
+
+describe('ThogAMM proxy upgrades', () => {
+  it('announces every upgrade loudly — an ABI shift would silence fills otherwise', async () => {
+    const notes: string[] = [];
+    const adapter = createThogammAdapter();
+    const ctx = stubCtx(notes);
+    await adapter.discover(ctx);
+    notes.length = 0;
+
+    const upgrade = (impl: string) => ({ address: THOGAMM_ADDRESS, eventName: 'Upgraded', args: { implementation: impl }, blockNumber: 91_000_000n, logIndex: 1, transactionHash: `0x${'a'.repeat(64)}` });
+    await adapter.decode(ctx, { upgrades: [upgrade('0x127a5b18e3e96fc104f5eaf280dfe502dd3fd40a')], swaps: [] } as any, () => 0, new Set());
+
+    expect(notes.filter((n) => n.includes('proxy upgraded'))).toHaveLength(1);
+    expect(notes[0]).toContain('0x127a…d40a');
+    expect(notes[0]).toContain('re-verify');
+    // discovery re-ran (the token registry can change with the implementation)
+    expect(notes.some((n) => n.includes('registered market(s)'))).toBe(true);
+  });
+
+  it('notes each implementation in a multi-upgrade range, and tolerates a malformed arg', async () => {
+    const notes: string[] = [];
+    const adapter = createThogammAdapter();
+    const ctx = stubCtx(notes);
+    await adapter.discover(ctx);
+    notes.length = 0;
+
+    await adapter.decode(ctx, {
+      upgrades: [
+        { address: THOGAMM_ADDRESS, eventName: 'Upgraded', args: { implementation: '0xaea051d2d7c0f4a5b6d3e2f1a0b9c8d7e6f5a4b3' }, blockNumber: 1n, logIndex: 0 },
+        { address: THOGAMM_ADDRESS, eventName: 'Upgraded', args: {}, blockNumber: 2n, logIndex: 0 },
+      ],
+      swaps: [],
+    } as any, () => 0, new Set());
+
+    const upgradeNotes = notes.filter((n) => n.includes('proxy upgraded'));
+    expect(upgradeNotes).toHaveLength(2);
+    expect(upgradeNotes[0]).toContain('0xaea0…a4b3');
+    expect(upgradeNotes[1]).toContain('an unreadable implementation');
+  });
+
+  it('stays silent when no upgrade is in the range', async () => {
+    const notes: string[] = [];
+    const adapter = createThogammAdapter();
+    const ctx = stubCtx(notes);
+    await adapter.discover(ctx);
+    notes.length = 0;
+    await adapter.decode(ctx, { upgrades: [], swaps: [REAL_MON_USDC_FILL] } as any, () => 1_785_053_296_000, new Set());
+    expect(notes).toEqual([]);
   });
 });

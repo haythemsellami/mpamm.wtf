@@ -348,7 +348,24 @@ export function createThogammAdapter(): VenueAdapter {
     }],
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
-      if ((logs.upgrades ?? []).length) await refresh(ctx);
+      const upgrades = logs.upgrades ?? [];
+      if (upgrades.length) {
+        // Calls go to the PROXY, so an upgrade is transparent while the
+        // interface holds — the implementation address is never referenced.
+        // But this proxy has upgraded 27 times (7 in its first four live
+        // days), and an ABI change is the one thing state refresh cannot
+        // absorb: a renamed/reordered/re-indexed event param shifts topic0,
+        // and our fill + gas filters would then match NOTHING while looking
+        // exactly like a quiet venue (the Hanji FastQuoter failure mode).
+        // So announce every upgrade in state.notes — one note per new
+        // implementation — as the cue to re-verify the ABIs.
+        for (const log of upgrades) {
+          const impl = String(log?.args?.implementation ?? '');
+          const label = /^0x[0-9a-fA-F]{40}$/.test(impl) ? shortHex(impl) : 'an unreadable implementation';
+          ctx.log(`ThogAMM: proxy upgraded to ${label} — re-verify quote/fill/gas ABIs against the new implementation`);
+        }
+        await refresh(ctx);
+      }
       const out: Fill[] = [];
       for (const log of logs.swaps ?? []) {
         let blockNumber: bigint;
