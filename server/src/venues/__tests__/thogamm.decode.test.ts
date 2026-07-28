@@ -4,6 +4,7 @@ import {
   THOGAMM_ADDRESS,
   decodeThogammSwap,
   indexThogammMarkets,
+  selectThogammPoolId,
   thogammMarketsForTokens,
 } from '../thogamm.js';
 
@@ -49,6 +50,17 @@ const usdForToken = (tokenKey: string, amount: number) => {
   const px: Record<string, number> = { WMON: 0.021, WETH: 3_800, WBTC: 118_000, CBBTC: 118_000 };
   return amount * (px[tokenKey] ?? 0);
 };
+
+describe('ThogAMM pool discovery', () => {
+  it('follows a sole rotated id and rejects zero or multiple pools', () => {
+    const v1 = '0xce389e78282dedac7b18ba7f775b7602d2ab3ab171bbd6711eb0239be6ef4dcc' as const;
+    const v2 = '0x2222222222222222222222222222222222222222222222222222222222222222' as const;
+    expect(selectThogammPoolId([v1])).toBe(v1);
+    expect(selectThogammPoolId([v2])).toBe(v2);
+    expect(() => selectThogammPoolId([])).toThrow('expected exactly one pool id, got 0');
+    expect(() => selectThogammPoolId([v1, v2])).toThrow('expected exactly one pool id, got 2');
+  });
+});
 
 describe('ThogAMM registered-market coverage', () => {
   it('lists every base/stable and crypto/crypto pair supported by the reference model', () => {

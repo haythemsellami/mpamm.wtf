@@ -12,7 +12,6 @@ import type { AdapterContext, LogBundle, VenueAdapter } from './adapter.js';
  */
 
 export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as const;
-export const THOGAMM_POOL_ID = '0xce389e78282dedac7b18ba7f775b7602d2ab3ab171bbd6711eb0239be6ef4dcc' as const;
 
 const THOGAMM_VENUE: VenueMeta = {
   id: 'thogamm',
@@ -43,6 +42,14 @@ export interface ThogammMarket {
   quoteKey: string;
   base: TokenInfo;
   quote: TokenInfo;
+}
+
+/** Follow a pool-id rotation, but fail closed if the proxy is not single-pool. */
+export function selectThogammPoolId(poolIds: readonly `0x${string}`[]): `0x${string}` {
+  if (poolIds.length !== 1) {
+    throw new Error(`ThogAMM expected exactly one pool id, got ${poolIds.length}: ${poolIds.join(', ') || 'none'}`);
+  }
+  return poolIds[0];
 }
 
 function tokenKeysForPair(pair: Pair): readonly [string, string] | undefined {
@@ -194,15 +201,13 @@ export function createThogammAdapter(): VenueAdapter {
       functionName: 'getPoolIds',
       blockNumber,
     }) as readonly `0x${string}`[];
-    if (poolIds.length !== 1 || poolIds[0].toLowerCase() !== THOGAMM_POOL_ID) {
-      throw new Error(`ThogAMM pool id mismatch: ${poolIds.join(', ') || 'none'}`);
-    }
+    const poolId = selectThogammPoolId(poolIds);
 
     const addresses = await ctx.client.readContract({
       address: THOGAMM_ADDRESS,
       abi: thogammAbi,
       functionName: 'getTokens',
-      args: [THOGAMM_POOL_ID],
+      args: [poolId],
       blockNumber,
     }) as readonly `0x${string}`[];
     const normalized = addresses.map((address) => address.toLowerCase());

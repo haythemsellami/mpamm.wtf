@@ -222,8 +222,9 @@ export const PAIRS: Pair[] = [
   { symbol: 'BTC/ETH', base: 'BTC', quote: 'ETH', quoteKind: 'asset' },
   { symbol: 'cbBTC/MON', base: 'BTC', quote: 'MON', quoteKind: 'asset', wrapBasisOverride: '' },
   { symbol: 'cbBTC/ETH', base: 'BTC', quote: 'ETH', quoteKind: 'asset', wrapBasisOverride: '' },
-  // WBTC/cbBTC benchmarks the traded WBTC against native BTC with WBTCBTC's
-  // live basis; cbBTC's Coinbase mint/redeem leg is parity-overridden.
+  // WBTC/cbBTC applies WBTCBTC to the WBTC base leg. The asset-quoted reference
+  // uses native BTC for the cbBTC quote leg, so cbBTC parity is implicit rather
+  // than a wrap-basis override.
   { symbol: 'WBTC/cbBTC', base: 'BTC', quote: 'BTC', quoteKind: 'asset' },
 ];
 
