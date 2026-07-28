@@ -35,6 +35,16 @@ export function App() {
       {tab === 'volume' && <VolumeTab />}
       {tab === 'markouts' && <MarkoutsTab />}
       {tab === 'leaderboard' && <LeaderboardTab />}
+      {/* AGPL §13: a hosted (possibly modified) instance must offer its users
+          the corresponding source — this link is that offer. Keep it visible
+          in forks. */}
+      <div style={{ padding: '4px 18px 16px', fontSize: 9, letterSpacing: '.05em', color: 'var(--faint)', textAlign: 'right' }}>
+        source:{' '}
+        <a href="https://github.com/haythemsellami/mpamm.wtf" target="_blank" rel="noreferrer" style={{ color: 'var(--dim)', textDecoration: 'none', borderBottom: '1px solid var(--border2)' }}>
+          github.com/haythemsellami/mpamm.wtf
+        </a>{' '}
+        · AGPL-3.0
+      </div>
       {mobile && <BottomNav />}
     </div>
   );
