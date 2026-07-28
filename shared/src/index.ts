@@ -206,14 +206,25 @@ export const PAIRS: Pair[] = [
   { symbol: 'MON/USDT0', base: 'MON', quote: 'USDT0' },
   { symbol: 'MON/AUSD', base: 'MON', quote: 'AUSD' },
   { symbol: 'MON/USD1', base: 'MON', quote: 'USD1' },
+  { symbol: 'BTC/USDT0', base: 'BTC', quote: 'USDT0' },
+  { symbol: 'BTC/AUSD', base: 'BTC', quote: 'AUSD' },
+  { symbol: 'ETH/USDT0', base: 'ETH', quote: 'USDT0' },
+  { symbol: 'ETH/AUSD', base: 'ETH', quote: 'AUSD' },
   // Hanji's markets (cbBTC ≠ WBTC — distinct market symbols so each wrapper
   // gets ITS OWN reference basis; sharing 'BTC/USDC' would mis-mark cbBTC by
   // the live WBTC basis). NB pairFor(base, quote) resolves the CANONICAL pair
   // (first match) — token-specific pairs like these are referenced by symbol.
   { symbol: 'cbBTC/USDC', base: 'BTC', quote: 'USDC', wrapBasisOverride: '' },
+  { symbol: 'cbBTC/USDT0', base: 'BTC', quote: 'USDT0', wrapBasisOverride: '' },
+  { symbol: 'cbBTC/AUSD', base: 'BTC', quote: 'AUSD', wrapBasisOverride: '' },
   { symbol: 'MON/ETH', base: 'MON', quote: 'ETH', quoteKind: 'asset' },
+  { symbol: 'BTC/MON', base: 'BTC', quote: 'MON', quoteKind: 'asset' },
+  { symbol: 'BTC/ETH', base: 'BTC', quote: 'ETH', quoteKind: 'asset' },
   { symbol: 'cbBTC/MON', base: 'BTC', quote: 'MON', quoteKind: 'asset', wrapBasisOverride: '' },
   { symbol: 'cbBTC/ETH', base: 'BTC', quote: 'ETH', quoteKind: 'asset', wrapBasisOverride: '' },
+  // WBTC/cbBTC benchmarks the traded WBTC against native BTC with WBTCBTC's
+  // live basis; cbBTC's Coinbase mint/redeem leg is parity-overridden.
+  { symbol: 'WBTC/cbBTC', base: 'BTC', quote: 'BTC', quoteKind: 'asset' },
 ];
 
 /** Market symbols (derived from the pair registry). */
