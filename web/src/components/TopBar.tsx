@@ -3,7 +3,7 @@ import { C, SANS, LOGO_PURPLE } from '../theme';
 import { useDashboard, type Tab } from '../store';
 import { useViewport } from '../lib/viewport';
 import { clockSec, fmtInt } from '../lib/format';
-import { isRoutineNote } from '../lib/notes';
+import { isRoutineNote } from '@shared';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'exec', label: 'EXECUTION' },
@@ -91,6 +91,7 @@ export function TopBar() {
   const { mobile, tablet } = useViewport();
   const [clock, setClock] = useState(clockSec());
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const chipRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
     const t = setInterval(() => setClock(clockSec()), 1000);
     return () => clearInterval(t);
@@ -151,14 +152,14 @@ export function TopBar() {
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: mobile ? 10 : 15, fontSize: 10, color: C.dim2 }}>
           {/* degradation chip — hidden when only routine discovery lines are present */}
           {showChip && (
-            <button type="button"
+            <button type="button" ref={chipRef}
               onClick={() => setDrawerOpen((v) => !v)}
               aria-expanded={drawerOpen}
               aria-label={`${degradedCount} status note${degradedCount !== 1 ? 's' : ''} — click to view`}
               title={`${degradedCount} degradation note${degradedCount !== 1 ? 's' : ''}`}
               style={{
                 display: 'flex', alignItems: 'center', gap: 4,
-                border: `1px solid rgba(163,101,10,0.5)`,
+                border: `1px solid color-mix(in srgb, var(--amber) 50%, transparent)`,
                 borderRadius: 4, padding: mobile ? '3px 6px' : '3px 8px',
                 cursor: 'pointer', letterSpacing: '.06em', userSelect: 'none',
                 whiteSpace: 'nowrap', color: C.amber,
@@ -191,7 +192,7 @@ export function TopBar() {
         </div>
       </div>
       {drawerOpen && (
-        <NotesDrawer notes={notes} onClose={() => setDrawerOpen(false)} />
+        <NotesDrawer notes={notes} onClose={() => { setDrawerOpen(false); chipRef.current?.focus(); }} />
       )}
     </>
   );

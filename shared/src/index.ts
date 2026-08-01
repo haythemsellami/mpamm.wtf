@@ -520,3 +520,49 @@ export type StreamMessage =
   | { ch: 'volume'; data: DailyVolume };
 
 export const STREAM_PATH = '/stream';
+
+// ──────────────────────────────────────────────────────────────────────────
+// state.notes classification
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Routine note formats, anchored to the strings the server actually emits.
+ *
+ * A generic "count plus (s)" heuristic gets this wrong in both directions, so the
+ * patterns below quote the real formats instead. Real degradations carry counts and
+ * "(s)" too (the oracle feed-count mismatch in venues/metric.ts, the RPC archive skip
+ * and the two attribution relabels in datasource/live.ts), and routine progress lines
+ * carry counts and no "(s)" (the two block-range scan lines in the same file). Because
+ * notes are sticky for the process lifetime, a misread in either direction is permanent
+ * until restart: a hidden degradation stays hidden, and a boot-time progress line keeps
+ * the chip amber all day.
+ *
+ * Anything not listed here counts as a degradation. A note nobody has classified is
+ * exactly the kind that should raise the chip rather than hide behind DISCOVERY.
+ */
+const ROUTINE_NOTES: readonly RegExp[] = [
+  // Venue discovery counts from ctx.log(): "POE: 3 base/stable pool(s)",
+  // "Metric: 2 base/stable pool(s)", "Uniswap v4: 5 baseline pool(s) (...)",
+  // "Hanji: 4 market(s), taker fee 10bps (on-chain config)",
+  // "Lunarbase: 3/5 validated production pool(s), whitelist fee mode",
+  // "<venue>: discovered 7 market(s)".
+  /^[^:]+: (?:discovered )?\d+(?:\/\d+)? [\w /-]*(?:pool|market|book)\(s\)/,
+  // "Clober: subgraph discovery (2 vault book(s))"
+  /^[^:]+: subgraph discovery \(\d+ [\w ]*\(s\)\)/,
+  // Work that finished normally.
+  /^.+: backfill complete — \d+ day\(s\) seeded/,
+  /^.+: onboarding fill scan complete — \d+ historical fill\(s\) persisted/,
+  /^.+: markouts backfilled for \d+ fill\(s\)/,
+  /^seeded \d+ closed day-row\(s\) from adapter backfill/,
+  // Work in progress over a block range. These make no data-quality claim, and counting
+  // them means one boot-time backfill pins the chip amber for the process lifetime.
+  /^.+: on-chain backfill .+ — blocks \d+→\d+/,
+  /^.+: onboarding fill scan .+ — blocks \d+→\d+/,
+  // A starvation warning being withdrawn, not a new one.
+  / feed recovered: /,
+];
+
+/** True when a state.notes entry is discovery, progress or completion rather than a degradation. */
+export function isRoutineNote(note: string): boolean {
+  return ROUTINE_NOTES.some((re) => re.test(note));
+}
