@@ -5,6 +5,7 @@ import { createCloberVaultAdapter } from './clober.js';
 import { createMetricAdapter } from './metric.js';
 import { createHanjiAdapter } from './hanji.js';
 import { createLunarbaseAdapter } from './lunarbase.js';
+import { createThogammAdapter } from './thogamm.js';
 import { createUniswapAdapter } from './uniswap.js';
 import { createReferenceRegistry } from './reference.js';
 
@@ -23,6 +24,7 @@ const ALL_ADAPTERS: VenueAdapter[] = [
   createMetricAdapter(),
   createHanjiAdapter(),
   createLunarbaseAdapter(),
+  createThogammAdapter(),
   createUniswapAdapter(), // baseline (quote-only) — the standard-DEX band
 ];
 

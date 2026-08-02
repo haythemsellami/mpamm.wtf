@@ -48,3 +48,10 @@ VENUES=myvenue BACKFILL=off MARKOUT_BACKFILL=off GAS_METRIC=off npm run dev
 | [docs/deploy.md](docs/deploy.md) | Hosting — single container, Render blueprint, configuration knobs |
 
 The pixel-level design source lives under [`design/`](design/).
+
+## License
+
+[AGPL-3.0-only](LICENSE). Fork it, modify it, build on it — but if you run a
+modified version as a network service, the AGPL requires you to offer your
+users the complete corresponding source. Improvements stay public, the same
+way this project is.

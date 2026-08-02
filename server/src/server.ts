@@ -9,6 +9,21 @@ import type { DataSource } from './datasource/index.js';
 import { config } from './config.js';
 import { venueMeta } from './venues/registry.js';
 
+/** Unsent bytes a stream client may accumulate before we cut it. ~20 quote
+ *  ticks of backlog — generous for a real browser on a slow link, reached only
+ *  by a peer that has stopped draining. */
+export const MAX_BACKLOG_BYTES = 1_000_000;
+/** Ping cadence; one unanswered round (≥ this long) terminates the client. */
+export const HEARTBEAT_MS = 30_000;
+
+/** What to do with one stream client on a broadcast. Pure so the backpressure
+ *  policy is unit-tested — a wrong 'cut' here would disconnect real users, and
+ *  a missing one leaks the heap (see the OOM note on the broadcast loop). */
+export function streamAction(readyState: number, bufferedAmount: number): 'send' | 'drop' | 'cut' {
+  if (readyState !== WebSocket.OPEN) return 'drop';           // closing/closed — forget it
+  return bufferedAmount > MAX_BACKLOG_BYTES ? 'cut' : 'send'; // hopeless vs healthy
+}
+
 /**
  * Thin transport over a DataSource (docs/architecture.md: API + system shape): REST snapshots + a WS
  * stream. The frontend renders purely off these and never touches the chain,
@@ -108,22 +123,49 @@ export function startServer(source: DataSource): Server {
   const wss = new WebSocketServer({ server: httpServer, path: STREAM_PATH });
 
   const clients = new Set<WebSocket>();
+  // Clients that owe us a pong from the last heartbeat round.
+  const awaitingPong = new Set<WebSocket>();
   wss.on('connection', (ws) => {
     clients.add(ws);
     // hello with current state so a client can render before the next tick
     safeSend(ws, { ch: 'state', data: source.getState() });
     safeSend(ws, { ch: 'quotes', data: source.getQuotes() });
-    ws.on('close', () => clients.delete(ws));
-    ws.on('error', () => clients.delete(ws));
+    ws.on('pong', () => awaitingPong.delete(ws));
+    ws.on('close', () => drop(ws));
+    ws.on('error', () => drop(ws));
   });
+  const drop = (ws: WebSocket) => { clients.delete(ws); awaitingPong.delete(ws); };
+  const cut = (ws: WebSocket) => { drop(ws); try { ws.terminate(); } catch { /* already gone */ } };
 
   const onMessage = (m: StreamMessage) => {
     const payload = JSON.stringify(m);
     for (const ws of clients) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+      // BACKPRESSURE: a stalled peer (sleeping laptop, backgrounded phone,
+      // half-dead TCP) never closes, so every frame we push queues in OUR
+      // heap — the quote tick alone is ~46KB at 2/s, ~330MB per stalled
+      // client per hour. That OOM-killed prod (heap 311MB after 18h uptime,
+      // 2026-07-29). A live dashboard gains nothing from replaying a stale
+      // backlog, so cut anyone who falls this far behind; their browser
+      // reconnects and gets a fresh hello.
+      const action = streamAction(ws.readyState, ws.bufferedAmount);
+      if (action === 'drop') { drop(ws); continue; }
+      if (action === 'cut') { cut(ws); continue; }
+      ws.send(payload);
     }
   };
   source.on('message', onMessage);
+
+  // HEARTBEAT: a peer that vanished without a close frame keeps readyState
+  // OPEN forever, so it would otherwise sit in `clients` buffering for the
+  // process lifetime. One missed pong round (≥30s) is enough to cut it.
+  const heartbeat = setInterval(() => {
+    for (const ws of clients) {
+      if (awaitingPong.has(ws)) { cut(ws); continue; }
+      awaitingPong.add(ws);
+      try { ws.ping(); } catch { cut(ws); }
+    }
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
 
   // Fail cleanly on a listen error (e.g. another instance already on this port)
   // instead of crashing with an unhandled 'error' event.
@@ -142,7 +184,7 @@ export function startServer(source: DataSource): Server {
     console.log(`[mpamm] ${source.mode} source · http://localhost:${config.port} · ws ${STREAM_PATH}`);
   });
 
-  httpServer.on('close', () => source.off('message', onMessage));
+  httpServer.on('close', () => { clearInterval(heartbeat); source.off('message', onMessage); });
   return httpServer;
 }
 

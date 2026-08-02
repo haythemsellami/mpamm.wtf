@@ -28,11 +28,22 @@ const GRANS = ['D', 'W', 'M'] as const;
 
 /** One rendered bar of a D/W/M-bucketed chart: the member days plus the span
  *  metadata the axis/tooltips need. 'D' produces single-day buckets so every
- *  consumer renders one uniform shape. Weeks are epoch weeks and months are
- *  calendar months, exactly as the design reference buckets them. */
+ *  consumer renders one uniform shape. Weeks are CALENDAR weeks (UTC Monday →
+ *  Sunday inclusive) and months are calendar months.
+ *
+ *  The −4 is what makes a week a calendar week: `floor(ms / 7d)` alone anchors
+ *  to the Unix epoch, and 1970-01-01 was a THURSDAY, so plain epoch weeks ran
+ *  Thu→Wed. Shifting by 4 days moves the boundary onto Monday. Days are UTC
+ *  throughout the dashboard, so these are UTC Mondays.
+ *
+ *  The first and last buckets of a window are naturally partial — history
+ *  starts mid-week and the current week is unfinished. `iso0`/`isoEnd` track
+ *  the days actually PRESENT (not the calendar edges), so the axis label and
+ *  the tooltip span always state the real covered range rather than implying
+ *  data we don't have. */
 interface Bucket { iso0: string; isoEnd: string; partial: boolean; days: DailyVolume[] }
 const bucketDays = (days: DailyVolume[], gran: string): Bucket[] => {
-  const keyOf = (iso: string) => (gran === 'M' ? iso.slice(0, 7) : String(Math.floor(Date.parse(iso) / 604_800_000)));
+  const keyOf = (iso: string) => (gran === 'M' ? iso.slice(0, 7) : String(Math.floor((Date.parse(iso) / 86_400_000 - 4) / 7)));
   if (gran !== 'W' && gran !== 'M') return days.map((x) => ({ iso0: x.utcDay, isoEnd: x.utcDay, partial: !!x.partial, days: [x] }));
   const out: Bucket[] = [];
   let k0: string | null = null;
