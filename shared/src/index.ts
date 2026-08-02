@@ -532,10 +532,14 @@ export const STREAM_PATH = '/stream';
  * patterns below quote the real formats instead. Real degradations carry counts and
  * "(s)" too (the oracle feed-count mismatch in venues/metric.ts, the RPC archive skip
  * and the two attribution relabels in datasource/live.ts), and routine progress lines
- * carry counts and no "(s)" (the two block-range scan lines in the same file). Because
+ * carry counts and no "(s)" (the block-range scan lines in live.ts and gas.ts). Because
  * notes are sticky for the process lifetime, a misread in either direction is permanent
  * until restart: a hidden degradation stays hidden, and a boot-time progress line keeps
  * the chip amber all day.
+ *
+ * The completion lines are anchored at BOTH ends. A completion note grows a suffix when
+ * the work finished with a caveat, and that variant is a degradation, so a head-only
+ * anchor would swallow it.
  *
  * Anything not listed here counts as a degradation. A note nobody has classified is
  * exactly the kind that should raise the chip rather than hide behind DISCOVERY.
@@ -545,21 +549,29 @@ const ROUTINE_NOTES: readonly RegExp[] = [
   // "Metric: 2 base/stable pool(s)", "Uniswap v4: 5 baseline pool(s) (...)",
   // "Hanji: 4 market(s), taker fee 10bps (on-chain config)",
   // "Lunarbase: 3/5 validated production pool(s), whitelist fee mode",
-  // "<venue>: discovered 7 market(s)".
+  // "<venue>: discovered 7 market(s)". The trailing detail is per venue, so the head
+  // anchor plus the count is the whole claim here.
   /^[^:]+: (?:discovered )?\d+(?:\/\d+)? [\w /-]*(?:pool|market|book)\(s\)/,
   // "Clober: subgraph discovery (2 vault book(s))"
-  /^[^:]+: subgraph discovery \(\d+ [\w ]*\(s\)\)/,
-  // Work that finished normally.
-  /^.+: backfill complete — \d+ day\(s\) seeded/,
-  /^.+: onboarding fill scan complete — \d+ historical fill\(s\) persisted/,
-  /^.+: markouts backfilled for \d+ fill\(s\)/,
-  /^seeded \d+ closed day-row\(s\) from adapter backfill/,
+  /^[^:]+: subgraph discovery \(\d+ [\w ]*\(s\)\)$/,
+  // Work that finished with nothing to report. datasource/live.ts APPENDS "(N block(s)
+  // unreadable on the RPC archive and skipped — those windows may undercount)" to the
+  // backfill-complete note when the archive had a hole; the trailing anchor is what keeps
+  // that variant a degradation, since an undercounted day is exactly what the chip is for.
+  /^.+: backfill complete — \d+ day\(s\) seeded$/,
+  /^.+: onboarding fill scan complete — \d+ historical fill\(s\) persisted$/,
+  /^.+: markouts backfilled for \d+ fill\(s\)$/,
+  /^seeded \d+ closed day-row\(s\) from adapter backfill; on-chain-only venues accumulate forward$/,
   // Work in progress over a block range. These make no data-quality claim, and counting
-  // them means one boot-time backfill pins the chip amber for the process lifetime.
-  /^.+: on-chain backfill .+ — blocks \d+→\d+/,
-  /^.+: onboarding fill scan .+ — blocks \d+→\d+/,
-  // A starvation warning being withdrawn, not a new one.
-  / feed recovered: /,
+  // them means one boot-time crawl pins the chip amber for the process lifetime. All three
+  // crawls emit one: volume backfill, markout onboarding and the quote-update gas scan.
+  /^.+: on-chain backfill .+ — blocks \d+→\d+$/,
+  /^.+: onboarding fill scan .+ — blocks \d+→\d+$/,
+  /^.+: quote-update gas scan from .+ — blocks \d+→\d+$/,
+  // A starvation warning being withdrawn, not a new one. The paired dropNote() has already
+  // removed the warning, so counting the retraction would leave the chip amber over
+  // nothing. Anchored to the whole line: no other note may borrow the phrase.
+  /^.+ feed recovered: .+ mid is back — .+ pairs visible again \(hidden for ~\d+m\)$/,
 ];
 
 /** True when a state.notes entry is discovery, progress or completion rather than a degradation. */

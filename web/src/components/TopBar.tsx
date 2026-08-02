@@ -20,8 +20,25 @@ function NotesDrawer({ notes, onClose }: { notes: string[]; onClose: () => void 
   useEffect(() => {
     ref.current?.focus();
     const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+      else if (e.key === 'Tab') {
+        // focus trap, same shape as the tour modal. The panel itself is the first stop
+        // (it takes focus on open), so Shift+Tab can't walk out behind the overlay.
+        const panel = ref.current;
+        if (panel) {
+          const items: HTMLElement[] = [panel, ...panel.querySelectorAll<HTMLElement>('button')];
+          const first = items[0], last = items[items.length - 1];
+          if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+          else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+      }
+      // a modal owns the keyboard: App's global [1]-[4] tab switch must not act on the
+      // page behind the drawer. App listens on window too, and same-target listeners
+      // ignore the capture flag, so this has to be the immediate variant.
+      e.stopImmediatePropagation();
     };
+    // capture phase so this runs before App's global tab-key handler
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [onClose]);
@@ -35,7 +52,7 @@ function NotesDrawer({ notes, onClose }: { notes: string[]; onClose: () => void 
       style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end' }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div ref={ref} tabIndex={-1} style={{
+      <div ref={ref} id="notes-drawer" tabIndex={-1} style={{
         marginTop: 42, width: 380, maxWidth: 'calc(100vw - 24px)',
         maxHeight: 'calc(100vh - 58px)', overflowY: 'auto',
         background: C.panel, border: `1px solid ${C.line}`, borderTop: 'none', outline: 'none',
@@ -52,7 +69,9 @@ function NotesDrawer({ notes, onClose }: { notes: string[]; onClose: () => void 
           </button>
         </div>
         {degraded.length > 0 && (
-          <ul style={{ margin: 0, padding: '8px 12px', listStyle: 'none' }}>
+          // named groups: the split between a degradation and a routine line is carried by
+          // the list name and the glyph, not by the grey it is printed in.
+          <ul aria-label="Degradations" style={{ margin: 0, padding: '8px 12px', listStyle: 'none' }}>
             {degraded.map((n, i) => (
               <li key={i} style={{
                 fontSize: 11, color: C.text, lineHeight: 1.5,
@@ -66,9 +85,9 @@ function NotesDrawer({ notes, onClose }: { notes: string[]; onClose: () => void 
         {routine.length > 0 && (
           <>
             {degraded.length > 0 && (
-              <div style={{ padding: '6px 12px 2px', fontSize: 9, color: C.faint2, letterSpacing: '.08em' }}>DISCOVERY</div>
+              <div aria-hidden="true" style={{ padding: '6px 12px 2px', fontSize: 9, color: C.faint2, letterSpacing: '.08em' }}>DISCOVERY</div>
             )}
-            <ul style={{ margin: 0, padding: '4px 12px 8px', listStyle: 'none' }}>
+            <ul aria-label="Discovery and progress" style={{ margin: 0, padding: '4px 12px 8px', listStyle: 'none' }}>
               {routine.map((n, i) => (
                 <li key={i} style={{
                   fontSize: 10, color: C.dim2, lineHeight: 1.5,
@@ -155,7 +174,8 @@ export function TopBar() {
             <button type="button" ref={chipRef}
               onClick={() => setDrawerOpen((v) => !v)}
               aria-expanded={drawerOpen}
-              aria-label={`${degradedCount} status note${degradedCount !== 1 ? 's' : ''} — click to view`}
+              aria-controls={drawerOpen ? 'notes-drawer' : undefined}
+              aria-label={`${degradedCount} degradation note${degradedCount !== 1 ? 's' : ''}`}
               title={`${degradedCount} degradation note${degradedCount !== 1 ? 's' : ''}`}
               style={{
                 display: 'flex', alignItems: 'center', gap: 4,
