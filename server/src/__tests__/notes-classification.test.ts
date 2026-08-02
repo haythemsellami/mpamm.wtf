@@ -18,6 +18,7 @@ const ROUTINE: [string, string][] = [
   ['Lunarbase: 3/5 validated production pool(s), whitelist fee mode', 'venues/lunarbase.ts:439'],
   ['Clober: subgraph discovery (7 vault book(s))', 'venues/clober.ts:481'],
   ['MyVenue: discovered 12 market(s)', 'venues/_template.ts:51'],
+  ['ThogAMM: 7 registered market(s) across 12 on-chain token(s) at block 84500000', 'venues/thogamm.ts:245'],
   ['seeded 14 closed day-row(s) from adapter backfill; on-chain-only venues accumulate forward', 'live.ts:347'],
   ['Clober: on-chain backfill 2026-07-04 — blocks 12000→13000', 'live.ts:551'],
   ['Clober: backfill complete — 30 day(s) seeded', 'live.ts:653'],
@@ -95,6 +96,8 @@ const DEGRADED: [string, string][] = [
   ['Lunarbase MON/USDC quote hidden: pool paused', 'venues/lunarbase.ts:489'],
   ['Metric: pool 0x1234abcd… (WBTC/USDC) is not a registered pair — skipped', 'venues/metric.ts:110'],
   ['Metric: push oracle serves 6 feed(s) but Metric uses 4 — burn attribution may overcount', 'venues/metric.ts:156'],
+  ['ThogAMM: token 0x7547…b603 is not in @shared TOKENS; its pairs remain unlisted', 'venues/thogamm.ts:229'],
+  ['ThogAMM: proxy upgraded to 0x1111…1111 — re-verify quote/fill/gas ABIs against the new implementation', 'venues/thogamm.ts:365'],
 ];
 
 describe('isRoutineNote', () => {
