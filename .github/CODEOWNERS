@@ -1,0 +1,10 @@
+# Code owners for mpamm.wtf
+#
+# The `main` ruleset requires an approving review from a code owner on every
+# pull request, so this file decides who that reviewer is.
+#
+# Syntax: <path pattern>  <owner…>   — the LAST matching pattern wins, so put
+# narrower rules below this one if some area ever needs a different owner.
+
+# Everything in the repository.
+*       @haythemsellami
