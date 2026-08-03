@@ -24,13 +24,31 @@ const METRIC_VENUE: VenueMeta = { id: 'metric', name: 'Metric', color: { light: 
 /** Shared MetricOmmSwapRouter on Monad (same for every pool). */
 const ROUTER = '0xaF9ADa6b6eC7993CE146f6c0bF98f7211CDfD3e5' as const;
 
-/** Metric OMM pools to track — base/stable only (verified on-chain: getImmutables
- *  resolves each pool's PriceProvider + token layout, so a stale entry fails loud). */
-const KNOWN_POOLS: `0x${string}`[] = [
+/** MetricOmmFactory — the permissionless deployer. Metric is a DEX whose pool
+ *  architecture lets anyone run their own propAMM on it, so the pool set is
+ *  open-ended: pools are discovered from the factory's PoolCreated event rather
+ *  than listed here (verified on-chain: 7 pools created to date, of which the
+ *  three seeds below are the funded ones). */
+const FACTORY = '0xe22F9fc0f04486dE25ed6CF1800a4a47aFD82e0C' as const;
+
+/** Seed pools — the funded, team-run pools that predate event discovery. They
+ *  are the ONLY entries that fail loud: a seed that stops resolving is a real
+ *  regression, while a permissionless pool that misbehaves is just skipped. */
+const SEED_POOLS: `0x${string}`[] = [
   '0xFA32f9ec28787d1F9C5BA5c39e54e59984FEF3f0', // WMON/USDC
   '0x2D82AC42334b394A9a8d8f097d61DC1c6B065Fd8', // WBTC/USDC
   '0x354D92279cA0190fF275095fE6A2a6989BAa66Fb', // WETH/USDC
 ];
+
+/** Boot does NOT scan the factory's history — it records the head and scans
+ *  only forward from there. Three reasons this is safe and the alternative is
+ *  not: pools older than boot are the SEED_POOLS (verified: the only other
+ *  pools ever created hold nothing); pools created while we were DOWN arrive
+ *  through `poolCreated` in logSources, which the core's fills tail gap-fills
+ *  from its persisted cursor; and a lookback is ruinously slow — 200k blocks
+ *  through the 90-block getLogs cap is ~2,200 sequential requests, measured at
+ *  7m45s, which would block boot every restart. The forward scan below then
+ *  costs ~17 requests per cycle. */
 
 /** Price-limit sentinels (Q64.64) so a quote walks the full binned liquidity for
  *  the size: no upper bound buying the base, no lower bound selling it. */
@@ -42,6 +60,14 @@ const metricPoolAbi = parseAbi([
   'event Swap(address sender, address recipient, bool exactInput, int128 amount0Delta, int128 amount1Delta, int16 newTick, uint104 newPositionInBin)',
 ]);
 const priceProviderAbi = parseAbi(['function getBidAndAskPrice() view returns (uint128, uint128)']);
+const erc20Abi = parseAbi(['function balanceOf(address) view returns (uint256)']);
+/** Recovered from a real creation log (topic0 0xe1c304ac…): the indexed
+ *  priceProvider is the one set AT CREATION and pools expose
+ *  setPriceProvider(), so the live provider is always re-read from
+ *  getImmutables — never taken from this event. */
+const metricFactoryAbi = parseAbi([
+  'event PoolCreated(address indexed token0, address indexed token1, address indexed priceProvider, address pool, bytes32 salt)',
+]);
 // gas-burn derivation (see gasSources): each provider names the push oracle it
 // reads and its own feed id; the oracle exposes how many feeds it serves.
 const providerOracleAbi = parseAbi([
@@ -66,15 +92,193 @@ interface MetricPool {
   stableDec: number;
 }
 
+/** Why a candidate pool was not admitted (null = admitted). Pure so the
+ *  permissionless admission rules are unit-tested without a chain. */
+export type RejectReason = 'unresolved' | 'not-base-stable' | 'unregistered-pair' | 'unknown-base-token';
+
+/** STRUCTURAL admission: does this pool describe a market we can price and
+ *  benchmark? Metric is permissionless, so anyone can deploy a pool for any
+ *  token combo — only registered base/stable pairs (@shared PAIRS) can carry
+ *  reference rows and markouts, and everything else is dropped rather than
+ *  surfaced as an unbenchmarkable market. */
+export function admitMetricPool(pool: `0x${string}`, im: readonly unknown[] | null): { ok: true; value: MetricPool } | { ok: false; reason: RejectReason; detail?: string } {
+  if (!im) return { ok: false, reason: 'unresolved' };
+  const priceProvider = im[1] as `0x${string}`;
+  const token0 = String(im[2]).toLowerCase();
+  const token1 = String(im[3]).toLowerCase();
+  // exactly one side a tracked base asset, the other a stable
+  const a0 = assetForToken(token0), a1 = assetForToken(token1);
+  if (!!a0 === !!a1) return { ok: false, reason: 'not-base-stable' };
+  const baseIsToken0 = !!a0;
+  const base = (baseIsToken0 ? a0 : a1)!;
+  const stableAddr = baseIsToken0 ? token1 : token0;
+  const stable = Object.values(TOKENS).find((t) => t.stable && t.address.toLowerCase() === stableAddr);
+  if (!stable) return { ok: false, reason: 'not-base-stable' };
+  const pair = pairFor(base.key, stable.symbol);
+  if (!pair) return { ok: false, reason: 'unregistered-pair', detail: `${base.symbol}/${stable.symbol}` };
+  const baseTok = baseTokenOf(base.key);
+  if (!baseTok) return { ok: false, reason: 'unknown-base-token', detail: base.key };
+  return {
+    ok: true,
+    value: {
+      pool, priceProvider, market: pair.symbol, baseIsToken0,
+      baseToken: base.token, baseDec: baseTok.decimals,
+      stableSym: stable.symbol, stableDec: stable.decimals,
+    },
+  };
+}
+
+/** LIVENESS: a structurally-valid pool is only QUOTED once it can actually
+ *  trade — both sides funded and the provider returning a two-sided price.
+ *  Permissionless deployment means empty shells exist (4 of the 7 pools on
+ *  chain today hold nothing); quoting them would put dead markets on the
+ *  Execution tab. Fills are gated on the same rule, so an unfunded pool can
+ *  never contribute volume. */
+export function isMetricPoolLive(bal0: bigint | null, bal1: bigint | null, bid: bigint | null, ask: bigint | null): boolean {
+  if (bal0 === null || bal1 === null || bid === null || ask === null) return false;
+  if (bal0 <= 0n || bal1 <= 0n) return false;   // one-sided or empty inventory
+  return bid > 0n && ask > 0n;
+}
+
 /**
- * Metric OMM adapter — on-chain discovery (getImmutables) + oracle-quote
- * (PriceProvider + Router.quoteSwap) + Pool.Swap fill decode. No backfill().
+ * Metric OMM adapter — permissionless factory discovery + on-chain admission
+ * (getImmutables) + oracle-quote (PriceProvider + Router.quoteSwap) + Pool.Swap
+ * fill decode. No backfill().
  */
 export function createMetricAdapter(): VenueAdapter {
-  let pools: MetricPool[] = [];
-  let byAddr = new Map<string, MetricPool>();
+  let pools: MetricPool[] = [];                       // live: quoted + tailed
+  let byAddr = new Map<string, MetricPool>();         // MONOTONIC decode map
   let discovered = false;
-  let pushOracle: `0x${string}` | null = null; // resolved at discovery (gasSources)
+  /** every pool address the factory has told us about (seeds + discovered). */
+  const candidates = new Set<string>(SEED_POOLS.map((p) => p.toLowerCase()));
+  /** factory scan progress; null until the first discovery. */
+  let scanCursor: bigint | null = null;
+  /** every push oracle Metric's live providers read — sorted + deduped so the
+   *  gas tracker's destination fingerprint is stable (see gasSources). */
+  let pushOracles: `0x${string}`[] = [];
+
+  /** Full discovery pass — also called from decode() when the factory
+   *  announces a pool mid-range. */
+  const refresh = async (ctx: AdapterContext) => {
+      // ── 1. widen the candidate set from the factory ────────────────────────
+      // Incremental: first pass covers a bounded lookback, later passes only
+      // the new blocks. A scan failure is non-fatal — the seeds and everything
+      // already discovered still resolve below, and the cursor is left alone
+      // so the next cycle retries the same range.
+      try {
+        const head = await ctx.client.getBlockNumber();
+        if (scanCursor === null) scanCursor = head + 1n;   // first pass: anchor, don't backscan
+        const from = scanCursor;
+        if (from <= head) {
+          const logs = await ctx.getLogs({
+            address: FACTORY, fromBlock: from, toBlock: head,
+            events: [ev(metricFactoryAbi, 'PoolCreated')],
+          }) as any[];
+          let added = 0;
+          for (const l of logs ?? []) {
+            const p = String(l?.args?.pool ?? '').toLowerCase();
+            if (/^0x[0-9a-f]{40}$/.test(p) && !candidates.has(p)) { candidates.add(p); added++; }
+          }
+          scanCursor = head + 1n;
+          if (added) ctx.log(`Metric: factory announced ${added} new pool(s)`);
+        }
+      } catch { /* scan failed — keep the cursor, retry next discovery */ }
+
+      // ── 2. resolve + admit every candidate ─────────────────────────────────
+      const list = [...candidates] as `0x${string}`[];
+      const seeds = new Set(SEED_POOLS.map((p) => p.toLowerCase()));
+      const imRes = await ctx.client.multicall({
+        contracts: list.map((p) => ({ address: p, abi: metricPoolAbi, functionName: 'getImmutables' as const })),
+        allowFailure: true,
+      });
+      const admitted: MetricPool[] = [];
+      for (let i = 0; i < list.length; i++) {
+        const r = imRes[i];
+        const isSeed = seeds.has(list[i].toLowerCase());
+        const verdict = admitMetricPool(list[i], r.status === 'success' ? (r.result as readonly unknown[]) : null);
+        if (verdict.ok) { admitted.push(verdict.value); continue; }
+        // A SEED that stops resolving is a real regression → fail closed (held
+        // cursor). A permissionless pool is just not ours to vouch for: skip it
+        // and keep the venue running.
+        if (isSeed && verdict.reason === 'unresolved') throw new Error(`Metric getImmutables failed for seed pool ${list[i]}`);
+        if (verdict.reason === 'unregistered-pair') {
+          ctx.log(`Metric: pool ${shortHex(list[i])} (${verdict.detail}) is not a registered pair — skipped`);
+        }
+      }
+
+      // ── 3. liveness gate: funded + two-sided quote ─────────────────────────
+      const liveRes = await ctx.client.multicall({
+        contracts: admitted.flatMap((p) => {
+          const baseAddr = TOKENS[p.baseToken]?.address as `0x${string}`;
+          const stableAddr = Object.values(TOKENS).find((t) => t.symbol === p.stableSym)?.address as `0x${string}`;
+          return [
+            { address: baseAddr, abi: erc20Abi, functionName: 'balanceOf' as const, args: [p.pool] as const },
+            { address: stableAddr, abi: erc20Abi, functionName: 'balanceOf' as const, args: [p.pool] as const },
+            { address: p.priceProvider, abi: priceProviderAbi, functionName: 'getBidAndAskPrice' as const },
+          ];
+        }),
+        allowFailure: true,
+      });
+      const live: MetricPool[] = [];
+      for (let i = 0; i < admitted.length; i++) {
+        const b0 = liveRes[i * 3], b1 = liveRes[i * 3 + 1], q = liveRes[i * 3 + 2];
+        const bal0 = b0.status === 'success' ? (b0.result as bigint) : null;
+        const bal1 = b1.status === 'success' ? (b1.result as bigint) : null;
+        const px = q.status === 'success' ? (q.result as readonly [bigint, bigint]) : null;
+        if (isMetricPoolLive(bal0, bal1, px ? px[0] : null, px ? px[1] : null)) live.push(admitted[i]);
+      }
+
+      pools = live;
+      // decode map is MONOTONIC: a pool that empties (or fails a liveness probe)
+      // stops being quoted/tailed, but fills already fetched for it must still
+      // decode — dropping it from the map would silently discard real volume.
+      for (const p of live) byAddr.set(p.pool.toLowerCase(), p);
+      discovered = true;
+      const shells = admitted.length - live.length;
+      ctx.log(`Metric: ${live.length} live base/stable pool(s)${shells ? ` (+${shells} unfunded, not quoted)` : ''}`);
+
+      // ── 4. gas destinations: EVERY oracle Metric's providers read ──────────
+      // Metric is permissionless infra: curators plug in their own pricing, so
+      // pools can read DIFFERENT push oracles. Requiring a single shared oracle
+      // (the old rule) would silently stall burn tracking the day a second one
+      // appears — gasSources() would throw forever and the series would flatline
+      // while looking merely quiet. Collect them all instead; the tracker takes
+      // an address array and its destination fingerprint handles the set change.
+      const oracleFeeds = new Map<string, Set<string>>();
+      if (pools.length) {
+        const provRes = await ctx.client.multicall({
+          contracts: pools.flatMap((p) => [
+            { address: p.priceProvider, abi: providerOracleAbi, functionName: 'offchainOracle' as const },
+            { address: p.priceProvider, abi: providerOracleAbi, functionName: 'offchainFeedId' as const },
+          ]),
+          allowFailure: true,
+        });
+        for (let i = 0; i < pools.length; i++) {
+          const o = provRes[i * 2], f = provRes[i * 2 + 1];
+          // one unreadable provider must not blank the others (that was the
+          // old `oracles.clear(); break;` — a single failure killed all burn).
+          if (o.status !== 'success' || f.status !== 'success') continue;
+          const oracle = String(o.result).toLowerCase();
+          if (!/^0x[0-9a-f]{40}$/.test(oracle) || /^0x0{40}$/.test(oracle)) continue;
+          const set = oracleFeeds.get(oracle) ?? new Set<string>();
+          set.add(String(f.result).toLowerCase());
+          oracleFeeds.set(oracle, set);
+        }
+      }
+      pushOracles = [...oracleFeeds.keys()].sort() as `0x${string}`[];
+
+      // Multi-tenancy note: we attribute an oracle's WHOLE burn to Metric. That
+      // is right while it serves only Metric feeds. If it serves more, say so —
+      // the number then includes another tenant's pushes.
+      for (const [oracle, feeds] of oracleFeeds) {
+        try {
+          const count = await ctx.client.readContract({ address: oracle as `0x${string}`, abi: pushOracleAbi, functionName: 'getOracleCount' });
+          if (Number(count) !== feeds.size) {
+            ctx.log(`Metric: push oracle ${shortHex(oracle)} serves ${count} feed(s) but Metric uses ${feeds.size} — burn attribution may overcount`);
+          }
+        } catch { /* count is advisory only — never gates tracking */ }
+      }
+  };
 
   return {
     venues: () => [METRIC_VENUE],
@@ -82,84 +286,7 @@ export function createMetricAdapter(): VenueAdapter {
     // deployment era (WMON/USDC block 65042020 · 2026-03-31). Background — see live.ts.
     backfillFromUtc: '2026-03-31',
 
-    async discover(ctx: AdapterContext) {
-      const res = await ctx.client.multicall({
-        contracts: KNOWN_POOLS.map((p) => ({ address: p, abi: metricPoolAbi, functionName: 'getImmutables' as const })),
-        allowFailure: true,
-      });
-      const found: MetricPool[] = [];
-      for (let i = 0; i < KNOWN_POOLS.length; i++) {
-        const r = res[i];
-        // fail closed: a configured pool that won't resolve is a hard error (held cursor), not a silent skip.
-        if (r.status !== 'success') throw new Error(`Metric getImmutables failed for ${KNOWN_POOLS[i]}`);
-        const im = r.result as readonly unknown[];
-        const priceProvider = im[1] as `0x${string}`;
-        const token0 = String(im[2]).toLowerCase();
-        const token1 = String(im[3]).toLowerCase();
-        // keep base/stable pools: exactly one side a tracked base asset, the other a stable.
-        const a0 = assetForToken(token0), a1 = assetForToken(token1);
-        if (!!a0 === !!a1) continue; // both/neither base → skip (stable/stable, unknown/unknown)
-        const baseIsToken0 = !!a0;
-        const base = (baseIsToken0 ? a0 : a1)!;
-        const stableAddr = baseIsToken0 ? token1 : token0;
-        const stable = Object.values(TOKENS).find((t) => t.stable && t.address.toLowerCase() === stableAddr);
-        if (!stable) continue;
-        // REGISTERED pairs only (@shared PAIRS) — a pool for an unregistered combo
-        // would emit a market with no reference rows / markout routing.
-        const pair = pairFor(base.key, stable.symbol);
-        if (!pair) { ctx.log(`Metric: pool ${KNOWN_POOLS[i].slice(0, 8)}… (${base.symbol}/${stable.symbol}) is not a registered pair — skipped`); continue; }
-        const baseTok = baseTokenOf(base.key);
-        if (!baseTok) continue;
-        found.push({
-          pool: KNOWN_POOLS[i], priceProvider, market: pair.symbol,
-          baseIsToken0, baseToken: base.token, baseDec: baseTok.decimals,
-          stableSym: stable.symbol, stableDec: stable.decimals,
-        });
-      }
-      pools = found;
-      byAddr = new Map(pools.map((p) => [p.pool.toLowerCase(), p]));
-      discovered = true;
-      ctx.log(`Metric: ${pools.length} base/stable pool(s)`);
-
-      // Resolve the quote-freshness gas destination from the chain (never
-      // hardcoded): every provider names its push oracle + feed id. All
-      // providers must agree on ONE oracle; any failure leaves pushOracle
-      // null and gasSources() throws — the gas cursor holds and retries at
-      // the next discovery, quotes/fills are unaffected.
-      pushOracle = null;
-      if (pools.length) {
-        const res = await ctx.client.multicall({
-          contracts: pools.flatMap((p) => [
-            { address: p.priceProvider, abi: providerOracleAbi, functionName: 'offchainOracle' as const },
-            { address: p.priceProvider, abi: providerOracleAbi, functionName: 'offchainFeedId' as const },
-          ]),
-          allowFailure: true,
-        });
-        const oracles = new Set<string>();
-        const feedIds = new Set<string>();
-        for (let i = 0; i < pools.length; i++) {
-          const o = res[i * 2], f = res[i * 2 + 1];
-          if (o.status !== 'success' || f.status !== 'success') { oracles.clear(); break; }
-          oracles.add(String(o.result).toLowerCase());
-          feedIds.add(String(f.result).toLowerCase());
-        }
-        if (oracles.size === 1) {
-          const oracle = [...oracles][0] as `0x${string}`;
-          // exclusivity guard: we attribute the oracle's WHOLE burn to Metric,
-          // which is only sound while it serves exactly Metric's feeds (true at
-          // ship time: getOracleCount()==3 == our three pools). If the operator
-          // onboards another tenant on Monad, say so loudly — the number then
-          // overcounts until attribution is split per feed.
-          try {
-            const count = await ctx.client.readContract({ address: oracle, abi: pushOracleAbi, functionName: 'getOracleCount' });
-            if (Number(count) !== feedIds.size) {
-              ctx.log(`Metric: push oracle serves ${count} feed(s) but Metric uses ${feedIds.size} — burn attribution may overcount`);
-            }
-            pushOracle = oracle;
-          } catch { /* count probe failed — keep pushOracle null, retry next discovery */ }
-        }
-      }
-    },
+    discover: refresh,
 
     async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
       if (!pools.length) return [];
@@ -232,8 +359,13 @@ export function createMetricAdapter(): VenueAdapter {
 
     logSources() {
       if (!discovered) throw new Error('Metric discovery unavailable'); // hold the cursor until discovered
-      if (!pools.length) return [];
-      return [{ key: 'swap', address: pools.map((p) => p.pool), events: [ev(metricPoolAbi, 'Swap')], kind: 'fills' as const }];
+      // The factory source is ALWAYS tailed, even with no live pools: it is how
+      // a permissionless deployment reaches us between discovery cycles. 'state'
+      // because a missed PoolCreated makes that pool's later Swaps undecodable,
+      // so its failure must hold the cursor like any other decode prerequisite.
+      const sources = [{ key: 'poolCreated', address: FACTORY as `0x${string}`, events: [ev(metricFactoryAbi, 'PoolCreated')], kind: 'state' as const }];
+      if (!pools.length) return sources;
+      return [{ key: 'swap', address: pools.map((p) => p.pool), events: [ev(metricPoolAbi, 'Swap')], kind: 'fills' as const }, ...sources];
     },
 
     // taker entries owned by Metric: today only the pools themselves — sampled
@@ -255,11 +387,25 @@ export function createMetricAdapter(): VenueAdapter {
     // The publisher EOAs pay the gas — we count it as Metric's freshness
     // burn, whole.
     gasSources() {
-      if (!pushOracle) throw new Error('Metric push oracle not resolved yet'); // hold the gas cursor
-      return [{ mode: 'blocks' as const, address: pushOracle }];
+      // Fail closed only when we know of NO oracle at all — with one or many,
+      // count them all. Sorted + deduped at discovery so the tracker's
+      // destination fingerprint is stable across passes.
+      if (!pushOracles.length) throw new Error('Metric push oracle not resolved yet'); // hold the gas cursor
+      return [{ mode: 'blocks' as const, address: [...pushOracles] }];
     },
 
-    decode(_ctx: AdapterContext, logs: LogBundle, tsOf) {
+    async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
+      // A pool announced mid-range must be admitted BEFORE this range's Swaps
+      // are decoded, or its first fills would be dropped as unknown addresses.
+      const created = (logs.poolCreated ?? []).filter((l: any) => {
+        const p = String(l?.args?.pool ?? '').toLowerCase();
+        return /^0x[0-9a-f]{40}$/.test(p) && !candidates.has(p);
+      });
+      if (created.length) {
+        for (const l of created) candidates.add(String(l.args.pool).toLowerCase());
+        ctx.log(`Metric: factory deployed ${created.length} new pool(s) — re-running discovery`);
+        await refresh(ctx);
+      }
       const out: Fill[] = [];
       const abs = (x: bigint) => (x < 0n ? -x : x);
       for (const l of logs.swap ?? []) {
