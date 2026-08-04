@@ -57,6 +57,51 @@ export function checkReferenceStarvation(
   }
 }
 
+/** Consecutive empty quote cycles before a venue is called dark. At the 500ms
+ *  quote cadence that is ~10s: long enough that one RPC blip inside a venue's
+ *  own multicall is not an outage, short enough to catch the real thing. */
+export const QUOTE_DARK_CYCLES = 20;
+
+/**
+ * A venue that has stopped quoting — the CORE's backstop.
+ *
+ * Returning no rows is how a venue leaves the Execution grid, and by itself it
+ * says nothing: a venue switching itself off and an adapter whose ABI drifted
+ * look identical. Adapters that can dig out a reason do (venues/quote-health.ts)
+ * and this stands down for them, but the check lives here so a venue going dark
+ * is reported whether or not its adapter's author thought about it — including
+ * adapters not written yet.
+ *
+ * No time-of-day or lookback rule on purpose: "has it quoted recently" needs
+ * persistence to survive a restart and then goes BLIND on exactly the long
+ * outages that matter most. Emptiness is judged only against the run of empty
+ * cycles, so the signal never expires. Callers gate on boot warmup (references
+ * start cold) and on RPC health (during failover everything is empty and the
+ * rpc.* note already explains it).
+ */
+export function checkQuoteOutage(
+  venues: readonly { id: string; name: string }[],
+  rowsFor: (id: string) => number,
+  emptyRuns: Map<string, number>,
+  dark: Set<string>,
+  io: { warn: (id: string, m: string) => void; announce: (id: string, m: string) => void; explained: (id: string) => boolean },
+): void {
+  for (const v of venues) {
+    if (rowsFor(v.id) > 0) {
+      emptyRuns.set(v.id, 0);
+      if (dark.delete(v.id)) io.announce(v.id, `${v.name} is quoting again`);
+      continue;
+    }
+    const run = (emptyRuns.get(v.id) ?? 0) + 1;
+    emptyRuns.set(v.id, run);
+    if (run < QUOTE_DARK_CYCLES || dark.has(v.id)) continue;
+    dark.add(v.id); // marked dark either way, so recovery is still announced
+    // the adapter already said WHY — a generic second note would only be noise.
+    if (io.explained(v.id)) continue;
+    io.warn(v.id, `${v.name} is not quoting — no rows for ${run} consecutive cycles (venue offline, or its adapter no longer matches the contract)`);
+  }
+}
+
 /** Hold a deep history crawl while the RPC runs on a backup: the live tail and
  *  quote ticks keep the backup's rate budget; crawls resume on the primary.
  *  (Cursors/accumulators simply wait — nothing is lost or restarted.) */
@@ -146,6 +191,11 @@ export class LiveDataSource extends BaseSource {
   private notes = new NoteBuffer();
   /** base asset key → when its reference mid went dark (checkReferenceStarvation). */
   private starvedSince = new Map<string, number>();
+  /** venue id → run of consecutive empty quote cycles, and the set already
+   *  reported dark (checkQuoteOutage). In memory on purpose: nothing here
+   *  needs to survive a restart, since a still-dark venue re-earns its run. */
+  private quoteEmptyRuns = new Map<string, number>();
+  private quoteDark = new Set<string>();
   private block = 0;
   /** all registered venue ids — a fill/quote carrying an unknown id is dropped
    *  (a plugin bug must not silently store data the UI can't render). */
@@ -999,12 +1049,31 @@ export class LiveDataSource extends BaseSource {
       publicClient.getBlockNumber(),
       Promise.all(ADAPTERS.map(async (a) => {
         if (!a.quote) return [] as QuoteRow[];
-        const rows = await a.quote(this.ctxFor(a), config.sizesUsd).catch(() => [] as QuoteRow[]);
+        // a THROWN quote is a degradation like any other — swallowing it left
+        // the venue's disappearance with no explanation anywhere.
+        const rows = await a.quote(this.ctxFor(a), config.sizesUsd).catch((e) => {
+          this.noteOnce('venue.quote.unavailable', `${a.venues()[0]?.name ?? 'venue'} quote failed: ${(e as Error).message}`, this.vidOf(a));
+          return [] as QuoteRow[];
+        });
         return this.ownVenues(a, rows, 'quote'); // drop rows for ids the adapter didn't declare
       })),
     ]);
     this.block = Number(head);
     const venueRows = venueRowsNested.flat();
+    // A venue that stopped quoting vanishes from the grid silently otherwise
+    // (checkQuoteOutage). Skipped during boot warmup — references start cold,
+    // so EVERY venue is legitimately empty for the first cycles — and while the
+    // RPC is degraded, when everything is empty and the rpc.* note says why.
+    if (now - this.bootMs > 60_000 && !rpcStatus().degraded) {
+      const counts = new Map<string, number>();
+      for (const r of venueRows) counts.set(r.venueId, (counts.get(r.venueId) ?? 0) + 1);
+      const quoting = ADAPTERS.filter((a) => a.quote).map((a) => a.venues()[0]).filter(Boolean);
+      checkQuoteOutage(quoting, (id) => counts.get(id) ?? 0, this.quoteEmptyRuns, this.quoteDark, {
+        warn: (id, m) => this.noteOnce('venue.quote.unavailable', m, id),
+        announce: (id, m) => this.note('venue.quote.recovered', m, id),
+        explained: (id) => this.notes.holds('venue.quote.unavailable', id),
+      });
+    }
     // benchmark rows for every pair, each routed to + tagged with its CEX (Bybit/Binance).
     const refRows = REFERENCES.quote(config.sizesUsd);
     annotateCex(venueRows, refRows); // docs/architecture.md: fill stream — matched per market, so each venue row hits its pair's CEX

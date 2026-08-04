@@ -3,6 +3,7 @@ import type { QuoteRow, Fill, Side, VenueMeta } from '@shared';
 import { TOKENS, ASSETS, PAIRS, baseTokenOf } from '@shared';
 import { fromUnits, toUnits, shortHex } from '../util.js';
 import type { VenueAdapter, AdapterContext, LogBundle } from './adapter.js';
+import { createQuoteOutageReporter } from './quote-health.js';
 
 /**
  * LFJ POE adapter — LFJ's "Public Prop AMM" on Monad, fully on-chain and generic
@@ -59,6 +60,9 @@ interface PoePool {
  * executable quotes (Pool.getQuote) + Pool.Swap fill decode. No backfill().
  */
 export function createPoeAdapter(): VenueAdapter {
+  // every leg reverting is a venue-wide cause (paused, ABI drift), not a
+  // per-pair gap — name it instead of vanishing (venues/quote-health.ts).
+  const reportOutage = createQuoteOutageReporter(POE_VENUE.name);
   // MERGE, never replace (LFJ review #3): getPool is a factory READ, not a
   // cursor-holding log source, so a transient/partial discovery must only
   // ADD/refresh pools — never shrink the tailed set or drop an address a live
@@ -165,6 +169,7 @@ export function createPoeAdapter(): VenueAdapter {
       }
       if (!calls.length) return [];
       const res = await ctx.client.multicall({ contracts: calls, allowFailure: true });
+      if (reportOutage(ctx, res)) return [];
 
       const rowByKey = new Map<string, QuoteRow>();
       const ts = Date.now();

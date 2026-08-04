@@ -3,6 +3,7 @@ import type { QuoteRow, Fill, Side, VenueMeta } from '@shared';
 import { TOKENS, pairOf } from '@shared';
 import { shortHex } from '../util.js';
 import type { VenueAdapter, AdapterContext, LogBundle } from './adapter.js';
+import { createQuoteOutageReporter } from './quote-health.js';
 
 /**
  * Hanji adapter — a fully on-chain LOB whose ENTIRE passive side is the
@@ -102,6 +103,9 @@ interface HanjiMarket {
 }
 
 export function createHanjiAdapter(): VenueAdapter {
+  // every leg reverting is a venue-wide cause (paused, ABI drift), not a
+  // per-pair gap — name it instead of vanishing (venues/quote-health.ts).
+  const reportOutage = createQuoteOutageReporter(HANJI_VENUE.name);
   let markets: HanjiMarket[] = [];
   let byClob = new Map<string, HanjiMarket>();
   let discovered = false;
@@ -160,6 +164,7 @@ export function createHanjiAdapter(): VenueAdapter {
         })),
         allowFailure: true,
       });
+      if (reportOutage(ctx, res)) return [];
 
       const rows: QuoteRow[] = [];
       const ts = Date.now();

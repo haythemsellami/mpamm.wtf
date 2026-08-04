@@ -409,7 +409,14 @@ export function createLunarbaseAdapter(): VenueAdapter {
     noted.add(key);
     ctx.note(code, message);
   };
-  const recovered = (key: string) => noted.delete(key);
+  /** Clear a raised note AND say so. Dropping the dedupe key alone only re-arms
+   *  the warning for next time — the one already served stands until the window
+   *  rolls it off, so a healed pool keeps scaring whoever reads state.notes.
+   *  An adapter cannot retract, so recovery has to be announced (6c3cf5b). */
+  const recovered = (ctx: AdapterContext, key: string, msg: string) => {
+    if (!noted.delete(key)) return; // nothing was ever raised — stay quiet
+    ctx.note('venue.quote.recovered', msg);
+  };
   const quarantine = (ctx: AdapterContext, config: LunarbasePoolConfig, reason: string) => {
     byAddress.delete(config.pool.toLowerCase());
     byMarket.delete(config.market);
@@ -422,7 +429,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
     }
     byAddress.set(pool.pool.toLowerCase(), pool);
     byMarket.set(pool.market, pool);
-    recovered(`quarantine:${pool.pool}`);
+    recovered(ctx, `quarantine:${pool.pool}`, `Lunarbase ${pool.market} re-admitted — the quarantine condition cleared`);
   };
 
   return {
@@ -473,10 +480,10 @@ export function createLunarbaseAdapter(): VenueAdapter {
         noteOnce(ctx, 'snapshot', 'venue.quote.unavailable', `Lunarbase quote refresh failed: ${error instanceof Error ? error.message : String(error)}`);
         return [];
       }
-      recovered('head');
-      recovered('snapshot');
+      recovered(ctx, 'head', 'Lunarbase chain head readable again — quoting resumed');
+      recovered(ctx, 'snapshot', 'Lunarbase pool state refresh succeeded again — quoting resumed');
       for (const pool of current) {
-        recovered(`snapshot:${pool.pool}`);
+        recovered(ctx, `snapshot:${pool.pool}`, `Lunarbase ${pool.market} pool state readable again`);
         activate(ctx, pool);
       }
 
@@ -489,7 +496,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
           noteOnce(ctx, `inactive:${pool.pool}`, 'venue.quote.unavailable', `Lunarbase ${pool.market} quote hidden: ${snapshot.paused ? 'pool paused' : !snapshot.whitelistProbe ? 'whitelist route unavailable' : 'state stale'}`);
           continue;
         }
-        recovered(`inactive:${pool.pool}`);
+        recovered(ctx, `inactive:${pool.pool}`, `Lunarbase ${pool.market} quoting again (pool live, whitelist route open, state fresh)`);
         const mid = ctx.pricer.pairMid(pool.market);
         if (!(mid > 0)) continue;
         const legs = await (legsByPool.get(pool.pool.toLowerCase()) ?? Promise.resolve([]));

@@ -3,7 +3,7 @@
 // no signal by itself. These lock down that the adapter names the cause.
 import { describe, expect, it } from 'vitest';
 import { TOKENS } from '@shared';
-import { createThogammAdapter, thogammQuoteOutageReason } from '../thogamm.js';
+import { createThogammAdapter } from '../thogamm.js';
 
 /**
  * The real viem error a reverted `makerQuoteExactInput` leg carries, recorded
@@ -19,29 +19,6 @@ const PAUSED_ERROR = Object.assign(
 const MESSAGE_ONLY_ERROR = new Error('The contract function "makerQuoteExactInput" reverted with the following reason:\nmaker: paused');
 
 const failed = (error: unknown) => ({ status: 'failure' as const, error });
-const ok = { status: 'success' as const, result: [1n, 2n] as const };
-
-describe('thogammQuoteOutageReason', () => {
-  it('names the shared revert reason when every leg fails', () => {
-    expect(thogammQuoteOutageReason([failed(PAUSED_ERROR), failed(PAUSED_ERROR)])).toBe('maker: paused');
-  });
-
-  it('reads the reason off the rendered message when viem did not decode one', () => {
-    expect(thogammQuoteOutageReason([failed(MESSAGE_ONLY_ERROR)])).toBe('maker: paused');
-  });
-
-  it('is silent while ANY leg still quotes — one quiet market is not an outage', () => {
-    expect(thogammQuoteOutageReason([failed(PAUSED_ERROR), ok])).toBeNull();
-    expect(thogammQuoteOutageReason([])).toBeNull(); // references cold: not ThogAMM's fault
-  });
-
-  it('reports the DOMINANT reason, and falls back rather than throwing on an opaque error', () => {
-    expect(thogammQuoteOutageReason([failed(PAUSED_ERROR), failed(PAUSED_ERROR), failed(new Error('socket hang up'))]))
-      .toBe('maker: paused');
-    expect(thogammQuoteOutageReason([failed(undefined)])).toBe('call failed');
-    expect(thogammQuoteOutageReason([failed({ cause: { cause: null } })])).toBe('call failed');
-  });
-});
 
 const LIVE_TOKEN_ADDRESSES = [
   TOKENS.USDC.address, TOKENS.AUSD.address, TOKENS.USDT0.address,
@@ -84,7 +61,7 @@ describe('ThogAMM quote outage notes', () => {
     expect(notes[0].code).toBe('venue.quote.unavailable');
     expect(notes[0].msg).toContain('maker: paused');
     // the note must distinguish the two causes it could be — that is its job.
-    expect(notes[0].msg).toMatch(/maker disabled.*proxy upgrade/);
+    expect(notes[0].msg).toMatch(/venue disabled.*ABI drifted/);
 
     // the quote loop runs every 500ms: one event, one note.
     await adapter.quote!(ctx, [100]);

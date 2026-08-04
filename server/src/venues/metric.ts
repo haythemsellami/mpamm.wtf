@@ -3,6 +3,7 @@ import type { QuoteRow, Fill, Side, VenueMeta } from '@shared';
 import { TOKENS, assetForToken, baseTokenOf, pairFor } from '@shared';
 import { fromUnits, toUnits, shortHex } from '../util.js';
 import type { VenueAdapter, AdapterContext, LogBundle } from './adapter.js';
+import { createQuoteOutageReporter } from './quote-health.js';
 
 /**
  * Metric OMM adapter — an oracle-anchored bin AMM (propAMM), fully on-chain and
@@ -146,6 +147,9 @@ export function isMetricPoolLive(bal0: bigint | null, bal1: bigint | null, bid: 
  * fill decode. No backfill().
  */
 export function createMetricAdapter(): VenueAdapter {
+  // every leg reverting is a venue-wide cause (paused, ABI drift), not a
+  // per-pair gap — name it instead of vanishing (venues/quote-health.ts).
+  const reportOutage = createQuoteOutageReporter(METRIC_VENUE.name);
   let pools: MetricPool[] = [];                       // live: quoted + tailed
   let byAddr = new Map<string, MetricPool>();         // MONOTONIC decode map
   let discovered = false;
@@ -323,6 +327,7 @@ export function createMetricAdapter(): VenueAdapter {
       });
       if (!calls.length) return [];
       const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true });
+      if (reportOutage(ctx, qRes)) return [];
 
       const rowByKey = new Map<string, QuoteRow>();
       const ts = Date.now();
