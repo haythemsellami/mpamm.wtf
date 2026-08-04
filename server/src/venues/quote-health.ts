@@ -38,8 +38,10 @@ export interface MulticallOutcome { status: 'success' | 'failure'; error?: unkno
  *
  * Only an ALL-failure round counts: one market going quiet is routine per-pair
  * behaviour (a drained side, a cold reference), not an outage. When legs fail
- * for different reasons the dominant one is reported — a venue-wide cause is
- * the same string on every leg, so the majority IS the cause.
+ * for different reasons the most common one is reported (a plurality, not
+ * necessarily a majority; ties go to whichever was seen first) — a venue-wide
+ * cause is the same string on every leg, so it dominates whatever noise a
+ * flaky leg contributes.
  */
 export function quoteOutageReason(results: readonly MulticallOutcome[]): string | null {
   if (!results.length || results.some((r) => r.status === 'success')) return null;
@@ -70,7 +72,10 @@ export function createQuoteOutageReporter(venueName: string): (ctx: AdapterConte
     if (reason) {
       if (current !== reason) {
         current = reason;
-        ctx.note('venue.quote.unavailable', `${venueName} quotes unavailable — all ${results.length} legs reverted "${reason}" (venue disabled, or the ABI drifted from the contract)`);
+        // "failed", not "reverted": a leg can fail without reverting (transport
+        // error, decode failure), and `reason` falls back to a generic string
+        // in that case — `reverted "call failed"` would be a lie.
+        ctx.note('venue.quote.unavailable', `${venueName} quotes unavailable — all ${results.length} legs failed with "${reason}" (venue disabled, or the ABI drifted from the contract)`);
       }
       return true;
     }

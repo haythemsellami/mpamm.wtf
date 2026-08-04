@@ -62,13 +62,24 @@ describe('checkQuoteOutage', () => {
     expect(s.notes.map((n) => n.id)).toEqual(['hanji']); // metric's own note already says "maker: paused"
   });
 
-  it('still tracks a venue it stayed quiet about, so its recovery is announced', () => {
-    // otherwise an adapter-explained outage would heal in silence — exactly the
-    // stale-warning failure this whole layer exists to prevent.
+  it('stands down BOTH ways for an adapter-explained venue — no second, vaguer recovery', () => {
+    // the adapter that raised the detailed outage also announces the detailed
+    // recovery; a generic core announcement on top would double-report one event.
     const s = { runs: new Map<string, number>(), dark: new Set<string>(), notes: [] as any[], explained: new Set(['metric']) };
-    run(() => 0, QUOTE_DARK_CYCLES, s);
-    expect(s.dark.has('metric')).toBe(true);
-    run(() => 2, 1, s);
-    expect(s.notes.some((n) => n.kind === 'announce' && n.id === 'metric')).toBe(true);
+    run(() => 0, QUOTE_DARK_CYCLES + 10, s);
+    run(() => 2, 3, s);
+    expect(s.notes.filter((n) => n.id === 'metric')).toEqual([]);
+    // hanji has no adapter note, so the core owns BOTH ends of its story.
+    expect(s.notes.filter((n) => n.id === 'hanji').map((n) => n.kind)).toEqual(['warn', 'announce']);
+  });
+
+  it('takes over if the adapter note is gone by the time the run completes', () => {
+    // `explained` reads the served window, which can roll a note off. The venue
+    // is still dark, so the backstop must speak rather than assume it is covered.
+    const s = { runs: new Map<string, number>(), dark: new Set<string>(), notes: [] as any[], explained: new Set(['metric']) };
+    run(() => 0, QUOTE_DARK_CYCLES - 1, s);
+    s.explained.delete('metric'); // the adapter's note aged out of the window
+    run(() => 0, 1, s);
+    expect(s.notes.filter((n) => n.id === 'metric').map((n) => n.kind)).toEqual(['warn']);
   });
 });

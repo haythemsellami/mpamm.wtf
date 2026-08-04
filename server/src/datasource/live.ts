@@ -95,9 +95,11 @@ export function checkQuoteOutage(
     const run = (emptyRuns.get(v.id) ?? 0) + 1;
     emptyRuns.set(v.id, run);
     if (run < QUOTE_DARK_CYCLES || dark.has(v.id)) continue;
-    dark.add(v.id); // marked dark either way, so recovery is still announced
-    // the adapter already said WHY — a generic second note would only be noise.
+    // The adapter already said WHY, so it owns this venue's outage telemetry
+    // BOTH ways: standing down here but still marking it dark would let the
+    // core announce a second, vaguer recovery alongside the adapter's own.
     if (io.explained(v.id)) continue;
+    dark.add(v.id); // only ever holds venues this check itself reported
     io.warn(v.id, `${v.name} is not quoting — no rows for ${run} consecutive cycles (venue offline, or its adapter no longer matches the contract)`);
   }
 }
@@ -1052,7 +1054,11 @@ export class LiveDataSource extends BaseSource {
         // a THROWN quote is a degradation like any other — swallowing it left
         // the venue's disappearance with no explanation anywhere.
         const rows = await a.quote(this.ctxFor(a), config.sizesUsd).catch((e) => {
-          this.noteOnce('venue.quote.unavailable', `${a.venues()[0]?.name ?? 'venue'} quote failed: ${(e as Error).message}`, this.vidOf(a));
+          // a rejection is not necessarily an Error — a bare string or an
+          // Error with an empty message would otherwise note "quote failed:
+          // undefined", which is worse than useless to whoever reads it.
+          const why = (e instanceof Error && e.message) || String(e ?? '') || 'no reason given';
+          this.noteOnce('venue.quote.unavailable', `${a.venues()[0]?.name ?? 'venue'} quote failed: ${why}`, this.vidOf(a));
           return [] as QuoteRow[];
         });
         return this.ownVenues(a, rows, 'quote'); // drop rows for ids the adapter didn't declare
