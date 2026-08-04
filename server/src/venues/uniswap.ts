@@ -88,8 +88,8 @@ interface UniMarket {
 }
 
 export function createUniswapAdapter(): VenueAdapter {
-  // every leg reverting is a venue-wide cause (paused, ABI drift), not a
-  // per-pair gap — name it instead of vanishing (venues/quote-health.ts).
+  // every leg FAILING is a venue-wide cause (paused, ABI drift, dead RPC route),
+  // not a per-pair gap — name it instead of vanishing (venues/quote-health.ts).
   const reportOutage = createQuoteOutageReporter(UNI_VENUE.name);
   let markets: UniMarket[] = [];
 

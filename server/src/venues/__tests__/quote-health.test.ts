@@ -28,6 +28,22 @@ describe('quoteOutageReason', () => {
     expect(quoteOutageReason([failed(MESSAGE_ONLY_ERROR)])).toBe('maker: paused');
   });
 
+  it('takes ONLY the reason line, not the Contract Call sections viem appends', () => {
+    // `.` does not cross newlines, so the fallback stops at end-of-line — the
+    // note can never bloat with addresses/args. Pinned because it is a silent
+    // property of the regex, not something the code says out loud.
+    const noisy = new Error([
+      'The contract function "makerQuoteExactInput" reverted with the following reason:',
+      'maker: paused',
+      '',
+      'Contract Call:',
+      '  address:   0x80c74517BCC2D67fFE02D3ED886796272F647210',
+      '  function:  makerQuoteExactInput(address tokenIn, address tokenOut, uint256 amountIn)',
+      '  args:      (0x3bd359…, 0x754704…, 48000000000000000000)',
+    ].join('\n'));
+    expect(quoteOutageReason([failed(noisy)])).toBe('maker: paused');
+  });
+
   it('is silent while ANY leg still quotes — one quiet market is not an outage', () => {
     expect(quoteOutageReason([failed(PAUSED_ERROR), ok])).toBeNull();
     expect(quoteOutageReason([])).toBeNull(); // references cold: not the venue's fault

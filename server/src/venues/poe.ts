@@ -60,8 +60,8 @@ interface PoePool {
  * executable quotes (Pool.getQuote) + Pool.Swap fill decode. No backfill().
  */
 export function createPoeAdapter(): VenueAdapter {
-  // every leg reverting is a venue-wide cause (paused, ABI drift), not a
-  // per-pair gap — name it instead of vanishing (venues/quote-health.ts).
+  // every leg FAILING is a venue-wide cause (paused, ABI drift, dead RPC route),
+  // not a per-pair gap — name it instead of vanishing (venues/quote-health.ts).
   const reportOutage = createQuoteOutageReporter(POE_VENUE.name);
   // MERGE, never replace (LFJ review #3): getPool is a factory READ, not a
   // cursor-holding log source, so a transient/partial discovery must only

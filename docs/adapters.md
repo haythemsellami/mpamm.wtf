@@ -85,7 +85,7 @@ DB_PATH=./data/scratch.db npm run dev
 const reportOutage = createQuoteOutageReporter(MY_VENUE.name);   // in the factory closure
 …
 const res = await ctx.client.multicall({ contracts: calls, allowFailure: true });
-if (reportOutage(ctx, res)) return [];                            // notes "…reverted \"maker: paused\""
+if (reportOutage(ctx, res)) return [];                            // notes: all N legs failed with "maker: paused"
 ```
 
 The core stands down once your note is on the record, so the venue is explained exactly once. Recovery is **announced**, never retracted — an adapter can only append, so a heal that said nothing would leave the warning standing until the served window rolled it off.
