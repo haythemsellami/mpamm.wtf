@@ -519,7 +519,7 @@ export type NoteCode =
   // venue adapters: discovery, market coverage, quoting, decode
   | 'venue.discovery' | 'venue.discovery.degraded' | 'venue.discovery.failed'
   | 'venue.market.unlisted' | 'venue.upgraded' | 'venue.quarantined'
-  | 'venue.quote.unavailable' | 'venue.gas.suspect'
+  | 'venue.quote.unavailable' | 'venue.quote.recovered' | 'venue.gas.suspect'
   | 'venue.source.failed' | 'venue.decode.failed' | 'venue.foreign'
   // the live fill tail and its resume point
   | 'tail.resume' | 'tail.gap.skipped' | 'tail.failed' | 'tail.timestamps.failed'
@@ -548,7 +548,7 @@ export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'rpc.failover': 'warn', 'rpc.down': 'warn', 'rpc.recovered': 'info', 'rpc.endpoint.dropped': 'warn',
   'venue.discovery': 'info', 'venue.discovery.degraded': 'warn', 'venue.discovery.failed': 'warn',
   'venue.market.unlisted': 'warn', 'venue.upgraded': 'warn', 'venue.quarantined': 'warn',
-  'venue.quote.unavailable': 'warn', 'venue.gas.suspect': 'warn',
+  'venue.quote.unavailable': 'warn', 'venue.quote.recovered': 'info', 'venue.gas.suspect': 'warn',
   'venue.source.failed': 'warn', 'venue.decode.failed': 'warn', 'venue.foreign': 'warn',
   'tail.resume': 'info', 'tail.gap.skipped': 'warn', 'tail.failed': 'warn', 'tail.timestamps.failed': 'warn',
   'backfill.start': 'info', 'backfill.done': 'info', 'backfill.deferred': 'info', 'backfill.held': 'info',

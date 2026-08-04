@@ -172,6 +172,46 @@ export function decodeThogammSwap(
   };
 }
 
+/** The Error(string) payload of a reverted eth_call, from anywhere in viem's
+ *  nested error chain (multicall wraps it a few `cause` levels deep). Falls
+ *  back to parsing the rendered message, which always carries the reason. */
+function revertReason(err: unknown): string | null {
+  for (let e = err as any, depth = 0; e && depth < 6; e = e.cause, depth++) {
+    if (typeof e.reason === 'string' && e.reason.trim()) return e.reason.trim();
+  }
+  const rendered = err instanceof Error ? err.message : String(err ?? '');
+  const m = /reverted with the following reason:\s*\n?(.+)/.exec(rendered);
+  return m ? m[1].trim() : null;
+}
+
+/**
+ * The venue-wide quote outage reason, or null while ANY leg still quotes.
+ *
+ * `makerQuoteExactInput` REVERTS rather than returning zero when the maker is
+ * off — the keeper posts `sideEnableBits = 0` and every call then reverts
+ * "maker: paused" (observed 2026-08-04 07:16:39 UTC, block 92,998,939). The
+ * quote multicall runs with allowFailure, so that arrives as an all-failure
+ * result set and the venue simply stops appearing — visually identical to our
+ * ABI drifting after one of this proxy's frequent upgrades. Naming the reason
+ * is what separates "the maker switched off" from "we are broken".
+ *
+ * Only an ALL-failure round counts: a single market going quiet is routine
+ * per-pair behaviour, not an outage.
+ */
+export function thogammQuoteOutageReason(
+  results: readonly { status: 'success' | 'failure'; error?: unknown }[],
+): string | null {
+  if (!results.length || results.some((r) => r.status === 'success')) return null;
+  const counts = new Map<string, number>();
+  for (const r of results) {
+    const reason = revertReason(r.error) ?? 'call failed';
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  let top = 'call failed', most = 0;
+  for (const [reason, n] of counts) if (n > most) { most = n; top = reason; }
+  return top;
+}
+
 interface QuoteLeg {
   market: ThogammMarket;
   sizeUsd: number;
@@ -192,6 +232,9 @@ export function createThogammAdapter(): VenueAdapter {
   const byMarket = new Map<string, ThogammMarket>();
   let byDirection = new Map<string, ThogammMarket>();
   let discovered = false;
+  /** the outage reason currently on the record, so the 500ms quote loop notes
+   *  it once — but a CHANGED reason is a new event and gets its own note. */
+  let quoteOutage: string | null = null;
 
   const refresh = async (ctx: AdapterContext) => {
     const blockNumber = await ctx.client.getBlockNumber();
@@ -283,6 +326,23 @@ export function createThogammAdapter(): VenueAdapter {
       if (!calls.length) return [];
 
       const results = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
+      // Say WHY the venue went dark before returning nothing (see
+      // thogammQuoteOutageReason) — silence is the one failure mode that reads
+      // as a healthy-but-quiet venue.
+      const outage = thogammQuoteOutageReason(results);
+      if (outage) {
+        if (quoteOutage !== outage) {
+          quoteOutage = outage;
+          ctx.note('venue.quote.unavailable', `ThogAMM quotes unavailable — all ${results.length} legs reverted "${outage}" (maker disabled, or the ABI drifted after a proxy upgrade)`);
+        }
+        return [];
+      }
+      // retract by announcement: an adapter can only append, so a recovery that
+      // said nothing would leave the warning standing until the window rolled.
+      if (quoteOutage) {
+        ctx.note('venue.quote.recovered', `ThogAMM quoting again (was "${quoteOutage}")`);
+        quoteOutage = null;
+      }
       const partials = new Map<string, PartialQuote>();
       for (let i = 0; i < results.length; i++) {
         const result = results[i];
