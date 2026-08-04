@@ -180,7 +180,7 @@ export function createMetricAdapter(): VenueAdapter {
             if (/^0x[0-9a-f]{40}$/.test(p) && !candidates.has(p)) { candidates.add(p); added++; }
           }
           scanCursor = head + 1n;
-          if (added) ctx.log(`Metric: factory announced ${added} new pool(s)`);
+          if (added) ctx.note('venue.discovery', `Metric: factory announced ${added} new pool(s)`);
         }
       } catch { /* scan failed — keep the cursor, retry next discovery */ }
 
@@ -202,7 +202,7 @@ export function createMetricAdapter(): VenueAdapter {
         // and keep the venue running.
         if (isSeed && verdict.reason === 'unresolved') throw new Error(`Metric getImmutables failed for seed pool ${list[i]}`);
         if (verdict.reason === 'unregistered-pair') {
-          ctx.log(`Metric: pool ${shortHex(list[i])} (${verdict.detail}) is not a registered pair — skipped`);
+          ctx.note('venue.market.unlisted', `Metric: pool ${shortHex(list[i])} (${verdict.detail}) is not a registered pair — skipped`);
         }
       }
 
@@ -235,7 +235,7 @@ export function createMetricAdapter(): VenueAdapter {
       for (const p of live) byAddr.set(p.pool.toLowerCase(), p);
       discovered = true;
       const shells = admitted.length - live.length;
-      ctx.log(`Metric: ${live.length} live base/stable pool(s)${shells ? ` (+${shells} unfunded, not quoted)` : ''}`);
+      ctx.note('venue.discovery', `Metric: ${live.length} live base/stable pool(s)${shells ? ` (+${shells} unfunded, not quoted)` : ''}`);
 
       // ── 4. gas destinations: EVERY oracle Metric's providers read ──────────
       // Metric is permissionless infra: curators plug in their own pricing, so
@@ -274,7 +274,7 @@ export function createMetricAdapter(): VenueAdapter {
         try {
           const count = await ctx.client.readContract({ address: oracle as `0x${string}`, abi: pushOracleAbi, functionName: 'getOracleCount' });
           if (Number(count) !== feeds.size) {
-            ctx.log(`Metric: push oracle ${shortHex(oracle)} serves ${count} feed(s) but Metric uses ${feeds.size} — burn attribution may overcount`);
+            ctx.note('venue.gas.suspect', `Metric: push oracle ${shortHex(oracle)} serves ${count} feed(s) but Metric uses ${feeds.size} — burn attribution may overcount`);
           }
         } catch { /* count is advisory only — never gates tracking */ }
       }
@@ -403,7 +403,7 @@ export function createMetricAdapter(): VenueAdapter {
       });
       if (created.length) {
         for (const l of created) candidates.add(String(l.args.pool).toLowerCase());
-        ctx.log(`Metric: factory deployed ${created.length} new pool(s) — re-running discovery`);
+        ctx.note('venue.discovery', `Metric: factory deployed ${created.length} new pool(s) — re-running discovery`);
         await refresh(ctx);
       }
       const out: Fill[] = [];

@@ -1,5 +1,5 @@
 import { parseAbi } from 'viem';
-import type { Fill, QuoteRow, Side, VenueMeta } from '@shared';
+import type { Fill, NoteCode, QuoteRow, Side, VenueMeta } from '@shared';
 import { NATIVE_MON, TOKENS, pairFor } from '@shared';
 import { fromUnits, shortHex, toUnits } from '../util.js';
 import type { AdapterContext, LogBundle, VenueAdapter } from './adapter.js';
@@ -404,21 +404,21 @@ export function createLunarbaseAdapter(): VenueAdapter {
   const byMarket = new Map<string, LunarbaseCachedPool>();
   const noted = new Set<string>();
   let discovered = false;
-  const noteOnce = (ctx: AdapterContext, key: string, message: string) => {
+  const noteOnce = (ctx: AdapterContext, key: string, code: NoteCode, message: string) => {
     if (noted.has(key)) return;
     noted.add(key);
-    ctx.log(message);
+    ctx.note(code, message);
   };
   const recovered = (key: string) => noted.delete(key);
   const quarantine = (ctx: AdapterContext, config: LunarbasePoolConfig, reason: string) => {
     byAddress.delete(config.pool.toLowerCase());
     byMarket.delete(config.market);
-    noteOnce(ctx, `quarantine:${config.pool}`, `Lunarbase ${config.market} quarantined: ${reason}`);
+    noteOnce(ctx, `quarantine:${config.pool}`, 'venue.quarantined', `Lunarbase ${config.market} quarantined: ${reason}`);
   };
   const activate = (ctx: AdapterContext, pool: LunarbaseCachedPool) => {
     const prior = byAddress.get(pool.pool.toLowerCase());
     if (prior && prior.snapshot.implementation !== pool.snapshot.implementation) {
-      ctx.log(`Lunarbase ${pool.market} implementation changed ${prior.snapshot.implementation.slice(0, 10)}… → ${pool.snapshot.implementation.slice(0, 10)}…`);
+      ctx.note('venue.upgraded', `Lunarbase ${pool.market} implementation changed ${prior.snapshot.implementation.slice(0, 10)}… → ${pool.snapshot.implementation.slice(0, 10)}…`);
     }
     byAddress.set(pool.pool.toLowerCase(), pool);
     byMarket.set(pool.market, pool);
@@ -436,7 +436,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
       const staged = await readPoolsAtBlock(ctx, LUNARBASE_POOLS, blockNumber, (config, reason) => quarantine(ctx, config, reason));
       for (const pool of staged) activate(ctx, pool);
       discovered = true;
-      ctx.log(`Lunarbase: ${staged.length}/${LUNARBASE_POOLS.length} validated production pool(s), whitelist fee mode`);
+      ctx.note('venue.discovery', `Lunarbase: ${staged.length}/${LUNARBASE_POOLS.length} validated production pool(s), whitelist fee mode`);
     },
 
     async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
@@ -445,7 +445,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
       try {
         head = await ctx.client.getBlockNumber();
       } catch (error) {
-        noteOnce(ctx, 'head', `Lunarbase quote unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        noteOnce(ctx, 'head', 'venue.quote.unavailable', `Lunarbase quote unavailable: ${error instanceof Error ? error.message : String(error)}`);
         return [];
       }
 
@@ -470,7 +470,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
         current = await readPoolsAtBlock(ctx, gatePools, head, (config, reason) => quarantine(ctx, config, reason));
       } catch (error) {
         // legs settle harmlessly (quoteLunarbaseLeg never rejects) — nothing dangles.
-        noteOnce(ctx, 'snapshot', `Lunarbase quote refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+        noteOnce(ctx, 'snapshot', 'venue.quote.unavailable', `Lunarbase quote refresh failed: ${error instanceof Error ? error.message : String(error)}`);
         return [];
       }
       recovered('head');
@@ -486,7 +486,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
         const snapshot = pool.snapshot;
         if (snapshot.paused || !snapshot.whitelistProbe
           || head >= snapshot.latestUpdateBlock + snapshot.blockDelay) {
-          noteOnce(ctx, `inactive:${pool.pool}`, `Lunarbase ${pool.market} quote hidden: ${snapshot.paused ? 'pool paused' : !snapshot.whitelistProbe ? 'whitelist route unavailable' : 'state stale'}`);
+          noteOnce(ctx, `inactive:${pool.pool}`, 'venue.quote.unavailable', `Lunarbase ${pool.market} quote hidden: ${snapshot.paused ? 'pool paused' : !snapshot.whitelistProbe ? 'whitelist route unavailable' : 'state stale'}`);
           continue;
         }
         recovered(`inactive:${pool.pool}`);

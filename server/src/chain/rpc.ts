@@ -1,7 +1,7 @@
 import { createPublicClient, createTransport, defineChain, http, type PublicClient, type Transport } from 'viem';
 import { config } from '../config.js';
 import { ADDR, MONAD_CHAIN_ID } from '@shared';
-import { RpcBreaker, type RpcStatusView } from './failover.js';
+import { RpcBreaker, type RpcNote, type RpcStatusView } from './failover.js';
 
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
@@ -55,9 +55,10 @@ export const publicClient: PublicClient = createPublicClient({
   transport: failoverTransport,
 });
 
-/** Failover status for /api/markets (labels only) + event sink for state.notes. */
+/** Failover status for /api/markets (labels only) + event sink for state.notes
+ *  (each event carries its own note code — see failover.ts RpcNote). */
 export const rpcStatus = (): RpcStatusView => breaker.status();
-export const onRpcEvent = (cb: (msg: string) => void): void => breaker.subscribe(cb);
+export const onRpcEvent = (cb: (n: RpcNote) => void): void => breaker.subscribe(cb);
 
 /** Boot sanity check — verifies chain id 143 on EVERY endpoint (wrong-chain
  *  backups are dropped, wrong-chain primary is fatal) and pre-positions onto

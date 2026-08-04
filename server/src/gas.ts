@@ -1,8 +1,10 @@
 import type { PublicClient } from 'viem';
+import type { NoteCode } from '@shared';
 import { config } from './config.js';
 import { utcDay } from './util.js';
 import { blockAtOrAfter } from './chain/rpc.js';
 import type { VolumeStore } from './db.js';
+import type { NoteFn } from './notes.js';
 import type { GasSource, VenueAdapter } from './venues/adapter.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -107,7 +109,7 @@ export class GasTracker {
     private client: PublicClient,
     private store: VolumeStore,
     private adapters: readonly VenueAdapter[],
-    private note: (m: string) => void,
+    private note: NoteFn,
     /** RPC failover state — gas accrual pauses on a backup endpoint (cursors
      *  hold exactly, so the series catches up losslessly on the primary). */
     private degraded: () => boolean = () => false,
@@ -166,7 +168,7 @@ export class GasTracker {
           this.store.resetGas(vid);
           this.store.setMeta(`gas_approx_${vid}`, '');
           this.approx.delete(vid);
-          this.note(`${a.venues()[0]?.name ?? vid}: gas series removed — venue no longer declares quote-update sources`);
+          this.note('gas.series.reset', `${a.venues()[0]?.name ?? vid}: gas series removed — venue no longer declares quote-update sources`, vid);
         }
       }
       // destination ownership: the SAME contract claimed by two venues would
@@ -186,7 +188,7 @@ export class GasTracker {
               const key = addr.toLowerCase();
               const held = owner.get(key);
               if (held && held !== vid) {
-                this.noteOnce(`${name}: gas destination ${addr.slice(0, 10)}… already tracked by '${held}' — venue skipped until the collision is resolved`);
+                this.noteOnce('gas.destination.conflict', `${name}: gas destination ${addr.slice(0, 10)}… already tracked by '${held}' — venue skipped until the collision is resolved`, vid);
                 conflict = true;
               } else owner.set(key, vid);
             }
@@ -194,7 +196,7 @@ export class GasTracker {
         } catch { /* sources unresolved (pre-discovery) — tailVenue defers anyway */ }
         if (conflict) continue;
         try { await this.tailVenue(a, vid, name); }
-        catch (e) { this.note(`${name}: quote-update gas tail paused (${(e as Error).message}); retried next pass`); }
+        catch (e) { this.note('gas.scan.paused', `${name}: quote-update gas tail paused (${(e as Error).message}); retried next pass`, vid); }
       }
     } finally {
       this.running = false;
@@ -212,7 +214,7 @@ export class GasTracker {
     // differently-paced walks. Every current venue declares exactly one source.
     const mode = sources[0].mode;
     if (sources.some((s) => s.mode !== mode)) {
-      this.noteOnce(`${name}: mixed gas-source modes — using '${mode}' sources only`);
+      this.noteOnce('gas.mode.mixed', `${name}: mixed gas-source modes — using '${mode}' sources only`, vid);
       sources = sources.filter((s) => s.mode === mode);
     }
     if (mode === 'blocks' && !this.approx.has(vid)) {
@@ -280,7 +282,7 @@ export class GasTracker {
             const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
             this.store.resetGasFrom(vid, day);
             this.store.setMeta(cursorKey, String(startBlock));
-            this.note(`${name}: verifying quote-update coverage — rebuilding from ${day}`);
+            this.note('gas.series.reset', `${name}: verifying quote-update coverage — rebuilding from ${day}`, vid);
           }
         }
       } catch { return; }
@@ -294,7 +296,7 @@ export class GasTracker {
     const seededFrom = this.store.getMeta(fromKey);
     if (this.store.getMeta(cursorKey) && (!seededFrom || seededFrom > sinceDay)) {
       this.store.resetGas(vid);
-      this.note(`${name}: deepening quote-update gas history to ${sinceDay} — re-scanning`);
+      this.note('gas.series.reset', `${name}: deepening quote-update gas history to ${sinceDay} — re-scanning`, vid);
     }
     const cur = this.store.getMeta(cursorKey);
     let cursor: bigint;
@@ -303,7 +305,7 @@ export class GasTracker {
     } else {
       cursor = await blockAtOrAfter(Math.floor(Date.parse(`${sinceDay}T00:00:00Z`) / 1000), head);
       this.store.setMeta(fromKey, sinceDay);
-      this.noteOnce(`${name}: quote-update gas scan from ${sinceDay} — blocks ${cursor}→${head}`);
+      this.noteOnce('gas.scan.start', `${name}: quote-update gas scan from ${sinceDay} — blocks ${cursor}→${head}`, vid);
     }
     if (cursor > head) return;
 
@@ -344,14 +346,14 @@ export class GasTracker {
             const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
             this.store.resetGasFrom(vid, day);
             this.store.setMeta(cursorKey, String(startBlock));
-            this.note(`${name}: quote-update destination added — rebuilding from ${day} (earlier history unaffected)`);
+            this.note('gas.series.reset', `${name}: quote-update destination added — rebuilding from ${day} (earlier history unaffected)`, vid);
             return;
           }
         }
       } catch { /* probe/anchor failure — fall through to the full rebuild */ }
     }
     this.store.resetGas(vid);
-    this.note(`${name}: quote-update destination set changed — re-scanning venue lifetime`);
+    this.note('gas.series.reset', `${name}: quote-update destination set changed — re-scanning venue lifetime`, vid);
   }
 
   /** First block where `addr` has code (its deployment), or null when it has
@@ -415,7 +417,7 @@ export class GasTracker {
           if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; break; } // too wide → shrink, retry cursor
           if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; } // transient → back off
           // a range the RPC can't serve is skipped LOUDLY (undercount, never a stall).
-          this.noteOnce(`${name}: gas scan could not read blocks near ${cursor} — a small range was skipped`);
+          this.noteOnce('gas.range.skipped', `${name}: gas scan could not read blocks near ${cursor} — a small range was skipped`, vid);
           logs = [];
         }
       }
@@ -438,7 +440,7 @@ export class GasTracker {
           if (Number.isFinite(anchorMs)) break;
         }
         if (!Number.isFinite(anchorMs)) {
-          this.noteOnce(`${name}: gas scan block timestamps unresolved near ${cursor} — chunk skipped`);
+          this.noteOnce('gas.range.skipped', `${name}: gas scan block timestamps unresolved near ${cursor} — chunk skipped`, vid);
         } else {
           // receipts: evenly-strided sample, scaled to the exact tx count. Keeper
           // limits are flat and prices ride the base-fee floor — the sample tracks
@@ -470,7 +472,7 @@ export class GasTracker {
             e.txs += hashes.length;
             acc.set(day, e);
           } else {
-            this.noteOnce(`${name}: gas scan receipts unavailable near ${cursor} — chunk skipped`);
+            this.noteOnce('gas.range.skipped', `${name}: gas scan receipts unavailable near ${cursor} — chunk skipped`, vid);
           }
         }
       }
@@ -537,10 +539,11 @@ export class GasTracker {
     acc.clear();
   }
 
-  private noteOnce(m: string): void {
-    if (this.noted.has(m)) return;
+  private noteOnce(code: NoteCode, msg: string, venue?: string): void {
+    const key = `${code}|${venue ?? ''}|${msg}`;
+    if (this.noted.has(key)) return;
     if (this.noted.size >= 300) this.noted.clear(); // cursor-stamped messages are unique — bound the set
-    this.noted.add(m);
-    this.note(m);
+    this.noted.add(key);
+    this.note(code, msg, venue);
   }
 }

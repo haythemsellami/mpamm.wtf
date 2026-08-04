@@ -132,7 +132,7 @@ export function createHanjiAdapter(): VenueAdapter {
         if (String(tokenX).toLowerCase() !== base.address.toLowerCase() || String(tokenY).toLowerCase() !== quote.address.toLowerCase()) {
           throw new Error(`Hanji ${m.market}: on-chain tokens ${tokenX}/${tokenY} don't match ${m.baseTok}/${m.quoteTok}`);
         }
-        if (!pairOf(m.market)) { ctx.log(`Hanji: ${m.market} is not a registered pair — skipped`); continue; }
+        if (!pairOf(m.market)) { ctx.note('venue.market.unlisted', `Hanji: ${m.market} is not a registered pair — skipped`); continue; }
         const baseShare = Number(sx) / 10 ** base.decimals;
         const quoteShare = Number(sy) / 10 ** quote.decimals;
         found.push({
@@ -146,7 +146,7 @@ export function createHanjiAdapter(): VenueAdapter {
       markets = found;
       byClob = new Map(markets.map((m) => [m.clob.toLowerCase(), m]));
       discovered = true;
-      ctx.log(`Hanji: ${markets.length} market(s), taker fee ${markets[0]?.feeBps ?? '?'}bps (on-chain config)`);
+      ctx.note('venue.discovery', `Hanji: ${markets.length} market(s), taker fee ${markets[0]?.feeBps ?? '?'}bps (on-chain config)`);
     },
 
     async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {

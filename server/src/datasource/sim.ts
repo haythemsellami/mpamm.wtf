@@ -6,6 +6,7 @@ import {
   type GasResponse, type VenueGasDaily,
 } from '@shared';
 import { config } from '../config.js';
+import { NoteBuffer } from '../notes.js';
 import { clamp, utcDay, nextId, annotateCex } from '../util.js';
 import { ADAPTERS, venueMeta, validateRegistry } from '../venues/registry.js';
 
@@ -52,6 +53,9 @@ export class SimDataSource extends BaseSource {
   private baselines: VenueMeta[] = this.venues.filter((v) => v.role === 'baseline');
   private references: VenueMeta[] = this.venues.filter((v) => v.role === 'reference');
   private param: Record<string, Param> = {};
+  /** the sim's one note: what this data is. Raised at construction, not per
+   *  request, so its timestamp says when the process started. */
+  private notes = new NoteBuffer();
 
   private px: Record<string, number> = { ...ASSET_PX };
   /** MON price alias (the header/`monUsd`), backed by the per-asset price map. */
@@ -83,6 +87,7 @@ export class SimDataSource extends BaseSource {
         weight: Math.max(0.1, 0.55 - i * 0.22),
       };
     });
+    this.notes.note('source.sim', 'simulated data — set DATA_SOURCE=live for on-chain quotes');
   }
 
   async start(): Promise<void> {
@@ -101,7 +106,7 @@ export class SimDataSource extends BaseSource {
       chainId: 143, block: this.block, monUsd: this.mon, monChangePct: this.chg,
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
       quoteCadenceMs: config.quoteIntervalMs, source: 'sim', venues: this.venues,
-      notes: ['simulated data — set DATA_SOURCE=live for on-chain quotes'],
+      notes: this.notes.list(),
     };
   }
   getQuotes(): QuoteSnapshot { return { block: this.block, monUsd: this.mon, ts: Date.now(), rows: this.buildMatrix() }; }

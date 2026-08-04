@@ -1,4 +1,5 @@
 import { HttpRequestError, TimeoutError } from 'viem';
+import type { NoteCode } from '@shared';
 
 /**
  * RpcBreaker — ordered-endpoint failover for the single shared RPC client.
@@ -21,8 +22,16 @@ import { HttpRequestError, TimeoutError } from 'viem';
  *
  * Event messages are label-only ("primary", "backup-1") — they flow into the
  * public state.notes, so endpoint URLs (which embed RPC keys) must never
- * appear in them.
+ * appear in them. Each event also carries the note code the transition IS, so
+ * a consumer filters on `rpc.failover` rather than on the wording.
  */
+
+/** A breaker transition, ready to raise as a note (server/src/notes.ts). */
+export interface RpcNote {
+  code: NoteCode;
+  /** label-only sentence — never a URL. */
+  msg: string;
+}
 
 /** raw JSON-RPC request fn (an instantiated viem transport's `request`). */
 export type RpcRequestFn = (args: { method: string; params?: unknown }) => Promise<unknown>;
@@ -69,7 +78,7 @@ export class RpcBreaker {
   private probeTimer: ReturnType<typeof setInterval> | undefined;
   private probeInFlight = false;
   private healthyProbes = 0;
-  private onEvent: (msg: string) => void = () => undefined;
+  private onEvent: (n: RpcNote) => void = () => undefined;
   private readonly probeIntervalMs: number;
 
   constructor(opts?: { probeIntervalMs?: number }) {
@@ -83,7 +92,7 @@ export class RpcBreaker {
   }
 
   /** Replace the event sink (single listener — the live source's noteOnce). */
-  subscribe(cb: (msg: string) => void): void {
+  subscribe(cb: (n: RpcNote) => void): void {
     this.onEvent = cb;
   }
 
@@ -110,7 +119,7 @@ export class RpcBreaker {
         this.advancesSinceSuccess = 0;
         if (this.allDown) {
           this.allDown = false;
-          this.onEvent(`RPC serving again (on ${this.endpoints[this.active].label})`);
+          this.onEvent({ code: 'rpc.recovered', msg: `RPC serving again (on ${this.endpoints[this.active].label})` });
         }
         return res;
       } catch (e) {
@@ -146,7 +155,7 @@ export class RpcBreaker {
         const chainId = Number(BigInt(String(id)));
         if (chainId !== expectChainId) {
           health.push(false);
-          this.onEvent(`RPC ${ep.label} dropped at boot: chainId ${chainId} != ${expectChainId}`);
+          this.onEvent({ code: 'rpc.endpoint.dropped', msg: `RPC ${ep.label} dropped at boot: chainId ${chainId} != ${expectChainId}` });
         } else {
           health.push(true);
           block = Math.max(block, Number(BigInt(String(bn))));
@@ -167,7 +176,7 @@ export class RpcBreaker {
     if (firstHealthy > 0) {
       this.active = firstHealthy;
       this.degradedSinceTs = Date.now();
-      this.onEvent(`RPC primary unreachable at boot — starting on ${this.endpoints[firstHealthy].label}`);
+      this.onEvent({ code: 'rpc.failover', msg: `RPC primary unreachable at boot — starting on ${this.endpoints[firstHealthy].label}` });
       this.startProbe();
     }
     return { ok: true, block };
@@ -200,9 +209,12 @@ export class RpcBreaker {
     this.advancesSinceSuccess += 1;
     if (this.advancesSinceSuccess >= this.endpoints.length && !this.allDown) {
       this.allDown = true;
-      this.onEvent(this.endpoints.length === 1
-        ? 'RPC endpoint unreachable (no backups configured) — chain data frozen until it recovers'
-        : `RPC: all ${this.endpoints.length} endpoints unreachable — chain data frozen until one recovers`);
+      this.onEvent({
+        code: 'rpc.down',
+        msg: this.endpoints.length === 1
+          ? 'RPC endpoint unreachable (no backups configured) — chain data frozen until it recovers'
+          : `RPC: all ${this.endpoints.length} endpoints unreachable — chain data frozen until one recovers`,
+      });
     }
     if (this.active === 0) {
       // cycled through every backup back to the primary — give it a fresh shot
@@ -213,7 +225,7 @@ export class RpcBreaker {
       return;
     }
     if (this.degradedSinceTs === undefined) this.degradedSinceTs = Date.now();
-    this.onEvent(`RPC failover: ${from} unhealthy — switched to ${this.endpoints[this.active].label}`);
+    this.onEvent({ code: 'rpc.failover', msg: `RPC failover: ${from} unhealthy — switched to ${this.endpoints[this.active].label}` });
     this.startProbe();
   }
 
@@ -227,7 +239,7 @@ export class RpcBreaker {
     this.stop();
     if (sinceTs !== undefined) {
       const mins = Math.max(1, Math.round((Date.now() - sinceTs) / 60_000));
-      this.onEvent(`RPC recovered: back on primary (was on ${wasOn} for ~${mins}m)`);
+      this.onEvent({ code: 'rpc.recovered', msg: `RPC recovered: back on primary (was on ${wasOn} for ~${mins}m)` });
     }
   }
 

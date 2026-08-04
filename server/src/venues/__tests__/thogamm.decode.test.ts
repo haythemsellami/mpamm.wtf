@@ -134,7 +134,7 @@ describe('decodeThogammSwap (real Monad fixture)', () => {
 
 /** Minimal ctx: discovery reads are stubbed to the live 7-token registry, so
  *  decode() can exercise the upgrade path with no network. */
-const stubCtx = (notes: string[]) => ({
+const stubCtx = (notes: string[], codes: string[] = []) => ({
   client: {
     getBlockNumber: async () => 91_000_000n,
     readContract: async ({ functionName }: any) =>
@@ -148,14 +148,15 @@ const stubCtx = (notes: string[]) => ({
       })),
   },
   pricer: { usdForToken: (key: string, amount: number) => usdForToken(key, amount) },
-  log: (m: string) => notes.push(m),
+  note: (code: string, m: string) => { codes.push(code); notes.push(m); },
 }) as any;
 
 describe('ThogAMM proxy upgrades', () => {
   it('announces every upgrade loudly — an ABI shift would silence fills otherwise', async () => {
     const notes: string[] = [];
+    const codes: string[] = [];
     const adapter = createThogammAdapter();
-    const ctx = stubCtx(notes);
+    const ctx = stubCtx(notes, codes);
     await adapter.discover(ctx);
     notes.length = 0;
 
@@ -165,6 +166,8 @@ describe('ThogAMM proxy upgrades', () => {
     expect(notes.filter((n) => n.includes('proxy upgraded'))).toHaveLength(1);
     expect(notes[0]).toContain('0x127a…d40a');
     expect(notes[0]).toContain('re-verify');
+    // classified at the emit site — a consumer filters on the code, not the wording.
+    expect(codes).toContain('venue.upgraded');
     // discovery re-ran (the token registry can change with the implementation)
     expect(notes.some((n) => n.includes('registered market(s)'))).toBe(true);
   });
