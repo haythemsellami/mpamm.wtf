@@ -102,7 +102,7 @@ export function createPoeAdapter(): VenueAdapter {
         if (addr === ZERO) continue; // no POE pool for this pair — normal
         candidates.push({ pool: addr, combo: combos[i] });
       }
-      if (!candidates.length) { discovered = true; ctx.log('POE: 0 base/stable pool(s)'); return; }
+      if (!candidates.length) { discovered = true; ctx.note('venue.discovery', 'POE: 0 base/stable pool(s)'); return; }
 
       // phase 2: canonical token order (which side is the base) per pool.
       const tokRes = await ctx.client.multicall({
@@ -135,7 +135,7 @@ export function createPoeAdapter(): VenueAdapter {
         byAddr.set(p.pool.toLowerCase(), p);
       }
       discovered = true;
-      ctx.log(`POE: ${byMarket.size} base/stable pool(s)`);
+      ctx.note('venue.discovery', `POE: ${byMarket.size} base/stable pool(s)`);
     },
 
     async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {

@@ -48,7 +48,7 @@ export function createTemplateAdapter(): VenueAdapter {
       // markets = await ctx.client.readContract({ ... });   // on-chain
       // markets = (await (await fetch(ctx.config.subgraphUrl, { ... })).json()).data.pools;  // subgraph
       discovered = true;
-      ctx.log(`${MY_VENUE.name}: discovered ${markets.length} market(s)`);
+      ctx.note('venue.discovery', `${MY_VENUE.name}: discovered ${markets.length} market(s)`);
     },
 
     // (Pattern B) OPTIONAL historical seed — closed-day volume and/or fills.

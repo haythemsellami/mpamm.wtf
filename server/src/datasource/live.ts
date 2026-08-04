@@ -2,7 +2,7 @@ import { BaseSource } from './index.js';
 import {
   MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf,
   type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
-  type LeaderboardResponse, type GasResponse,
+  type LeaderboardResponse, type GasResponse, type NoteCode,
 } from '@shared';
 import { computeLeaderboard } from '../analytics.js';
 import { FillAttributor } from '../attribution.js';
@@ -12,6 +12,7 @@ import { config } from '../config.js';
 import { publicClient, getLogsChunked, probeChain, blockAtOrAfter, onRpcEvent, rpcStatus } from '../chain/rpc.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore } from '../db.js';
+import { NoteBuffer } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
 import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, validateRegistry } from '../venues/registry.js';
@@ -84,20 +85,33 @@ export class LiveDataSource extends BaseSource {
   private pricer = new UsdPricer((key) => REFERENCES.assetUsd(key), (market) => REFERENCES.midForPair(market));
   private store = new VolumeStore(config.dbPath);
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
-  private gas = new GasTracker(publicClient, this.store, ADAPTERS, (m) => this.noteOnce(m), () => rpcStatus().degraded);
+  private gas = new GasTracker(publicClient, this.store, ADAPTERS, (code, msg, venue) => this.noteOnce(code, msg, venue), () => rpcStatus().degraded);
   /** fill attribution — UNKNOWN → DIRECT / "Router - X" from tx.to (best-effort;
    *  stays on during failover — per-fill lookups are live-path cheap, unlike crawls). */
   private attributor = new FillAttributor(publicClient, ADAPTERS);
-  /** shared infra handed to every adapter (they don't import globals). */
-  private ctx: AdapterContext = {
-    client: publicClient,
-    getLogs: getLogsChunked,
-    pricer: this.pricer,
-    config,
-    // deduped: discovery logs repeat verbatim on every 10-min rediscover and
-    // were accumulating unbounded ("Metric: 3 pool(s)" × N) in public notes.
-    log: (m: string) => this.noteOnce(m),
-  };
+  /** shared infra handed to every adapter (they don't import globals), built
+   *  once PER ADAPTER so every note it raises carries its own venue id without
+   *  the adapter repeating that at each call site. */
+  private ctxCache = new WeakMap<VenueAdapter, AdapterContext>();
+  private ctxFor(a: VenueAdapter): AdapterContext {
+    let ctx = this.ctxCache.get(a);
+    if (!ctx) {
+      const venue = this.vidOf(a);
+      ctx = {
+        client: publicClient,
+        getLogs: getLogsChunked,
+        pricer: this.pricer,
+        config,
+        // deduped: discovery notes repeat verbatim on every 10-min rediscover
+        // and were accumulating unbounded ("Metric: 3 pool(s)" × N).
+        note: (code, msg) => this.noteOnce(code, msg, venue),
+      };
+      this.ctxCache.set(a, ctx);
+    }
+    return ctx;
+  }
+  /** the adapter's primary venue id — what its notes are stamped with. */
+  private vidOf(a: VenueAdapter): string | undefined { return a.venues()[0]?.id; }
 
   private quotes: QuoteSnapshot = { block: 0, monUsd: 0, ts: 0, rows: [] };
   private days: DailyVolume[] = [];
@@ -126,7 +140,10 @@ export class LiveDataSource extends BaseSource {
   /** re-entrancy guard shared by the boot onboarding chain and the retry timer
    *  — two remark walks over the same cursors must never interleave. */
   private remarkRunning = false;
-  private notes: string[] = [];
+  /** the served notes window (server/src/notes.ts): sanitized, stamped with a
+   *  code + level, deduped, and capped without letting one chatty subsystem
+   *  evict everything else. */
+  private notes = new NoteBuffer();
   /** base asset key → when its reference mid went dark (checkReferenceStarvation). */
   private starvedSince = new Map<string, number>();
   private block = 0;
@@ -141,7 +158,7 @@ export class LiveDataSource extends BaseSource {
     this.knownVenueIds = venueIds();
     // RPC failover events (switch / all-down / recovery) land in state.notes.
     // Subscribed BEFORE the boot probe so a degraded start is on the record.
-    onRpcEvent((m) => this.noteOnce(m));
+    onRpcEvent((e) => this.noteOnce(e.code, e.msg));
     // Fail fast when NO endpoint serves or the primary is on the wrong chain
     // (docs/architecture.md: operations) rather than half-start; a dead primary
     // with a healthy backup boots degraded instead of failing.
@@ -151,8 +168,8 @@ export class LiveDataSource extends BaseSource {
     await REFERENCES.start();
     // discover every venue's markets/pools (adapters hold their own state).
     for (const a of ADAPTERS) {
-      try { await a.discover(this.ctx); }
-      catch (e) { this.note(`${a.venues()[0]?.name ?? 'venue'} discovery failed: ${(e as Error).message}`); }
+      try { await a.discover(this.ctxFor(a)); }
+      catch (e) { this.note('venue.discovery.failed', `${a.venues()[0]?.name ?? 'venue'} discovery failed: ${(e as Error).message}`, this.vidOf(a)); }
     }
 
     await this.initHistory();
@@ -195,7 +212,7 @@ export class LiveDataSource extends BaseSource {
     try {
       if (config.markoutBackfill) {
         try { await this.markoutOnboarding(); }
-        catch (e) { this.noteOnce(`markout onboarding stopped: ${(e as Error).message}; retried automatically`); }
+        catch (e) { this.noteOnce('markout.paused', `markout onboarding stopped: ${(e as Error).message}; retried automatically`); }
       }
       if (config.backfillEnabled) await this.backfillOnchain();
     } finally {
@@ -236,8 +253,8 @@ export class LiveDataSource extends BaseSource {
    *  (never wipe) their cache, so a transient failure here is harmless. */
   private async rediscover(): Promise<void> {
     for (const a of ADAPTERS) {
-      try { await a.discover(this.ctx); }
-      catch (e) { this.noteOnce(`${a.venues()[0]?.name ?? 'venue'} re-discovery failed: ${(e as Error).message}`); }
+      try { await a.discover(this.ctxFor(a)); }
+      catch (e) { this.noteOnce('venue.discovery.failed', `${a.venues()[0]?.name ?? 'venue'} re-discovery failed: ${(e as Error).message}`, this.vidOf(a)); }
     }
     // seeds deferred at boot (pools quarantined / not discovered) retry here —
     // no-op when everything is seeded, and the in-flight guard makes an extra
@@ -249,7 +266,7 @@ export class LiveDataSource extends BaseSource {
     return {
       chainId: 143, block: this.block, monUsd: REFERENCES.assetUsd('MON'), monChangePct: REFERENCES.changePctFor('MON'),
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
-      quoteCadenceMs: config.quoteIntervalMs, source: 'live', venues: venueMeta(), notes: this.notes,
+      quoteCadenceMs: config.quoteIntervalMs, source: 'live', venues: venueMeta(), notes: this.notes.list(),
       rpc: rpcStatus(),
     };
   }
@@ -266,13 +283,13 @@ export class LiveDataSource extends BaseSource {
     // delete the filtered-out venues' history (their done-flags would survive
     // and block any re-backfill — unrecoverable without a manual reset).
     const pruned = this.store.reconcileVenues([...allVenueIds()]);
-    if (pruned.volume || pruned.fills) this.note(`pruned ${pruned.volume} volume row(s) + ${pruned.fills} fill(s) for removed venue(s)`);
+    if (pruned.volume || pruned.fills) this.note('store.migrated', `pruned ${pruned.volume} volume row(s) + ${pruned.fills} fill(s) for removed venue(s)`);
     // one-time honesty relabel: Metric/POE used to hardcode DIRECT with no
     // attribution evidence — retained rows revert to UNKNOWN (new fills get
     // real labels from the attributor; evidence-based venues are untouched).
     if (this.store.getMeta('attribution_relabel') !== 'v1') {
       const n = this.store.relabelCategory(['metric', 'poe'], 'DIRECT', 'UNKNOWN');
-      if (n > 0) this.note(`attribution: relabeled ${n} retained unevidenced DIRECT fill(s) to UNKNOWN`);
+      if (n > 0) this.note('store.migrated', `attribution: relabeled ${n} retained unevidenced DIRECT fill(s) to UNKNOWN`);
       this.store.setMeta('attribution_relabel', 'v1');
     }
     // FastLane rows written as ROUTER before the MEV class existed: the
@@ -280,7 +297,7 @@ export class LiveDataSource extends BaseSource {
     // nothing — the inner swap is searcher flow.
     if (this.store.getMeta('mev_relabel') !== 'v1') {
       const n = this.store.relabelCategoryByRouter('FastLane', 'ROUTER', 'MEV');
-      if (n > 0) this.note(`attribution: reclassified ${n} FastLane fill(s) ROUTER → MEV`);
+      if (n > 0) this.note('store.migrated', `attribution: reclassified ${n} FastLane fill(s) ROUTER → MEV`);
       this.store.setMeta('mev_relabel', 'v1');
     }
     // 1. authoritative persisted history
@@ -308,13 +325,13 @@ export class LiveDataSource extends BaseSource {
       if (!a.backfill) continue;
       const allowed = new Set(a.venues().map((v) => v.id)); // ids this adapter may emit
       try {
-        const bf = await a.backfill(this.ctx, config.seedSinceUtc);
+        const bf = await a.backfill(this.ctxFor(a), config.seedSinceUtc);
         for (const bd of bf.days ?? []) {
           if (bd.utcDay >= today) continue; // today is owned by live tailing
           let row = this.days.find((d) => d.utcDay === bd.utcDay);
           if (!row) { row = this.emptyDay(bd.utcDay, false); this.days.push(row); }
           for (const [venueId, vd] of Object.entries(bd.byVenue)) {
-            if (!allowed.has(venueId)) { this.note(`dropped backfill volume for foreign venue '${venueId}'`); continue; }
+            if (!allowed.has(venueId)) { this.note('venue.foreign', `dropped backfill volume for foreign venue '${venueId}'`, this.vidOf(a)); continue; }
             row.byVenue[venueId] = { usd: vd.usd, swaps: vd.swaps ?? 0 };
           }
           row.partial = false;
@@ -325,11 +342,11 @@ export class LiveDataSource extends BaseSource {
         // bf.days, so they are NOT ingested (no double-count), and their
         // closed-day blocks sit before the live tail cursor (never re-decoded).
         for (const f of bf.fills ?? []) {
-          if (!allowed.has(f.venueId)) { this.note(`dropped backfill fill for foreign venue '${f.venueId}'`); continue; }
+          if (!allowed.has(f.venueId)) { this.note('venue.foreign', `dropped backfill fill for foreign venue '${f.venueId}'`, this.vidOf(a)); continue; }
           seededFills.push(f);
         }
       } catch (e) {
-        this.note(`${a.venues()[0]?.name ?? 'venue'} backfill unavailable (${(e as Error).message}); history grows forward`);
+        this.note('backfill.paused', `${a.venues()[0]?.name ?? 'venue'} backfill unavailable (${(e as Error).message}); history grows forward`, this.vidOf(a));
       }
     }
     if (seededFills.length) {
@@ -344,7 +361,7 @@ export class LiveDataSource extends BaseSource {
       // markout/leaderboard stats (never fabricated from a much-later mid).
       for (const f of seededFills) if (this.hasFutureMarkoutHorizon(f, bootMs)) this.pending.add(f);
     }
-    if (seeded) this.note(`seeded ${seeded} closed day-row(s) from adapter backfill; on-chain-only venues accumulate forward`);
+    if (seeded) this.note('backfill.done', `seeded ${seeded} closed day-row(s) from adapter backfill; on-chain-only venues accumulate forward`);
     this.days.sort((a, b) => (a.utcDay < b.utcDay ? -1 : 1));
     this.today(); // ensure today's partial bucket, rolling any stale "today" closed
     this.reconcileSwapCounts(); // derive per-venue swap counts from retained + backfilled fills
@@ -362,10 +379,13 @@ export class LiveDataSource extends BaseSource {
     // midnight-crossing restart.
     if (lpb && head - BigInt(lpb) <= BigInt(config.gapFillMaxBlocks)) {
       this.lastBlock = BigInt(lpb);
-      this.note(`resuming: gap-filling ${head - BigInt(lpb)} block(s) since last run`);
+      this.note('tail.resume', `resuming: gap-filling ${head - BigInt(lpb)} block(s) since last run`);
     } else {
       this.lastBlock = head;
-      this.note(lpb ? `gap exceeds ${config.gapFillMaxBlocks} blocks — resuming at tip (interim fills not decoded)` : 'cold start — today builds forward from now');
+      // two different events: a bounded gap was skipped (fills in it are lost
+      // for good, so it is a warning) versus a first boot with nothing to resume.
+      if (lpb) this.note('tail.gap.skipped', `gap exceeds ${config.gapFillMaxBlocks} blocks — resuming at tip (interim fills not decoded)`);
+      else this.note('tail.resume', 'cold start — today builds forward from now');
     }
   }
 
@@ -390,7 +410,7 @@ export class LiveDataSource extends BaseSource {
     } catch (e) {
       // retained + retried next tick, but say so — a broken disk otherwise
       // looks healthy while the cursor silently stops advancing.
-      this.noteOnce(`persist failed (${(e as Error).message}); retrying`);
+      this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); retrying`);
     }
   }
 
@@ -400,33 +420,16 @@ export class LiveDataSource extends BaseSource {
   }
 
   /**
-   * SANITIZE anything that reaches state.notes — notes are served publicly on
-   * /api/markets, and provider error messages embed the FULL request URL,
-   * including a private RPC key (viem prints "URL: https://host/rpc/<key>").
-   * Strip every URL, collapse whitespace, and cap the length.
+   * Notes are the service's dev-facing telemetry (server/src/notes.ts): the
+   * buffer sanitizes the message, stamps the timestamp and the code's level,
+   * and prints every note as it is raised. `code` classifies the event and
+   * `venue` scopes it, both known here at the call site.
    */
-  private scrubNote(msg: string): string {
-    const s = msg.replace(/(?:https?|wss?):\/\/\S+/gi, '<rpc>').replace(/\s+/g, ' ').trim();
-    return s.length > 300 ? s.slice(0, 297) + '…' : s;
-  }
-  /** append a (sanitized) note. ALL notes must go through this or noteOnce. */
-  private note(msg: string): void {
-    this.notes.push(this.scrubNote(msg));
-    // capped: notes live for the process lifetime and are served publicly —
-    // keep a recent window, never an unbounded log.
-    while (this.notes.length > 60) this.notes.shift();
-  }
-  /** push a note at most once — per-tick drop reasons must not spam state.notes. */
-  private noteOnce(msg: string): void {
-    const s = this.scrubNote(msg);
-    if (!this.notes.includes(s)) this.note(s);
-  }
-  /** retract a note that no longer describes reality (a recovered degradation).
-   *  Scrubbed the same way it was pushed, so the strings actually match. */
-  private dropNote(msg: string): void {
-    const s = this.scrubNote(msg);
-    for (let i = this.notes.length - 1; i >= 0; i--) if (this.notes[i] === s) this.notes.splice(i, 1);
-  }
+  private note(code: NoteCode, msg: string, venue?: string): void { this.notes.note(code, msg, venue); }
+  /** raise a note at most once — per-tick drop reasons must not spam state.notes. */
+  private noteOnce(code: NoteCode, msg: string, venue?: string): void { this.notes.noteOnce(code, msg, venue); }
+  /** retract a note that no longer describes reality (a recovered degradation). */
+  private dropNote(code: NoteCode, msg: string, venue?: string): void { this.notes.drop(code, msg, venue); }
 
   /** keep only items whose venueId is one this adapter declared — a foreign id
    *  (plugin bug) is dropped with a one-time note, never silently stored (review #3). */
@@ -434,7 +437,7 @@ export class LiveDataSource extends BaseSource {
     const allowed = new Set(a.venues().map((v) => v.id));
     return items.filter((x) => {
       if (allowed.has(x.venueId)) return true;
-      this.noteOnce(`${a.venues()[0]?.name ?? 'adapter'} emitted a ${kind} for foreign venue '${x.venueId}' — dropped`);
+      this.noteOnce('venue.foreign', `${a.venues()[0]?.name ?? 'adapter'} emitted a ${kind} for foreign venue '${x.venueId}' — dropped`, this.vidOf(a));
       return false;
     });
   }
@@ -476,7 +479,7 @@ export class LiveDataSource extends BaseSource {
       this.store.setMeta(`backfill_cursor_${vid}`, '');
     }
     this.store.setMeta('backfill_reset_applied', want);
-    this.note(`backfill reset applied (${want}) — re-scanning: ${vids.join(', ')}`);
+    this.note('backfill.reset', `backfill reset applied (${want}) — re-scanning: ${vids.join(', ')}`);
   }
 
   // ── background on-chain backfill ─────────────────────────────────────────────
@@ -499,9 +502,9 @@ export class LiveDataSource extends BaseSource {
       // quarantined/undiscovered right now) must NOT be — the done-flag would
       // silently drop the venue's lifetime history (issue: seed vs quarantine).
       if (seed.action === 'skip') { this.store.setMeta(`backfill_done_${vid}`, '1'); continue; }
-      if (seed.action === 'defer') { this.noteOnce(`${name} backfill deferred — ${seed.reason}`); continue; }
+      if (seed.action === 'defer') { this.noteOnce('backfill.deferred', `${name} backfill deferred — ${seed.reason}`, vid); continue; }
       try { await this.backfillAdapter(a, vid, name, sinceUtc, seed.fills); }
-      catch (e) { this.noteOnce(`${name} backfill paused (${(e as Error).message}); retried automatically`); }
+      catch (e) { this.noteOnce('backfill.paused', `${name} backfill paused (${(e as Error).message}); retried automatically`, vid); }
     }
   }
 
@@ -509,7 +512,7 @@ export class LiveDataSource extends BaseSource {
     const end = this.bootHead;
     if (end <= 0n) return;
     const startSec = Math.floor(Date.parse(`${sinceUtc}T00:00:00Z`) / 1000);
-    if (!Number.isFinite(startSec)) { this.noteOnce(`${name} backfill: invalid backfillFromUtc '${sinceUtc}'`); return; }
+    if (!Number.isFinite(startSec)) { this.noteOnce('backfill.config.invalid', `${name} backfill: invalid backfillFromUtc '${sinceUtc}'`, vid); return; }
 
     // Resume from a DAY-ALIGNED block: re-scan the in-progress day from its start
     // so mergeBackfill's SET-per-day stays idempotent (earlier days already done).
@@ -548,14 +551,14 @@ export class LiveDataSource extends BaseSource {
     let skipStride = floor;
     const MAX_STRIDE = 216_000n; // ≈ one UTC day of Monad blocks (~0.4s/block)
     const maxChunk = BigInt(config.backfillChunk);
-    this.noteOnce(`${name}: on-chain backfill ${sinceUtc} — blocks ${from}→${end}`);
+    this.noteOnce('backfill.start', `${name}: on-chain backfill ${sinceUtc} — blocks ${from}→${end}`, vid);
 
     /** one getLogs across every fill source over [cursor, t]; throws on failure. */
     const fetchRange = (t: bigint) => Promise.all(sources.map((s) =>
       publicClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
 
     while (cursor <= end) {
-      if (await holdWhileDegraded()) this.noteOnce(`${name} backfill held while on backup RPC — resumed on primary`);
+      if (await holdWhileDegraded()) this.noteOnce('backfill.held', `${name} backfill held while on backup RPC — resumed on primary`, vid);
       // ── in-hole mode: probe a floor-sized slice at the cursor. Readable → the
       // hole is over (fall through and INGEST that probe normally). Unreadable →
       // skip a stride and double it (capped), so a multi-million-block hole is
@@ -592,7 +595,7 @@ export class LiveDataSource extends BaseSource {
             skipped += to - cursor + 1n;
             holeRun = 1;
             skipStride = floor * 2n;
-            this.noteOnce(`${name} backfill: RPC archive could not serve blocks near ${cursor} — skipping unreadable range(s); affected day(s) may undercount`);
+            this.noteOnce('backfill.range.skipped', `${name} backfill: RPC archive could not serve blocks near ${cursor} — skipping unreadable range(s); affected day(s) may undercount`, vid);
             cursor = to + 1n;
             break;
           }
@@ -620,7 +623,7 @@ export class LiveDataSource extends BaseSource {
           const tsOf = () => anchorMs; // chunk-level ts — daily bucketing only
           const bundle: LogBundle = {};
           sources.forEach((s, i) => { bundle[s.key] = batches![i]; });
-          const fills = this.ownVenues(a, await a.decode(this.ctx, bundle, tsOf, new Set()), 'backfill fill');
+          const fills = this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, new Set()), 'backfill fill');
           for (const f of fills) {
             const day = utcDay(f.ts);
             if (day >= today) continue; // today is owned by the live tail — no overlap
@@ -628,7 +631,7 @@ export class LiveDataSource extends BaseSource {
             e.usd += f.usd; e.swaps += 1; acc.set(day, e);
           }
         } else {
-          this.noteOnce(`${name} backfill: block timestamps unresolved near ${cursor} — chunk skipped`);
+          this.noteOnce('backfill.range.skipped', `${name} backfill: block timestamps unresolved near ${cursor} — chunk skipped`, vid);
         }
       }
 
@@ -650,8 +653,8 @@ export class LiveDataSource extends BaseSource {
     // merge makes a full re-run idempotent).
     this.store.setMeta(`backfill_done_${vid}`, '1');
     this.store.upsertMany(this.days);
-    this.note(`${name}: backfill complete — ${acc.size} day(s) seeded` +
-      (skipped > 0n ? ` (${skipped} block(s) unreadable on the RPC archive and skipped — those windows may undercount)` : ''));
+    this.note('backfill.done', `${name}: backfill complete — ${acc.size} day(s) seeded` +
+      (skipped > 0n ? ` (${skipped} block(s) unreadable on the RPC archive and skipped — those windows may undercount)` : ''), vid);
     this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) }); // nudge connected clients
   }
 
@@ -700,7 +703,7 @@ export class LiveDataSource extends BaseSource {
         await this.remarkVenue(vid, a.venues()[0]?.name ?? vid);
       }
     } catch (e) {
-      this.noteOnce(`markout retry sweep failed: ${(e as Error).message}; retried on the next sweep`);
+      this.noteOnce('markout.paused', `markout retry sweep failed: ${(e as Error).message}; retried on the next sweep`);
     } finally {
       this.remarkRunning = false;
     }
@@ -716,12 +719,12 @@ export class LiveDataSource extends BaseSource {
       // state (e.g. Clober book Opens) and router attribution to label them.
       const seed = seedSources(a);
       if (seed.action === 'skip') { this.store.setMeta(`mkfill_done_${vid}`, '1'); continue; }
-      if (seed.action === 'defer') { this.noteOnce(`${name} markout onboarding deferred — ${seed.reason}`); continue; }
+      if (seed.action === 'defer') { this.noteOnce('markout.deferred', `${name} markout onboarding deferred — ${seed.reason}`, vid); continue; }
       try {
         if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') await this.backfillRecentFills(a, vid, name, seed.all);
         await this.remarkVenue(vid, name);
       } catch (e) {
-        this.noteOnce(`${name} markout onboarding paused (${(e as Error).message}); retried automatically`);
+        this.noteOnce('markout.paused', `${name} markout onboarding paused (${(e as Error).message}); retried automatically`, vid);
       }
     }
   }
@@ -756,13 +759,13 @@ export class LiveDataSource extends BaseSource {
     let persisted = 0;
     let tsFails = 0; // consecutive timestamp-resolution failures at the SAME cursor
     const batch: Fill[] = [];
-    this.noteOnce(`${name}: onboarding fill scan ${sinceDay} — blocks ${from}→${end}`);
+    this.noteOnce('markout.scan.start', `${name}: onboarding fill scan ${sinceDay} — blocks ${from}→${end}`, vid);
 
     const fetchAll = (t: bigint) => Promise.all(sources.map((s) =>
       publicClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
 
     while (cursor <= end) {
-      if (await holdWhileDegraded()) this.noteOnce(`${name} onboarding scan held while on backup RPC — resumed on primary`);
+      if (await holdWhileDegraded()) this.noteOnce('markout.scan.held', `${name} onboarding scan held while on backup RPC — resumed on primary`, vid);
       const to = cursor + chunk - 1n > end ? end : cursor + chunk - 1n;
       let batches: any[][] | null = null;
       let tries = 0;
@@ -775,7 +778,7 @@ export class LiveDataSource extends BaseSource {
           if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; } // transient → back off
           // A recent range should never be an archive hole; if the RPC still
           // can't serve it, skip ONE floor chunk loudly rather than stalling.
-          this.noteOnce(`${name} onboarding: RPC could not serve blocks near ${cursor} — a small range was skipped`);
+          this.noteOnce('markout.range.skipped', `${name} onboarding: RPC could not serve blocks near ${cursor} — a small range was skipped`, vid);
           cursor = to + 1n;
           break;
         }
@@ -807,7 +810,7 @@ export class LiveDataSource extends BaseSource {
         // after 3 attempts skip the chunk (its fills stay un-backfilled, loudly).
         if (tsFailed) {
           if (++tsFails < 3) { await sleep(config.backfillPaceMs * 25 * tsFails); continue; }
-          this.noteOnce(`${name} onboarding: block timestamps unresolved near ${cursor} — chunk skipped`);
+          this.noteOnce('markout.range.skipped', `${name} onboarding: block timestamps unresolved near ${cursor} — chunk skipped`, vid);
           tsFails = 0;
           cursor = to + 1n;
           continue;
@@ -820,7 +823,7 @@ export class LiveDataSource extends BaseSource {
         };
         const bundle: LogBundle = {};
         sources.forEach((s, i) => { bundle[s.key] = batches![i]; });
-        const fills = this.ownVenues(a, await a.decode(this.ctx, bundle, tsOf, new Set()), 'onboarding fill');
+        const fills = this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, new Set()), 'onboarding fill');
         // today is owned by the live tail (its volume/markouts accrue there).
         for (const f of fills) if (utcDay(f.ts) < today) batch.push(f);
       }
@@ -836,7 +839,7 @@ export class LiveDataSource extends BaseSource {
     }
 
     this.store.setMeta(`mkfill_done_${vid}`, '1');
-    this.note(`${name}: onboarding fill scan complete — ${persisted} historical fill(s) persisted`);
+    this.note('markout.scan.done', `${name}: onboarding fill scan complete — ${persisted} historical fill(s) persisted`, vid);
   }
 
   /** Mark this venue's still-unmarked persisted fills against archived CEX
@@ -851,7 +854,7 @@ export class LiveDataSource extends BaseSource {
       // endpoint) must not skip the venue's OTHER markets — observed in prod
       // when a MON cross-leg 403 paused the whole venue's remark stage.
       try { await this.remarkVenueMarket(vid, name, market, cutoff); }
-      catch (e) { this.noteOnce(`${name} ${market}: markout backfill paused (${(e as Error).message}); resumes next boot`); }
+      catch (e) { this.noteOnce('markout.paused', `${name} ${market}: markout backfill paused (${(e as Error).message}); resumes next boot`, vid); }
     }
   }
 
@@ -877,7 +880,7 @@ export class LiveDataSource extends BaseSource {
         const series = await pairMidSeries(market, dayStart, dayEnd + 120_000);
         // deferral is a BREAK, not a return: the days already marked this walk
         // must still get their summary note + cache invalidation below.
-        if (!series) { this.noteOnce(`${name} ${market}: CEX price archive for ${day} not published yet — markouts resume later`); break; }
+        if (!series) { this.noteOnce('markout.archive.pending', `${name} ${market}: CEX price archive for ${day} not published yet — markouts resume later`, vid); break; }
         const updates = fills.map((f) => {
           const ss = f.side === 'buy' ? 1 : -1;
           const marks = MARKOUT_HORIZONS.map((h) => {
@@ -896,7 +899,7 @@ export class LiveDataSource extends BaseSource {
       await sleep(config.backfillPaceMs);
     }
     if (marked) {
-      this.note(`${name} ${market}: markouts backfilled for ${marked} fill(s)`);
+      this.note('markout.remark.done', `${name} ${market}: markouts backfilled for ${marked} fill(s)`, vid);
       this.lbCache.clear(); // fresh aggregates on the next /api/leaderboard hit
     }
   }
@@ -956,7 +959,7 @@ export class LiveDataSource extends BaseSource {
         try { await this.poll(); } catch { /* keep ticking */ }
         this.ageMarkouts();
       } else {
-        try { await this.tailFills(); } catch (e) { this.noteOnce(`tail failed — holding cursor, retrying: ${(e as Error).message}`); }
+        try { await this.tailFills(); } catch (e) { this.noteOnce('tail.failed', `tail failed — holding cursor, retrying: ${(e as Error).message}`); }
         this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) });
       }
       this.scheduleLoop(kind, Math.max(0, interval - (Date.now() - t0)));
@@ -975,9 +978,9 @@ export class LiveDataSource extends BaseSource {
     // covers the normal cold-start warmup.
     if (now - this.bootMs > 60_000) {
       checkReferenceStarvation(Object.values(ASSETS), (k) => REFERENCES.assetUsd(k), this.starvedSince, now, {
-        warn: (m) => this.noteOnce(m),
-        clear: (m) => this.dropNote(m),
-        announce: (m) => this.note(m),
+        warn: (m) => this.noteOnce('reference.starved', m),
+        clear: (m) => this.dropNote('reference.starved', m),
+        announce: (m) => this.note('reference.recovered', m),
       });
     }
     // record each PAIR's CEX mid history in its own terms (the markout anchors).
@@ -996,7 +999,7 @@ export class LiveDataSource extends BaseSource {
       publicClient.getBlockNumber(),
       Promise.all(ADAPTERS.map(async (a) => {
         if (!a.quote) return [] as QuoteRow[];
-        const rows = await a.quote(this.ctx, config.sizesUsd).catch(() => [] as QuoteRow[]);
+        const rows = await a.quote(this.ctxFor(a), config.sizesUsd).catch(() => [] as QuoteRow[]);
         return this.ownVenues(a, rows, 'quote'); // drop rows for ids the adapter didn't declare
       })),
     ]);
@@ -1043,7 +1046,7 @@ export class LiveDataSource extends BaseSource {
           // 'fills' + 'state' sources hold the cursor; only 'attribution' is tolerated.
           if (s.kind !== 'attribution') {
             requiredFailed = true;
-            this.noteOnce(`${a.venues()[0]?.name ?? 'venue'} log source '${s.key}' failed — holding cursor, retrying`);
+            this.noteOnce('venue.source.failed', `${a.venues()[0]?.name ?? 'venue'} log source '${s.key}' failed — holding cursor, retrying`, this.vidOf(a));
           }
         }
       }));
@@ -1064,7 +1067,7 @@ export class LiveDataSource extends BaseSource {
     try {
       blockTs = await this.blockTimes(blocks);
     } catch (e) {
-      this.noteOnce(`block timestamp lookup failed — holding cursor, retrying: ${(e as Error).message}`);
+      this.noteOnce('tail.timestamps.failed', `block timestamp lookup failed — holding cursor, retrying: ${(e as Error).message}`);
       return;
     }
     const tsOf = (bn: bigint) => {
@@ -1076,10 +1079,10 @@ export class LiveDataSource extends BaseSource {
     const fresh: Fill[] = [];
     let decodeFailed = false;
     for (const { a, bundle, failed } of perAdapter) {
-      try { fresh.push(...this.ownVenues(a, await a.decode(this.ctx, bundle, tsOf, failed), 'fill')); }
+      try { fresh.push(...this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, failed), 'fill')); }
       catch (e) {
         decodeFailed = true;
-        this.noteOnce(`${a.venues()[0]?.name ?? 'venue'} decode error — holding cursor, retrying: ${(e as Error).message}`);
+        this.noteOnce('venue.decode.failed', `${a.venues()[0]?.name ?? 'venue'} decode error — holding cursor, retrying: ${(e as Error).message}`, this.vidOf(a));
       }
     }
     // Decode is cursor-critical too: if an adapter cannot decode this range, do
@@ -1108,7 +1111,7 @@ export class LiveDataSource extends BaseSource {
   private ingest(f: Fill): void {
     // never store a fill for a venue the registry doesn't know (its volume would
     // be invisible in the UI / could merge into another venue) — review #3.
-    if (!this.knownVenueIds.has(f.venueId)) { this.noteOnce(`dropped fill for unknown venue '${f.venueId}'`); return; }
+    if (!this.knownVenueIds.has(f.venueId)) { this.noteOnce('venue.foreign', `dropped fill for unknown venue '${f.venueId}'`); return; }
     // Idempotent (H1): a fill already counted — a re-tail / gap-fill / restart
     // re-decode of the same on-chain event (deterministic id) — must never
     // advance the volume buckets again.
@@ -1164,7 +1167,7 @@ export class LiveDataSource extends BaseSource {
       // (a BTC fill aged vs a $0.02 mid would fabricate absurd markouts). Leave
       // its markouts null and stop tracking it (defense in depth; adapters gate
       // discovery/decode on the pair registry so this shouldn't be reachable).
-      if (!pairOf(f.market)) { this.pending.delete(f); this.noteOnce(`fill market '${f.market}' is not a registered pair — markouts skipped`); continue; }
+      if (!pairOf(f.market)) { this.pending.delete(f); this.noteOnce('markout.market.unregistered', `fill market '${f.market}' is not a registered pair — markouts skipped`, f.venueId); continue; }
       const hist = this.midHist.get(f.market) ?? [];
       // A horizon that elapsed before we had any mid for THIS pair can't be
       // computed faithfully — leave it null rather than fabricate it (M1).

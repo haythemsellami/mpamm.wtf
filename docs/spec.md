@@ -175,5 +175,5 @@ WS  /stream                        channels: state, quotes, fill, volume
 - **Fail-closed indexing**: required-source failures hold the cursor; ticks are re-entrancy-guarded; discovery merges (never shrinks) its cache; `logSources()` throws until discovery is ready.
 - **Boot**: live boot fail-fasts on a chain sanity check (chain id, Multicall3) so a supervisor restarts it. The simulator (`DATA_SOURCE=sim`) is the explicit offline mode — registry-driven, same contract, never a silent fallback.
 - **Every long job is cursor-resumable** and commits atomically with its cursor — kills mid-scan never double-count.
-- **Public notes**: every degradation (starving feed, deferred archive, skipped ranges) is surfaced in `state.notes`, sanitized so credentials never leak.
+- **Developer notes**: every degradation (starving feed, deferred archive, skipped ranges) is surfaced in `state.notes` as `{ ts, level, code, venue?, msg }`, sanitized so credentials never leak. Maintainer-facing telemetry, not rendered in the UI.
 - **Deploy**: single container, one replica (single-writer SQLite + in-memory state), persistent disk. See [deploy.md](deploy.md).

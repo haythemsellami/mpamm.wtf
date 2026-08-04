@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { HttpRequestError, TimeoutError } from 'viem';
+import type { NoteCode } from '@shared';
 import { RpcBreaker, isTransportFailure, type BreakerEndpoint } from '../failover.js';
 
 /**
@@ -36,9 +37,12 @@ function build(behaviors: Array<{ mode: 'ok' | (() => Error) }>, labels?: string
   const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 }); // timer irrelevant — probeNow() driven
   const endpoints = behaviors.map((b, i) => fakeEndpoint(labels?.[i] ?? (i === 0 ? 'primary' : `backup-${i}`), b));
   breaker.attach(endpoints);
+  // events carry the note code the transition IS, so a consumer filters on the
+  // code and never on the wording (server/src/notes.ts).
   const events: string[] = [];
-  breaker.subscribe((m) => events.push(m));
-  return { breaker, endpoints, events };
+  const codes: NoteCode[] = [];
+  breaker.subscribe((n) => { events.push(n.msg); codes.push(n.code); });
+  return { breaker, endpoints, events, codes };
 }
 
 let cleanup: RpcBreaker[] = [];
@@ -73,7 +77,7 @@ describe('RpcBreaker failover', () => {
   });
 
   it('advances after the threshold and transparently serves that request from the backup', async () => {
-    const { breaker, endpoints, events } = track(build([{ mode: () => http502() }, { mode: 'ok' }]));
+    const { breaker, endpoints, events, codes } = track(build([{ mode: () => http502() }, { mode: 'ok' }]));
     await expect(breaker.request({ method: 'eth_blockNumber' })).rejects.toThrow();
     await expect(breaker.request({ method: 'eth_blockNumber' })).rejects.toThrow();
     // third failure crosses the threshold — the SAME request retries on backup-1 and succeeds.
@@ -82,6 +86,7 @@ describe('RpcBreaker failover', () => {
     expect(breaker.status()).toMatchObject({ active: 'backup-1', degraded: true, down: false });
     expect(breaker.status().degradedSinceTs).toBeTypeOf('number');
     expect(events.filter((e) => e.includes('failover'))).toHaveLength(1);
+    expect(codes).toEqual(['rpc.failover']);
     expect(endpoints[1].calls.length).toBeGreaterThan(0);
     // URLs must never leak into events.
     expect(events.join(' ')).not.toMatch(/https?:\/\//);
@@ -109,10 +114,11 @@ describe('RpcBreaker failover', () => {
 
   it('marks down when every endpoint fails, clears on any success', async () => {
     const backup: { mode: 'ok' | (() => Error) } = { mode: () => timeout() };
-    const { breaker, events } = track(build([{ mode: () => http502() }, backup]));
+    const { breaker, events, codes } = track(build([{ mode: () => http502() }, backup]));
     for (let i = 0; i < 8; i++) await expect(breaker.request({ method: 'eth_blockNumber' })).rejects.toThrow();
     expect(breaker.status().down).toBe(true);
     expect(events.some((e) => e.includes('unreachable'))).toBe(true);
+    expect(codes).toContain('rpc.down');
     backup.mode = 'ok';
     // keep requesting — rotation lands on the healthy backup again.
     let ok = false;
@@ -120,6 +126,7 @@ describe('RpcBreaker failover', () => {
     expect(ok).toBe(true);
     expect(breaker.status().down).toBe(false);
     expect(events.some((e) => e.includes('serving again'))).toBe(true);
+    expect(codes).toContain('rpc.recovered');
   });
 
   it('goes down (and back up) with a single endpoint and no backups', async () => {
@@ -184,7 +191,7 @@ describe('RpcBreaker.verify (boot)', () => {
     const good = fakeEndpoint('primary', { mode: 'ok' });
     breaker.attach([good, wrongChain]);
     const events: string[] = [];
-    breaker.subscribe((m) => events.push(m));
+    breaker.subscribe((n) => events.push(n.msg));
     const res = await breaker.verify(143);
     expect(res.ok).toBe(true);
     expect(events.some((e) => e.includes('dropped at boot'))).toBe(true);

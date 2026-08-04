@@ -36,7 +36,7 @@ interface VenueAdapter {
 }
 ```
 
-Everything you need is on `ctx` (`AdapterContext`) — **use it instead of importing globals**: `ctx.client` (viem), `ctx.getLogs` (range-chunked), `ctx.pricer` (`usdPerToken`/`tokenForUsd` for USD sizing; **`pairMid(market)`** = the pair's CEX reference mid in the pair's own terms — use it as the bps anchor when quoting), `ctx.config`, `ctx.log`.
+Everything you need is on `ctx` (`AdapterContext`) — **use it instead of importing globals**: `ctx.client` (viem), `ctx.getLogs` (range-chunked), `ctx.pricer` (`usdPerToken`/`tokenForUsd` for USD sizing; **`pairMid(market)`** = the pair's CEX reference mid in the pair's own terms — use it as the bps anchor when quoting), `ctx.config`, `ctx.note`.
 
 **Only quote/emit REGISTERED pairs** (`@shared` `PAIRS`; check a combo with `pairFor(baseKey, stableSym)`). An unregistered market has no reference rows and no markout routing — the core drops it. Adding a pair/asset is a `@shared` registry entry (see **Scope & limits**).
 
@@ -77,7 +77,7 @@ DB_PATH=./data/scratch.db npm run dev
 - Every server script auto-loads a repo-root **`.env`** (`--env-file-if-exists=../.env`, already gitignored) — copy `.env.example` and put `RPC_HTTP_URL` there instead of exporting it per command.
 - The default public RPC works for quotes + live fill tailing but caps `getLogs` ranges — set `RPC_HTTP_URL` to a higher-limit/archive node to exercise the lifetime backfill (`BACKFILL=on`, the default). Monad's docs list providers: https://docs.monad.xyz/tooling-and-infra/rpc-providers.
 - `DATA_SOURCE=sim npm run dev` runs the offline simulator — your venue appears automatically (the sim is registry-driven). Good for UI wiring; **useless for decode correctness** — verify against the real chain.
-- Watch `state.notes` on `/api/markets` (also shown in the UI footer): adapter errors, discovery failures and degradations surface there.
+- Watch `state.notes` on `/api/markets` (the same lines go to the service log): adapter errors, discovery failures and degradations surface there. Raise your own with `ctx.note(code, msg)`, picking the code that matches the event (`venue.discovery`, `venue.market.unlisted`, `venue.quote.unavailable`, `venue.upgraded`, `venue.quarantined`, ...). The code decides the note's level and is what a consumer filters on, so it belongs at the call site rather than in the wording.
 
 ## Verifying your adapter (what review checks)
 

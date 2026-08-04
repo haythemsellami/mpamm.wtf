@@ -134,7 +134,7 @@ The leaderboard aggregates server-side on purpose: shipping raw fills truncated 
 - **Fail-loud registry**: duplicate/invalid venue ids throw at startup; fills/quotes for undeclared venue ids are dropped with a public note, never silently stored.
 - **Boot sanity**: live mode fail-fasts on chain id 143 + Multicall3 presence rather than half-starting — but a dead primary with a healthy backup boots degraded instead of failing; wrong-chain backups are dropped loudly, a wrong-chain primary stays fatal.
 - **Self-healing discovery**: every adapter's `discover()` re-runs periodically (default 10 min) and must merge, never replace, its cache.
-- **Public notes**: `state.notes` (visible in `/api/markets`) carries every degradation — starving reference feeds, deferred archives, skipped RPC holes — sanitized (URLs stripped) so a private RPC key can never leak.
+- **Developer notes**: `state.notes` (on `/api/markets`, and the same lines on stdout) carries every degradation and lifecycle event — starving reference feeds, deferred archives, skipped RPC holes, held cursors. Each entry is `{ ts, level, code, venue?, msg }` (`@shared`: `StateNote`), so a consumer filters on `level` or a `code` prefix instead of parsing prose. Messages are sanitized (URLs stripped) so a private RPC key can never leak. The served window is capped, charging overflow to the noisiest subsystem so one chatty crawl cannot evict the note that explains an incident. This is a maintainer/contributor channel: the dashboard does not render it.
 
 ## Where addresses & ABIs live
 

@@ -478,9 +478,9 @@ export function createCloberVaultAdapter(): VenueAdapter {
       try {
         disc = await discoverCloberViaSubgraph(ctx.config.subgraphUrl);
         authoritative = true;
-        ctx.log(`Clober: subgraph discovery (${disc.vault.size} vault book(s))`);
+        ctx.note('venue.discovery', `Clober: subgraph discovery (${disc.vault.size} vault book(s))`);
       } catch {
-        ctx.log('Clober: subgraph discovery failed; trying recent Open logs');
+        ctx.note('venue.discovery.degraded', 'Clober: subgraph discovery failed; trying recent Open logs');
         try { disc = await discoverClober(ctx.client, ctx.getLogs, 2000); } catch { disc = { books: new Map(), markets: [], vault: new Set() }; }
       }
       // MERGE (don't replace): a periodic re-discovery can only ADD/refresh vault
@@ -490,7 +490,7 @@ export function createCloberVaultAdapter(): VenueAdapter {
       markets = assembleCloberMarkets(books);
       if (authoritative) authoritativeDiscovery = true;
       else if (!authoritativeDiscovery) {
-        ctx.log('Clober: authoritative discovery unavailable; holding Take ranges until rediscovery succeeds');
+        ctx.note('venue.discovery.degraded', 'Clober: authoritative discovery unavailable; holding Take ranges until rediscovery succeeds');
       }
     },
     quote(ctx, sizesUsd) {

@@ -135,7 +135,7 @@ const stub = (notes: string[], o: StubOpts = {}) => {
       return (o.createdPools ?? []).map((c) => ({ args: { pool: c.pool } }));
     },
     pricer: { pairMid: () => 1, usdPerToken: () => 1, usdForToken: () => 1, tokenForUsd: () => 1, assetUsd: () => 1 },
-    log: (m: string) => notes.push(m),
+    note: (_code: string, m: string) => notes.push(m),
   } as any;
 };
 

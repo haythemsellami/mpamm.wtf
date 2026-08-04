@@ -495,6 +495,86 @@ export interface RpcStatus {
   degradedSinceTs?: number;
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// state.notes — developer-facing telemetry
+// ──────────────────────────────────────────────────────────────────────────
+
+/** How much a note matters. 'warn' means a maintainer should look: data is
+ *  degraded, held or dropped. 'info' is lifecycle and progress. */
+export type NoteLevel = 'info' | 'warn';
+
+/**
+ * Every note code, `<subsystem>.<event>`.
+ *
+ * The code, not the wording, is what a consumer filters, groups or alerts on,
+ * so it is fixed where the note is raised: the emitter already knows which
+ * event this is, and nothing downstream should have to rebuild that by
+ * matching prose. `msg` is free text and may be reworded any time. The
+ * subsystem prefix is load-bearing too: the notes window charges its overflow
+ * to the noisiest subsystem (server/src/notes.ts).
+ */
+export type NoteCode =
+  // RPC failover breaker (server/src/chain/failover.ts) — labels only.
+  | 'rpc.failover' | 'rpc.down' | 'rpc.recovered' | 'rpc.endpoint.dropped'
+  // venue adapters: discovery, market coverage, quoting, decode
+  | 'venue.discovery' | 'venue.discovery.degraded' | 'venue.discovery.failed'
+  | 'venue.market.unlisted' | 'venue.upgraded' | 'venue.quarantined'
+  | 'venue.quote.unavailable' | 'venue.gas.suspect'
+  | 'venue.source.failed' | 'venue.decode.failed' | 'venue.foreign'
+  // the live fill tail and its resume point
+  | 'tail.resume' | 'tail.gap.skipped' | 'tail.failed' | 'tail.timestamps.failed'
+  // deep volume history: adapter seed + the on-chain replay
+  | 'backfill.start' | 'backfill.done' | 'backfill.deferred' | 'backfill.held'
+  | 'backfill.reset' | 'backfill.paused' | 'backfill.range.skipped' | 'backfill.config.invalid'
+  // markout onboarding scan + the archived-price remark
+  | 'markout.scan.start' | 'markout.scan.done' | 'markout.scan.held'
+  | 'markout.remark.done' | 'markout.deferred' | 'markout.archive.pending'
+  | 'markout.paused' | 'markout.range.skipped' | 'markout.market.unregistered'
+  // QUOTE_UPDATE_BURN accrual (server/src/gas.ts)
+  | 'gas.scan.start' | 'gas.series.reset' | 'gas.scan.paused'
+  | 'gas.range.skipped' | 'gas.destination.conflict' | 'gas.mode.mixed'
+  // CEX reference feeds
+  | 'reference.starved' | 'reference.recovered'
+  // SQLite store migrations / persistence
+  | 'store.migrated' | 'store.persist.failed'
+  // the data source itself
+  | 'source.sim';
+
+/** The level each code is raised at. Level lives WITH the code, not at the
+ *  call site, so one event cannot be a warning in one branch and an info line
+ *  in another — that consistency is what makes `level` safe to alert on. A
+ *  site that needs a different level needs a different code. */
+export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
+  'rpc.failover': 'warn', 'rpc.down': 'warn', 'rpc.recovered': 'info', 'rpc.endpoint.dropped': 'warn',
+  'venue.discovery': 'info', 'venue.discovery.degraded': 'warn', 'venue.discovery.failed': 'warn',
+  'venue.market.unlisted': 'warn', 'venue.upgraded': 'warn', 'venue.quarantined': 'warn',
+  'venue.quote.unavailable': 'warn', 'venue.gas.suspect': 'warn',
+  'venue.source.failed': 'warn', 'venue.decode.failed': 'warn', 'venue.foreign': 'warn',
+  'tail.resume': 'info', 'tail.gap.skipped': 'warn', 'tail.failed': 'warn', 'tail.timestamps.failed': 'warn',
+  'backfill.start': 'info', 'backfill.done': 'info', 'backfill.deferred': 'info', 'backfill.held': 'info',
+  'backfill.reset': 'info', 'backfill.paused': 'warn', 'backfill.range.skipped': 'warn', 'backfill.config.invalid': 'warn',
+  'markout.scan.start': 'info', 'markout.scan.done': 'info', 'markout.scan.held': 'info',
+  'markout.remark.done': 'info', 'markout.deferred': 'info', 'markout.archive.pending': 'info',
+  'markout.paused': 'warn', 'markout.range.skipped': 'warn', 'markout.market.unregistered': 'warn',
+  'gas.scan.start': 'info', 'gas.series.reset': 'info', 'gas.scan.paused': 'warn',
+  'gas.range.skipped': 'warn', 'gas.destination.conflict': 'warn', 'gas.mode.mixed': 'warn',
+  'reference.starved': 'warn', 'reference.recovered': 'info',
+  'store.migrated': 'info', 'store.persist.failed': 'warn',
+  'source.sim': 'info',
+};
+
+/** One entry of `MarketState.notes`. */
+export interface StateNote {
+  /** epoch ms the note was raised (not when it was served). */
+  ts: number;
+  level: NoteLevel;
+  code: NoteCode;
+  /** the venue id this note is about, when it is about one. */
+  venue?: string;
+  /** the sentence a human reads: sanitized (URLs stripped) and length-capped. */
+  msg: string;
+}
+
 export interface MarketState {
   chainId: number;
   block: number;
@@ -508,8 +588,11 @@ export interface MarketState {
   /** the venue registry (adapters + CEX reference) — the frontend renders
    *  everything venue-related from this, so venues aren't hardcoded client-side. */
   venues: VenueMeta[];
-  /** present when the live source degrades and parts fall back. */
-  notes?: string[];
+  /** the indexer's own telemetry, oldest first: degradations, held cursors and
+   *  lifecycle. Served for maintainers, contributors and tooling debugging the
+   *  service (docs/architecture.md: public notes); the dashboard does not
+   *  render it. */
+  notes?: StateNote[];
   /** RPC failover health (absent in sim — there is no RPC). */
   rpc?: RpcStatus;
 }

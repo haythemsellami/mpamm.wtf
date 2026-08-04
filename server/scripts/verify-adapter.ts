@@ -62,7 +62,7 @@ const ctx: AdapterContext = {
   getLogs: getLogsChunked,
   pricer: new UsdPricer((k) => REFERENCES.assetUsd(k), (m) => REFERENCES.midForPair(m)),
   config,
-  log: (m) => console.log(`  [adapter] ${m}`),
+  note: (code, msg) => console.log(`  [adapter] ${code}: ${msg}`),
 };
 
 // discovery

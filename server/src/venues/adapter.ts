@@ -1,5 +1,5 @@
 import type { PublicClient } from 'viem';
-import type { Fill, QuoteRow, VenueMeta } from '@shared';
+import type { Fill, NoteCode, QuoteRow, VenueMeta } from '@shared';
 import type { getLogsChunked } from '../chain/rpc.js';
 import type { UsdPricer } from '../pricer.js';
 import type { Config } from '../config.js';
@@ -26,7 +26,13 @@ export interface AdapterContext {
   /** token→USD pricing (stables = $1, base assets off their CEX reference). */
   pricer: UsdPricer;
   config: Config;
-  log: (m: string) => void;
+  /** raise a developer-facing note (server/src/notes.ts → `state.notes` on
+   *  /api/markets, and stdout). Pick the `code` that matches the event: it is
+   *  what a consumer filters and alerts on, and it also decides the note's
+   *  level (@shared: NOTE_LEVEL), so nothing downstream has to read your
+   *  wording. The core stamps the timestamp and your venue id, and drops a
+   *  repeat of a note it already holds (discovery re-runs every 10 minutes). */
+  note: (code: NoteCode, msg: string) => void;
 }
 
 /** A group of on-chain logs the core fetches each cycle for this adapter and

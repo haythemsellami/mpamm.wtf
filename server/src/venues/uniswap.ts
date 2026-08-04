@@ -132,7 +132,7 @@ export function createUniswapAdapter(): VenueAdapter {
         baseDec: cand.base.dec, quoteDec: cand.quote.dec,
         baseTok: cand.base.tok, quoteTok: cand.quote.tok,
       }));
-      ctx.log(`Uniswap v4: ${markets.length} baseline pool(s) (deepest hookless tier per pair)`);
+      ctx.note('venue.discovery', `Uniswap v4: ${markets.length} baseline pool(s) (deepest hookless tier per pair)`);
     },
 
     async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {

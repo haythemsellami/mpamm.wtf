@@ -34,7 +34,7 @@ Follow **[docs/adapters.md](docs/adapters.md)** exactly — interface, correctne
 - **References are pair-terms** ([docs/architecture.md](docs/architecture.md#the-reference-is-in-the-pairs-own-terms)): never compare an on-chain USDC price to a raw USDT CEX price; use `ctx.pricer.pairMid(market)` as the bps anchor.
 - **SQLite schema is long-format** (`(utc_day, venue_id)` rows) — venue changes never alter the shape. Additive migrations only (`CREATE TABLE IF NOT EXISTS` / PRAGMA-guarded `ALTER`); bumping `SCHEMA_VERSION` wipes prod history on deploy, so treat it as a last resort.
 - **Cursors commit atomically with their data** (one transaction) everywhere — volume, fills, gas. Keep that invariant in anything new; it's what makes every background job crash-safe and restart-resumable.
-- **`state.notes` is public** (`/api/markets`): anything noted must go through the sanitizer (URLs stripped — RPC keys must never leak). Note degradations loudly, once (`noteOnce`).
+- **`state.notes` is developer-facing telemetry** (`/api/markets` plus stdout, never the dashboard UI). Each note is `{ ts, level, code, venue?, msg }` (`@shared`: `StateNote`). Raise one with the code that matches the event (`ctx.note(code, msg)` in an adapter, `note`/`noteOnce` in the core); the buffer stamps the time, takes the level from the code (`NOTE_LEVEL`), strips URLs so an RPC key can never leak and drops a verbatim repeat.
 - The public Monad RPC caps `getLogs` to ~100 blocks; all range work must chunk adaptively (see existing backfill loops for the shrink/back-off/hole-skip pattern).
 - Frontend reads ONLY the API (`store.tsx`); tabs compute view-models from contract data. Venue colors come from `VenueMeta.color` per theme — new colors must be distinct + CVD-safe in both themes.
 

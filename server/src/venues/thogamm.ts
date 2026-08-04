@@ -226,7 +226,7 @@ export function createThogammAdapter(): VenueAdapter {
     for (let i = 0; i < addresses.length; i++) {
       const known = knownByAddress.get(normalized[i]);
       if (!known) {
-        ctx.log(`ThogAMM: token ${shortHex(addresses[i])} is not in @shared TOKENS; its pairs remain unlisted`);
+        ctx.note('venue.market.unlisted', `ThogAMM: token ${shortHex(addresses[i])} is not in @shared TOKENS; its pairs remain unlisted`);
         continue;
       }
       const result = decimals[i];
@@ -242,7 +242,7 @@ export function createThogammAdapter(): VenueAdapter {
     for (const market of found) byMarket.set(market.market, market);
     byDirection = indexThogammMarkets([...byMarket.values()]);
     discovered = true;
-    ctx.log(`ThogAMM: ${found.length} registered market(s) across ${addresses.length} on-chain token(s) at block ${blockNumber}`);
+    ctx.note('venue.discovery', `ThogAMM: ${found.length} registered market(s) across ${addresses.length} on-chain token(s) at block ${blockNumber}`);
   };
 
   return {
@@ -362,7 +362,7 @@ export function createThogammAdapter(): VenueAdapter {
         for (const log of upgrades) {
           const impl = String(log?.args?.implementation ?? '');
           const label = /^0x[0-9a-fA-F]{40}$/.test(impl) ? shortHex(impl) : 'an unreadable implementation';
-          ctx.log(`ThogAMM: proxy upgraded to ${label} — re-verify quote/fill/gas ABIs against the new implementation`);
+          ctx.note('venue.upgraded', `ThogAMM: proxy upgraded to ${label} — re-verify quote/fill/gas ABIs against the new implementation`);
         }
         await refresh(ctx);
       }
