@@ -63,6 +63,15 @@ export class NoteBuffer {
   /** the window as served, oldest first. */
   list(): StateNote[] { return this.items; }
 
+  /** whether the window already holds this code for this venue. Lets a generic
+   *  backstop stand down when a subsystem has already explained the same event
+   *  in more detail (datasource/live.ts: checkQuoteOutage vs an adapter's own
+   *  venue.quote.unavailable). */
+  holds(code: NoteCode, venue?: string): boolean {
+    const v = venue || undefined;
+    return this.items.some((n) => n.code === code && n.venue === v);
+  }
+
   /** raise a note. */
   note(code: NoteCode, msg: string, venue?: string): void {
     this.push(code, scrubNote(msg), venue);

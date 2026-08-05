@@ -2,6 +2,7 @@ import { parseAbi, keccak256, encodeAbiParameters } from 'viem';
 import type { QuoteRow, VenueMeta, Pair } from '@shared';
 import { PAIRS, TOKENS, NATIVE_MON } from '@shared';
 import type { VenueAdapter, AdapterContext } from './adapter.js';
+import { createQuoteOutageReporter } from './quote-health.js';
 
 /**
  * Uniswap v4 BASELINE adapter — the standard-DEX comparison band on the
@@ -87,6 +88,9 @@ interface UniMarket {
 }
 
 export function createUniswapAdapter(): VenueAdapter {
+  // every leg FAILING is a venue-wide cause (paused, ABI drift, dead RPC route),
+  // not a per-pair gap — name it instead of vanishing (venues/quote-health.ts).
+  const reportOutage = createQuoteOutageReporter(UNI_VENUE.name);
   let markets: UniMarket[] = [];
 
   return {
@@ -157,6 +161,7 @@ export function createUniswapAdapter(): VenueAdapter {
       if (!calls.length) return [];
       // quoter sims are gas-heavy — keep each aggregate comfortably under call caps
       const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true, batchSize: 4096 });
+      if (reportOutage(ctx, qRes)) return [];
 
       const rowByKey = new Map<string, QuoteRow>();
       const ts = Date.now();

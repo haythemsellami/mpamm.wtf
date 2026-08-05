@@ -79,7 +79,16 @@ DB_PATH=./data/scratch.db npm run dev
 - `DATA_SOURCE=sim npm run dev` runs the offline simulator — your venue appears automatically (the sim is registry-driven). Good for UI wiring; **useless for decode correctness** — verify against the real chain.
 - Watch `state.notes` on `/api/markets` (the same lines go to the service log): adapter errors, discovery failures and degradations surface there. Raise your own with `ctx.note(code, msg)`, picking the code that matches the event (`venue.discovery`, `venue.market.unlisted`, `venue.quote.unavailable`, `venue.upgraded`, `venue.quarantined`, ...). The code decides the note's level and is what a consumer filters on, so it belongs at the call site rather than in the wording. An adapter can only append, never retract, so a degradation that heals must be **announced** (`venue.quote.recovered` after `venue.quote.unavailable`) — otherwise the warning stands until the window rolls it off.
 
-**A venue that goes dark must say why.** Returning `[]` from `quote()` is how a venue leaves the grid, and on its own it is indistinguishable from an adapter you have broken — a renamed function, a drifted ABI after a proxy upgrade. When every quote leg fails, note the reason (see `thogammQuoteOutageReason` in [`thogamm.ts`](../server/src/venues/thogamm.ts): `allowFailure` multicalls swallow per-leg reverts, so the reason has to be dug out and named).
+**A venue that goes dark must say why.** Returning `[]` from `quote()` is how a venue leaves the grid, and on its own it is indistinguishable from an adapter you have broken — a renamed function, a drifted ABI after a proxy upgrade. The core notices the silence on its own (`checkQuoteOutage` in [`live.ts`](../server/src/datasource/live.ts): no rows for 20 consecutive cycles ⇒ `venue.quote.unavailable`), so you cannot leave a venue unexplained by forgetting. What the core cannot know is the **reason** — `allowFailure` multicalls swallow the per-leg revert that carries it. Dig it out with [`quote-health.ts`](../server/src/venues/quote-health.ts):
+
+```ts
+const reportOutage = createQuoteOutageReporter(MY_VENUE.name);   // in the factory closure
+…
+const res = await ctx.client.multicall({ contracts: calls, allowFailure: true });
+if (reportOutage(ctx, res)) return [];                            // notes: all N legs failed with "maker: paused"
+```
+
+The core stands down once your note is on the record, so the venue is explained exactly once. Recovery is **announced**, never retracted — an adapter can only append, so a heal that said nothing would leave the warning standing until the served window rolled it off.
 
 ## Verifying your adapter (what review checks)
 
