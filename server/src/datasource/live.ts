@@ -165,7 +165,10 @@ export function checkGapFill(
   if (state.msg === undefined || lastBlock < target) return;
   io.clear(state.msg);
   state.msg = undefined;
-  io.announce(`gap-fill caught up: tail is current at block ${target}`);
+  // name the TARGET the gap was measured to, not a position: the cursor has
+  // already moved past it by the time we get here (lastBlock >= target), so
+  // "current at block target" would report a block the tail has left behind.
+  io.announce(`gap-fill caught up: decoded through block ${target}`);
 }
 
 /** Hold a deep history crawl while the RPC runs on a backup: the live tail and
@@ -1007,13 +1010,17 @@ export class LiveDataSource extends BaseSource {
       if (fills.length) {
         // pair-terms mid series covering the day + the horizons past midnight.
         const series = await pairMidSeries(market, dayStart, dayEnd + 120_000);
-        // Warn+defer while this month's archive is missing, retract+announce the
-        // sweep it publishes (checkArchivePending, family A of #6). The pending
-        // string stays byte-identical so drop() matches what noteOnce() emitted.
+        // Warn+defer while this month's archive is missing, retract the stale
+        // note on the sweep it publishes (checkArchivePending, family A of #6).
+        // The pending string stays byte-identical so drop() matches what
+        // noteOnce() emitted. The retraction fires here; the "resumed" announce
+        // waits until applyRemarks below has actually written the markouts, so a
+        // failed write can never leave a note claiming they resumed (review nit).
+        let resumed: string | undefined;
         checkArchivePending({ vid, name, market, day }, series != null, this.archivePending, {
           warn: (m) => this.noteOnce('markout.archive.pending', m, vid),
           clear: (m) => this.dropNote('markout.archive.pending', m, vid),
-          announce: (m) => this.note('markout.archive.published', m, vid),
+          announce: (m) => { resumed = m; },
         });
         // deferral is a BREAK, not a return: the days already marked this walk
         // must still get their summary note + cache invalidation below.
@@ -1027,6 +1034,10 @@ export class LiveDataSource extends BaseSource {
           return { id: f.id, markoutsBps: marks };
         });
         this.store.applyRemarks(updates);
+        // the markouts are on disk now, so the "resumed" line is finally true.
+        // checkArchivePending set `resumed` only on the sweep the archive
+        // published, so this stays silent on every other sweep.
+        if (resumed) this.note('markout.archive.published', resumed, vid);
         // count only fills that got ≥1 markout — an all-null result (mid gaps)
         // is honest but isn't "computed".
         marked += updates.filter((u) => u.markoutsBps.some((m) => m != null)).length;

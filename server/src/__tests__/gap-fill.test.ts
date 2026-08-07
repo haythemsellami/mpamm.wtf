@@ -35,7 +35,7 @@ describe('checkGapFill', () => {
     notes.push(RESUME);
     checkGapFill(1000n, 1000n, state, io);
     expect(notes).toHaveLength(1);
-    expect(notes[0]).toBe('gap-fill caught up: tail is current at block 1000');
+    expect(notes[0]).toBe('gap-fill caught up: decoded through block 1000');
     expect(notes).not.toContain(RESUME); // the stale note is GONE
     expect(state.msg).toBeUndefined();
   });

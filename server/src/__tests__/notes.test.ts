@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { NOTE_LEVEL, type StateNote } from '@shared';
 import { NoteBuffer, noteSubsystem, scrubNote } from '../notes.js';
-import { checkReferenceStarvation } from '../datasource/live.js';
+import { checkArchivePending, checkGapFill, checkReferenceStarvation } from '../datasource/live.js';
 
 const T0 = 1_800_000_000_000;
 
@@ -120,5 +120,57 @@ describe('a real call site: reference-feed starvation', () => {
     // the stale scare-warning is gone, the recovery is on the record (6c3cf5b)
     expect(codesOf(b)).toEqual(['reference.recovered']);
     expect(b.list()[0].msg).toContain('hidden for ~7m');
+  });
+});
+
+describe('a real call site: archive-pending markout re-scan', () => {
+  const HANJI = { vid: 'hanji', name: 'Hanji', market: 'MON/USDC', day: '2026-07-31' };
+
+  it('warns once with markout.archive.pending, then retracts it and announces on publish', () => {
+    const { b } = buf();
+    // wired exactly as remarkVenueMarket does. The retract is a real
+    // NoteBuffer.drop keyed on (code, venue, scrubbed msg), so it has to hit the
+    // same note noteOnce stored. The fake-sink test matches raw strings, so it
+    // cannot prove the scrub runs on both sides or that the code and venue line
+    // up. Driving the real buffer here does.
+    const io = {
+      warn: (m: string) => b.noteOnce('markout.archive.pending', m, 'hanji'),
+      clear: (m: string) => b.drop('markout.archive.pending', m, 'hanji'),
+      announce: (m: string) => b.note('markout.archive.published', m, 'hanji'),
+    };
+    const pending = new Set<string>();
+    checkArchivePending(HANJI, false, pending, io);
+    checkArchivePending(HANJI, false, pending, io); // repeated sweep, still deferred
+    expect(codesOf(b)).toEqual(['markout.archive.pending']);
+    expect(b.list()[0]).toMatchObject({ level: 'info', venue: 'hanji' });
+
+    checkArchivePending(HANJI, true, pending, io); // the archive lands this sweep
+    // the sticky "resume later" note is gone through the real buffer, only the
+    // publish is on the record. A future scrubNote change would trip this.
+    expect(codesOf(b)).toEqual(['markout.archive.published']);
+    expect(b.list()[0].msg).toContain('markouts resumed');
+  });
+});
+
+describe('a real call site: gap-fill tail catch-up', () => {
+  const RESUME = 'resuming: gap-filling 128 block(s) since last run';
+
+  it('retracts the boot tail.resume note and announces once the cursor reaches the boot head', () => {
+    const { b } = buf();
+    b.note('tail.resume', RESUME); // the boot resume note, raised the way live.ts does
+    const state: { msg?: string } = { msg: RESUME };
+    const io = {
+      clear: (m: string) => b.drop('tail.resume', m),
+      announce: (m: string) => b.note('tail.caughtup', m),
+    };
+    checkGapFill(900n, 1000n, state, io); // still short of the boot head, nothing changes
+    expect(codesOf(b)).toEqual(['tail.resume']);
+
+    checkGapFill(1000n, 1000n, state, io); // cursor reaches bootHead
+    // the sticky boot note is gone through the real buffer. Only the catch-up
+    // stays on the record. state.msg is cleared so it never re-fires.
+    expect(codesOf(b)).toEqual(['tail.caughtup']);
+    expect(state.msg).toBeUndefined();
+    expect(b.list()[0].msg).toContain('decoded through block 1000');
   });
 });
