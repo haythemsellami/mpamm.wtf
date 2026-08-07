@@ -60,6 +60,11 @@ const bucketLabel = (b: Bucket, gran: string) => (gran === 'M' ? b.iso0.slice(0,
 const bucketDate = (b: Bucket) => b.iso0 === b.isoEnd
   ? b.iso0 + (b.partial ? ' (today, partial)' : '')
   : `${b.iso0} → ${b.isoEnd}${b.partial ? ' (partial)' : ''}`;
+/** Summary-table column header: WHICH bucket the totals below it cover.
+ *  The tables summarize the chart's LATEST bucket, so the header has to name
+ *  it — "ALL-TIME" over one day's numbers was the bug this replaced. */
+const bucketScope = (b: Bucket, gran: string) =>
+  gran === 'M' ? b.iso0.slice(0, 7) : gran === 'W' ? `WK ${mmdd(b.iso0)}` : mmdd(b.iso0);
 /** ≤5 axis ticks across a bucket array (deduped — short windows repeat indexes). */
 const axisOf = (arr: Bucket[], gran: string): { label: string; left: string }[] => {
   const n = arr.length;
@@ -249,7 +254,7 @@ export function VolumeTab() {
         since: '—',
         legRows: series.map((s) => ({ id: s.id, name: s.name, color: s.color, vol: f(0), share: '0.0%', hidden: false })),
         legTotal: f(0), cumLine: '', cumArea: '', cumVenueLines: [] as { color: string; path: string }[], cumSigma: f(0),
-        rangeLabel: 'ALL-TIME', brkLabel: 'ALL-TIME',
+        rangeLabel: '—', volScopeSpan: '', brkLabel: 'ALL-TIME',
         msBands: [] as { path: string; color: string }[],
         msTopName: '—', msTopPct: '0.0%', msTopColor: msLabelColor(C.faint2),
         msBotName: '—', msBotPct: '0.0%', msBotColor: msLabelColor(C.faint2),
@@ -268,7 +273,7 @@ export function VolumeTab() {
         burnMaxLabel: '0 MON', burnMidLabel: '0 MON',
         burnTip: null as null | { left: string; date: string; total: string; usd: string; rows: { name: string; color: string; val: string }[] },
         burnRows: [] as { id: string; name: string; color: string; burn: string; updates: string; hidden: boolean }[],
-        burnTotal: '0 MON', burnUpdatesTotal: '0', burnColHdr: 'ALL-TIME BURN', burnPerM: '0',
+        burnTotal: '0 MON', burnUpdatesTotal: '0', burnColHdr: 'BURN', burnPerM: '0', burnScopeSpan: '',
         burnBrushBars: [] as { h: string; color: string }[],
         burnBrushLeft: '0', burnBrushWidth: '100', burnBrushStartLbl: '—', burnBrushEndLbl: '—',
       };
@@ -315,13 +320,19 @@ export function VolumeTab() {
     // everything below them — legend, breakdown, all three charts — follows the
     // SELECTED window so the page reads as one coherent range.
     const allTot = allDays.reduce((a, x) => a + dayTotal(x), 0);
-    const isFullWindow = wS === 0 && wE === nd - 1;
-    const rangeLabel = isFullWindow ? 'ALL-TIME' : 'WINDOW';
-    const winEndDay = wDays[ndW - 1].utcDay;
-    // window totals per venue — venues that didn't EXIST during any part of the
-    // window are omitted (same honesty rule as the per-day tooltips).
+    // The summary table covers the chart's LATEST bucket at the selected
+    // granularity — D = the newest day, W = the newest week, M = the newest
+    // month — so the D/W/M pills move the numbers, not just the bars. It used
+    // to sum the whole window regardless, which read as "ALL-TIME" forever.
+    // Latest IN THE WINDOW, so panning the brush to a past range summarizes
+    // that range's last bucket rather than jumping back to today.
+    const volScope = dB[ndB - 1];
+    const winEndDay = volScope.isoEnd;
+    // totals per venue — venues that didn't EXIST by the end of the bucket are
+    // omitted (same honesty rule as the per-day tooltips). One that existed and
+    // simply didn't trade still shows, at 0.
     const winSeries = series.filter((s) => !s.since || s.since <= winEndDay);
-    const totals = winSeries.map((s) => ({ id: s.id, name: s.name, color: s.color, tot: wDays.reduce((a, x) => a + s.val(x), 0) }));
+    const totals = winSeries.map((s) => ({ id: s.id, name: s.name, color: s.color, tot: bSum(volScope, s.val) }));
     const winTot = totals.reduce((a, t) => a + t.tot, 0);
     const share = (x: number) => (winTot ? (x / winTot * 100) : 0).toFixed(1) + '%';
 
@@ -508,21 +519,23 @@ export function VolumeTab() {
         usd: monUsd > 0 ? '~$' + (bTot[hiB] * monUsd).toFixed(0) : '',
       };
     }
-    // summary table: totals over the burn window's DAYS (bucketing changes the
-    // bars, never the sums).
+    // summary table: the chart's LATEST bucket at this chart's own granularity,
+    // matching DAILY_VOLUME's table (it used to sum the whole burn window, so
+    // the D/W/M pills moved the bars and left the numbers alone).
+    const burnScope = bB[nbB - 1];
     const burnRows = burnSeries.map((s) => {
-      const tot = bDaysW.reduce((a, x) => a + gVal(x.utcDay, s.id), 0);
-      const ups = bDaysW.reduce((a, x) => a + gTxs(x.utcDay, s.id), 0);
+      const tot = bSum(burnScope, (x) => gVal(x.utcDay, s.id));
+      const ups = bSum(burnScope, (x) => gTxs(x.utcDay, s.id));
       return { id: s.id, name: s.name, color: s.color, burn: (approx.has(s.id) ? '≈' : '') + fMON(tot), updates: ups.toLocaleString(), hidden: hiddenBurn.has(s.id) };
     });
-    const burnTotal = burnSeries.reduce((a, s) => a + bDaysW.reduce((x, y) => x + gVal(y.utcDay, s.id), 0), 0);
-    const burnUpdatesTotal = burnSeries.reduce((a, s) => a + bDaysW.reduce((x, y) => x + gTxs(y.utcDay, s.id), 0), 0);
-    // burn per $1M of volume over the SAME window (design: the ratio's
-    // denominator is this chart's own window volume). Every gas series is
-    // venue-lifetime, so the window's full volume is the honest denominator.
-    const bVol = bDaysW.reduce((a, x) => a + dayTotal(x), 0);
+    const burnTotal = burnSeries.reduce((a, s) => a + bSum(burnScope, (x) => gVal(x.utcDay, s.id)), 0);
+    const burnUpdatesTotal = burnSeries.reduce((a, s) => a + bSum(burnScope, (x) => gTxs(x.utcDay, s.id)), 0);
+    // burn per $1M of volume over the SAME bucket — the denominator MUST follow
+    // the numerator's scope, or one day's burn gets divided by a whole window's
+    // volume and the ratio reads an order of magnitude too low.
+    const bVol = bSum(burnScope, dayTotal);
     const burnPerM = bVol > 0 ? (burnTotal / (bVol / 1e6)).toFixed(1) : '0';
-    const burnColHdr = bDaysW.length < nd ? 'WINDOW BURN' : 'ALL-TIME BURN';
+    const burnColHdr = `${bucketScope(burnScope, d.burnGran)} BURN`;
 
     // ── brush / minimap: the FULL history as miniature total bars, window-tinted.
     const aMax = Math.max(...aTot) || 1;
@@ -561,7 +574,7 @@ export function VolumeTab() {
       since,
       legRows: totals.map((t) => ({ id: t.id, name: t.name, color: t.color, vol: f(t.tot), share: share(t.tot), hidden: hiddenVol.has(t.id) })),
       legTotal: f(winTot), cumLine, cumArea, cumVenueLines, cumSigma: f(cum),
-      rangeLabel, brkLabel,
+      rangeLabel: bucketScope(volScope, dGran), volScopeSpan: bucketDate(volScope), brkLabel,
       msBands,
       msTopName: series[series.length - 1].name,
       msTopPct: (series[series.length - 1].val(mLast) / lt * 100).toFixed(1) + '%',
@@ -578,7 +591,7 @@ export function VolumeTab() {
       burnMaxLabel: fMON(bMax), burnMidLabel: fMON(bMax / 2),
       burnTip, burnRows,
       burnTotal: fMON(burnTotal), burnUpdatesTotal: burnUpdatesTotal.toLocaleString(),
-      burnColHdr, burnPerM,
+      burnColHdr, burnPerM, burnScopeSpan: bucketDate(burnScope),
       burnBrushBars, burnBrushLeft, burnBrushWidth, burnBrushStartLbl, burnBrushEndLbl,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -758,7 +771,7 @@ export function VolumeTab() {
               <div style={{ textAlign: 'right', color: C.text, fontWeight: 600 }}>{vm.legTotal}</div>
               <div style={{ textAlign: 'right', color: C.dim }}>100%</div>
             </div>
-            <div style={{ fontSize: 8.5, color: C.faint2, marginTop: 5, textAlign: 'right' }}>click a venue to hide/show it in the chart</div>
+            <div style={{ fontSize: 8.5, color: C.faint2, marginTop: 5, textAlign: 'right' }}>{vm.volScopeSpan} · click a venue to hide/show</div>
           </div>
         </div>
       </div>
@@ -849,7 +862,7 @@ export function VolumeTab() {
                 <div style={{ textAlign: 'right', color: C.text, fontWeight: 600 }}>{vm.burnTotal}</div>
                 <div style={{ textAlign: 'right', color: C.dim }}>{vm.burnUpdatesTotal}</div>
               </div>
-              <div style={{ fontSize: 9, color: C.faint2, marginTop: 5, textAlign: 'right' }}>burn per $1M volume: {vm.burnPerM} MON · click a venue to hide/show</div>
+              <div style={{ fontSize: 9, color: C.faint2, marginTop: 5, textAlign: 'right' }}>burn per $1M volume: {vm.burnPerM} MON<br />{vm.burnScopeSpan} · click a venue to hide/show</div>
             </div>
           </div>
         </div>
