@@ -63,8 +63,16 @@ const bucketDate = (b: Bucket) => b.iso0 === b.isoEnd
 /** Summary-table column header: WHICH bucket the totals below it cover.
  *  The tables summarize the chart's LATEST bucket, so the header has to name
  *  it — "ALL-TIME" over one day's numbers was the bug this replaced. */
-const bucketScope = (b: Bucket, gran: string) =>
-  gran === 'M' ? b.iso0.slice(0, 7) : gran === 'W' ? `WK ${mmdd(b.iso0)}` : mmdd(b.iso0);
+const bucketScope = (b: Bucket, gran: string) => {
+  if (gran === 'M') return b.iso0.slice(0, 7);
+  if (gran === 'W') {
+    const d0 = new Date(b.iso0 + 'T00:00:00Z');
+    const daysSinceMon = (d0.getUTCDay() + 6) % 7;
+    d0.setUTCDate(d0.getUTCDate() - daysSinceMon);
+    return `WK ${mmdd(d0.toISOString().slice(0, 10))}`;
+  }
+  return mmdd(b.iso0);
+};
 /** ≤5 axis ticks across a bucket array (deduped — short windows repeat indexes). */
 const axisOf = (arr: Bucket[], gran: string): { label: string; left: string }[] => {
   const n = arr.length;
