@@ -104,6 +104,73 @@ export function checkQuoteOutage(
   }
 }
 
+/** Archive-pending lifecycle for the markout re-scan (family A of #6).
+ *
+ * A month's CEX price archive publishes days after the month closes, so the
+ * remark walk defers that day and raises a sticky `markout.archive.pending`
+ * note. Like the reference-starvation warning before 6c3cf5b, that note was
+ * sticky for the whole process: it kept telling maintainers "markouts resume
+ * later" for hours after the archive had landed and the fills were marked.
+ * Recovery now retracts the stale note on the sweep the archive publishes, then
+ * announces that markouts resumed.
+ *
+ * The retract is keyed on the structured identity (venue, market, day). The
+ * cleared string is rebuilt from those same fields, so it is byte-identical to
+ * what warn() emitted. Handing clear() a different string leaves the stale note
+ * behind, the exact bug this pattern exists to prevent.
+ *
+ * Pure with injected sinks (the async archive probe stays at the call site), so
+ * the transitions are unit-tested without a live CEX dump (archive-notes.test.ts).
+ */
+export function checkArchivePending(
+  a: { vid: string; name: string; market: string; day: string },
+  published: boolean,
+  pending: Set<string>,
+  io: { warn: (m: string) => void; clear: (m: string) => void; announce: (m: string) => void },
+): void {
+  const key = `${a.vid}:${a.market}:${a.day}`;
+  const warning = `${a.name} ${a.market}: CEX price archive for ${a.day} not published yet — markouts resume later`;
+  if (!published) {
+    pending.add(key);
+    io.warn(warning);
+    return;
+  }
+  if (!pending.delete(key)) return; // published all along: nothing to retract
+  io.clear(warning);
+  io.announce(`${a.name} ${a.market}: CEX price archive for ${a.day} published — markouts resumed`);
+}
+
+/** Gap-fill catch-up lifecycle for the live tail (family B of #6).
+ *
+ * On boot the tail resumes from the persisted cursor and raises a sticky
+ * `tail.resume` note naming how many blocks it has to gap-fill. That note stayed
+ * on the record for the whole process, long after the tail had decoded the gap
+ * and gone current. It clears once the cursor reaches the boot head the count
+ * was measured against, then announces the tail is caught up.
+ *
+ * Singleton state (one tail cursor serves the indexer), so the holder carries a
+ * single outstanding message rather than a per-key map. The count is fixed at
+ * boot while the cursor keeps moving, so the caller stores the emitted string and
+ * replays it verbatim to clear(). Rebuilding it from the moved cursor would miss,
+ * leaving the stale note behind.
+ *
+ * Pure with injected sinks, unit-tested without a live tail (gap-fill.test.ts).
+ */
+export function checkGapFill(
+  lastBlock: bigint,
+  target: bigint,
+  state: { msg?: string },
+  io: { clear: (m: string) => void; announce: (m: string) => void },
+): void {
+  if (state.msg === undefined || lastBlock < target) return;
+  io.clear(state.msg);
+  state.msg = undefined;
+  // name the TARGET the gap was measured to, not a position: the cursor has
+  // already moved past it by the time we get here (lastBlock >= target), so
+  // "current at block target" would report a block the tail has left behind.
+  io.announce(`gap-fill caught up: decoded through block ${target}`);
+}
+
 /** Hold a deep history crawl while the RPC runs on a backup: the live tail and
  *  quote ticks keep the backup's rate budget; crawls resume on the primary.
  *  (Cursors/accumulators simply wait — nothing is lost or restarted.) */
@@ -193,6 +260,14 @@ export class LiveDataSource extends BaseSource {
   private notes = new NoteBuffer();
   /** base asset key → when its reference mid went dark (checkReferenceStarvation). */
   private starvedSince = new Map<string, number>();
+  /** venue+market+day keys with a still-unpublished CEX archive (checkArchivePending,
+   *  family A of #6). Retracted when that archive publishes; per-key so each deferred
+   *  day re-arms its own recovery independently. */
+  private archivePending = new Set<string>();
+  /** the boot gap-fill resume note still outstanding (checkGapFill, family B of #6),
+   *  retracted when the tail cursor reaches bootHead. Singleton on purpose: one tail
+   *  cursor serves the whole indexer. */
+  private gapResume: { msg?: string } = {};
   /** venue id → run of consecutive empty quote cycles, and the set already
    *  reported dark (checkQuoteOutage). In memory on purpose: nothing here
    *  needs to survive a restart, since a still-dark venue re-earns its run. */
@@ -431,7 +506,12 @@ export class LiveDataSource extends BaseSource {
     // midnight-crossing restart.
     if (lpb && head - BigInt(lpb) <= BigInt(config.gapFillMaxBlocks)) {
       this.lastBlock = BigInt(lpb);
-      this.note('tail.resume', `resuming: gap-filling ${head - BigInt(lpb)} block(s) since last run`);
+      // remember this exact line so the tail can retract it once it catches up to
+      // bootHead (checkGapFill, family B of #6); the count is fixed here while the
+      // cursor keeps moving, so the string is stored rather than rebuilt.
+      const resume = `resuming: gap-filling ${head - BigInt(lpb)} block(s) since last run`;
+      this.note('tail.resume', resume);
+      this.gapResume.msg = resume;
     } else {
       this.lastBlock = head;
       // two different events: a bounded gap was skipped (fills in it are lost
@@ -930,9 +1010,21 @@ export class LiveDataSource extends BaseSource {
       if (fills.length) {
         // pair-terms mid series covering the day + the horizons past midnight.
         const series = await pairMidSeries(market, dayStart, dayEnd + 120_000);
+        // Warn+defer while this month's archive is missing, retract the stale
+        // note on the sweep it publishes (checkArchivePending, family A of #6).
+        // The pending string stays byte-identical so drop() matches what
+        // noteOnce() emitted. The retraction fires here; the "resumed" announce
+        // waits until applyRemarks below has actually written the markouts, so a
+        // failed write can never leave a note claiming they resumed (review nit).
+        let resumed: string | undefined;
+        checkArchivePending({ vid, name, market, day }, series != null, this.archivePending, {
+          warn: (m) => this.noteOnce('markout.archive.pending', m, vid),
+          clear: (m) => this.dropNote('markout.archive.pending', m, vid),
+          announce: (m) => { resumed = m; },
+        });
         // deferral is a BREAK, not a return: the days already marked this walk
         // must still get their summary note + cache invalidation below.
-        if (!series) { this.noteOnce('markout.archive.pending', `${name} ${market}: CEX price archive for ${day} not published yet — markouts resume later`, vid); break; }
+        if (!series) break;
         const updates = fills.map((f) => {
           const ss = f.side === 'buy' ? 1 : -1;
           const marks = MARKOUT_HORIZONS.map((h) => {
@@ -942,6 +1034,10 @@ export class LiveDataSource extends BaseSource {
           return { id: f.id, markoutsBps: marks };
         });
         this.store.applyRemarks(updates);
+        // the markouts are on disk now, so the "resumed" line is finally true.
+        // checkArchivePending set `resumed` only on the sweep the archive
+        // published, so this stays silent on every other sweep.
+        if (resumed) this.note('markout.archive.published', resumed, vid);
         // count only fills that got ≥1 markout — an all-null result (mid gaps)
         // is honest but isn't "computed".
         marked += updates.filter((u) => u.markoutsBps.some((m) => m != null)).length;
@@ -1166,6 +1262,12 @@ export class LiveDataSource extends BaseSource {
 
     // every required source succeeded → advance the cursor and ingest.
     this.lastBlock = head;
+    // the boot gap is fully decoded once the cursor reaches bootHead: retract the
+    // resume note, then announce the tail is current (checkGapFill, family B of #6).
+    checkGapFill(this.lastBlock, this.bootHead, this.gapResume, {
+      clear: (m) => this.dropNote('tail.resume', m),
+      announce: (m) => this.note('tail.caughtup', m),
+    });
     fresh.sort((a, b) => a.blockNumber - b.blockNumber);
     // best-effort label enrichment (UNKNOWN → DIRECT / Router - X). Never
     // cursor-critical: a lookup failure leaves the adapter's honest UNKNOWN.
