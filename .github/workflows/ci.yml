@@ -2,9 +2,24 @@ name: CI
 
 # Verify every push + PR. Deployment is handled by Render's native GitHub
 # auto-deploy (push to main → Render builds the Dockerfile + deploys).
+#
+# paths-ignore applies to PUSH only: docs/markdown/PaaS-blueprint edits can't
+# affect typecheck, tests, the build, or the image, so on push to main (which
+# triggers Render regardless) we skip the no-op verify to save runner minutes.
+# pull_request ALWAYS runs — a docs-only PR still needs to produce a check run
+# so it can satisfy a required-status-check rule on main (skipping the workflow
+# entirely would leave the check missing and block the merge). `workflow_dispatch`
+# remains the force-run escape hatch for a push that was skipped.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.github/CODEOWNERS'
+      - 'LICENSE'
+      - 'render.yaml'
+      - 'railway.json'
   pull_request:
   workflow_dispatch:
 

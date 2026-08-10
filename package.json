@@ -26,6 +26,6 @@
     "url": "git+https://github.com/haythemsellami/mpamm.wtf.git"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   }
 }
