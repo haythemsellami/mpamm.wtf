@@ -2,10 +2,29 @@ name: CI
 
 # Verify every push + PR. Deployment is handled by Render's native GitHub
 # auto-deploy (push to main → Render builds the Dockerfile + deploys).
+#
+# paths-ignore: docs/markdown/PaaS-blueprint edits can't affect typecheck,
+# tests, the build, or the image, so they skip the pipeline entirely rather
+# than burning runner minutes on a no-op verify. `workflow_dispatch` remains
+# the escape hatch to force a run on such a change if ever needed.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.github/CODEOWNERS'
+      - 'LICENSE'
+      - 'render.yaml'
+      - 'railway.json'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.github/CODEOWNERS'
+      - 'LICENSE'
+      - 'render.yaml'
+      - 'railway.json'
   workflow_dispatch:
 
 concurrency:
@@ -17,7 +36,7 @@ permissions:
 
 jobs:
   verify:
-    name: typecheck · build · docker
+    name: typecheck · test · build · docker
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
