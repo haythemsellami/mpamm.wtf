@@ -8,3 +8,4 @@ dist/
 *.db-*
 .DS_Store
 .vite/
+.zcode/
