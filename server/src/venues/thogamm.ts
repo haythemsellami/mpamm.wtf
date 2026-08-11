@@ -17,7 +17,9 @@ export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as c
 const THOGAMM_VENUE: VenueMeta = {
   id: 'thogamm',
   name: 'ThogAMM',
-  color: { light: '#6D28D9', dark: '#A78BFA' },
+  // Crimson in both themes keeps ThogAMM distinct from Clober blue, Hanji
+  // fuchsia and LFJ POE orange wherever venue series are co-plotted.
+  color: { light: '#B91C1C', dark: '#EF4444' },
   kind: 'amm',
   role: 'venue',
   sinceUtc: '2026-07-26',
@@ -258,7 +260,6 @@ export function createThogammAdapter(): VenueAdapter {
 
     async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
       if (!discovered || !byMarket.size) return [];
-      const blockNumber = await ctx.client.getBlockNumber();
       const calls: Array<{ address: typeof THOGAMM_ADDRESS; abi: typeof thogammAbi; functionName: 'makerQuoteExactInput'; args: readonly [`0x${string}`, `0x${string}`, bigint] }> = [];
       const legs: QuoteLeg[] = [];
 
@@ -287,7 +288,11 @@ export function createThogammAdapter(): VenueAdapter {
       }
       if (!calls.length) return [];
 
-      const results = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
+      // Quote against the node's latest state at execution time, matching the
+      // other live venue adapters. Fetching a head first and pinning this call
+      // to it made ThogAMM one RPC round older than Metric/Hanji in the same UI
+      // sample, manufacturing an apparent quote-publication lag.
+      const results = await ctx.client.multicall({ contracts: calls, allowFailure: true });
       if (reportOutage(ctx, results)) return [];
       const partials = new Map<string, PartialQuote>();
       for (let i = 0; i < results.length; i++) {
