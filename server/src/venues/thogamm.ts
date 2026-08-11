@@ -258,7 +258,6 @@ export function createThogammAdapter(): VenueAdapter {
 
     async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
       if (!discovered || !byMarket.size) return [];
-      const blockNumber = await ctx.client.getBlockNumber();
       const calls: Array<{ address: typeof THOGAMM_ADDRESS; abi: typeof thogammAbi; functionName: 'makerQuoteExactInput'; args: readonly [`0x${string}`, `0x${string}`, bigint] }> = [];
       const legs: QuoteLeg[] = [];
 
@@ -287,7 +286,11 @@ export function createThogammAdapter(): VenueAdapter {
       }
       if (!calls.length) return [];
 
-      const results = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
+      // Quote against the node's latest state at execution time, matching the
+      // other live venue adapters. Fetching a head first and pinning this call
+      // to it made ThogAMM one RPC round older than Metric/Hanji in the same UI
+      // sample, manufacturing an apparent quote-publication lag.
+      const results = await ctx.client.multicall({ contracts: calls, allowFailure: true });
       if (reportOutage(ctx, results)) return [];
       const partials = new Map<string, PartialQuote>();
       for (let i = 0; i < results.length; i++) {

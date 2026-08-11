@@ -26,26 +26,49 @@ const LIVE_TOKEN_ADDRESSES = [
 ];
 
 /** ctx whose quote multicall reverts every leg, until `live` is flipped on. */
-function stubCtx(notes: { code: string; msg: string }[], state: { live: boolean }) {
+function stubCtx(notes: { code: string; msg: string }[], state: { live: boolean }, quoteReads?: { heads: number; args?: any }) {
   return {
     client: {
-      getBlockNumber: async () => 93_063_374n,
+      getBlockNumber: async () => {
+        if (quoteReads) quoteReads.heads++;
+        return 93_063_374n;
+      },
       readContract: async ({ functionName }: any) =>
         functionName === 'getPoolIds'
           ? ['0xce389e78282dedac7b18ba7f775b7602d2ab3ab171bbd6711eb0239be6ef4dcc']
           : LIVE_TOKEN_ADDRESSES,
-      multicall: async ({ contracts }: any) => contracts.map((c: any) =>
-        // discovery asks for decimals; quoting asks for makerQuoteExactInput.
-        c.functionName === 'decimals'
-          ? { status: 'success', result: Object.values(TOKENS).find((t) => t.address.toLowerCase() === String(c.address).toLowerCase())!.decimals }
-          : state.live
-            ? { status: 'success', result: [1n, 93_063_374n] }
-            : failed(PAUSED_ERROR)),
+      multicall: async (args: any) => {
+        const { contracts } = args;
+        if (quoteReads && contracts[0]?.functionName === 'makerQuoteExactInput') quoteReads.args = args;
+        return contracts.map((c: any) =>
+          // discovery asks for decimals; quoting asks for makerQuoteExactInput.
+          c.functionName === 'decimals'
+            ? { status: 'success', result: Object.values(TOKENS).find((t) => t.address.toLowerCase() === String(c.address).toLowerCase())!.decimals }
+            : state.live
+              ? { status: 'success', result: [1n, 93_063_374n] }
+              : failed(PAUSED_ERROR));
+      },
     },
     pricer: { pairMid: () => 0.0207, usdPerToken: () => 0.0207 },
     note: (code: string, msg: string) => { notes.push({ code, msg }); },
   } as any;
 }
+
+describe('ThogAMM quote block selection', () => {
+  it('quotes from latest state without a preflight head read or historical pin', async () => {
+    const reads: { heads: number; args?: any } = { heads: 0 };
+    const adapter = createThogammAdapter();
+    const ctx = stubCtx([], { live: true }, reads);
+    await adapter.discover!(ctx);
+    reads.heads = 0;
+
+    expect((await adapter.quote!(ctx, [100])).length).toBeGreaterThan(0);
+    expect(reads.heads).toBe(0);
+    expect(reads.args).toBeDefined();
+    expect(reads.args).not.toHaveProperty('blockNumber');
+    expect(reads.args).not.toHaveProperty('blockTag');
+  });
+});
 
 describe('ThogAMM quote outage notes', () => {
   it('says the maker is paused instead of vanishing silently, once, then announces recovery', async () => {
