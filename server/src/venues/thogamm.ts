@@ -17,9 +17,7 @@ export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as c
 const THOGAMM_VENUE: VenueMeta = {
   id: 'thogamm',
   name: 'ThogAMM',
-  // Crimson in both themes keeps ThogAMM distinct from Clober blue, Hanji
-  // fuchsia and LFJ POE orange wherever venue series are co-plotted.
-  color: { light: '#B91C1C', dark: '#EF4444' },
+  color: { light: '#6D28D9', dark: '#A78BFA' },
   kind: 'amm',
   role: 'venue',
   sinceUtc: '2026-07-26',
