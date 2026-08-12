@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { C, SANS, LOGO_PURPLE } from '../theme';
+import { isTourDismissed, persistTourDismissed } from '../lib/tour-preference';
 
 /**
  * First-visit onboarding tour (design: FIRST-VISIT TOUR block) — a one-shot
@@ -12,8 +13,6 @@ import { C, SANS, LOGO_PURPLE } from '../theme';
  * canonical set) instead of the design's stylized miniature mocks. Only the
  * active slide's <video> is mounted, so slides 2-4 lazy-load by construction.
  */
-
-const DISMISS_KEY = 'pamm-tour-dismissed';
 
 // slide copy is VERBATIM from the design file; assets are self-hosted loops.
 const SLIDES = [
@@ -39,14 +38,11 @@ const SLIDES = [
   },
 ] as const;
 
-function dismissed(): boolean {
-  try { return localStorage.getItem(DISMISS_KEY) === '1'; } catch { return false; } // storage errors → show
-}
-
 export function Tour() {
-  const [open, setOpen] = useState(() => !dismissed());
+  const [open, setOpen] = useState(() => !isTourDismissed());
   const [slide, setSlide] = useState(0);
   const [noShow, setNoShow] = useState(false); // unchecked by default
+  const [rememberError, setRememberError] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const noShowRef = useRef(noShow);
   noShowRef.current = noShow;
@@ -54,13 +50,21 @@ export function Tour() {
   slideRef.current = slide;
 
   const close = () => {
-    // persist ONLY when the checkbox is checked at close time — every path
-    // (skip ✕, Esc, finishing) goes through here.
-    if (noShowRef.current) { try { localStorage.setItem(DISMISS_KEY, '1'); } catch { /* best effort */ } }
+    // The checkbox persists immediately; closing writes once more as a fallback
+    // so every exit path (skip ✕, Esc, finishing) honors the visible choice.
+    if (noShowRef.current) persistTourDismissed(true);
     setOpen(false);
     // the quote canvas repaints on window resize — force one paint next frame
     // in case a data tick landed while the overlay was up.
     requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+  };
+  const remember = (value: boolean) => {
+    if (!persistTourDismissed(value)) {
+      setRememberError(true);
+      return;
+    }
+    setNoShow(value);
+    setRememberError(false);
   };
   const next = () => { const n = slideRef.current + 1; if (n > SLIDES.length - 1) close(); else setSlide(n); };
   const prev = () => setSlide((s) => Math.max(0, s - 1));
@@ -75,7 +79,7 @@ export function Tour() {
       else if (e.key === 'Escape') { e.preventDefault(); close(); }
       else if (e.key === 'Tab') {
         // focus trap: cycle within the card
-        const items = cardRef.current?.querySelectorAll<HTMLElement>('button, [tabindex="0"]');
+        const items = cardRef.current?.querySelectorAll<HTMLElement>('button, input, [tabindex="0"]');
         if (!items || !items.length) return;
         const first = items[0], last = items[items.length - 1];
         if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
@@ -140,10 +144,14 @@ export function Tour() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 18px 16px' }}>
-          <button type="button" onClick={() => setNoShow((v) => !v)} aria-pressed={noShow}
-            style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 9.5, color: C.faint, cursor: 'pointer', userSelect: 'none' }}>
-            <span style={{ color: C.accent, fontSize: 11 }}>{noShow ? '■' : '□'}</span> don't show this again
-          </button>
+          <div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 9.5, color: C.faint, cursor: 'pointer', userSelect: 'none' }}>
+              <input type="checkbox" checked={noShow} onChange={(e) => remember(e.currentTarget.checked)}
+                style={{ width: 12, height: 12, margin: 0, accentColor: C.accent, cursor: 'pointer' }} />
+              don't show this again
+            </label>
+            {rememberError && <div role="status" style={{ marginTop: 3, fontSize: 8.5, color: C.amber }}>browser could not save this preference</div>}
+          </div>
           <div style={{ display: 'flex', gap: 5, marginLeft: 'auto', marginRight: 14, alignItems: 'center' }}>
             {SLIDES.map((sl, j) => (
               <button key={sl.n} type="button" aria-label={`Go to slide ${j + 1}`} aria-current={j === slide ? 'step' : undefined}

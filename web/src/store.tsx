@@ -2,15 +2,22 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type R
 import type { MarketState, QuoteSnapshot, QuoteRow, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse } from '@shared';
 import { pairOf, cexForBase } from '@shared';
 import { fetchMarkets, fetchFills, fetchLeaderboard, fetchGas, fetchQuoteHistory, connectStream } from './lib/api';
+import { pathForTab, tabFromPath, urlForTab, type Tab } from './lib/tab-route';
 import type { Theme } from './theme';
+
+export type { Tab } from './lib/tab-route';
 
 /** Read the persisted theme, matching the pre-paint script in index.html.
  *  Default is bright (light); only an explicit 'dark' choice opts in. */
 const initialTheme = (): Theme => {
   try { return localStorage.getItem('pamm-theme') === 'dark' ? 'dark' : 'light'; } catch { return 'light'; }
 };
-export type Tab = 'exec' | 'volume' | 'markouts' | 'leaderboard';
 const N = 120; // canvas rolling window (≈60s @ 500ms)
+
+const initialTab = (): Tab => {
+  if (typeof window === 'undefined') return 'exec';
+  return tabFromPath(window.location.pathname) ?? 'exec';
+};
 
 export interface Series { bid: number[]; ask: number[]; }
 
@@ -89,15 +96,15 @@ function rowFor(q: QuoteSnapshot | null, venueId: string, market: string, size: 
 }
 
 export function DashboardProvider({ children }: { children: ReactNode }) {
-  const [ui, setUi] = useState<UiState>({
-    tab: 'exec', theme: initialTheme(), pair: 'MON/USDC', size: 100,
+  const [ui, setUi] = useState<UiState>(() => ({
+    tab: initialTab(), theme: initialTheme(), pair: 'MON/USDC', size: 100,
     venueToggles: {},
     mkProto: 'ALL', mkSide: 'ALL', mkSize: 'ANY', mkPaused: false,
     volStart: null, volEnd: null, burnStart: null, burnEnd: null,
     volGran: 'D', burnGran: 'D',
     cumFrom: null, cumTo: null, msFrom: null, msTo: null, brkFrom: null, brkTo: null,
     lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbMk: 'MAKER', lbWinners: true, lbTop: 25,
-  });
+  }));
   const [conn, setConn] = useState<'connecting' | 'live' | 'reconnecting'>('connecting');
   const [state, setState] = useState<MarketState | null>(null);
   const [quotes, setQuotes] = useState<QuoteSnapshot | null>(null);
@@ -107,6 +114,30 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [lbDay, setLbDay] = useState<LeaderboardResponse | null>(null);
   const [gas, setGas] = useState<GasResponse | null>(null);
   const [frame, setFrame] = useState(0);
+
+  // The URL is the shareable form of tab state. Canonicalize direct loads,
+  // restore the selected tab on browser navigation, and preserve any filters
+  // another feature has placed in the query string or hash.
+  useEffect(() => {
+    const syncFromLocation = () => {
+      const tab = tabFromPath(window.location.pathname) ?? 'exec';
+      const path = pathForTab(tab);
+      if (window.location.pathname !== path) {
+        window.history.replaceState(window.history.state, '', urlForTab(tab, window.location.search, window.location.hash));
+      }
+      setUi((state) => state.tab === tab ? state : { ...state, tab });
+    };
+
+    syncFromLocation();
+    window.addEventListener('popstate', syncFromLocation);
+    return () => window.removeEventListener('popstate', syncFromLocation);
+  }, []);
+
+  useEffect(() => {
+    const path = pathForTab(ui.tab);
+    if (window.location.pathname === path) return;
+    window.history.pushState(window.history.state, '', urlForTab(ui.tab, window.location.search, window.location.hash));
+  }, [ui.tab]);
 
   const seriesRef = useRef<Record<string, Series>>({});
   const samplesRef = useRef<Record<string, number[]>>({});

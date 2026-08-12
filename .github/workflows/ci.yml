@@ -51,6 +51,9 @@ jobs:
       - name: Tests (server — fixture-based, no network)
         run: npm -w server run test
 
+      - name: Tests (web)
+        run: npm -w web run test
+
       - name: Build frontend
         run: npm -w web run build
 
