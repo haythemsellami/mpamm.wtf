@@ -3,7 +3,7 @@ import type { Fill } from '@shared';
 import { useDashboard } from '../store';
 import { useViewport } from '../lib/viewport';
 import { C, venueColor } from '../theme';
-import { Pills, SideTag } from '../components/ui';
+import { Pills, SideTag, FieldLegend } from '../components/ui';
 import { fmtUsd, clockMs, clockSec, fmtInt, shortHex } from '../lib/format';
 
 const H = [0, 5, 10, 30, 60];
@@ -25,6 +25,30 @@ function catLabel(c: string, router?: string): string {
   if (router) return `${c === 'MEV' ? 'MEV' : 'Router'} - ${router}`;
   return c === 'DIRECT' ? '—' : c;
 }
+
+/** Column definitions for the two tape tables. The tape is a RAW FILL feed, so
+ *  it keeps the taker sign convention the fills are decoded in — unlike the
+ *  Leaderboard, which aggregates per venue and is maker-signed. Stating that on
+ *  both pages is the whole point of these legends. */
+const TAPE_FIELDS = [
+  { term: 'TS UTC / BLOCK', unit: '—', desc: 'when the fill landed, and in which block.' },
+  { term: 'TX / TO', unit: 'address', desc: 'transaction hash, and the contract it was sent to — a router or aggregator for routed flow, the venue itself for direct trades.' },
+  { term: 'CATEGORY', unit: '—', desc: 'how the trade reached the venue: DIRECT, ROUTER, AGG (aggregator), MEV (entered via auction/bundle infrastructure — searcher flow, not user routing), CEX/DEX, or UNKNOWN when attribution was unavailable (never guessed as DIRECT).' },
+  { term: 'SIDE', unit: '—', desc: 'BUY or SELL of the pair\u2019s base asset, from the taker\u2019s point of view.' },
+  { term: 'SIZE USD', unit: 'USD', desc: 'notional of the fill, taken from the USD-stable quote leg.' },
+  { term: 'EXEC PX', unit: 'quote/base', desc: 'realized price of the fill — quote units per one base unit.' },
+  { term: 'MK-0S … MK-60S', unit: 'bps', desc: 'markout at 0, 5, 10, 30 and 60 seconds after the fill. A cell stays blank until the swap has actually aged past that horizon — blank means "not yet known", never zero.' },
+] as const;
+
+const OUTLIER_FIELDS = [
+  { term: 'WHEN / BLOCK', unit: '—', desc: 'how long ago the fill landed, and in which block.' },
+  { term: 'PROTOCOL / PAIR / POOL', unit: '—', desc: 'the venue, the market, and the specific pool or book that filled it.' },
+  { term: 'SIDE', unit: '—', desc: 'BUY or SELL of the base asset, taker\u2019s point of view.' },
+  { term: 'USD', unit: 'USD', desc: 'notional of the fill.' },
+  { term: 'EXEC PX', unit: 'quote/base', desc: 'realized price — quote units per one base unit.' },
+  { term: 'MK-0S (BPS)', unit: 'bps', desc: 'markout at the instant of the trade.' },
+  { term: 'MK-0S P&L', unit: 'USD', desc: 'the same markout in dollars: bps × size_usd ÷ 10⁴. The feed is ranked by the absolute value of this.' },
+] as const;
 
 export function MarkoutsTab() {
   const d = useDashboard();
@@ -104,7 +128,11 @@ export function MarkoutsTab() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap', padding: '9px 12px', borderBottom: `1px solid ${C.line2}` }}>
           <div style={{ fontSize: 11, letterSpacing: '.03em' }}>
             <span style={{ color: C.purple }}>&gt;</span>{' '}
-            <span style={{ color: C.text, fontWeight: 600 }}>SWAP_TAPE</span>
+            <span style={{ color: C.text, fontWeight: 600 }}>SWAP_TAPE</span>{' '}
+            <span style={{ color: C.faint }}>markout bps unless marked</span>
+            <FieldLegend items={TAPE_FIELDS} note={<>
+              A <strong style={{ color: C.text3, fontWeight: 600 }}>markout</strong> is the fill price compared to the pair&rsquo;s CEX reference mid a set time later.{' '}Signed from the <strong style={{ color: C.text3, fontWeight: 600 }}>taker</strong> side, as fills are decoded: positive = the taker got a favorable fill vs the CEX reference, negative = adverse. (The Leaderboard aggregates per venue and flips this to the maker side.)
+            </>} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
             <Pills options={['ALL', ...displayVenues.map((v) => v.name.toUpperCase())]} value={d.mkProto} onChange={(v) => d.set('mkProto', v)} sm />
@@ -230,6 +258,9 @@ export function MarkoutsTab() {
           <span style={{ color: C.red }}>!</span>{' '}
           <span style={{ color: C.text, fontWeight: 600 }}>OUTLIER_FEED</span>{' '}
           <span style={{ color: C.faint }}>sorted by |mk-0s P&amp;L| desc &middot; last 24h</span>
+          <FieldLegend items={OUTLIER_FIELDS} note={<>
+            The 24h fills with the largest markout in dollars, either direction.{' '}Signed from the <strong style={{ color: C.text3, fontWeight: 600 }}>taker</strong> side, as fills are decoded: positive = the taker got a favorable fill vs the CEX reference, negative = adverse. (The Leaderboard aggregates per venue and flips this to the maker side.)
+          </>} />
         </div>
 
         <div style={{ overflowX: 'auto' }}>
