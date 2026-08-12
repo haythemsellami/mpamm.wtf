@@ -2,8 +2,11 @@ export const TOUR_DISMISS_KEY = 'pamm-tour-dismissed';
 
 type TourStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
-export function isTourDismissed(storage: TourStorage = localStorage): boolean {
-  try { return storage.getItem(TOUR_DISMISS_KEY) === '1'; } catch { return false; }
+export function isTourDismissed(storage?: TourStorage): boolean {
+  try {
+    const s = storage ?? localStorage;
+    return s.getItem(TOUR_DISMISS_KEY) === '1';
+  } catch { return false; }
 }
 
 /** Persist and read back the choice so the control never claims a preference
