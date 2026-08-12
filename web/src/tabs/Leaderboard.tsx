@@ -31,10 +31,17 @@ const TOP_GRID = '30px 76px 64px 82px 1.3fr 64px 88px 46px 1fr 1fr 76px 56px 80p
 
 export function LeaderboardTab() {
   const d = useDashboard();
-  const { lb, lbWin, lbGroup, lbHz, lbMk, lbWinners, lbTop, venuesById } = d;
+  const { lb, lbWin, lbGroup, lbHz, lbWinners, lbTop, venuesById } = d;
 
   const hzIdx = HZ_IDX[lbHz] ?? 0;
-  const sign = lbMk === 'MAKER' ? -1 : 1;
+  // MAKER side, always. This dashboard is about propAMM venues, and every
+  // figure on the page is framed from the pool's side — the PnL column is
+  // literally POOL PNL. A taker toggle re-signed those numbers while leaving
+  // the labels alone, so the same cell could report the TAKERS' PnL under a
+  // "POOL" heading. One convention, stated in the prose, removes that trap.
+  //
+  // The API stays TAKER-signed (it is the raw fill convention); maker is a pure
+  // negation applied here, on the way in — see each use below.
 
   // Aggregates come from /api/leaderboard, computed server-side over the FULL
   // window (the old in-browser aggregation silently truncated 7D/30D at the
@@ -57,27 +64,28 @@ export function LeaderboardTab() {
           : C.accent;
     return rows.map((r) => ({
       name: labelFor(r.key), color: colorFor(r.key), vol: r.vol, swaps: r.swaps,
-      ...(sign === 1
-        ? { p5: r.p5, p25: r.p25, p50: r.p50, p75: r.p75, p95: r.p95, pnl: r.pnl, sp: r.spark }
-        : { p5: -r.p95, p25: -r.p75, p50: -r.p50, p75: -r.p25, p95: -r.p5, pnl: -r.pnl, sp: r.spark.map((v) => -v) }),
+      // maker = −taker, which REVERSES the percentile order too: the takers'
+      // p95 is the makers' p5.
+      p5: -r.p95, p25: -r.p75, p50: -r.p50, p75: -r.p25, p95: -r.p5,
+      pnl: -r.pnl, sp: r.spark.map((v) => -v),
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, lbGroup, hzIdx, sign, d.theme, venuesById]);
+  }, [current, lbGroup, hzIdx, d.theme, venuesById]);
 
-  // TOP_SWAPS rows — biggest single-swap winners/losers. Under the MAKER sign
-  // flip the server's loser list IS the maker-winner list (and vice versa), in
-  // the right order already.
+  // TOP_SWAPS rows — biggest single-swap winners/losers, maker-side. The
+  // server's TAKER-loser list IS the maker-winner list, already in the right
+  // order, so WINNERS reads `losers` and vice versa.
   const topRows = useMemo(() => {
     const lists = current?.topSwaps[String(hzIdx)];
-    const list = (lbWinners === (sign === 1) ? lists?.winners : lists?.losers) ?? [];
+    const list = (lbWinners ? lists?.losers : lists?.winners) ?? [];
     return list
       .filter((f) => f.markoutsBps[hzIdx] != null)
       .map((f) => {
-        const mk = sign * (f.markoutsBps[hzIdx] as number);
+        const mk = -(f.markoutsBps[hzIdx] as number);
         return { f, mk, pnl: mk / 1e4 * f.usd };
       })
       .slice(0, lbTop);
-  }, [current, hzIdx, sign, lbWinners, lbTop]);
+  }, [current, hzIdx, lbWinners, lbTop]);
 
   // percentile cell — '+'/'' + toFixed(2), green > 0.02 / red < -0.02 / dim.
   const pcell = (v: number) => ({
@@ -93,7 +101,7 @@ export function LeaderboardTab() {
         <div>
           <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '.06em', color: C.text }}>MARKOUT LEADERBOARD</div>
           <div style={{ fontSize: 11, color: C.dim3, marginTop: 6, lineHeight: 1.55, maxWidth: 760 }}>
-            Percentile distribution of markouts and the biggest single-swap winners / losers, per group, over the selected window. Markouts vs each pair's CEX BBO mid (Bybit for MON, Binance for BTC/ETH); pool PnL = Σ(markout_bps × size_usd / 10000).
+            Percentile distribution of markouts and the biggest single-swap winners / losers, per group, over the selected window. Markouts vs each pair's CEX BBO mid (Bybit for MON, Binance for BTC/ETH); pool PnL = Σ(markout_bps × size_usd / 10000). Signed from the <strong style={{ color: C.dim2, fontWeight: 600 }}>maker</strong> side throughout: positive = the pool earned, negative = the pool gave up edge.
           </div>
         </div>
         <Pills options={['24H', '7D', '30D']} value={lbWin} onChange={(v) => d.set('lbWin', v)} sm />
@@ -108,10 +116,6 @@ export function LeaderboardTab() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
           <span style={{ letterSpacing: '.06em' }}>HORIZON</span>
           <Pills options={['T+0S', 'T+10S', 'T+30S', 'T+60S']} value={lbHz} onChange={(v) => d.set('lbHz', v)} sm />
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <span style={{ letterSpacing: '.06em' }}>MARKOUTS</span>
-          <Pills options={['TAKER', 'MAKER']} value={lbMk} onChange={(v) => d.set('lbMk', v)} sm />
         </div>
         <button type="button" onClick={() => d.resetLb()} style={{
           marginLeft: 'auto', padding: '3px 9px', border: '1px solid var(--pill-border)', borderRadius: 4,
