@@ -6,6 +6,9 @@ import { RpcBreaker, type RpcNote, type RpcStatusView } from './failover.js';
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
   name: 'Monad',
+  // Viem derives its polling interval from this. Without it, a custom chain
+  // falls back to 12s blocks and caches eth_blockNumber for 4s.
+  blockTime: 400,
   nativeCurrency: { name: 'Monad', symbol: 'MON', decimals: 18 },
   rpcUrls: {
     default: { http: [config.rpcHttp], webSocket: [config.rpcWs] },
@@ -52,6 +55,9 @@ const failoverTransport: Transport = ({ chain }) => {
  *  per-market reads collapse toward a single round-trip (docs/architecture.md: quote poller). */
 export const publicClient: PublicClient = createPublicClient({
   chain: monad,
+  // Quote and fill-tail loops need the actual head on every pass. A cached
+  // head makes the UI jump blocks and adds the cache window to fill latency.
+  cacheTime: 0,
   transport: failoverTransport,
 });
 
