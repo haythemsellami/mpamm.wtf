@@ -4,6 +4,7 @@ import { useDashboard, LB_WIN_DAYS } from '../store';
 import { C, SEM, venueColor } from '../theme';
 import { Pills, SideTag } from '../components/ui';
 import { fmtUsd, fmtAmt, fmtInt, pnlFmt, sparkPath, humanAge, shortHex } from '../lib/format';
+import { avgMarkoutBps } from '../lib/markout';
 
 const HZ_IDX: Record<string, number> = { 'T+0S': 0, 'T+10S': 2, 'T+30S': 3, 'T+60S': 4 };
 const GROUP_ID: Record<string, LeaderboardGrouping> = {
@@ -25,7 +26,7 @@ function catLabel(c: string, router?: string): string {
 }
 
 // grid templates lifted verbatim from the design (source of truth for pixels).
-const LB_GRID = '34px 1.7fr 96px 64px 58px 58px 58px 58px 58px 1.5fr';
+const LB_GRID = '34px 1.7fr 96px 64px 58px 58px 58px 58px 58px 62px 1.5fr';
 const TOP_GRID = '30px 76px 64px 82px 1.3fr 64px 88px 46px 1fr 1fr 76px 56px 80px';
 
 export function LeaderboardTab() {
@@ -128,16 +129,17 @@ export function LeaderboardTab() {
           <span style={{ color: C.faint }}>grouped by {groupLbl} · markout {lbHz}</span>
         </div>
         <div style={{ padding: '4px 14px 12px', overflowX: 'auto' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: LB_GRID, gap: '0 8px', padding: '9px 6px', fontSize: 9, color: C.faint2, letterSpacing: '.04em', borderBottom: `1px solid ${C.line}`, minWidth: 980 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: LB_GRID, gap: '0 8px', padding: '9px 6px', fontSize: 9, color: C.faint2, letterSpacing: '.04em', borderBottom: `1px solid ${C.line}`, minWidth: 1042 }}>
             <div>#</div><div>{lbGroup}</div>
             <div style={{ textAlign: 'right' }}>VOLUME</div><div style={{ textAlign: 'right' }}>SWAPS</div>
             <div style={{ textAlign: 'right' }}>P5</div><div style={{ textAlign: 'right' }}>P25</div><div style={{ textAlign: 'right' }}>P50</div>
-            <div style={{ textAlign: 'right' }}>P75</div><div style={{ textAlign: 'right' }}>P95</div><div style={{ textAlign: 'right' }}>POOL PNL</div>
+            <div style={{ textAlign: 'right' }}>P75</div><div style={{ textAlign: 'right' }}>P95</div>
+            <div style={{ textAlign: 'right' }} title="volume-weighted mean markout (bps) — POOL PNL ÷ VOLUME">AVG</div><div style={{ textAlign: 'right' }}>POOL PNL</div>
           </div>
           {lbRows.map((g, i) => {
             const cells = [g.p5, g.p25, g.p50, g.p75, g.p95].map(pcell);
             return (
-              <div key={g.name + i} style={{ display: 'grid', gridTemplateColumns: LB_GRID, gap: '0 8px', padding: '11px 6px', fontSize: 11.5, borderBottom: `1px solid ${C.line3}`, alignItems: 'center', minWidth: 980 }}>
+              <div key={g.name + i} style={{ display: 'grid', gridTemplateColumns: LB_GRID, gap: '0 8px', padding: '11px 6px', fontSize: 11.5, borderBottom: `1px solid ${C.line3}`, alignItems: 'center', minWidth: 1042 }}>
                 <div style={{ color: C.faint2 }}>{String(i + 1).padStart(2, '0')}</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
                   <span style={{ width: 9, height: 9, borderRadius: 2, background: g.color, flex: 'none' }} />
@@ -148,6 +150,7 @@ export function LeaderboardTab() {
                 {cells.map((c, k) => (
                   <div key={k} style={{ textAlign: 'right', color: c.color }}>{c.txt}</div>
                 ))}
+                {(() => { const a = pcell(avgMarkoutBps(g.pnl, g.vol)); return <div style={{ textAlign: 'right', color: a.color, fontWeight: 600 }}>{a.txt}</div>; })()}
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10 }}>
                   <span style={{ color: g.pnl >= 0 ? C.green : C.red, fontWeight: 600 }}>{pnlFmt(g.pnl)}</span>
                   <svg width="130" height="26" viewBox="0 0 130 26" preserveAspectRatio="none" style={{ flex: 'none' }}>
