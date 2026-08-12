@@ -14,10 +14,7 @@ const initialTheme = (): Theme => {
 };
 const N = 120; // canvas rolling window (≈60s @ 500ms)
 
-const initialTab = (): Tab => {
-  if (typeof window === 'undefined') return 'exec';
-  return tabFromPath(window.location.pathname) ?? 'exec';
-};
+const initialTab = (): Tab => tabFromPath(window.location.pathname) ?? 'exec';
 
 export interface Series { bid: number[]; ask: number[]; }
 

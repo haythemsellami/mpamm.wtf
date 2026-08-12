@@ -44,15 +44,10 @@ export function Tour() {
   const [noShow, setNoShow] = useState(false); // unchecked by default
   const [rememberError, setRememberError] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
-  const noShowRef = useRef(noShow);
-  noShowRef.current = noShow;
   const slideRef = useRef(slide);
   slideRef.current = slide;
 
   const close = () => {
-    // The checkbox persists immediately; closing writes once more as a fallback
-    // so every exit path (skip ✕, Esc, finishing) honors the visible choice.
-    if (noShowRef.current) persistTourDismissed(true);
     setOpen(false);
     // the quote canvas repaints on window resize — force one paint next frame
     // in case a data tick landed while the overlay was up.
@@ -145,12 +140,19 @@ export function Tour() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 18px 16px' }}>
           <div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 9.5, color: C.faint, cursor: 'pointer', userSelect: 'none' }}>
-              <input type="checkbox" checked={noShow} onChange={(e) => remember(e.currentTarget.checked)}
-                style={{ width: 12, height: 12, margin: 0, accentColor: C.accent, cursor: 'pointer' }} />
-              don't show this again
+            <label className="tour-remember" style={{
+              position: 'relative', display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 9.5, color: C.faint, cursor: 'pointer', userSelect: 'none',
+            }}>
+              <input className="tour-remember-input" type="checkbox" checked={noShow}
+                aria-describedby={rememberError ? 'tour-remember-error' : undefined}
+                onChange={(e) => remember(e.currentTarget.checked)} />
+              <span className="tour-remember-glyph" aria-hidden="true"
+                style={{ color: C.accent, fontSize: 11, lineHeight: 1 }}>{noShow ? '■' : '□'}</span>
+              <span>don't show this again</span>
             </label>
-            {rememberError && <div role="status" style={{ marginTop: 3, fontSize: 8.5, color: C.amber }}>browser could not save this preference</div>}
+            {rememberError && <div id="tour-remember-error" role="status"
+              style={{ marginTop: 3, fontSize: 8.5, color: C.amber }}>browser could not save this preference</div>}
           </div>
           <div style={{ display: 'flex', gap: 5, marginLeft: 'auto', marginRight: 14, alignItems: 'center' }}>
             {SLIDES.map((sl, j) => (
