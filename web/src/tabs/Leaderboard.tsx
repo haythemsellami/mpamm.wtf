@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import type { LeaderboardGrouping } from '@shared';
 import { useDashboard, LB_WIN_DAYS } from '../store';
 import { C, SEM, venueColor } from '../theme';
-import { Pills, SideTag } from '../components/ui';
+import { Pills, SideTag, FieldLegend } from '../components/ui';
 import { fmtUsd, fmtAmt, fmtInt, pnlFmt, sparkPath, humanAge, shortHex } from '../lib/format';
 import { avgMarkoutBps } from '../lib/markout';
 
@@ -28,6 +28,29 @@ function catLabel(c: string, router?: string): string {
 // grid templates lifted verbatim from the design (source of truth for pixels).
 const LB_GRID = '34px 1.7fr 96px 64px 58px 58px 58px 58px 58px 62px 1.5fr';
 const TOP_GRID = '30px 76px 64px 82px 1.3fr 64px 88px 46px 1fr 1fr 76px 56px 80px';
+
+/** What each leaderboard column is, and — the part the table never said — its
+ *  UNIT. Kept next to the component that renders the columns so a new column
+ *  and its definition move together. */
+const LB_FIELDS = [
+  { term: 'VOLUME', unit: 'USD', desc: 'total notional traded by the group over the window.' },
+  { term: 'SWAPS', unit: 'count', desc: 'fills with a REALIZED markout at this horizon. A fill too recent to have aged past the horizon is excluded rather than counted as zero, so this can differ between horizons.' },
+  { term: 'P5 … P95', unit: 'bps', desc: 'percentiles of per-fill markout. P5 is the bad tail (only 5% of fills did worse), P50 the median, P95 the good tail. They describe the SHAPE of the distribution, not its direction.' },
+  { term: 'AVG', unit: 'bps', desc: 'volume-weighted mean markout = POOL PNL ÷ VOLUME × 10⁴. This is the one that tells you the direction: a skewed distribution can show a positive median and a negative mean.' },
+  { term: 'POOL PNL', unit: 'USD', desc: 'Σ(markout_bps × size_usd ÷ 10⁴) — the same quantity as AVG, in dollars instead of a rate. Dollars are not comparable across venues of different size; AVG is.' },
+  { term: 'sparkline', unit: 'USD', desc: 'cumulative POOL PNL across the window, oldest on the left.' },
+] as const;
+
+const TOP_FIELDS = [
+  { term: 'BLOCK / AGE', unit: '—', desc: 'block the fill landed in, and how long ago.' },
+  { term: 'TX / TO', unit: 'address', desc: 'transaction hash, and the contract it was sent to — a router or aggregator for routed flow, the venue itself for direct trades.' },
+  { term: 'CATEGORY', unit: '—', desc: 'how the trade reached the venue: DIRECT, ROUTER, AGG (aggregator), MEV (entered via auction/bundle infrastructure — searcher flow, not user routing), CEX/DEX, or UNKNOWN when attribution was unavailable (never guessed as DIRECT).' },
+  { term: 'SIDE', unit: '—', desc: 'BUY or SELL of the pair\u2019s base asset, from the taker\u2019s point of view.' },
+  { term: 'IN / OUT', unit: 'tokens', desc: 'amounts actually moved, in each token\u2019s own units.' },
+  { term: 'EXEC PX', unit: 'quote/base', desc: 'realized price of the fill — quote units per one base unit.' },
+  { term: 'MK BPS', unit: 'bps', desc: 'that single fill\u2019s markout at the selected horizon.' },
+  { term: 'MK $', unit: 'USD', desc: 'the same markout in dollars: MK BPS × size_usd ÷ 10⁴.' },
+] as const;
 
 export function LeaderboardTab() {
   const d = useDashboard();
@@ -130,7 +153,11 @@ export function LeaderboardTab() {
         <div style={{ padding: '9px 12px', borderBottom: `1px solid ${C.line2}`, fontSize: 11, letterSpacing: '.03em' }}>
           <span style={{ color: C.purple }}>$</span>{' '}
           <span style={{ color: C.text, fontWeight: 600 }}>LEADERBOARD_{lbWin}</span>{' '}
-          <span style={{ color: C.faint }}>grouped by {groupLbl} · markout {lbHz}</span>
+          <span style={{ color: C.faint }}>grouped by {groupLbl} · markout {lbHz} · bps unless marked</span>
+          <FieldLegend items={LB_FIELDS} note={<>
+            A <strong style={{ color: C.text3, fontWeight: 600 }}>markout</strong> is the fill price compared to the pair&rsquo;s CEX reference mid (Bybit for MON, Binance for BTC/ETH) a set time later — the horizon pills. T+0S is the price at the instant of the trade; T+60S is one minute after, which is where informed flow shows up.{' '}
+            Everything here is signed from the <strong style={{ color: C.text3, fontWeight: 600 }}>maker</strong> (pool) side: positive = the pool earned, negative = the pool gave up edge.
+          </>} />
         </div>
         <div style={{ padding: '4px 14px 12px', overflowX: 'auto' }}>
           <div style={{ display: 'grid', gridTemplateColumns: LB_GRID, gap: '0 8px', padding: '9px 6px', fontSize: 9, color: C.faint2, letterSpacing: '.04em', borderBottom: `1px solid ${C.line}`, minWidth: 1042 }}>
@@ -177,6 +204,9 @@ export function LeaderboardTab() {
           <div style={{ fontSize: 11, letterSpacing: '.03em' }}>
             <span style={{ color: C.purple }}>−</span>{' '}
             <span style={{ color: C.text, fontWeight: 600 }}>TOP_SWAPS_BY_MARKOUT_USD</span>{' '}
+          <FieldLegend items={TOP_FIELDS} note={<>
+            Individual fills, ranked by markout in dollars, maker-signed like the table above: WINNERS are the pool&rsquo;s best fills, LOSERS its worst.
+          </>} />
             <span style={{ color: C.faint }}>{lbHz} markout · {lbWin} window</span>
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
