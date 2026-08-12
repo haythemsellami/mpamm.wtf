@@ -130,13 +130,11 @@ export function FieldLegend({ items, note }: {
             display: 'grid', gridTemplateColumns: 'max-content max-content 1fr',
             gap: '5px 10px', margin: 0, fontSize: 10, lineHeight: 1.5, alignItems: 'baseline',
           }}>
-            {items.map((f) => (
-              <div key={f.term} style={{ display: 'contents' }}>
-                <dt style={{ color: C.text2, letterSpacing: '.04em', whiteSpace: 'nowrap' }}>{f.term}</dt>
-                <dd style={{ margin: 0, color: C.accent, whiteSpace: 'nowrap' }}>{f.unit ?? ''}</dd>
-                <dd style={{ margin: 0, color: C.dim3 }}>{f.desc}</dd>
-              </div>
-            ))}
+            {items.flatMap((f) => ([
+              <dt key={`${f.term}-term`} style={{ color: C.text2, letterSpacing: '.04em', whiteSpace: 'nowrap' }}>{f.term}</dt>,
+              <dd key={`${f.term}-unit`} style={{ margin: 0, color: C.accent, whiteSpace: 'nowrap' }}>{f.unit ?? ''}</dd>,
+              <dd key={`${f.term}-desc`} style={{ margin: 0, color: C.dim3 }}>{f.desc}</dd>,
+            ]))}
           </dl>
           {note && <div style={{ marginTop: 8, paddingTop: 7, borderTop: `1px solid ${C.line3}`, fontSize: 10, lineHeight: 1.5, color: C.dim3 }}>{note}</div>}
         </div>
