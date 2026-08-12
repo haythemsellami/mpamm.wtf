@@ -40,7 +40,7 @@ interface UiState {
   msFrom: string | null; msTo: string | null;
   brkFrom: string | null; brkTo: string | null;
   // leaderboard
-  lbWin: string; lbGroup: string; lbHz: string; lbMk: string; lbWinners: boolean; lbTop: number;
+  lbWin: string; lbGroup: string; lbHz: string; lbWinners: boolean; lbTop: number;
 }
 
 /** the leaderboard window pills → /api/leaderboard days. */
@@ -100,7 +100,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     volStart: null, volEnd: null, burnStart: null, burnEnd: null,
     volGran: 'D', burnGran: 'D',
     cumFrom: null, cumTo: null, msFrom: null, msTo: null, brkFrom: null, brkTo: null,
-    lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbMk: 'MAKER', lbWinners: true, lbTop: 25,
+    lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbWinners: true, lbTop: 25,
   }));
   const [conn, setConn] = useState<'connecting' | 'live' | 'reconnecting'>('connecting');
   const [state, setState] = useState<MarketState | null>(null);
@@ -399,7 +399,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       // canvas colors come from JS getters (not var()), so force a repaint.
       setFrame((f) => f + 1);
     },
-    resetLb: () => setUi((s) => ({ ...s, lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbMk: 'MAKER', lbWinners: true, lbTop: 25 })),
+    resetLb: () => setUi((s) => ({ ...s, lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbWinners: true, lbTop: 25 })),
   }), [ui, conn, state, quotes, volume, fills, lb, lbDay, gas, frame, venues, displayVenues, baselines, reference, references, referenceFor, venuesById]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
