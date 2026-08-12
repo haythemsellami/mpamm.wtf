@@ -134,10 +134,11 @@ export function LeaderboardTab() {
             <div style={{ textAlign: 'right' }}>VOLUME</div><div style={{ textAlign: 'right' }}>SWAPS</div>
             <div style={{ textAlign: 'right' }}>P5</div><div style={{ textAlign: 'right' }}>P25</div><div style={{ textAlign: 'right' }}>P50</div>
             <div style={{ textAlign: 'right' }}>P75</div><div style={{ textAlign: 'right' }}>P95</div>
-            <div style={{ textAlign: 'right' }} title="volume-weighted mean markout (bps) — POOL PNL ÷ VOLUME">AVG</div><div style={{ textAlign: 'right' }}>POOL PNL</div>
+            <div style={{ textAlign: 'right' }} title="volume-weighted mean markout, bps — (POOL PNL ÷ VOLUME) × 10⁴">AVG</div><div style={{ textAlign: 'right' }}>POOL PNL</div>
           </div>
           {lbRows.map((g, i) => {
             const cells = [g.p5, g.p25, g.p50, g.p75, g.p95].map(pcell);
+            const avg = pcell(avgMarkoutBps(g.pnl, g.vol));
             return (
               <div key={g.name + i} style={{ display: 'grid', gridTemplateColumns: LB_GRID, gap: '0 8px', padding: '11px 6px', fontSize: 11.5, borderBottom: `1px solid ${C.line3}`, alignItems: 'center', minWidth: 1042 }}>
                 <div style={{ color: C.faint2 }}>{String(i + 1).padStart(2, '0')}</div>
@@ -150,7 +151,7 @@ export function LeaderboardTab() {
                 {cells.map((c, k) => (
                   <div key={k} style={{ textAlign: 'right', color: c.color }}>{c.txt}</div>
                 ))}
-                {(() => { const a = pcell(avgMarkoutBps(g.pnl, g.vol)); return <div style={{ textAlign: 'right', color: a.color, fontWeight: 600 }}>{a.txt}</div>; })()}
+                <div style={{ textAlign: 'right', color: avg.color, fontWeight: 600 }}>{avg.txt}</div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10 }}>
                   <span style={{ color: g.pnl >= 0 ? C.green : C.red, fontWeight: 600 }}>{pnlFmt(g.pnl)}</span>
                   <svg width="130" height="26" viewBox="0 0 130 26" preserveAspectRatio="none" style={{ flex: 'none' }}>
