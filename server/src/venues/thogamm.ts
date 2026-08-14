@@ -375,6 +375,17 @@ export function createThogammAdapter(): VenueAdapter {
         }
         await refresh(ctx);
       }
+      // Sources are a constant, so logSources() is always right and cannot carry
+      // the fail-closed guard the discovered-address venues get for free.
+      // Discovery supplies only the decode table: with it empty every swap
+      // decodes to null, the core reads "no fills in this range" and advances
+      // past fills the on-chain backfill (< bootHead) will never return for.
+      // Hold the cursor instead — conditionally, as Clober does, so an
+      // undiscovered ThogAMM never stalls the shared tail over ranges that
+      // carry nothing of ours.
+      if (!discovered && (logs.swaps?.length ?? 0) > 0) {
+        throw new Error('ThogAMM discovery unavailable');
+      }
       const out: Fill[] = [];
       for (const log of logs.swaps ?? []) {
         let blockNumber: bigint;
