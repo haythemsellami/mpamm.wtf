@@ -8,6 +8,7 @@ import {
   selectThogammPoolId,
   thogammMarketsForTokens,
 } from '../thogamm.js';
+import type { VenueAdapter } from '../adapter.js';
 
 /**
  * The only MakerSwapExecuted log in ThogAMM's on-chain history when this
@@ -201,5 +202,49 @@ describe('ThogAMM proxy upgrades', () => {
     notes.length = 0;
     await adapter.decode(ctx, { upgrades: [], swaps: [REAL_MON_USDC_FILL] } as any, () => 1_785_053_296_000, new Set());
     expect(notes).toEqual([]);
+  });
+});
+
+describe('ThogAMM fail-closed before discovery', () => {
+  const decode = (adapter: VenueAdapter, ctx: any, logs: any) =>
+    adapter.decode(ctx, logs, () => 1_785_053_296_000, new Set());
+
+  it('holds the cursor on a real fill while the decode table is empty', async () => {
+    const adapter = createThogammAdapter();
+    await expect(decode(adapter, stubCtx([]), { upgrades: [], swaps: [REAL_MON_USDC_FILL] }))
+      .rejects.toThrow('ThogAMM discovery unavailable');
+  });
+
+  it('still holds after a discovery attempt has failed', async () => {
+    const adapter = createThogammAdapter();
+    const ctx = stubCtx([]);
+    ctx.client.readContract = async () => { throw new Error('RPC unavailable'); };
+    await expect(adapter.discover(ctx)).rejects.toThrow('RPC unavailable');
+    await expect(decode(adapter, ctx, { upgrades: [], swaps: [REAL_MON_USDC_FILL] }))
+      .rejects.toThrow('ThogAMM discovery unavailable');
+  });
+
+  it('decodes the same fill once discovery has succeeded', async () => {
+    const adapter = createThogammAdapter();
+    const ctx = stubCtx([]);
+    await adapter.discover(ctx);
+    const fills = await decode(adapter, ctx, { upgrades: [], swaps: [REAL_MON_USDC_FILL] });
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({ market: 'MON/USDC', side: 'sell', baseAmount: 0.01 });
+  });
+
+  it('lets an undiscovered range carrying no ThogAMM swap advance', async () => {
+    const adapter = createThogammAdapter();
+    // the sources are static and genuinely knowable, so the shared tail must
+    // keep moving for every other venue while ThogAMM is undiscovered.
+    expect(adapter.logSources()).toHaveLength(2);
+    await expect(decode(adapter, stubCtx([]), { upgrades: [], swaps: [] })).resolves.toEqual([]);
+  });
+
+  it('accepts a fill that arrives with the upgrade which repaired discovery', async () => {
+    const adapter = createThogammAdapter();
+    const upgrade = { address: THOGAMM_ADDRESS, eventName: 'Upgraded', args: { implementation: '0x127a5b18e3e96fc104f5eaf280dfe502dd3fd40a' }, blockNumber: 91_000_000n, logIndex: 1 };
+    const fills = await decode(adapter, stubCtx([]), { upgrades: [upgrade], swaps: [REAL_MON_USDC_FILL] });
+    expect(fills).toHaveLength(1);
   });
 });
