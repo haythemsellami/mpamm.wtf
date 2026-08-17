@@ -1003,7 +1003,11 @@ export class LiveDataSource extends BaseSource {
     let persisted = 0;
     let tsFails = 0; // consecutive timestamp-resolution failures at the SAME cursor
     const batch: Fill[] = [];
-    this.noteOnce('markout.scan.start', `${name}: onboarding fill scan ${sinceDay} — blocks ${from}→${end}`, vid);
+    // `sinceDay` is the WINDOW anchor, not necessarily where this scan begins: a
+    // resumed cursor (or a targeted BACKFILL_RESET) moves `from` forward. Naming
+    // the anchor as if it were the start reported a scan that was not happening —
+    // the same mislabel already corrected on backfill.start above.
+    this.noteOnce('markout.scan.start', `${name}: onboarding fill scan — blocks ${from}→${end} (window since ${sinceDay})`, vid);
 
     const fetchAll = (t: bigint) => Promise.all(sources.map((s) =>
       publicClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
