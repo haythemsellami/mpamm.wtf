@@ -44,31 +44,45 @@ const FAST_QUOTER_HELPER = '0x237dB58fea34A35A8543b44C217d221606cE7788' as const
  *  off `externalPrices` (FP24-packed bid/ask ×5 pairs + expiry) that Hanji's
  *  keeper writes via `updatePrices(uint256)` (sel 0xae7e8d81) every ~1s from
  *  HEAVILY ROTATING EOAs (87 senders observed in 4 min) — which is exactly why
- *  gas tracking is destination-keyed. Updates emit NO logs (45k flat limit),
- *  and every direct tx to this contract is a price update (254/254 sampled),
- *  so blocks-mode tx counting is exact-in-kind. Provenance: team-provided
- *  update tx 0x2b17b095… decoded against their published packing.
+ *  gas tracking is destination-keyed. Updates emit NO logs, and every direct
+ *  tx to a quoter is a price update (254/254, 317/317 and 38/38 sampled across
+ *  three generations), so blocks-mode tx counting is exact-in-kind.
+ *  Provenance: team-provided update tx 0x2b17b095… decoded against their
+ *  published packing.
  *
  *  GENERATIONS: Hanji redeploys the FastQuoter every week or two and cuts the
- *  fleet over to it; the old contract simply stops receiving pushes. Each
- *  generation carries the SAME owner (0xA24D2aF7…), the same
- *  updatePrices(uint256) packed-word calldata and the same 45k flat limit, so
- *  `owner()` is the cheapest way to confirm a candidate is theirs. Every
- *  generation is listed so the burn series spans the cutovers — a missing one
- *  doesn't error, it silently flatlines the venue's burn while the venue
- *  itself trades on (gen3 went untracked for 11 days that way).
+ *  fleet over to it; the old contract simply stops receiving pushes. The one
+ *  invariant across all six is `owner() == 0xA24D2aF7…` — so that, plus the
+ *  updatePrices(uint256) packed-word calldata, is what confirms a candidate is
+ *  theirs. Do NOT identify them by gas limit: gen1+ push at a flat 45,000 but
+ *  gen0 used 100,000, and the limit is a keeper setting, not an identity.
+ *  Every generation is listed so the burn series spans the cutovers — a
+ *  missing one doesn't error, it silently flatlines the venue's burn while the
+ *  venue itself trades on (gen3 went untracked for 11 days that way, gen5 for
+ *  3 days; both were noticed only because burn hit null against live volume).
  *
- *  To find the current one: scan recent blocks for the updatePrices selector
+ *  NOT OURS: 0xc1ff9fefdd86735bb14286caa796f72d90f4b0fc pushes the very same
+ *  selector from its own rotating fleet, but `owner()` is 0x6792e60a… and it
+ *  ran CONCURRENTLY with gen1 (2026-07-13 → 07-15) — two live quoters under
+ *  different owners can't both be Hanji's. It is a third party copying the
+ *  pattern; counting it would inflate Hanji's burn the way tracking
+ *  0x0000a8fd…8888 once did. Check owner() before appending anything.
+ *
+ *  To find the CURRENT one: scan recent blocks for the updatePrices selector
  *  0xae7e8d81 and read the destination — far cheaper than ranking destinations
- *  by tx frequency, since the fleet rotates senders every push. Then check
- *  owner(). Append below; the gas tracker re-scans from the earliest ADDED
- *  contract's creation day whenever this set changes (gas.ts:
+ *  by tx frequency, since the fleet rotates senders every push. To audit the
+ *  WHOLE set you must sample across the venue lifetime, not recent blocks: a
+ *  retired generation is invisible today, which is how gen0 stayed unlisted
+ *  from the start. Append below; the gas tracker re-scans from the earliest
+ *  ADDED contract's creation day whenever this set changes (gas.ts:
  *  reconcileSourceChange), so earlier history is preserved. */
 const FAST_QUOTERS = [
-  '0x04fdEAC24E4e57364B4F22844106583d88F747d7', // gen1 — until 2026-07-16 15:33 UTC
+  '0xd637b38f8436fc4974ce9236d65888a1bac64160', // gen0 — 2026-06-26 13:43:02 → 2026-06-30 UTC
+  '0x04fdEAC24E4e57364B4F22844106583d88F747d7', // gen1 — 2026-06-30 22:49:37 → 2026-07-16 15:33 UTC
   '0x48cba27861983367c3fb063877b144a628e2b48b', // gen2 — 2026-07-16 → ~2026-07-30
   '0x91855e7930044a8f13f10b336abf551f1f58ac7e', // gen3 — deployed 2026-07-30 06:39:45 UTC
-  '0xeae24c729ee1a38554037e4ad25ef1e3c9e30be0', // gen4 — deployed 2026-08-08 23:36:31 UTC, active
+  '0xeae24c729ee1a38554037e4ad25ef1e3c9e30be0', // gen4 — deployed 2026-08-08 23:36:31 UTC
+  '0x103de0b5226a2a6d8b918d8192dc23248825bb55', // gen5 — deployed 2026-08-14 15:02:12 UTC, active
 ] as const;
 
 /** Hanji markets (team-provided, tokens verified on-chain via getConfig).
