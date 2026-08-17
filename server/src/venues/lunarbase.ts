@@ -151,7 +151,7 @@ async function readPoolsAtBlock(
   ctx: AdapterContext,
   configs: readonly LunarbasePoolConfig[],
   blockNumber: bigint,
-  onFailure: (config: LunarbasePoolConfig, reason: string) => void,
+  onFailure: (config: LunarbasePoolConfig, reason: string, transient: boolean) => void,
 ): Promise<LunarbaseCachedPool[]> {
   const calls: any[] = [];
   const indexes = new Map<string, Partial<Record<ReadKey, number>>>();
@@ -187,6 +187,21 @@ async function readPoolsAtBlock(
   for (let i = 0; i < configs.length; i++) {
     const config = configs[i];
     const ix = indexes.get(config.pool.toLowerCase())!;
+    // A FAILED read is not a misconfiguration. multicall reports status per call
+    // and readResult() collapses a failure to `undefined`, which the checks below
+    // then read as a wrong VALUE — an unreadable pool surfaced as
+    // "token order mismatch: X=unreadable Y=unreadable" and got QUARANTINED,
+    // which deletes it from byAddress and so from logSources(): the venue stops
+    // being tailed and its fills are silently lost (observed during the
+    // 2026-08-14 RPC brownout). Transient reads keep the cached snapshot.
+    const unread = (k: ReadKey) => { const j = ix[k]; return j === undefined || results[j]?.status !== 'success'; };
+    const required: ReadKey[] = ['x', 'y', 'state', 'reserveX', 'reserveY', 'concentrationK', 'blockDelay', 'paused', 'blacklistFeeMultiplier', 'whitelistProbe'];
+    if (config.expectedX.toLowerCase() !== ZERO) required.push('xDecimals');
+    if (config.expectedY.toLowerCase() !== ZERO) required.push('yDecimals');
+    if (required.some(unread) || !implementationFromSlot(implementationSlots[i])) {
+      onFailure(config, 'pinned-block reads unavailable — keeping the cached snapshot', true);
+      continue;
+    }
     try {
       if (!registeredConfig(config)) throw new Error(`market ${config.market} is not registered`);
       const x = String(readResult<string>(results, ix.x) ?? '').toLowerCase();
@@ -238,7 +253,7 @@ async function readPoolsAtBlock(
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      onFailure(config, reason);
+      onFailure(config, reason, false);   // reads succeeded, the VALUE is wrong
     }
   }
   return found;
@@ -417,6 +432,10 @@ export function createLunarbaseAdapter(): VenueAdapter {
     if (!noted.delete(key)) return; // nothing was ever raised — stay quiet
     ctx.note('venue.quote.recovered', msg);
   };
+  /** Transient read failure: say so, but keep the pool tailed and decodable. */
+  const unreadable = (ctx: AdapterContext, config: LunarbasePoolConfig, reason: string) => {
+    noteOnce(ctx, `unread:${config.pool}`, 'venue.quote.unavailable', `Lunarbase ${config.market} state unreadable: ${reason}`);
+  };
   const quarantine = (ctx: AdapterContext, config: LunarbasePoolConfig, reason: string) => {
     byAddress.delete(config.pool.toLowerCase());
     byMarket.delete(config.market);
@@ -440,7 +459,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
       const blockNumber = await ctx.client.getBlockNumber();
       // Validation is intentionally per pool: a failed behavioral gate must
       // never block every venue's fill cursor.
-      const staged = await readPoolsAtBlock(ctx, LUNARBASE_POOLS, blockNumber, (config, reason) => quarantine(ctx, config, reason));
+      const staged = await readPoolsAtBlock(ctx, LUNARBASE_POOLS, blockNumber, (config, reason, transient) => transient ? unreadable(ctx, config, reason) : quarantine(ctx, config, reason));
       for (const pool of staged) activate(ctx, pool);
       discovered = true;
       ctx.note('venue.discovery', `Lunarbase: ${staged.length}/${LUNARBASE_POOLS.length} validated production pool(s), whitelist fee mode`);
@@ -474,7 +493,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
       }))]));
       let current: LunarbaseCachedPool[];
       try {
-        current = await readPoolsAtBlock(ctx, gatePools, head, (config, reason) => quarantine(ctx, config, reason));
+        current = await readPoolsAtBlock(ctx, gatePools, head, (config, reason, transient) => transient ? unreadable(ctx, config, reason) : quarantine(ctx, config, reason));
       } catch (error) {
         // legs settle harmlessly (quoteLunarbaseLeg never rejects) — nothing dangles.
         noteOnce(ctx, 'snapshot', 'venue.quote.unavailable', `Lunarbase quote refresh failed: ${error instanceof Error ? error.message : String(error)}`);
