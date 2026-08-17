@@ -6,6 +6,7 @@ import {
   lunarbaseQuoteDirection,
   quoteLunarbaseLeg,
   type LunarbaseCachedPool,
+  createLunarbaseAdapter,
 } from '../lunarbase.js';
 
 /**
@@ -192,3 +193,87 @@ describe('Lunarbase production pool configuration', () => {
     expect(lunarbaseQuoteDirection(MON_POOL, 'buy')).toBe('quoteYToX');
   });
 });
+
+describe('a failed read is not a misconfiguration (issue #61)', () => {
+  // The 2026-08-14 RPC brownout produced
+  //   "Lunarbase MON/USDC quarantined: token order mismatch: X=unreadable Y=unreadable"
+  // because readResult() collapses a FAILED multicall entry to undefined, which
+  // the token-order check then read as a wrong value. Quarantine deletes the pool
+  // from byAddress, which is what logSources() is built from — so the venue
+  // silently stopped being tailed on a transient RPC error.
+  const cfg = LUNARBASE_POOLS[0];
+  // a pool that passes every structural check, so the healthy pass establishes it
+  const ok: Record<string, unknown> = {
+    X: cfg.expectedX, Y: cfg.expectedY,
+    state: [1_000_000n, 100, 100, 400n],          // anchorPrice > 0
+    getXReserve: 10n ** 20n, getYReserve: 10n ** 8n,
+    concentrationK: 1, blockDelay: 10n, paused: false,
+    blacklistFeeMultiplier: 1n, isWhitelisted: true,
+    decimals: cfg.stableDec,                       // only Y is an ERC-20 here (X is native)
+  };
+  const IMPL_SLOT = '0x' + '0'.repeat(24) + '1'.repeat(40);
+  const ZERO_SLOT = '0x' + '0'.repeat(64);
+  const stub = (allFail: boolean, slot: string | undefined = allFail ? undefined : IMPL_SLOT) => ({
+    client: {
+      multicall: async ({ contracts }: any) => contracts.map((c: any) =>
+        allFail ? { status: 'failure' } : { status: 'success', result: ok[c.functionName] }),
+      getStorageAt: async () => slot,
+      getBlockNumber: async () => 500n,
+    },
+    pricer: { pairMid: () => 1, usdPerToken: () => 1, usdForToken: () => 1 },
+    config: {},
+    note: () => {},
+  }) as any;
+
+  it('keeps an unreadable pool in the tail set instead of quarantining it', async () => {
+    const a = createLunarbaseAdapter();
+    await a.discover(stub(false));                    // healthy: pool is known
+    const before = a.logSources().find((s) => s.key === 'swap');
+    expect(before).toBeDefined();
+    const tailedBefore = (before!.address as string[]).length;
+    expect(tailedBefore).toBeGreaterThan(0);
+
+    await a.discover(stub(true));                     // brownout: every read fails
+    const after = a.logSources().find((s) => s.key === 'swap');
+    expect(after).toBeDefined();                                    // still tailed…
+    expect((after!.address as string[]).length).toBe(tailedBefore);  // …and not dropped
+  });
+
+  it('reports the outage as unreadable, not as a config mismatch', async () => {
+    const notes: { code: string; msg: string }[] = [];
+    const ctx = stub(true);
+    ctx.note = (code: string, msg: string) => notes.push({ code, msg });
+    const a = createLunarbaseAdapter();
+    await a.discover(stub(false));
+    await a.discover(ctx);
+    expect(notes.some((n) => n.code === 'venue.quarantined')).toBe(false);
+    expect(notes.some((n) => /state unreadable/.test(n.msg))).toBe(true);
+  });
+
+  it('still quarantines a ZERO implementation slot — that is a misconfiguration, not an outage', async () => {
+    // getStorageAt RESOLVED; the slot is just empty (non-proxy, or wrong slot).
+    // Classifying that as transient would keep a broken pool cached forever.
+    const notes: { code: string; msg: string }[] = [];
+    const a = createLunarbaseAdapter();
+    await a.discover(stub(false));
+    const ctx = stub(false, ZERO_SLOT);
+    ctx.note = (code: string, msg: string) => notes.push({ code, msg });
+    await a.discover(ctx);
+    expect(notes.some((n) => n.code === 'venue.quarantined')).toBe(true);
+    expect(a.logSources().find((s) => s.key === 'swap')).toBeUndefined();  // dropped, correctly
+  });
+
+  it('retracts the unreadable warning once the pool reads again', async () => {
+    const notes: { code: string; msg: string }[] = [];
+    const a = createLunarbaseAdapter();
+    await a.discover(stub(false));
+    const down = stub(true); down.note = (c: string, m: string) => notes.push({ code: c, msg: m });
+    await a.discover(down);
+    expect(notes.some((n) => /state unreadable/.test(n.msg))).toBe(true);
+
+    const up = stub(false); up.note = (c: string, m: string) => notes.push({ code: c, msg: m });
+    await a.discover(up);
+    expect(notes.some((n) => n.code === 'venue.quote.recovered' && /readable again/.test(n.msg))).toBe(true);
+  });
+});
+
