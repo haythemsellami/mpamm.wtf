@@ -211,11 +211,13 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     blacklistFeeMultiplier: 1n, isWhitelisted: true,
     decimals: cfg.stableDec,                       // only Y is an ERC-20 here (X is native)
   };
-  const stub = (allFail: boolean) => ({
+  const IMPL_SLOT = '0x' + '0'.repeat(24) + '1'.repeat(40);
+  const ZERO_SLOT = '0x' + '0'.repeat(64);
+  const stub = (allFail: boolean, slot: string | undefined = allFail ? undefined : IMPL_SLOT) => ({
     client: {
       multicall: async ({ contracts }: any) => contracts.map((c: any) =>
         allFail ? { status: 'failure' } : { status: 'success', result: ok[c.functionName] }),
-      getStorageAt: async () => (allFail ? undefined : '0x' + '0'.repeat(24) + '1'.repeat(40)),
+      getStorageAt: async () => slot,
       getBlockNumber: async () => 500n,
     },
     pricer: { pairMid: () => 1, usdPerToken: () => 1, usdForToken: () => 1 },
@@ -247,4 +249,31 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     expect(notes.some((n) => n.code === 'venue.quarantined')).toBe(false);
     expect(notes.some((n) => /state unreadable/.test(n.msg))).toBe(true);
   });
+
+  it('still quarantines a ZERO implementation slot — that is a misconfiguration, not an outage', async () => {
+    // getStorageAt RESOLVED; the slot is just empty (non-proxy, or wrong slot).
+    // Classifying that as transient would keep a broken pool cached forever.
+    const notes: { code: string; msg: string }[] = [];
+    const a = createLunarbaseAdapter();
+    await a.discover(stub(false));
+    const ctx = stub(false, ZERO_SLOT);
+    ctx.note = (code: string, msg: string) => notes.push({ code, msg });
+    await a.discover(ctx);
+    expect(notes.some((n) => n.code === 'venue.quarantined')).toBe(true);
+    expect(a.logSources().find((s) => s.key === 'swap')).toBeUndefined();  // dropped, correctly
+  });
+
+  it('retracts the unreadable warning once the pool reads again', async () => {
+    const notes: { code: string; msg: string }[] = [];
+    const a = createLunarbaseAdapter();
+    await a.discover(stub(false));
+    const down = stub(true); down.note = (c: string, m: string) => notes.push({ code: c, msg: m });
+    await a.discover(down);
+    expect(notes.some((n) => /state unreadable/.test(n.msg))).toBe(true);
+
+    const up = stub(false); up.note = (c: string, m: string) => notes.push({ code: c, msg: m });
+    await a.discover(up);
+    expect(notes.some((n) => n.code === 'venue.quote.recovered' && /readable again/.test(n.msg))).toBe(true);
+  });
 });
+

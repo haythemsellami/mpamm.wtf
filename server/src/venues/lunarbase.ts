@@ -198,7 +198,12 @@ async function readPoolsAtBlock(
     const required: ReadKey[] = ['x', 'y', 'state', 'reserveX', 'reserveY', 'concentrationK', 'blockDelay', 'paused', 'blacklistFeeMultiplier', 'whitelistProbe'];
     if (config.expectedX.toLowerCase() !== ZERO) required.push('xDecimals');
     if (config.expectedY.toLowerCase() !== ZERO) required.push('yDecimals');
-    if (required.some(unread) || !implementationFromSlot(implementationSlots[i])) {
+    // Only a FAILED read is transient. getStorageAt() resolves to undefined when
+    // the CALL failed; a slot that came back and decodes to the zero address is a
+    // real misconfiguration (non-proxy, or wrong slot) and must still reach the
+    // 'incomplete pinned snapshot' quarantine below — treating it as an outage
+    // would keep a broken pool cached forever.
+    if (required.some(unread) || implementationSlots[i] === undefined) {
       onFailure(config, 'pinned-block reads unavailable — keeping the cached snapshot', true);
       continue;
     }
@@ -449,6 +454,10 @@ export function createLunarbaseAdapter(): VenueAdapter {
     byAddress.set(pool.pool.toLowerCase(), pool);
     byMarket.set(pool.market, pool);
     recovered(ctx, `quarantine:${pool.pool}`, `Lunarbase ${pool.market} re-admitted — the quarantine condition cleared`);
+    // the pool just read cleanly, so retract the unreadable warning too — an
+    // adapter can only append, so a heal that said nothing would leave a stale
+    // warning standing until the served window rolled it off.
+    recovered(ctx, `unread:${pool.pool}`, `Lunarbase ${pool.market} state readable again`);
   };
 
   return {
