@@ -23,7 +23,6 @@ export const config = {
   source: (env.DATA_SOURCE?.toLowerCase() === 'sim' ? 'sim' : 'live') as SourcePref,
 
   rpcHttp: env.RPC_HTTP_URL ?? 'https://rpc.monad.xyz',
-  rpcWs: env.RPC_WS_URL ?? 'wss://rpc.monad.xyz',
   /** Ordered failover RPCs behind the primary (comma-separated). Default: the
    *  public RPC, so every deployment survives a provider outage with zero
    *  config. Set RPC_BACKUP_URLS="" to opt out (single-endpoint behavior). */
@@ -57,8 +56,17 @@ export const config = {
 
   sizesUsd: [...SIZES_USD],
 
-  /** getLogs range cap observed on the public RPC (413 above ~100 blocks). */
-  getLogsChunk: num('GETLOGS_CHUNK', 90),
+  /** getLogs span the tail ATTEMPTS. Measured caps: the devcore4 fleet serves
+   *  1000 blocks per call, the public endpoint 413s above ~100. Sized for the
+   *  fleet — a narrower endpoint is handled by getLogsChunked's shrink rather
+   *  than by pricing every request for the weakest possible node. */
+  getLogsChunk: num('GETLOGS_CHUNK', 900),
+  /** Narrowest span we degrade to, and the floor every adaptive crawl shrinks
+   *  toward. Proven to work on the public endpoint, so a failover down to it
+   *  keeps serving instead of 413ing every call. MUST stay <= backfillChunk:
+   *  the deep crawls start at backfillChunk and shrink to this, so a floor
+   *  above the start would leave them nowhere to go. */
+  getLogsMinChunk: num('GETLOGS_MIN_CHUNK', 90),
 
   // ── history (persist-forward indexer) ──────────────────────────────────────
   /** SQLite file — authoritative daily-volume history + lastProcessedBlock. */
@@ -85,7 +93,7 @@ export const config = {
    *  until complete. Set BACKFILL=off to disable (e.g. a range-limited RPC). */
   backfillEnabled: (env.BACKFILL ?? 'on').toLowerCase() !== 'off',
   /** Starting getLogs span for backfill — auto-shrinks on an RPC range error and
-   *  floors at getLogsChunk, so it runs as wide as the node allows without 413s. */
+   *  floors at getLogsMinChunk, so it runs as wide as the node allows without 413s. */
   backfillChunk: num('BACKFILL_CHUNK', 800),
   /** Delay between backfill chunks (ms) — paces requests under the RPC rate cap. */
   backfillPaceMs: num('BACKFILL_PACE_MS', 40),
@@ -135,5 +143,28 @@ export const config = {
   /** idle sleep between gas tail passes once caught up to head (ms). */
   gasTailMs: num('GAS_TAIL_MS', 60_000),
 } as const;
+
+// Fail LOUD at boot on a chunk misconfiguration rather than degrading quietly.
+// The three deep crawls start at backfillChunk and shrink toward getLogsMinChunk;
+// with the floor above the start they can never shrink, so their `catch` would
+// reclassify a legitimate "range too large" as an unreadable archive hole and
+// SKIP it — silently undercounting exactly the way this project refuses to.
+// Same reasoning as the fail-loud venue registry: a bad config should not boot.
+if (config.getLogsMinChunk > config.backfillChunk) {
+  throw new Error(
+    `GETLOGS_MIN_CHUNK (${config.getLogsMinChunk}) must be <= BACKFILL_CHUNK (${config.backfillChunk}) — ` +
+    'the backfill and gas crawls start at BACKFILL_CHUNK and shrink toward GETLOGS_MIN_CHUNK; ' +
+    'a floor above the start leaves them nowhere to shrink and turns range errors into skipped ranges.',
+  );
+}
+if (config.getLogsMinChunk > config.getLogsChunk) {
+  throw new Error(
+    `GETLOGS_MIN_CHUNK (${config.getLogsMinChunk}) must be <= GETLOGS_CHUNK (${config.getLogsChunk}) — ` +
+    'the tail attempts GETLOGS_CHUNK and narrows toward the floor, never the other way round.',
+  );
+}
+if (config.getLogsMinChunk < 1 || config.getLogsChunk < 1) {
+  throw new Error('GETLOGS_CHUNK and GETLOGS_MIN_CHUNK must both be >= 1 block.');
+}
 
 export type Config = typeof config;
