@@ -144,4 +144,27 @@ export const config = {
   gasTailMs: num('GAS_TAIL_MS', 60_000),
 } as const;
 
+// Fail LOUD at boot on a chunk misconfiguration rather than degrading quietly.
+// The three deep crawls start at backfillChunk and shrink toward getLogsMinChunk;
+// with the floor above the start they can never shrink, so their `catch` would
+// reclassify a legitimate "range too large" as an unreadable archive hole and
+// SKIP it — silently undercounting exactly the way this project refuses to.
+// Same reasoning as the fail-loud venue registry: a bad config should not boot.
+if (config.getLogsMinChunk > config.backfillChunk) {
+  throw new Error(
+    `GETLOGS_MIN_CHUNK (${config.getLogsMinChunk}) must be <= BACKFILL_CHUNK (${config.backfillChunk}) — ` +
+    'the backfill and gas crawls start at BACKFILL_CHUNK and shrink toward GETLOGS_MIN_CHUNK; ' +
+    'a floor above the start leaves them nowhere to shrink and turns range errors into skipped ranges.',
+  );
+}
+if (config.getLogsMinChunk > config.getLogsChunk) {
+  throw new Error(
+    `GETLOGS_MIN_CHUNK (${config.getLogsMinChunk}) must be <= GETLOGS_CHUNK (${config.getLogsChunk}) — ` +
+    'the tail attempts GETLOGS_CHUNK and narrows toward the floor, never the other way round.',
+  );
+}
+if (config.getLogsMinChunk < 1 || config.getLogsChunk < 1) {
+  throw new Error('GETLOGS_CHUNK and GETLOGS_MIN_CHUNK must both be >= 1 block.');
+}
+
 export type Config = typeof config;
