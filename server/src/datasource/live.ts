@@ -171,6 +171,28 @@ export function checkGapFill(
   io.announce(`gap-fill caught up: decoded through block ${target}`);
 }
 
+/**
+ * Every meta key a one-shot history reset must clear for one venue.
+ *
+ * Both halves matter, and each has a done-flag AND a cursor:
+ *  - volume backfill: `backfill_done` gates the re-run, `backfill_cursor` says
+ *    where it resumes.
+ *  - fills onboarding: `mkfill_done` gates it, `mkfill_cursor` is consulted as
+ *    `if (cb > from) from = cb` — so clearing only the flag restarts the scan
+ *    wherever the LAST onboarding finished and silently skips the earlier
+ *    window the reset was reached for. `mkhist_cursor_<vid>_<market>` are the
+ *    per-market markout walk positions.
+ *
+ * Listed in one place, and exported, because the failure mode of forgetting one
+ * is a reset that reports success and recovers nothing.
+ */
+export function resetVenueHistory(store: Pick<VolumeStore, 'setMeta' | 'deleteMetaPrefix'>, vid: string): void {
+  for (const k of [`backfill_done_${vid}`, `backfill_cursor_${vid}`, `mkfill_done_${vid}`, `mkfill_cursor_${vid}`]) {
+    store.setMeta(k, '');
+  }
+  store.deleteMetaPrefix(`mkhist_cursor_${vid}_`);
+}
+
 /** Hold a deep history crawl while the RPC runs on a backup: the live tail and
  *  quote ticks keep the backup's rate budget; crawls resume on the primary.
  *  (Cursors/accumulators simply wait — nothing is lost or restarted.) */
@@ -607,17 +629,7 @@ export class LiveDataSource extends BaseSource {
     const want = config.backfillReset.trim();
     if (!want || this.store.getMeta('backfill_reset_applied') === want) return;
     const vids = want.split(',').map((s) => s.trim().split('@')[0]).filter(Boolean);
-    for (const vid of vids) {
-      this.store.setMeta(`backfill_done_${vid}`, '');
-      this.store.setMeta(`backfill_cursor_${vid}`, '');
-      // Also re-arm the FILLS onboarding and its markout walk. Clearing only the
-      // volume flags recovers day totals but leaves the individual fills (and so
-      // the markouts) missing for the same window — which is exactly the half a
-      // reset is usually reached for (issue #61: fills dropped while a venue's
-      // pools were unquotable).
-      this.store.setMeta(`mkfill_done_${vid}`, '');
-      this.store.deleteMetaPrefix(`mkhist_cursor_${vid}_`);
-    }
+    for (const vid of vids) resetVenueHistory(this.store, vid);
     this.store.setMeta('backfill_reset_applied', want);
     this.note('backfill.reset', `backfill reset applied (${want}) — re-scanning: ${vids.join(', ')}`);
   }

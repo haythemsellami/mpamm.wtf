@@ -31,7 +31,6 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | `RPC_HTTP_URL` | Monad node (default: public endpoint) |
 | `RPC_BACKUP_URLS` | ordered failover nodes, comma-separated (default: public endpoint; `""` disables failover) |
 | `GETLOGS_CHUNK` | getLogs span the tail attempts (default 900 — the devcore4 fleet serves 1000/call; the public endpoint caps at ~100) |
-| `BACKFILL_RESET` | one-shot per-venue history re-scan, comma-separated (`"metric"`). Clears the venue's volume backfill AND fills/markout onboarding so both replay. The applied value is remembered — change it (`"metric@2"`) to re-run |
 | `GETLOGS_MIN_CHUNK` | narrowest span, and the floor every adaptive crawl shrinks to (default 90 — works on the public endpoint). Keep `<= BACKFILL_CHUNK` |
 | `QUOTE_INTERVAL_MS` / `TAIL_INTERVAL_MS` | quote-loop / fills-tail-loop cadence floors (default 500 each; the loops are independent and self-scheduling) |
 | `DATA_SOURCE=sim` | offline simulator instead of live |
@@ -44,7 +43,7 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | `MARKOUT_BACKFILL=off` · `MARKOUT_BACKFILL_DAYS` | onboarding markout backfill (archived CEX prices) |
 | `GAS_METRIC=off` · `GAS_SAMPLE_STRIDE_BLOCKS` | QUOTE_UPDATE_BURN tracker |
 | `SUBGRAPH_URL` | Clober discovery subgraph override |
-| `BACKFILL_RESET=venue[,venue]` | one-shot re-scan of a venue's volume history |
+| `BACKFILL_RESET=venue[,venue]` | one-shot re-scan of a venue's history — volume backfill AND fills/markout onboarding, cursors cleared so both replay from the start of their window. The applied value is remembered; change it (`venue@2`) to re-run |
 
 ## Operational notes
 
