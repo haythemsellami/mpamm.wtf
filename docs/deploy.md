@@ -43,7 +43,20 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | `MARKOUT_BACKFILL=off` · `MARKOUT_BACKFILL_DAYS` | onboarding markout backfill (archived CEX prices) |
 | `GAS_METRIC=off` · `GAS_SAMPLE_STRIDE_BLOCKS` | QUOTE_UPDATE_BURN tracker |
 | `SUBGRAPH_URL` | Clober discovery subgraph override |
-| `BACKFILL_RESET=venue[,venue]` | one-shot re-scan of a venue's history — volume backfill AND fills/markout onboarding, cursors cleared so both replay from the start of their window. The applied value is remembered; change it (`venue@2`) to re-run |
+| `BACKFILL_RESET=spec[,spec]` | one-shot re-scan of a venue's history — volume backfill AND fills/markout onboarding. `venue` replays the lifetime; `venue:<block>` or `venue:YYYY-MM-DD` replays only from there. `@n` is a re-run nonce, never a start (`venue@2`). The applied value is remembered, so change it to re-run |
+
+### Recovering a window the live tail missed
+
+```
+BACKFILL_RESET=metric:2026-08-14
+```
+
+Replays that venue from the given day (or block) to head instead of its whole
+lifetime — for Metric that is ~955k blocks rather than ~29M. Both halves are
+idempotent: day rows are SET-per-day and fills dedupe on deterministic ids, so a
+replay can overlap what is already stored. Watch for `backfill.reset` then
+`backfill.start` in `state.notes`; a start past head is refused loudly rather
+than silently downgraded to a lifetime replay.
 
 ## Operational notes
 

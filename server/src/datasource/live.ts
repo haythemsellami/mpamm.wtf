@@ -186,11 +186,60 @@ export function checkGapFill(
  * Listed in one place, and exported, because the failure mode of forgetting one
  * is a reset that reports success and recovers nothing.
  */
-export function resetVenueHistory(store: Pick<VolumeStore, 'setMeta' | 'deleteMetaPrefix'>, vid: string): void {
-  for (const k of [`backfill_done_${vid}`, `backfill_cursor_${vid}`, `mkfill_done_${vid}`, `mkfill_cursor_${vid}`]) {
-    store.setMeta(k, '');
-  }
+export function resetVenueHistory(
+  store: Pick<VolumeStore, 'setMeta' | 'deleteMetaPrefix'>,
+  vid: string,
+  /** resume point; omitted = replay the venue's whole lifetime. */
+  fromBlock?: bigint,
+): void {
+  // Both crawls resume from their cursor (`if (cb > from) from = cb`), so SETTING
+  // it is how a replay is targeted and CLEARING it is how a replay is made total.
+  const cursor = fromBlock === undefined ? '' : String(fromBlock);
+  store.setMeta(`backfill_done_${vid}`, '');
+  store.setMeta(`backfill_cursor_${vid}`, cursor);
+  store.setMeta(`mkfill_done_${vid}`, '');
+  store.setMeta(`mkfill_cursor_${vid}`, cursor);
+  // The markout walk cursors are per-market DAYS. Deleting them is always safe —
+  // the walk restarts from the earliest still-unmarked fill and re-marking is
+  // idempotent — whereas setting one too high would skip the very window a
+  // targeted replay exists to recover.
   store.deleteMetaPrefix(`mkhist_cursor_${vid}_`);
+}
+
+/** One parsed BACKFILL_RESET entry. `invalid` is carried rather than thrown so
+ *  one bad entry cannot stop the others, and so it can be reported loudly. */
+export type BackfillResetTarget =
+  | { vid: string; from: 'lifetime' }
+  | { vid: string; from: 'block'; block: bigint }
+  | { vid: string; from: 'day'; day: string }
+  | { vid: string; from: 'invalid'; spec: string };
+
+/**
+ * BACKFILL_RESET grammar: `vid[:from][@nonce]`, comma-separated.
+ *
+ *   metric                  replay the venue's whole lifetime (the original form)
+ *   metric:95836845         replay from that block
+ *   metric:2026-08-14       replay from that UTC day
+ *   metric@2                lifetime again — `@` stays a re-run nonce, not a start
+ *   metric:2026-08-14@2     both
+ *
+ * `:` carries the start and `@` the nonce so the two can never be confused:
+ * the whole raw string remains the applied-marker, so changing either re-runs.
+ */
+export function parseBackfillReset(spec: string): BackfillResetTarget[] {
+  return spec.split(',').map((x) => x.trim()).filter(Boolean).map((entry) => {
+    const [vid, from, ...rest] = entry.split('@')[0].split(':');
+    if (!vid || rest.length) return { vid: vid ?? '', from: 'invalid' as const, spec: entry };
+    if (from === undefined) return { vid, from: 'lifetime' as const };
+    // day first: a date can never be read as a block number, and vice versa.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(from)) {
+      return Number.isFinite(Date.parse(`${from}T00:00:00Z`))
+        ? { vid, from: 'day' as const, day: from }
+        : { vid, from: 'invalid' as const, spec: entry };
+    }
+    if (/^\d+$/.test(from) && BigInt(from) > 0n) return { vid, from: 'block' as const, block: BigInt(from) };
+    return { vid, from: 'invalid' as const, spec: entry };
+  });
 }
 
 /** Hold a deep history crawl while the RPC runs on a backup: the live tail and
@@ -625,13 +674,37 @@ export class LiveDataSource extends BaseSource {
    * A marker meta remembers the applied VALUE, so redeploys/restarts don't
    * re-trigger a multi-hour scan; change the value (e.g. "metric@2") to re-run.
    */
-  private applyBackfillReset(): void {
+  private async applyBackfillReset(): Promise<void> {
     const want = config.backfillReset.trim();
     if (!want || this.store.getMeta('backfill_reset_applied') === want) return;
-    const vids = want.split(',').map((s) => s.trim().split('@')[0]).filter(Boolean);
-    for (const vid of vids) resetVenueHistory(this.store, vid);
+    const applied: string[] = [];
+    for (const t of parseBackfillReset(want)) {
+      if (t.from === 'invalid') {
+        this.note('backfill.config.invalid', `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
+        continue;
+      }
+      let block: bigint | undefined;
+      if (t.from === 'block') block = t.block;
+      if (t.from === 'day') {
+        try { block = await blockAtOrAfter(Math.floor(Date.parse(`${t.day}T00:00:00Z`) / 1000), this.bootHead); }
+        catch (e) {
+          this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve ${t.day} to a block (${(e as Error).message}); left untouched`);
+          continue;
+        }
+      }
+      // A start past head is IGNORED by both resume checks (`cb <= end + 1n`),
+      // which would quietly downgrade a targeted replay into a lifetime one.
+      // Refuse instead of doing something other than what was asked.
+      if (block !== undefined && this.bootHead > 0n && block > this.bootHead) {
+        this.note('backfill.config.invalid', `backfill reset: ${t.vid} start ${block} is past head ${this.bootHead} — skipped rather than replaying the lifetime`);
+        continue;
+      }
+      resetVenueHistory(this.store, t.vid, block);
+      applied.push(block === undefined ? `${t.vid} (lifetime)` : `${t.vid} from block ${block}`);
+    }
+    // marker stores the RAW value, so a bad entry is not silently retried forever
     this.store.setMeta('backfill_reset_applied', want);
-    this.note('backfill.reset', `backfill reset applied (${want}) — re-scanning: ${vids.join(', ')}`);
+    if (applied.length) this.note('backfill.reset', `backfill reset applied (${want}) — re-scanning: ${applied.join(', ')}`);
   }
 
   // ── background on-chain backfill ─────────────────────────────────────────────
@@ -643,7 +716,7 @@ export class LiveDataSource extends BaseSource {
    * (retried each boot and on the rediscovery tick until `backfill_done_<venue>` is set).
    */
   private async backfillOnchain(): Promise<void> {
-    this.applyBackfillReset();
+    await this.applyBackfillReset();
     for (const a of ADAPTERS) {
       const sinceUtc = a.backfillFromUtc;
       const vid = a.venues()[0]?.id ?? '';
@@ -703,7 +776,7 @@ export class LiveDataSource extends BaseSource {
     let skipStride = floor;
     const MAX_STRIDE = 216_000n; // ≈ one UTC day of Monad blocks (~0.4s/block)
     const maxChunk = BigInt(config.backfillChunk);
-    this.noteOnce('backfill.start', `${name}: on-chain backfill ${sinceUtc} — blocks ${from}→${end}`, vid);
+    this.noteOnce('backfill.start', `${name}: on-chain backfill — blocks ${from}→${end} (venue history since ${sinceUtc})`, vid);
 
     /** one getLogs across every fill source over [cursor, t]; throws on failure. */
     const fetchRange = (t: bigint) => Promise.all(sources.map((s) =>
