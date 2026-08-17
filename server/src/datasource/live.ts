@@ -597,8 +597,9 @@ export class LiveDataSource extends BaseSource {
 
   /**
    * ONE-SHOT backfill reset (BACKFILL_RESET="metric[,poe]"): clear the listed
-   * venues' done-flag + cursor so their full history re-scans — used after
-   * switching to a better archive RPC to recover previously skipped holes.
+   * venues' done-flags + cursors so their full history re-scans — volume AND
+   * fills/markouts — used after switching to a better archive RPC, or to
+   * recover a window the live tail could not see.
    * A marker meta remembers the applied VALUE, so redeploys/restarts don't
    * re-trigger a multi-hour scan; change the value (e.g. "metric@2") to re-run.
    */
@@ -609,6 +610,13 @@ export class LiveDataSource extends BaseSource {
     for (const vid of vids) {
       this.store.setMeta(`backfill_done_${vid}`, '');
       this.store.setMeta(`backfill_cursor_${vid}`, '');
+      // Also re-arm the FILLS onboarding and its markout walk. Clearing only the
+      // volume flags recovers day totals but leaves the individual fills (and so
+      // the markouts) missing for the same window — which is exactly the half a
+      // reset is usually reached for (issue #61: fills dropped while a venue's
+      // pools were unquotable).
+      this.store.setMeta(`mkfill_done_${vid}`, '');
+      this.store.deleteMetaPrefix(`mkhist_cursor_${vid}_`);
     }
     this.store.setMeta('backfill_reset_applied', want);
     this.note('backfill.reset', `backfill reset applied (${want}) — re-scanning: ${vids.join(', ')}`);
