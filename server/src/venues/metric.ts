@@ -129,16 +129,42 @@ export function admitMetricPool(pool: `0x${string}`, im: readonly unknown[] | nu
   };
 }
 
-/** LIVENESS: a structurally-valid pool is only QUOTED once it can actually
- *  trade — both sides funded and the provider returning a two-sided price.
- *  Permissionless deployment means empty shells exist (4 of the 7 pools on
- *  chain today hold nothing); quoting them would put dead markets on the
- *  Execution tab. Fills are gated on the same rule, so an unfunded pool can
- *  never contribute volume. */
+/** Why a structurally-valid pool is not quotable right now. Three genuinely
+ *  different situations that a bare boolean used to flatten into one, and the
+ *  note then labelled all of them "unfunded":
+ *   - unfunded   the curator's shell — no inventory, cannot trade. Common:
+ *                permissionless deployment means empty pools exist.
+ *   - no-price   FUNDED, but the PriceProvider will not answer. The pool can
+ *                still TRADE — Metric's router takes bid/ask as call
+ *                parameters — so this is capital we cannot price, not a dead
+ *                market (observed 2026-08-14: ~$150k across three pools).
+ *   - unreadable the TOKEN contract did not answer, so funding is unknown.
+ *                Says nothing about the pool; reporting a read problem as the
+ *                venue's fault is the mistake #63 fixed for Lunarbase. */
+export type NotLiveReason = 'unfunded' | 'no-price' | 'unreadable';
+
+/** LIVENESS: a structurally-valid pool is only QUOTED once it can actually be
+ *  priced — both sides funded and the provider returning a two-sided price.
+ *  Quoting an empty shell would put dead markets on the Execution tab.
+ *  NOTE: fills are NOT gated on this (issue #61) — a pool we cannot price can
+ *  still trade, and its Swaps are tailed off ADMISSION. */
+export function metricPoolLiveness(
+  bal0: bigint | null, bal1: bigint | null, bid: bigint | null, ask: bigint | null,
+): 'live' | NotLiveReason {
+  // These come from ONE allowFailure multicall, so a per-entry failure is
+  // contract-level: a transport failure would have thrown the whole call before
+  // we got here. A missing price therefore means the provider REFUSED (Metric's
+  // revert since 2026-08-14), not that we could not reach it.
+  if (bal0 === null || bal1 === null) return 'unreadable';  // the token contract itself did not answer
+  if (bal0 <= 0n || bal1 <= 0n) return 'unfunded';          // one-sided or empty inventory
+  if (bid === null || ask === null) return 'no-price';      // provider reverted
+  if (bid <= 0n || ask <= 0n) return 'no-price';            // …or answered with nothing
+  return 'live';
+}
+
+/** Boolean view of the above, for the quote gate. */
 export function isMetricPoolLive(bal0: bigint | null, bal1: bigint | null, bid: bigint | null, ask: bigint | null): boolean {
-  if (bal0 === null || bal1 === null || bid === null || ask === null) return false;
-  if (bal0 <= 0n || bal1 <= 0n) return false;   // one-sided or empty inventory
-  return bid > 0n && ask > 0n;
+  return metricPoolLiveness(bal0, bal1, bid, ask) === 'live';
 }
 
 /**
@@ -233,12 +259,14 @@ export function createMetricAdapter(): VenueAdapter {
         allowFailure: true,
       });
       const live: MetricPool[] = [];
+      const notLive: Record<NotLiveReason, number> = { unfunded: 0, 'no-price': 0, unreadable: 0 };
       for (let i = 0; i < admitted.length; i++) {
         const b0 = liveRes[i * 3], b1 = liveRes[i * 3 + 1], q = liveRes[i * 3 + 2];
         const bal0 = b0.status === 'success' ? (b0.result as bigint) : null;
         const bal1 = b1.status === 'success' ? (b1.result as bigint) : null;
         const px = q.status === 'success' ? (q.result as readonly [bigint, bigint]) : null;
-        if (isMetricPoolLive(bal0, bal1, px ? px[0] : null, px ? px[1] : null)) live.push(admitted[i]);
+        const verdict = metricPoolLiveness(bal0, bal1, px ? px[0] : null, px ? px[1] : null);
+        if (verdict === 'live') live.push(admitted[i]); else notLive[verdict]++;
       }
 
       admittedPools = admitted;
@@ -249,8 +277,22 @@ export function createMetricAdapter(): VenueAdapter {
       // decode at all — the loss the old comment warned about, one step earlier.
       for (const p of admitted) byAddr.set(p.pool.toLowerCase(), p);
       discovered = true;
-      const shells = admitted.length - live.length;
-      ctx.note('venue.discovery', `Metric: ${live.length} live base/stable pool(s)${shells ? ` (+${shells} unfunded, not quoted)` : ''}`);
+      // Name each cause. "unfunded" for everything was wrong the moment a funded
+      // pool lost its oracle: it sent whoever read it to check balances (#58).
+      const why = [
+        notLive.unfunded ? `${notLive.unfunded} unfunded` : '',
+        notLive['no-price'] ? `${notLive['no-price']} funded but no oracle price` : '',
+        notLive.unreadable ? `${notLive.unreadable} unreadable` : '',
+      ].filter(Boolean);
+      ctx.note('venue.discovery', `Metric: ${live.length} live base/stable pool(s)${why.length ? ` (+${why.join(', ')}; not quoted)` : ''}`);
+      // Funded capital we cannot price is a DEGRADATION, not lifecycle, so it
+      // belongs at warn rather than buried in the discovery line. It also gives
+      // the core's went-dark backstop the reason it cannot know: without this
+      // the venue is reported as "offline, or its adapter no longer matches the
+      // contract" — a guess, when the adapter knows exactly what happened.
+      if (notLive['no-price']) {
+        ctx.note('venue.quote.unavailable', `Metric: ${notLive['no-price']} funded pool(s) have no oracle price — their PriceProvider is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
+      }
 
       // ── 4. gas destinations: EVERY oracle Metric's providers read ──────────
       // Metric is permissionless infra: curators plug in their own pricing, so

@@ -5,7 +5,12 @@
 // stalled gas tracking the day a second curator went live).
 import { describe, expect, it } from 'vitest';
 import { TOKENS } from '@shared';
-import { admitMetricPool, createMetricAdapter, isMetricPoolLive } from '../metric.js';
+import {
+  admitMetricPool,
+  createMetricAdapter,
+  isMetricPoolLive,
+  metricPoolLiveness,
+} from '../metric.js';
 
 const A = (s: string) => s as `0x${string}`;
 const POOL = A('0x00000000000000000000000000000000000000p1'.replace('p1', 'a1'));
@@ -180,7 +185,7 @@ describe('Metric permissionless discovery', () => {
     const swap = a.logSources().find((s) => s.key === 'swap')!;
     expect(swap.address).toContain(NEW);                       // tailed
     // …but excluded from the live set, so it is never quoted: 3 seeds live, 1 shell.
-    expect(notes.some((n) => /Metric: 3 live base\/stable pool\(s\) \(\+1 unfunded, not quoted\)/.test(n))).toBe(true);
+    expect(notes.some((n) => /Metric: 3 live base\/stable pool\(s\) \(\+1 unfunded; not quoted\)/.test(n))).toBe(true);
   });
 
   it('survives a factory scan failure — seeds still resolve', async () => {
@@ -288,5 +293,51 @@ describe('an unquotable pool still trades (issue #61)', () => {
     expect(fills[0].venueId).toBe('metric');
     expect(fills[0].usd).toBeCloseTo(2, 9);
     expect(fills[0].baseAmount).toBeCloseTo(1, 9);
+  });
+});
+
+describe('liveness carries a REASON, not just a verdict (issue #58)', () => {
+  it('separates the three causes a bare boolean used to flatten', () => {
+    expect(metricPoolLiveness(1n, 1n, 100n, 101n)).toBe('live');
+    expect(metricPoolLiveness(0n, 1n, 100n, 101n)).toBe('unfunded');    // curator's empty shell
+    expect(metricPoolLiveness(1n, 1n, 0n, 101n)).toBe('no-price');      // FUNDED, oracle silent
+    expect(metricPoolLiveness(1n, 1n, null, 101n)).toBe('no-price');    // provider REVERTED
+  });
+
+  it('treats a missing price as a revert, because the reads share one allowFailure multicall', () => {
+    // a transport failure kills the whole multicall before liveness runs, so a
+    // per-entry failure means the contract refused — which is the venue's state,
+    // not ours. Exactly Metric since 2026-08-14.
+    expect(metricPoolLiveness(1n, 1n, null, null)).toBe('no-price');
+    // an unreadable BALANCE is different: funding is then simply unknown.
+    expect(metricPoolLiveness(null, 0n, 0n, 0n)).toBe('unreadable');
+  });
+
+  it('names the real cause in the discovery note instead of calling it unfunded', async () => {
+    const notes: string[] = [];
+    // funded on both sides, but the oracle probe fails — exactly Metric since 2026-08-14
+    await createMetricAdapter().discover(stub(notes, { priceFails: true }));
+    expect(notes.some((n) => /funded but no oracle price/.test(n))).toBe(true);
+    expect(notes.some((n) => /unfunded/.test(n))).toBe(false);
+  });
+
+  it('raises funded-but-unpriceable as a WARN, with the fact that it can still trade', async () => {
+    const seen: { code: string; msg: string }[] = [];
+    const ctx = stub([], { priceFails: true });
+    ctx.note = (code: string, msg: string) => seen.push({ code, msg });
+    await createMetricAdapter().discover(ctx);
+    const warn = seen.find((n) => n.code === 'venue.quote.unavailable');
+    expect(warn).toBeDefined();
+    expect(warn!.msg).toMatch(/PriceProvider is not answering/);
+    expect(warn!.msg).toMatch(/can still trade/);
+  });
+
+  it('stays quiet when the pools are merely empty — a shell is not a degradation', async () => {
+    const seen: { code: string; msg: string }[] = [];
+    const ctx = stub([], { balances: () => [0n, 0n] });
+    ctx.note = (code: string, msg: string) => seen.push({ code, msg });
+    await createMetricAdapter().discover(ctx);
+    expect(seen.some((n) => n.code === 'venue.quote.unavailable')).toBe(false);
+    expect(seen.some((n) => /unfunded/.test(n.msg))).toBe(true);
   });
 });
