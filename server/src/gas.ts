@@ -377,7 +377,7 @@ export class GasTracker {
   // ── logs mode: events enumerate update txs; receipts price them ────────────
   private async tailLogs(vid: string, name: string, sources: GasSource[], cursor: bigint, head: bigint, cursorKey: string): Promise<void> {
     const maxChunk = BigInt(config.backfillChunk);
-    const floor = BigInt(config.getLogsChunk);
+    const floor = BigInt(config.getLogsMinChunk);
     let chunk = maxChunk;
     const acc = new Map<string, { mon: number; txs: number }>();
     let sinceCommit = 0;

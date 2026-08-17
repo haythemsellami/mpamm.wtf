@@ -11,7 +11,7 @@ export const monad = defineChain({
   blockTime: 400,
   nativeCurrency: { name: 'Monad', symbol: 'MON', decimals: 18 },
   rpcUrls: {
-    default: { http: [config.rpcHttp], webSocket: [config.rpcWs] },
+    default: { http: [config.rpcHttp] },
   },
   contracts: {
     multicall3: { address: ADDR.multicall3 as `0x${string}` },
@@ -97,24 +97,40 @@ export async function blockAtOrAfter(targetSec: number, hi: bigint): Promise<big
   return ans;
 }
 
-/** getLogs with automatic range-chunking — the public RPC 413s past ~100
- *  blocks (docs/architecture.md: operations). Returns logs across [from,to]. */
+/**
+ * getLogs with automatic range-chunking, narrowing on demand.
+ *
+ * Endpoints disagree on how wide a range they will serve — the devcore4 fleet
+ * answers 1000 blocks, the public endpoint 413s past ~100 — and the failover
+ * breaker can move us between them mid-run. So the span is not a constant: we
+ * ATTEMPT `chunk` and halve toward `getLogsMinChunk` when a call is refused,
+ * retrying the SAME start so no range is skipped. The narrowed span sticks for
+ * the rest of the call rather than re-probing per chunk.
+ *
+ * Failing at the floor still THROWS: a required source that cannot be read must
+ * hold the cursor, never return a short read that reads as "no logs here"
+ * (AGENTS.md: never swallow an error that would silently undercount fills).
+ */
 export async function getLogsChunked(
   params: { address: `0x${string}` | `0x${string}`[]; fromBlock: bigint; toBlock: bigint; events?: readonly unknown[] },
   chunk = BigInt(config.getLogsChunk),
+  fetchLogs: (a: { address: unknown; fromBlock: bigint; toBlock: bigint; events?: unknown }) => Promise<unknown[]>
+    = (a) => publicClient.getLogs(a as any) as Promise<unknown[]>,
 ): Promise<unknown[]> {
+  const floor = BigInt(config.getLogsMinChunk);
   const out: unknown[] = [];
+  let span = chunk > floor ? chunk : floor;
   let start = params.fromBlock;
   while (start <= params.toBlock) {
-    const end = start + chunk - 1n > params.toBlock ? params.toBlock : start + chunk - 1n;
-    const logs = await publicClient.getLogs({
-      address: params.address as any,
-      fromBlock: start,
-      toBlock: end,
-      events: params.events as any,
-    } as any);
-    out.push(...logs);
-    start = end + 1n;
+    const end = start + span - 1n > params.toBlock ? params.toBlock : start + span - 1n;
+    try {
+      out.push(...await fetchLogs({ address: params.address, fromBlock: start, toBlock: end, events: params.events }));
+      start = end + 1n;
+    } catch (e) {
+      if (span <= floor) throw e;             // already as narrow as we go — fail closed
+      const half = span / 2n;
+      span = half > floor ? half : floor;     // retry the same start, narrower
+    }
   }
   return out;
 }

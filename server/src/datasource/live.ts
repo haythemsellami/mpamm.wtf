@@ -665,7 +665,7 @@ export class LiveDataSource extends BaseSource {
     const today = utcDay();
     const acc = new Map<string, { usd: number; swaps: number }>(); // closed utcDay -> totals
     let chunk = BigInt(config.backfillChunk);
-    const floor = BigInt(config.getLogsChunk);
+    const floor = BigInt(config.getLogsMinChunk);
     let cursor = from;
     let sinceMerge = 0;
     // RPC archive holes: some providers permanently fail getLogs for specific
@@ -884,7 +884,7 @@ export class LiveDataSource extends BaseSource {
 
     const today = utcDay();
     let chunk = BigInt(config.backfillChunk);
-    const floor = BigInt(config.getLogsChunk);
+    const floor = BigInt(config.getLogsMinChunk);
     const maxChunk = BigInt(config.backfillChunk);
     let cursor = from;
     let sinceFlush = 0;

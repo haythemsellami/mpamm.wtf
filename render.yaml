@@ -21,8 +21,6 @@ services:
         value: --max-old-space-size=320
       - key: RPC_HTTP_URL    # trusted Monad node (Multicall3 + getLogs)
         sync: false
-      - key: RPC_WS_URL
-        sync: false
     disk:
       name: mpamm-data       # SQLite history survives deploys/restarts
       mountPath: /data
