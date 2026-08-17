@@ -43,7 +43,7 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | `MARKOUT_BACKFILL=off` · `MARKOUT_BACKFILL_DAYS` | onboarding markout backfill (archived CEX prices) |
 | `GAS_METRIC=off` · `GAS_SAMPLE_STRIDE_BLOCKS` | QUOTE_UPDATE_BURN tracker |
 | `SUBGRAPH_URL` | Clober discovery subgraph override |
-| `BACKFILL_RESET=venue[,venue]` | one-shot re-scan of a venue's volume history |
+| `BACKFILL_RESET=venue[,venue]` | one-shot re-scan of a venue's history — volume backfill AND fills/markout onboarding, cursors cleared so both replay from the start of their window. The applied value is remembered; change it (`venue@2`) to re-run |
 
 ## Operational notes
 

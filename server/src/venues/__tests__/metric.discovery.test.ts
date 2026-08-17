@@ -94,6 +94,8 @@ interface StubOpts {
   balances?: (pool: string) => [bigint, bigint];
   oracleCount?: (oracle: string) => number;
   logsThrow?: boolean;
+  /** oracle probe reverts — pools stay ADMITTED but drop out of `live`. */
+  priceFails?: boolean;
 }
 const stub = (notes: string[], o: StubOpts = {}) => {
   const tokenOf: Record<string, [string, string]> = {
@@ -117,7 +119,7 @@ const stub = (notes: string[], o: StubOpts = {}) => {
           // two balanceOf calls per pool, in order base then stable
           return { status: 'success', result: c.__side === 1 ? b1 : b0 };
         }
-        if (c.functionName === 'getBidAndAskPrice') return { status: 'success', result: [100n, 101n] };
+        if (c.functionName === 'getBidAndAskPrice') return o.priceFails ? { status: 'failure' } : { status: 'success', result: [100n, 101n] };
         if (c.functionName === 'offchainOracle') {
           const or = o.oracleOf ? o.oracleOf(String(c.address)) : ORACLE_A;
           return or === null ? { status: 'failure' } : { status: 'success', result: or };
@@ -163,16 +165,22 @@ describe('Metric permissionless discovery', () => {
     expect(notes.some((n) => /announced 1 new pool/.test(n))).toBe(true);
   });
 
-  it('does NOT quote unfunded shells but still reports them', async () => {
+  it('does NOT quote an unfunded shell, but DOES tail it', async () => {
+    // Tailing is keyed on admission, quoting on liveness (issue #61). An
+    // unfunded pool cannot trade today, but it can be funded and traded well
+    // before the next 10-minute rediscovery — and tailing it costs one more
+    // address in a single getLogs filter.
     const notes: string[] = [];
     const NEW = '0xcccc000000000000000000000000000000000002';
     const a = createMetricAdapter();
     const balances = (p: string) => (p === NEW ? [0n, 0n] as [bigint, bigint] : [1_000n, 1_000n] as [bigint, bigint]);
     await a.discover(stub(notes, { balances }));
-    await a.discover(stub(notes, { head: 1_000_500n, createdPools: [{ pool: NEW }], balances }));
+    const ctx = stub(notes, { head: 1_000_500n, createdPools: [{ pool: NEW }], balances });
+    await a.discover(ctx);
     const swap = a.logSources().find((s) => s.key === 'swap')!;
-    expect(swap.address).not.toContain(NEW);
-    expect(notes.some((n) => /unfunded, not quoted/.test(n))).toBe(true);
+    expect(swap.address).toContain(NEW);                       // tailed
+    // …but excluded from the live set, so it is never quoted: 3 seeds live, 1 shell.
+    expect(notes.some((n) => /Metric: 3 live base\/stable pool\(s\) \(\+1 unfunded, not quoted\)/.test(n))).toBe(true);
   });
 
   it('survives a factory scan failure — seeds still resolve', async () => {
@@ -234,5 +242,51 @@ describe('Metric gas attribution (multi-oracle)', () => {
     const a = createMetricAdapter();
     await a.discover(stub(notes, { oracleCount: () => 3 }));
     expect(notes.some((n) => /overcount/.test(n))).toBe(false);
+  });
+});
+
+describe('an unquotable pool still trades (issue #61)', () => {
+  // Metric's router takes bid/ask as CALL PARAMETERS, so a dead PriceProvider
+  // stops us quoting but not an aggregator swapping. On 2026-08-14 the oracle
+  // began reverting at 05:43 UTC and the pools executed 141 more swaps over the
+  // next 6.7h — every one invisible to us, because the fills source had gone.
+  it('keeps tailing admitted pools when the oracle probe reverts', async () => {
+    const notes: string[] = [];
+    const a = createMetricAdapter();
+    await a.discover(stub(notes, { priceFails: true }));
+
+    expect(notes.some((n) => /0 live/.test(n))).toBe(true);      // nothing quotable…
+    const swap = a.logSources().find((s) => s.key === 'swap');
+    expect(swap).toBeDefined();                                   // …but still tailed
+    expect(swap!.kind).toBe('fills');
+    expect((swap!.address as string[]).length).toBe(SEEDS.length);
+  });
+
+  it('quotes nothing while unquotable — liveness still gates the quote path', async () => {
+    const a = createMetricAdapter();
+    const ctx = stub([], { priceFails: true });
+    await a.discover(ctx);
+    expect(await a.quote!(ctx, [100])).toEqual([]);
+  });
+
+  it('DECODES a swap from a pool that never passed liveness', async () => {
+    const notes: string[] = [];
+    const a = createMetricAdapter();
+    const ctx = stub(notes, { priceFails: true });
+    await a.discover(ctx);
+
+    // WMON/USDC seed: base=token0, 1 WMON out against 2 USDC in.
+    const log = {
+      address: SEEDS[0],
+      args: { amount0Delta: -1_000_000_000_000_000_000n, amount1Delta: 2_000_000n, recipient: '0x' + '1'.repeat(40) },
+      transactionHash: '0x' + 'a'.repeat(64),
+      blockNumber: 1n,
+      logIndex: 0,
+    };
+    const fills = await a.decode(ctx, { swap: [log] } as any, () => 1_760_000_000_000, new Set());
+    expect(fills).toHaveLength(1);
+    expect(fills[0].venueId).toBe('metric');
+    expect(fills[0].usd).toBeCloseTo(2, 9);
+    expect(fills[0].baseAmount).toBeCloseTo(1, 9);
   });
 });

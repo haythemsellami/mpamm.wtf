@@ -150,7 +150,16 @@ export function createMetricAdapter(): VenueAdapter {
   // every leg FAILING is a venue-wide cause (paused, ABI drift, dead RPC route),
   // not a per-pair gap — name it instead of vanishing (venues/quote-health.ts).
   const reportOutage = createQuoteOutageReporter(METRIC_VENUE.name);
-  let pools: MetricPool[] = [];                       // live: quoted + tailed
+  // THREE different questions, three different sets — conflating them is what
+  // let real fills go uncounted (issue #61):
+  //   admitted → structurally understood (getImmutables + registered pair):
+  //              what we TAIL and what we can DECODE.
+  //   live     → priceable RIGHT NOW (funded + readable bid/ask): what we QUOTE.
+  // A pool whose oracle stops answering leaves `live` but keeps trading — the
+  // router takes bid/ask as CALL PARAMETERS, so an aggregator with its own price
+  // source swaps against it regardless of whether we can read one.
+  let admittedPools: MetricPool[] = [];               // tailed + decodable
+  let pools: MetricPool[] = [];                       // live: quoted
   let byAddr = new Map<string, MetricPool>();         // MONOTONIC decode map
   let discovered = false;
   /** every pool address the factory has told us about (seeds + discovered). */
@@ -232,11 +241,13 @@ export function createMetricAdapter(): VenueAdapter {
         if (isMetricPoolLive(bal0, bal1, px ? px[0] : null, px ? px[1] : null)) live.push(admitted[i]);
       }
 
+      admittedPools = admitted;
       pools = live;
-      // decode map is MONOTONIC: a pool that empties (or fails a liveness probe)
-      // stops being quoted/tailed, but fills already fetched for it must still
-      // decode — dropping it from the map would silently discard real volume.
-      for (const p of live) byAddr.set(p.pool.toLowerCase(), p);
+      // The decode map is MONOTONIC and keyed on ADMISSION, not liveness. Keying
+      // it on `live` protected only fills already fetched in the same cycle,
+      // while the pool silently left logSources() and stopped producing fills to
+      // decode at all — the loss the old comment warned about, one step earlier.
+      for (const p of admitted) byAddr.set(p.pool.toLowerCase(), p);
       discovered = true;
       const shells = admitted.length - live.length;
       ctx.note('venue.discovery', `Metric: ${live.length} live base/stable pool(s)${shells ? ` (+${shells} unfunded, not quoted)` : ''}`);
@@ -369,8 +380,11 @@ export function createMetricAdapter(): VenueAdapter {
       // because a missed PoolCreated makes that pool's later Swaps undecodable,
       // so its failure must hold the cursor like any other decode prerequisite.
       const sources = [{ key: 'poolCreated', address: FACTORY as `0x${string}`, events: [ev(metricFactoryAbi, 'PoolCreated')], kind: 'state' as const }];
-      if (!pools.length) return sources;
-      return [{ key: 'swap', address: pools.map((p) => p.pool), events: [ev(metricPoolAbi, 'Swap')], kind: 'fills' as const }, ...sources];
+      // ADMITTED, not live: an unquotable pool still trades (issue #61 — Metric
+      // executed 141 swaps in the 6.7h after its oracle began reverting, none of
+      // which we saw because this list had gone empty).
+      if (!admittedPools.length) return sources;
+      return [{ key: 'swap', address: admittedPools.map((p) => p.pool), events: [ev(metricPoolAbi, 'Swap')], kind: 'fills' as const }, ...sources];
     },
 
     // taker entries owned by Metric: today only the pools themselves — sampled
