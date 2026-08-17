@@ -228,7 +228,15 @@ export type BackfillResetTarget =
  */
 export function parseBackfillReset(spec: string): BackfillResetTarget[] {
   return spec.split(',').map((x) => x.trim()).filter(Boolean).map((entry) => {
-    const [vid, from, ...rest] = entry.split('@')[0].split(':');
+    // Structure first. Anything past the nonce used to be DISCARDED, so a typo
+    // like `metric@2:95836845` (nonce before start) silently parsed as bare
+    // `metric` and launched the lifetime replay the operator was avoiding.
+    const at = entry.split('@');
+    const nonce = at[1];
+    if (at.length > 2 || (nonce !== undefined && (nonce === '' || nonce.includes(':')))) {
+      return { vid: at[0]?.split(':')[0] ?? '', from: 'invalid' as const, spec: entry };
+    }
+    const [vid, from, ...rest] = at[0].split(':');
     if (!vid || rest.length) return { vid: vid ?? '', from: 'invalid' as const, spec: entry };
     if (from === undefined) return { vid, from: 'lifetime' as const };
     // day first: a date can never be read as a block number, and vice versa.
@@ -408,6 +416,11 @@ export class LiveDataSource extends BaseSource {
     if (this.historyRunning) return;
     this.historyRunning = true;
     try {
+      // BEFORE both stages, and NOT behind config.backfillEnabled: the reset
+      // re-arms the fills/markout onboarding too, so running it inside
+      // backfillOnchain() meant BACKFILL=off skipped it entirely, and with both
+      // enabled the markout pass had already gone by on that boot.
+      await this.applyBackfillReset();
       if (config.markoutBackfill) {
         try { await this.markoutOnboarding(); }
         catch (e) { this.noteOnce('markout.paused', `markout onboarding stopped: ${(e as Error).message}; retried automatically`); }
@@ -667,12 +680,19 @@ export class LiveDataSource extends BaseSource {
   }
 
   /**
-   * ONE-SHOT backfill reset (BACKFILL_RESET="metric[,poe]"): clear the listed
-   * venues' done-flags + cursors so their full history re-scans — volume AND
-   * fills/markouts — used after switching to a better archive RPC, or to
-   * recover a window the live tail could not see.
-   * A marker meta remembers the applied VALUE, so redeploys/restarts don't
-   * re-trigger a multi-hour scan; change the value (e.g. "metric@2") to re-run.
+   * ONE-SHOT history reset. Re-arms BOTH halves for the listed venues — the
+   * volume backfill and the fills/markout onboarding — after switching to a
+   * better archive RPC, or to recover a window the live tail could not see.
+   *
+   * BACKFILL_RESET is `vid[:from][@nonce]`, comma-separated:
+   *   metric                lifetime replay
+   *   metric:95836845       replay from that block
+   *   metric:2026-08-14     replay from that UTC day
+   *   metric@2              lifetime; `@` is a re-run nonce, never a start
+   *
+   * A marker meta remembers the applied VALUE, so redeploys don't re-trigger a
+   * multi-hour scan; change any part of the string to re-run. Runs from
+   * backgroundHistory() ahead of both stages so neither can miss it.
    */
   private async applyBackfillReset(): Promise<void> {
     const want = config.backfillReset.trim();
@@ -716,7 +736,6 @@ export class LiveDataSource extends BaseSource {
    * (retried each boot and on the rediscovery tick until `backfill_done_<venue>` is set).
    */
   private async backfillOnchain(): Promise<void> {
-    await this.applyBackfillReset();
     for (const a of ADAPTERS) {
       const sinceUtc = a.backfillFromUtc;
       const vid = a.venues()[0]?.id ?? '';

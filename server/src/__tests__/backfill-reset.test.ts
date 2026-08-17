@@ -85,6 +85,17 @@ describe('parseBackfillReset', () => {
     }
   });
 
+  it('rejects a malformed NONCE rather than falling back to a lifetime replay', () => {
+    // the dangerous shape: everything after the first `@` used to be discarded,
+    // so `metric@2:95836845` parsed as bare `metric` and would have launched the
+    // ~29M-block lifetime scan the operator was explicitly trying to avoid.
+    for (const bad of ['metric@2:95836845', 'metric@2@3', 'metric@']) {
+      const t = parseBackfillReset(bad)[0];
+      expect(t.from).toBe('invalid');
+      expect(t.vid).toBe('metric');          // still named, so the note is useful
+    }
+  });
+
   it('one bad entry does not take the good ones down with it', () => {
     const out = parseBackfillReset('metric:2026-08-14,poe:oops,hanji');
     expect(out.map((t) => t.from)).toEqual(['day', 'invalid', 'lifetime']);
