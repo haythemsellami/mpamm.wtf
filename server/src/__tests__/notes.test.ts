@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { NOTE_LEVEL, type StateNote } from '@shared';
 import { NoteBuffer, noteSubsystem, scrubNote } from '../notes.js';
-import { checkArchivePending, checkGapFill, checkReferenceStarvation } from '../datasource/live.js';
+import { QUOTE_DARK_CYCLES, checkArchivePending, checkGapFill, checkQuoteOutage, checkReferenceStarvation } from '../datasource/live.js';
 
 const T0 = 1_800_000_000_000;
 
@@ -172,5 +172,109 @@ describe('a real call site: gap-fill tail catch-up', () => {
     expect(codesOf(b)).toEqual(['tail.caughtup']);
     expect(state.msg).toBeUndefined();
     expect(b.list()[0].msg).toContain('decoded through block 1000');
+  });
+});
+
+describe('a real call site: the went-dark backstop', () => {
+  const VENUES = [{ id: 'metric', name: 'Metric' }];
+
+  /** the PRODUCTION wiring, which the fake-sink tests in quote-outage.test.ts
+   *  cannot model: `explained` reads the SAME buffer `warn` writes to, on the
+   *  one clock poll() stamps for both the check and the adapters' own notes. */
+  const wired = () => {
+    let now = T0;
+    const b = new NoteBuffer(60, () => {}, () => now);
+    const empty = new Map<string, { runs: number; since: number }>();
+    const dark = new Map<string, string>();
+    const io = {
+      warn: (id: string, m: string) => b.noteOnce('venue.quote.unavailable', m, id),
+      announce: (id: string, m: string) => b.note('venue.quote.recovered', m, id),
+      clear: (id: string, m: string) => b.drop('venue.quote.unavailable', m, id),
+      explained: (id: string, since: number) => b.holds('venue.quote.unavailable', id, since),
+    };
+    return {
+      b,
+      dark,
+      /** an adapter speaking from inside this tick's quote(). */
+      adapterSaid: (m: string) => b.noteOnce('venue.quote.unavailable', m, 'metric'),
+      cycle: (rows: number, n: number) => {
+        for (let i = 0; i < n; i++) checkQuoteOutage(VENUES, () => rows, empty, dark, (now += 1_000), io);
+      },
+      warns: () => b.list().filter((n) => n.code === 'venue.quote.unavailable').length,
+    };
+  };
+
+  it('reports a SECOND outage — the first warning is retracted, so noteOnce cannot swallow it', () => {
+    const w = wired();
+    w.cycle(0, QUOTE_DARK_CYCLES);
+    expect(w.warns()).toBe(1);
+    w.cycle(4, 1);
+    // retracted, not merely announced over: the wording is identical next time.
+    expect(codesOf(w.b)).toEqual(['venue.quote.recovered']);
+    w.cycle(0, QUOTE_DARK_CYCLES);
+    expect(w.warns()).toBe(1);
+  });
+
+  it('stands down for a note raised DURING this outage — the feature still works', () => {
+    const w = wired();
+    w.cycle(4, 1);                       // seen quoting: since = now
+    w.adapterSaid('Metric quotes unavailable — maker paused');
+    w.cycle(0, QUOTE_DARK_CYCLES + 20);
+    expect(w.warns()).toBe(1);           // the adapter's, not a second generic one
+    expect(w.dark.has('metric')).toBe(false);
+  });
+
+  it('is NOT stood down by a note from an outage that already ended', () => {
+    const w = wired();
+    w.adapterSaid('Metric quotes unavailable — maker paused'); // an EARLIER outage
+    w.cycle(4, 1);                                             // …which then recovered
+    w.cycle(0, QUOTE_DARK_CYCLES);
+    expect(w.warns()).toBe(2);           // the stale one, plus the backstop's own
+    expect(w.dark.get('metric')).toContain('is not quoting');
+  });
+
+  it('still stands down on a long outage, where a recency window would go blind', () => {
+    const w = wired();
+    w.cycle(4, 1);
+    w.adapterSaid('Metric quotes unavailable — maker paused');
+    w.cycle(0, 3_000);                   // ~50 minutes at one cycle/second
+    expect(w.warns()).toBe(1);
+  });
+
+  it('takes any note for a venue never yet seen quoting — the boot/warmup case', () => {
+    const w = wired();
+    w.adapterSaid('Metric quotes unavailable — maker paused'); // dark since boot
+    w.cycle(0, QUOTE_DARK_CYCLES + 5);
+    expect(w.warns()).toBe(1);
+  });
+
+  it('retracts the string it RAISED, which is not always the threshold run', () => {
+    // the warn can fire LATE: while an adapter note covers the venue the check
+    // stands down but keeps counting, so the run embedded in the message is
+    // whatever it had reached when that note left the window — not
+    // QUOTE_DARK_CYCLES, and so not rebuildable from stable fields.
+    const w = wired();
+    const ADAPTER = 'Metric quotes unavailable — maker paused';
+    w.cycle(4, 1);
+    w.adapterSaid(ADAPTER);
+    w.cycle(0, QUOTE_DARK_CYCLES + 5);
+    expect(w.dark.has('metric')).toBe(false);      // stood down, still counting
+    w.b.drop('venue.quote.unavailable', ADAPTER, 'metric'); // the note ages out
+    w.cycle(0, 1);
+    expect(w.dark.get('metric')).toContain(`${QUOTE_DARK_CYCLES + 6} consecutive cycles`);
+    w.cycle(4, 1);
+    expect(w.b.holds('venue.quote.unavailable', 'metric')).toBe(false);
+  });
+
+  it('retracts only the string it raised, leaving an adapter note standing', () => {
+    const w = wired();
+    const ADAPTER = 'Metric quotes unavailable — maker paused';
+    w.adapterSaid(ADAPTER);
+    w.cycle(4, 1);
+    w.cycle(0, QUOTE_DARK_CYCLES);       // backstop warns despite the stale note
+    w.cycle(4, 1);                       // …and recovers
+    expect(w.b.holds('venue.quote.unavailable', 'metric')).toBe(true); // the adapter's survives
+    expect(w.b.list().map((n) => n.msg)).toContain(ADAPTER);
+    expect(w.b.list().some((n) => n.msg.includes('is not quoting'))).toBe(false);
   });
 });

@@ -78,29 +78,63 @@ export const QUOTE_DARK_CYCLES = 20;
  * cycles, so the signal never expires. Callers gate on boot warmup (references
  * start cold) and on RPC health (during failover everything is empty and the
  * rpc.* note already explains it).
+ *
+ * `explained` is scoped to THIS outage: a note raised while the venue was still
+ * quoting cannot be the explanation for it having stopped. state.notes is an
+ * append log, not a health register — venue.quote.unavailable has eight writers
+ * (this check, the core when quote() rejects, and adapters via ctx.note) and
+ * none of them retract, so "the window holds that code for this venue" stays
+ * true forever after anything says it once, and the backstop stood down against
+ * a note describing an outage that had already ended: silent on exactly the
+ * unexplained outage it exists to catch. `empty` therefore carries `since` —
+ * when the venue was last seen with rows — and a note that IS about this outage
+ * is raised on or after it (an adapter notes from inside the same quote() that
+ * returned nothing). A venue never yet seen quoting takes any note: the window
+ * only holds notes from this process, so there is no earlier outage to confuse
+ * it with, and that is the boot case where the adapter speaks during warmup.
+ * A plain recency window would instead go blind on a long outage.
+ *
+ * Recovery RETRACTS the warning as well as announcing it, like the three
+ * sibling checks in this file. Not only window hygiene here: the wording is fixed (the run is always
+ * QUOTE_DARK_CYCLES when it fires), so noteOnce would swallow the SECOND
+ * outage's warning as a verbatim repeat of the first. `dark` therefore carries
+ * the exact string raised — drop() matches on the scrubbed message, the same
+ * reason gapResume stores its line rather than rebuilding it.
  */
 export function checkQuoteOutage(
   venues: readonly { id: string; name: string }[],
   rowsFor: (id: string) => number,
-  emptyRuns: Map<string, number>,
-  dark: Set<string>,
-  io: { warn: (id: string, m: string) => void; announce: (id: string, m: string) => void; explained: (id: string) => boolean },
+  empty: Map<string, { runs: number; since: number }>,
+  dark: Map<string, string>,
+  now: number,
+  io: {
+    warn: (id: string, m: string) => void;
+    announce: (id: string, m: string) => void;
+    clear: (id: string, m: string) => void;
+    explained: (id: string, since: number) => boolean;
+  },
 ): void {
   for (const v of venues) {
     if (rowsFor(v.id) > 0) {
-      emptyRuns.set(v.id, 0);
-      if (dark.delete(v.id)) io.announce(v.id, `${v.name} is quoting again`);
+      empty.set(v.id, { runs: 0, since: now }); // quoting AS OF now
+      const warned = dark.get(v.id);
+      if (warned === undefined) continue;
+      dark.delete(v.id);
+      io.clear(v.id, warned); // byte-identical to what warn() raised
+      io.announce(v.id, `${v.name} is quoting again`);
       continue;
     }
-    const run = (emptyRuns.get(v.id) ?? 0) + 1;
-    emptyRuns.set(v.id, run);
-    if (run < QUOTE_DARK_CYCLES || dark.has(v.id)) continue;
+    const run = empty.get(v.id) ?? { runs: 0, since: 0 }; // 0: never seen quoting
+    run.runs++;
+    empty.set(v.id, run);
+    if (run.runs < QUOTE_DARK_CYCLES || dark.has(v.id)) continue;
     // The adapter already said WHY, so it owns this venue's outage telemetry
     // BOTH ways: standing down here but still marking it dark would let the
     // core announce a second, vaguer recovery alongside the adapter's own.
-    if (io.explained(v.id)) continue;
-    dark.add(v.id); // only ever holds venues this check itself reported
-    io.warn(v.id, `${v.name} is not quoting — no rows for ${run} consecutive cycles (venue offline, or its adapter no longer matches the contract)`);
+    if (io.explained(v.id, run.since)) continue;
+    const msg = `${v.name} is not quoting — no rows for ${run.runs} consecutive cycles (venue offline, or its adapter no longer matches the contract)`;
+    dark.set(v.id, msg); // only ever holds venues this check itself reported
+    io.warn(v.id, msg);
   }
 }
 
@@ -347,11 +381,13 @@ export class LiveDataSource extends BaseSource {
    *  retracted when the tail cursor reaches bootHead. Singleton on purpose: one tail
    *  cursor serves the whole indexer. */
   private gapResume: { msg?: string } = {};
-  /** venue id → run of consecutive empty quote cycles, and the set already
-   *  reported dark (checkQuoteOutage). In memory on purpose: nothing here
-   *  needs to survive a restart, since a still-dark venue re-earns its run. */
-  private quoteEmptyRuns = new Map<string, number>();
-  private quoteDark = new Set<string>();
+  /** venue id → run of consecutive empty quote cycles + when it was last seen
+   *  quoting, and the venues already reported dark against the exact warning
+   *  raised for each, so recovery can retract it (checkQuoteOutage). In memory
+   *  on purpose: nothing here needs to survive a restart, since a still-dark
+   *  venue re-earns its run. */
+  private quoteEmptyRuns = new Map<string, { runs: number; since: number }>();
+  private quoteDark = new Map<string, string>();
   private block = 0;
   /** all registered venue ids — a fill/quote carrying an unknown id is dropped
    *  (a plugin bug must not silently store data the UI can't render). */
@@ -1286,10 +1322,13 @@ export class LiveDataSource extends BaseSource {
       const counts = new Map<string, number>();
       for (const r of venueRows) counts.set(r.venueId, (counts.get(r.venueId) ?? 0) + 1);
       const quoting = ADAPTERS.filter((a) => a.quote).map((a) => a.venues()[0]).filter(Boolean);
-      checkQuoteOutage(quoting, (id) => counts.get(id) ?? 0, this.quoteEmptyRuns, this.quoteDark, {
+      // `now` is stamped at the top of poll(), BEFORE the adapters quote, so a
+      // note an adapter raises from inside this tick lands on or after `since`.
+      checkQuoteOutage(quoting, (id) => counts.get(id) ?? 0, this.quoteEmptyRuns, this.quoteDark, now, {
         warn: (id, m) => this.noteOnce('venue.quote.unavailable', m, id),
         announce: (id, m) => this.note('venue.quote.recovered', m, id),
-        explained: (id) => this.notes.holds('venue.quote.unavailable', id),
+        clear: (id, m) => this.dropNote('venue.quote.unavailable', m, id),
+        explained: (id, since) => this.notes.holds('venue.quote.unavailable', id, since),
       });
     }
     // benchmark rows for every pair, each routed to + tagged with its CEX (Bybit/Binance).
