@@ -16,10 +16,13 @@ describe('fillLegs', () => {
     // A second real fill from the same book (log index 28):
     // 0x7e4b29d4f1fffb3942f6a62ab55f99cef6a0ecd24867a4044262e99a67cc7a5e
     // (block 97379790): 0.07285608 cbBTC ↔ 2.4059 ETH.
+    // The base leg reads 0.07286, not 0.0729, since fmtAmt moved to
+    // significant digits — 4 of them below 0.1 rather than a flat 4dp, which
+    // is strictly closer to the on-chain 0.07285608.
     const sell = fillLegs({ market: 'cbBTC/ETH', side: 'sell', baseAmount: 0.07285608, execPx: 33.023217777376985 });
     const buy = fillLegs({ market: 'cbBTC/ETH', side: 'buy', baseAmount: 0.07285608, execPx: 33.023217777376985 });
-    expect(sell).toEqual({ inAmt: '0.0729 cbBTC', outAmt: '2.4059 ETH' });
-    expect(buy).toEqual({ inAmt: '2.4059 ETH', outAmt: '0.0729 cbBTC' });
+    expect(sell).toEqual({ inAmt: '0.07286 cbBTC', outAmt: '2.4059 ETH' });
+    expect(buy).toEqual({ inAmt: '2.4059 ETH', outAmt: '0.07286 cbBTC' });
   });
 
   it('leaves dollar-quoted pairs unchanged: their quote leg is the dollar amount', () => {
