@@ -276,13 +276,13 @@ export function createCapricornAdapter(): VenueAdapter {
       allowFailure: true,
     });
     const live: CapPool[] = [];
-    let paused = 0, noPrice = 0;
+    let paused = 0, noQuote = 0;
     for (let i = 0; i < admitted.length; i++) {
       const p = liveRes[i * 2], q = liveRes[i * 2 + 1];
       const isPaused = p.status === 'success' ? Boolean(p.result) : false;
       const prices = q.status === 'success' && (q.result as bigint) > 0n;
       if (isPaused) { paused++; continue; }
-      if (!prices) { noPrice++; continue; }
+      if (!prices) { noQuote++; continue; }
       live.push(admitted[i]);
     }
 
@@ -291,12 +291,17 @@ export function createCapricornAdapter(): VenueAdapter {
     for (const p of admitted) byAddr.set(p.pool.toLowerCase(), p);
     discovered = true;
 
-    const why = [paused ? `${paused} paused` : '', noPrice ? `${noPrice} no oracle price` : ''].filter(Boolean);
-    ctx.note('venue.discovery', `Capricorn: ${live.length} quotable pool(s) of ${admitted.length} admitted${why.length ? ` (+${why.join(', ')}; not quoted)` : ''}`);
+    const why = [paused ? `${paused} paused` : '', noQuote ? `${noQuote} not quoting` : ''].filter(Boolean);
+    ctx.note('venue.discovery', `Capricorn: ${live.length}/${admitted.length} admitted pool(s) quotable${why.length ? ` (${why.join(', ')})` : ''}`);
     // Capital that trades but cannot be priced is a DEGRADATION, not lifecycle:
     // it gives the core's went-dark backstop the reason it cannot know.
-    if (noPrice) {
-      ctx.note('venue.quote.unavailable', `Capricorn: ${noPrice} pool(s) have no oracle price — their OracleRegistry feed is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
+    // Report WHAT WAS MEASURED, not an inferred root cause: `paused` is ruled
+    // out above, but an unanswered quoteExactIn is equally a stale/absent
+    // oracle feed, an engine-side revert or an ABI drift, and this gate cannot
+    // tell them apart. Naming one of them would send a reader to the wrong
+    // contract — the exact failure the Metric "unfunded" note made (#58).
+    if (noQuote) {
+      ctx.note('venue.quote.unavailable', `Capricorn: ${noQuote} unpaused pool(s) are not returning a quote — quoteExactIn is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
     }
   }
 
@@ -356,11 +361,20 @@ export function createCapricornAdapter(): VenueAdapter {
         if (!row) {
           // a leg that survived the band consumed only part of the reserve, so
           // the returned amount really is the full requested notional.
-          row = { venueId: CAPRICORN_VENUE.id, market: l.pool.market, sizeUsd: l.size, bidBps: 0, askBps: 0, bidPx: 0, askPx: 0, spreadBps: 0, filledFull: true, feeBps: l.pool.feeBps, ts };
+          row = { venueId: CAPRICORN_VENUE.id, market: l.pool.market, sizeUsd: l.size, bidBps: 0, askBps: 0, bidPx: 0, askPx: 0, spreadBps: 0, filledFull: true, feeBps: 0, ts };
           rowByKey.set(key, row);
         }
-        if (l.side === 'buy') { row.askBps = bps; row.askPx = px; }
-        else { row.bidBps = bps; row.bidPx = px; }
+        // BEST price across every pool serving this market, per side — the
+        // factory keys pools on (token0, token1, feeBps), so more than one fee
+        // tier of the SAME pair is the designed shape, and a taker routes to
+        // whichever is best. Last-write-wins would otherwise make the row
+        // depend on multicall ordering. Cheapest ask / richest bid wins.
+        if (l.side === 'buy') {
+          if (row.askPx === 0 || px < row.askPx) { row.askBps = bps; row.askPx = px; }
+        } else if (px > row.bidPx) { row.bidBps = bps; row.bidPx = px; }
+        // one fee for a row assembled from two pools can only be the worse of
+        // them — same convention as POE's multi-leg rows.
+        row.feeBps = Math.max(row.feeBps, l.pool.feeBps);
       }
       const out: QuoteRow[] = [];
       for (const row of rowByKey.values()) {
