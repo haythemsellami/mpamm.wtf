@@ -6,7 +6,7 @@
 // must get right is: no false alarm on the normal empty cycles, no silence on
 // a real outage, and no duplicate of a note an adapter already raised.
 import { describe, expect, it } from 'vitest';
-import { QUOTE_DARK_CYCLES, checkQuoteOutage } from '../datasource/live.js';
+import { QUOTE_DARK_CYCLES, checkQuoteOutage, trackQuoteFailure } from '../datasource/live.js';
 
 const VENUES = [{ id: 'metric', name: 'Metric' }, { id: 'hanji', name: 'Hanji' }];
 
@@ -90,5 +90,80 @@ describe('checkQuoteOutage', () => {
     s.explained.delete('metric'); // the adapter's note aged out of the window
     run(() => 0, 1, s);
     expect(s.notes.filter((n) => n.id === 'metric').map((n) => n.kind)).toEqual(['warn']);
+  });
+});
+
+// The core's OTHER quote signal: a.quote() rejecting outright, which
+// checkQuoteOutage never sees — a throwing adapter returns no rows, but so does
+// a venue that is simply quiet, and only this path knows which happened.
+describe('trackQuoteFailure', () => {
+  const METRIC = { id: 'metric', name: 'Metric' };
+  const fresh = () => ({
+    current: new Map<string, string>(),
+    notes: [] as { kind: 'warn' | 'announce'; id: string | undefined; msg: string }[],
+  });
+  const io = (s: ReturnType<typeof fresh>) => ({
+    warn: (id: string | undefined, msg: string) => s.notes.push({ kind: 'warn' as const, id, msg }),
+    announce: (id: string | undefined, msg: string) => s.notes.push({ kind: 'announce' as const, id, msg }),
+  });
+
+  it('notes a rejection once, however many cycles it lasts', () => {
+    const s = fresh();
+    for (let i = 0; i < 50; i++) trackQuoteFailure(METRIC, 'maker: paused', s.current, io(s));
+    expect(s.notes).toHaveLength(1);
+    expect(s.notes[0]).toMatchObject({ kind: 'warn', id: 'metric' });
+    expect(s.notes[0].msg).toBe('Metric quote failed: maker: paused');
+  });
+
+  it('a CHANGED reason is a different event and gets its own note', () => {
+    const s = fresh();
+    trackQuoteFailure(METRIC, 'maker: paused', s.current, io(s));
+    trackQuoteFailure(METRIC, 'execution reverted', s.current, io(s));
+    expect(s.notes.map((n) => n.msg)).toEqual([
+      'Metric quote failed: maker: paused',
+      'Metric quote failed: execution reverted',
+    ]);
+  });
+
+  it('announces recovery once, naming the reason that just cleared', () => {
+    const s = fresh();
+    trackQuoteFailure(METRIC, 'maker: paused', s.current, io(s));
+    trackQuoteFailure(METRIC, null, s.current, io(s));
+    expect(s.notes[1]).toMatchObject({ kind: 'announce', id: 'metric' });
+    expect(s.notes[1].msg).toBe('Metric quoting again (was "maker: paused")');
+  });
+
+  it('stays silent while the venue is healthy — most cycles are', () => {
+    const s = fresh();
+    for (let i = 0; i < 10; i++) trackQuoteFailure(METRIC, null, s.current, io(s));
+    expect(s.notes).toEqual([]);
+  });
+
+  it('re-reports the SAME reason after a recovery — a second outage is a second event', () => {
+    const s = fresh();
+    trackQuoteFailure(METRIC, 'maker: paused', s.current, io(s));
+    trackQuoteFailure(METRIC, null, s.current, io(s));
+    trackQuoteFailure(METRIC, 'maker: paused', s.current, io(s));
+    expect(s.notes.filter((n) => n.kind === 'warn')).toHaveLength(2);
+  });
+
+  it('resolving with ZERO rows still clears — empty-but-quoting is the backstop\'s job', () => {
+    // the caller passes null the moment the promise resolves, whatever it holds.
+    const s = fresh();
+    trackQuoteFailure(METRIC, 'rpc timeout', s.current, io(s));
+    trackQuoteFailure(METRIC, null, s.current, io(s));
+    expect(s.notes.map((n) => n.kind)).toEqual(['warn', 'announce']);
+  });
+
+  it('keys venues apart, including an adapter that declares no venue id', () => {
+    const s = fresh();
+    trackQuoteFailure(METRIC, 'maker: paused', s.current, io(s));
+    trackQuoteFailure({ id: 'hanji', name: 'Hanji' }, 'maker: paused', s.current, io(s));
+    trackQuoteFailure({ name: 'venue' }, 'maker: paused', s.current, io(s));
+    expect(s.notes).toHaveLength(3);
+    expect(s.notes.map((n) => n.id)).toEqual(['metric', 'hanji', undefined]);
+    // …and one venue healing does not clear another's warning.
+    trackQuoteFailure(METRIC, null, s.current, io(s));
+    expect(s.current.get('hanji')).toBe('maker: paused');
   });
 });

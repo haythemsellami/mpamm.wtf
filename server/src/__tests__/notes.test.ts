@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { NOTE_LEVEL, type StateNote } from '@shared';
 import { NoteBuffer, noteSubsystem, scrubNote } from '../notes.js';
-import { QUOTE_DARK_CYCLES, checkArchivePending, checkGapFill, checkQuoteOutage, checkReferenceStarvation } from '../datasource/live.js';
+import { QUOTE_DARK_CYCLES, checkArchivePending, checkGapFill, checkQuoteOutage, checkReferenceStarvation, trackQuoteFailure } from '../datasource/live.js';
 
 const T0 = 1_800_000_000_000;
 
@@ -276,5 +276,87 @@ describe('a real call site: the went-dark backstop', () => {
     expect(w.b.holds('venue.quote.unavailable', 'metric')).toBe(true); // the adapter's survives
     expect(w.b.list().map((n) => n.msg)).toContain(ADAPTER);
     expect(w.b.list().some((n) => n.msg.includes('is not quoting'))).toBe(false);
+  });
+});
+
+describe('a real call site: a venue whose quote() rejects', () => {
+  const VENUE = { id: 'metric', name: 'Metric' };
+  const VENUES = [VENUE];
+
+  /** the PRODUCTION wiring: one buffer and one clock shared by the rejection
+   *  latch and the went-dark backstop, exactly as poll() runs them. */
+  const wired = () => {
+    let now = T0;
+    const b = new NoteBuffer(60, () => {}, () => now);
+    const current = new Map<string, string>();
+    const empty = new Map<string, { runs: number; since: number }>();
+    const dark = new Map<string, string>();
+    const io = {
+      warn: (id: string | undefined, m: string) => b.note('venue.quote.unavailable', m, id),
+      announce: (id: string | undefined, m: string) => b.note('venue.quote.recovered', m, id),
+    };
+    /** one quote tick: the adapter speaks first (inside the await), then the
+     *  backstop judges the row count against the `now` stamped before it. */
+    const tick = (failure: string | null, rows: number) => {
+      now += 1_000;
+      const stamped = now;
+      trackQuoteFailure(VENUE, failure, current, io);
+      checkQuoteOutage(VENUES, () => rows, empty, dark, stamped, {
+        warn: (id, m) => b.noteOnce('venue.quote.unavailable', m, id),
+        announce: (id, m) => b.note('venue.quote.recovered', m, id),
+        clear: (id, m) => b.drop('venue.quote.unavailable', m, id),
+        explained: (id, since) => b.holds('venue.quote.unavailable', id, since),
+      });
+    };
+    return {
+      b,
+      dark,
+      cycle: (failure: string | null, rows: number, n = 1) => { for (let i = 0; i < n; i++) tick(failure, rows); },
+      msgs: (code: string) => b.list().filter((n) => n.code === code).map((n) => n.msg),
+    };
+  };
+
+  it('serves ONE warning through a long outage, then announces the recovery', () => {
+    const w = wired();
+    w.cycle('maker: paused', 0, QUOTE_DARK_CYCLES + 40);
+    expect(w.msgs('venue.quote.unavailable')).toEqual(['Metric quote failed: maker: paused']);
+    w.cycle(null, 4);
+    expect(w.msgs('venue.quote.recovered')).toEqual(['Metric quoting again (was "maker: paused")']);
+  });
+
+  it('reports a SECOND outage with the SAME reason — which noteOnce would have swallowed', () => {
+    const w = wired();
+    w.cycle('maker: paused', 0, 3);
+    w.cycle(null, 4);
+    w.cycle('maker: paused', 0, 3);
+    expect(w.msgs('venue.quote.unavailable')).toHaveLength(2);
+
+    // why the latch raises through `note` and not `noteOnce`: the message is
+    // byte-identical across outages, so the dedupe cannot tell a repeat from a
+    // recurrence. This is the same trap #69 fixed for the backstop with `dark`.
+    const control = new NoteBuffer(60, () => {}, () => T0);
+    control.noteOnce('venue.quote.unavailable', 'Metric quote failed: maker: paused', 'metric');
+    control.note('venue.quote.recovered', 'Metric quoting again', 'metric');
+    control.noteOnce('venue.quote.unavailable', 'Metric quote failed: maker: paused', 'metric');
+    expect(control.list().filter((n) => n.code === 'venue.quote.unavailable')).toHaveLength(1);
+  });
+
+  it('stands the backstop down on the second outage too — the note is fresh, not stale', () => {
+    // #69 scoped `explained` to notes raised during THIS outage. Before recovery
+    // was announced the second outage's note was swallowed as a repeat, so the
+    // only note on the record predated `since` and the backstop published its
+    // own vaguer warning next to the adapter's. It no longer does.
+    const w = wired();
+    w.cycle('maker: paused', 0, QUOTE_DARK_CYCLES + 2);
+    w.cycle(null, 4, 2);
+    w.cycle('maker: paused', 0, QUOTE_DARK_CYCLES + 2);
+    expect(w.msgs('venue.quote.unavailable').every((m) => m.startsWith('Metric quote failed:'))).toBe(true);
+    expect(w.dark.has('metric')).toBe(false);   // the backstop never fired
+  });
+
+  it('leaves a healthy venue silent — no note of either kind', () => {
+    const w = wired();
+    w.cycle(null, 4, 20);
+    expect(w.b.list()).toEqual([]);
   });
 });

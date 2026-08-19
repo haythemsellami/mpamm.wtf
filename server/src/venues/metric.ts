@@ -3,7 +3,7 @@ import type { QuoteRow, Fill, Side, VenueMeta } from '@shared';
 import { TOKENS, assetForToken, baseTokenOf, pairFor } from '@shared';
 import { fromUnits, toUnits, shortHex } from '../util.js';
 import type { VenueAdapter, AdapterContext, LogBundle } from './adapter.js';
-import { createQuoteOutageReporter } from './quote-health.js';
+import { createQuoteOutageNote, createQuoteOutageReporter } from './quote-health.js';
 
 /**
  * Metric OMM adapter — an oracle-anchored bin AMM (propAMM), fully on-chain and
@@ -176,6 +176,9 @@ export function createMetricAdapter(): VenueAdapter {
   // every leg FAILING is a venue-wide cause (paused, ABI drift, dead RPC route),
   // not a per-pair gap — name it instead of vanishing (venues/quote-health.ts).
   const reportOutage = createQuoteOutageReporter(METRIC_VENUE.name);
+  // funded pools with no oracle price: raised from discover(), which re-runs
+  // every 10 minutes, so the clear condition is re-evaluated there too.
+  const noPrice = createQuoteOutageNote();
   // THREE different questions, three different sets — conflating them is what
   // let real fills go uncounted (issue #61):
   //   admitted → structurally understood (getImmutables + registered pair):
@@ -291,7 +294,11 @@ export function createMetricAdapter(): VenueAdapter {
       // the venue is reported as "offline, or its adapter no longer matches the
       // contract" — a guess, when the adapter knows exactly what happened.
       if (notLive['no-price']) {
-        ctx.note('venue.quote.unavailable', `Metric: ${notLive['no-price']} funded pool(s) have no oracle price — their PriceProvider is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
+        noPrice.raise(ctx, `Metric: ${notLive['no-price']} funded pool(s) have no oracle price — their PriceProvider is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
+      } else {
+        // `notLive` is recomputed from scratch every pass, so this IS the clear
+        // condition — no separate probe, and no staleness of its own.
+        noPrice.recovered(ctx, 'Metric: every funded pool has an oracle price again');
       }
 
       // ── 4. gas destinations: EVERY oracle Metric's providers read ──────────

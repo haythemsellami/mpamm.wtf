@@ -341,3 +341,55 @@ describe('liveness carries a REASON, not just a verdict (issue #58)', () => {
     expect(seen.some((n) => /unfunded/.test(n.msg))).toBe(true);
   });
 });
+
+// The oracle outage is LIVE on chain as of 2026-08-14 (#58): three funded pools
+// whose PriceProvider reverts. Discovery says so, and used to keep saying so
+// after the provider came back, because the note was raised once and never
+// revisited — a standing `warn` for a venue that is quoting fine.
+describe('Metric no-oracle-price note announces its own recovery', () => {
+  /** the stub above throws away the note CODE; recovery is only observable with it. */
+  const recording = (o: StubOpts = {}) => {
+    const rec: { code: string; msg: string }[] = [];
+    const ctx = stub([], o) as any;
+    ctx.note = (code: string, msg: string) => rec.push({ code, msg });
+    return { ctx, rec };
+  };
+  const codes = (rec: { code: string }[]) => rec.filter((n) => n.code.startsWith('venue.quote.')).map((n) => n.code);
+
+  it('warns while the provider is dark, announces once when it answers again, then stays quiet', async () => {
+    const a = createMetricAdapter();
+
+    const dark = recording({ priceFails: true });
+    await a.discover(dark.ctx);
+    expect(codes(dark.rec)).toEqual(['venue.quote.unavailable']);
+    expect(dark.rec[dark.rec.length - 1].msg).toMatch(/3 funded pool\(s\) have no oracle price/);
+
+    const healed = recording({ priceFails: false });
+    await a.discover(healed.ctx);
+    expect(codes(healed.rec)).toEqual(['venue.quote.recovered']);
+    expect(healed.rec.find((n) => n.code === 'venue.quote.recovered')!.msg)
+      .toBe('Metric: every funded pool has an oracle price again');
+
+    // the pass after that has nothing to announce — discover() re-runs every 10
+    // minutes and almost every pass is healthy.
+    const quiet = recording({ priceFails: false });
+    await a.discover(quiet.ctx);
+    expect(codes(quiet.rec)).toEqual([]);
+  });
+
+  it('says nothing on a venue that was never degraded — no recovery from an outage that never happened', async () => {
+    const a = createMetricAdapter();
+    const healthy = recording({});
+    await a.discover(healthy.ctx);
+    expect(codes(healthy.rec)).toEqual([]);
+  });
+
+  it('re-arms: the NEXT outage is reported again', async () => {
+    const a = createMetricAdapter();
+    await a.discover(recording({ priceFails: true }).ctx);
+    await a.discover(recording({ priceFails: false }).ctx);
+    const again = recording({ priceFails: true });
+    await a.discover(again.ctx);
+    expect(codes(again.rec)).toEqual(['venue.quote.unavailable']);
+  });
+});
