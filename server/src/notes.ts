@@ -63,13 +63,16 @@ export class NoteBuffer {
   /** the window as served, oldest first. */
   list(): StateNote[] { return this.items; }
 
-  /** whether the window already holds this code for this venue. Lets a generic
-   *  backstop stand down when a subsystem has already explained the same event
-   *  in more detail (datasource/live.ts: checkQuoteOutage vs an adapter's own
-   *  venue.quote.unavailable). */
-  holds(code: NoteCode, venue?: string): boolean {
+  /** whether the window holds this code for this venue, raised no earlier than
+   *  `since`. Lets a generic backstop stand down when a subsystem has already
+   *  explained the same event in more detail (datasource/live.ts:
+   *  checkQuoteOutage vs an adapter's own venue.quote.unavailable). Pass the
+   *  moment the condition being reported STARTED: notes are an append log that
+   *  is rarely retracted, so an unscoped read answers "has anyone ever said
+   *  this", which stays true long after the event it described ended. */
+  holds(code: NoteCode, venue?: string, since = 0): boolean {
     const v = venue || undefined;
-    return this.items.some((n) => n.code === code && n.venue === v);
+    return this.items.some((n) => n.code === code && n.venue === v && n.ts >= since);
   }
 
   /** raise a note. */
