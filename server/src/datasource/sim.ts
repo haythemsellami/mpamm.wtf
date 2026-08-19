@@ -63,6 +63,9 @@ export class SimDataSource extends BaseSource {
   private set mon(v: number) { this.px.MON = v; }
   /** synthetic USD price for a market's base asset. */
   private basePx(market: string): number { const b = pairOf(market)?.base; return (b && this.px[b]) || this.px.MON || 1; }
+  /** synthetic USD price of a market's quote token — $1 for stables, the
+   *  asset's own price when the pair is quoted in a crypto asset. */
+  private quotePx(market: string): number { const p = pairOf(market); return (p?.quoteKind === 'asset' && this.px[p.quote]) || 1; }
   private chg = 2.3;
   private block = 84_500_000;
   private days: DailyVolume[] = [];
@@ -291,7 +294,12 @@ export class SimDataSource extends BaseSource {
     const cr = Math.random();
     const cat: FillCategory = cr < 0.14 ? 'ROUTER' : cr < 0.22 ? 'AGG' : cr < 0.34 ? 'CEX/DEX' : 'DIRECT';
     const usd = big ? 60000 + Math.random() * 640000 : (Math.random() < 0.72 ? 50 + Math.random() * 9000 : 9000 + Math.random() * 90000);
-    const execPx = this.basePx(market) * (1 + rnd() * 0.0009);
+    // execPx is quote units per base unit (the @shared Fill contract): a
+    // market quoted in a crypto asset divides by that asset's USD price.
+    // baseAmount is then derived from usd through the quote leg, so usd,
+    // baseAmount and execPx always agree — noise included.
+    const quoteUsd = this.quotePx(market);
+    const execPx = this.basePx(market) / quoteUsd * (1 + rnd() * 0.0009);
     const e0 = (this.param[v.id]?.markoutBias ?? 0) + rnd() * 1.6;
     const ss = side === 'buy' ? 1 : -1;
     let dd = 0;
@@ -305,7 +313,7 @@ export class SimDataSource extends BaseSource {
     return {
       id: nextId('sim'), bornMs,
       venueId: v.id, market, side, category: cat,
-      usd, baseAmount: usd / execPx, execPx,
+      usd, baseAmount: usd / (execPx * quoteUsd), execPx,
       txHash: txS(), to, pool,
       blockNumber: Math.max(1, this.block - Math.round(ageSec / 0.4)),
       ts: bornMs, markoutsBps: mk,
