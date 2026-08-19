@@ -41,7 +41,7 @@ export function QuoteCanvas() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
-    const padL = 58, padR = 10, padT = 12, padB = 22;
+    const padR = 10, padT = 12, padB = 22;
     const ch = CH[d.theme]; // theme-aware canvas chrome colors (can't use var())
     // propAMM venues + the selected pair's CEX reference (Bybit for MON, Binance for
     // BTC/ETH), filtered by the user's toggles. Everything comes from the registry.
@@ -60,20 +60,30 @@ export function QuoteCanvas() {
     if (!isFinite(mn) || mn === mx) return;
     const pad = (mx - mn) * 0.12; mn -= pad; mx += pad;
 
+    ctx.font = '9px "JetBrains Mono", monospace';
+    // Tick precision comes from the STEP BETWEEN GRIDLINES, never the absolute
+    // price: what an axis has to resolve is the span it draws. The old fixed
+    // toFixed(5) printed every MON/ETH gridline (~1.1e-5) as the same
+    // "0.00001", leaving the axis with no information at all.
+    const GRID = 4;
+    const tickDp = Math.min(10, Math.max(0, -Math.floor(Math.log10((mx - mn) / GRID))));
+    const ticks = Array.from({ length: GRID + 1 }, (_, g) => mn + (mx - mn) * g / GRID);
+    const labels = ticks.map((p) => p.toFixed(tickDp));
+    // MEASURE the gutter rather than guessing it. The old constant 58px clipped
+    // a 5-digit BTC price ("62210.02" drew as "2210.02"), and no constant can
+    // also fit the extra decimals a small-unit pair needs — so the axis pays
+    // for exactly the width its own labels take.
+    const padL = Math.max(58, Math.ceil(Math.max(...labels.map((l) => ctx.measureText(l).width))) + 12);
+
     const X = (i: number) => padL + (i / (N - 1)) * (w - padL - padR);
     const Y = (p: number) => padT + (1 - (p - mn) / (mx - mn)) * (h - padT - padB);
 
-    ctx.font = '9px "JetBrains Mono", monospace';
     ctx.lineWidth = 1;
-    // adaptive precision so a label always FITS the axis gutter — toFixed(5) on a
-    // 5-digit price (BTC ~62,000) is 11 chars, wider than padL, and the leading
-    // digit clips off-canvas ("62210.02" rendered as "2210.02").
-    const fmtPx = (p: number) => (p >= 1000 ? p.toFixed(1) : p >= 1 ? p.toFixed(3) : p.toFixed(5));
-    for (let g = 0; g <= 4; g++) {
-      const p = mn + (mx - mn) * g / 4, y = Y(p);
+    for (let g = 0; g <= GRID; g++) {
+      const y = Y(ticks[g]);
       ctx.strokeStyle = ch.grid;
       ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
-      ctx.fillStyle = ch.label; ctx.textAlign = 'right'; ctx.fillText(fmtPx(p), padL - 6, y + 3);
+      ctx.fillStyle = ch.label; ctx.textAlign = 'right'; ctx.fillText(labels[g], padL - 6, y + 3);
     }
     ctx.textAlign = 'center';
     // time axis spans (N-1) samples at the service's real quote cadence (audit I6).

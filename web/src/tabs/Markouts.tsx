@@ -4,7 +4,7 @@ import { useDashboard } from '../store';
 import { useViewport } from '../lib/viewport';
 import { C, venueColor } from '../theme';
 import { Pills, SideTag, FieldLegend } from '../components/ui';
-import { fmtUsd, clockMs, clockSec, fmtInt, shortHex } from '../lib/format';
+import { fmtUsd, clockMs, clockSec, fmtInt, fmtPx, shortHex } from '../lib/format';
 
 const H = [0, 5, 10, 30, 60];
 const TAPE_GRID = '78px 78px 84px 84px 64px 92px 80px 88px 46px 80px 80px 52px 52px 52px 52px 52px';
@@ -172,7 +172,7 @@ export function MarkoutsTab() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                     <span style={{ color: venueColor(venuesById[f.venueId], d.theme), fontSize: 10.5, fontWeight: 600 }}>{venueNameUpper(f)}</span>
                     <span style={{ color: catColor(f.category, f.router), fontSize: 9.5 }}>{catLabel(f.category, f.router)}</span>
-                    <span style={{ marginLeft: 'auto', color: C.dim, fontSize: 10 }}>{f.pxApprox ? '—' : f.execPx.toFixed(5)}</span>
+                    <span style={{ marginLeft: 'auto', color: C.dim, fontSize: 10 }}>{f.pxApprox ? '—' : fmtPx(f.execPx)}</span>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, fontSize: 9.5 }}>
                     <span style={{ color: C.faint }}>{clockMs(f.ts)}</span>
@@ -230,7 +230,7 @@ export function MarkoutsTab() {
                 <div style={{ color: C.faint2 }}>{f.pool}</div>
                 <div><SideTag side={f.side} /></div>
                 <div style={{ textAlign: 'right', color: C.text }}>{fmtUsd(f.usd)}</div>
-                <div style={{ textAlign: 'right', color: C.dim }}>{f.pxApprox ? '—' : f.execPx.toFixed(5)}</div>
+                <div style={{ textAlign: 'right', color: C.dim }}>{f.pxApprox ? '—' : fmtPx(f.execPx)}</div>
                 {H.map((h, i) => {
                   const v = f.markoutsBps[i];
                   if (age < h || v == null) return <div key={h} style={{ textAlign: 'right', color: C.ghost }}>{'·'}</div>;
@@ -290,7 +290,7 @@ export function MarkoutsTab() {
               <div style={{ color: C.faint2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.pool}</div>
               <div><SideTag side={f.side} /></div>
               <div style={{ textAlign: 'right', color: C.text }}>{fmtUsd(f.usd)}</div>
-              <div style={{ textAlign: 'right', color: C.dim }}>{f.pxApprox ? '—' : f.execPx.toFixed(5)}</div>
+              <div style={{ textAlign: 'right', color: C.dim }}>{f.pxApprox ? '—' : fmtPx(f.execPx)}</div>
               <div style={{ textAlign: 'right', color: mk0 >= 0 ? C.green : C.red }}>{(mk0 >= 0 ? '+' : '') + mk0.toFixed(2)}</div>
               <div style={{ textAlign: 'right', color: pnl >= 0 ? C.green : C.red, fontWeight: 600 }}>{(pnl >= 0 ? '+$' : '−$') + Math.abs(pnl).toFixed(2)}</div>
               <div style={{ color: C.link }}>{shortHex(f.txHash)}</div>

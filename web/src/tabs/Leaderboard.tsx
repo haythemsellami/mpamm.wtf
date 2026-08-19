@@ -3,7 +3,7 @@ import type { LeaderboardGrouping } from '@shared';
 import { useDashboard, LB_WIN_DAYS } from '../store';
 import { C, SEM, venueColor } from '../theme';
 import { Pills, SideTag, FieldLegend } from '../components/ui';
-import { fmtUsd, fmtInt, pnlFmt, sparkPath, humanAge, shortHex } from '../lib/format';
+import { fmtUsd, fmtInt, fmtPx, pnlFmt, sparkPath, humanAge, shortHex } from '../lib/format';
 import { avgMarkoutBps } from '../lib/markout';
 import { fillLegs } from '../lib/fill-legs';
 
@@ -229,7 +229,7 @@ export function LeaderboardTab() {
           </div>
           {topRows.map((x, i) => {
             const f = x.f;
-            const { inAmt, outAmt } = fillLegs(f);
+            const legs = fillLegs(f);
             return (
               <a
                 key={f.id}
@@ -248,9 +248,9 @@ export function LeaderboardTab() {
                 <div style={{ color: catCol(f.category, f.router), fontSize: 9 }}>{catLabel(f.category, f.router)}</div>
                 <div style={{ color: C.faint2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.pool}</div>
                 <div><SideTag side={f.side} /></div>
-                <div style={{ textAlign: 'right', color: C.dim }}>{inAmt}</div>
-                <div style={{ textAlign: 'right', color: C.dim }}>{outAmt}</div>
-                <div style={{ textAlign: 'right', color: C.text2 }}>{f.execPx.toFixed(5)}</div>
+                <div style={{ textAlign: 'right', color: C.dim }} title={legs.in.full}>{legs.in.amt}</div>
+                <div style={{ textAlign: 'right', color: C.dim }} title={legs.out.full}>{legs.out.amt}</div>
+                <div style={{ textAlign: 'right', color: C.text2 }}>{fmtPx(f.execPx)}</div>
                 <div style={{ textAlign: 'right', color: x.mk >= 0 ? C.green : C.red }}>{(x.mk >= 0 ? '+' : '') + x.mk.toFixed(2)}</div>
                 <div style={{ textAlign: 'right', color: x.pnl >= 0 ? C.green : C.red, fontWeight: 600 }}>{pnlFmt(x.pnl)}</div>
               </a>
