@@ -16,13 +16,11 @@ updates:
     groups:
       npm-minor:
         update-types: [minor, patch]
-    # @types/node tracks the RUNTIME, and that is pinned to 24 in three places:
-    # the Dockerfile's node:24-alpine stages, ci.yml's node-version, and the
-    # root engines field. Types ahead of the runtime describe APIs that are not
-    # there when the container runs — typecheck goes green and production
-    # throws, and node:sqlite (still experimental) moves between majors. A major
-    # here is a RUNTIME decision, so it ships with the runtime bump rather than
-    # on its own (#46 proposed 26 against a Node 24 image).
+    # @types/node tracks the runtime Node major. The runtime is pinned to 24 in
+    # the Dockerfile's node:24-alpine stages and ci.yml's node-version (the root
+    # "engines" field is a minimum, not a pin). Types ahead of the runtime can
+    # describe APIs that aren't present in production (notably node:sqlite), so
+    # Node/@types majors should ship together.
     ignore:
       - dependency-name: "@types/node"
         update-types: [version-update:semver-major]
