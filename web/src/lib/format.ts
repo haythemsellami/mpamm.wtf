@@ -21,25 +21,66 @@ export function fMillions(usd: number): string {
   return m >= 1 ? '$' + m.toFixed(2) + 'M' : '$' + (m * 1000).toFixed(0) + 'k';
 }
 
+/** Doubles carry ~15–17 significant digits; 15 is the last one always safe.
+ *  Past it a JS number prints its own binary noise (7.4387 ETH round-trips as
+ *  7.438700000000001), which must never reach a column that reads as exact. */
+const SAFE_SIG_DIGITS = 15;
+
+/** Drop the padding a fixed-dp render adds, so an exact value shows its real
+ *  length: "0.07915300" → "0.079153", "3.33350000000000" → "3.3335". */
+function trimZeros(s: string): string {
+  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;
+}
+
 /**
- * A token amount in its own units — SIGNIFICANT digits, not decimal places.
+ * A token amount in its own units.
  *
- * Token unit values span 3.1 million to one on this dashboard (MON at ~$0.02
- * against cbBTC at ~$68k), so no fixed decimal count serves both: the same $1k
- * trade is 45,000 MON or 0.0147 cbBTC. A flat 4dp silently rounded the
- * small-unit side toward zero — $1 of cbBTC rendered as "0.0000".
+ * On-chain amounts are INTEGERS of 10^-decimals, so the true value never has
+ * more fractional digits than the token has decimals. Given `decimals` this
+ * renders exactly that and trims the padding — an 8dp token prints its real
+ * traded amount (0.07285608 cbBTC, not 0.07286), which is what a trading
+ * dashboard owes the reader.
  *
- * Below 1k we therefore hold ~4 significant digits, capped at 8dp (the finest
- * on-chain resolution any tracked token has, WBTC/cbBTC). Every value ≥0.1 is
- * unchanged from the old fixed-4dp form, so the common rows do not move.
+ * Two limits are honest to state rather than hide:
+ *  - Above 1k the k/M compaction stays. That form READS as approximate, so it
+ *    cannot mislead the way a decimal like "0.07286" does — the full value is
+ *    carried in the cell's tooltip instead of widening every row.
+ *  - An 18-decimal amount can exceed what a double holds (14718.074205856226
+ *    is already lossy before it reaches us, since `Fill.baseAmount` is a JSON
+ *    number). Rounding at SAFE_SIG_DIGITS strips the resulting binary noise
+ *    rather than printing it as if it were precision. Recovering those digits
+ *    would mean carrying the raw integer on the wire.
+ *
+ * Without `decimals` it falls back to ~4 significant digits — still never the
+ * old flat 4dp, which rendered $1 of cbBTC as "0.0000".
  */
-export function fmtAmt(x: number): string {
+export function fmtAmt(x: number, decimals?: number): string {
   const a = Math.abs(x);
   if (!Number.isFinite(a)) return '—'; // before the k/M branches — Infinity is not "InfinityM"
   if (a === 0) return '0';
   if (a >= 1e6) return (x / 1e6).toFixed(2) + 'M';
   if (a >= 1e3) return (x / 1e3).toFixed(2) + 'k';
-  return x.toFixed(Math.min(8, Math.max(4, 3 - Math.floor(Math.log10(a)))));
+  if (decimals === undefined) return x.toFixed(Math.min(8, Math.max(4, 3 - Math.floor(Math.log10(a)))));
+  return trimZeros(x.toFixed(exactDp(a, decimals)));
+}
+
+/** Fractional digits that are BOTH real on-chain (≤ token decimals) and
+ *  representable (≤ what the double can justify at this magnitude). */
+function exactDp(a: number, decimals: number): number {
+  const intDigits = Math.max(1, Math.floor(Math.log10(a)) + 1);
+  return Math.max(0, Math.min(decimals, SAFE_SIG_DIGITS - intDigits));
+}
+
+/**
+ * The same amount at FULL precision — no k/M compaction — for a tooltip on a
+ * compacted cell, so the exact figure is always one hover away even when the
+ * column shows "445.20k MON".
+ */
+export function fmtAmtFull(x: number, decimals?: number): string {
+  const a = Math.abs(x);
+  if (!Number.isFinite(a)) return '—';
+  if (a === 0) return '0';
+  return trimZeros(x.toFixed(decimals === undefined ? Math.min(8, Math.max(4, 3 - Math.floor(Math.log10(a)))) : exactDp(a, decimals)));
 }
 
 /**
