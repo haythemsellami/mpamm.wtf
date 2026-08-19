@@ -15,15 +15,15 @@
     "@mpamm/shared": "*",
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "viem": "^2.21.55",
-    "ws": "^8.18.0"
+    "viem": "^2.55.16",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.13",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.12",
     "typescript": "^5.7.3",
     "vitest": "^4.1.10"
   },
