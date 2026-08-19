@@ -16,6 +16,14 @@ updates:
     groups:
       npm-minor:
         update-types: [minor, patch]
+    # @types/node tracks the runtime Node major. The runtime is pinned to 24 in
+    # the Dockerfile's node:24-alpine stages and ci.yml's node-version (the root
+    # "engines" field is a minimum, not a pin). Types ahead of the runtime can
+    # describe APIs that aren't present in production (notably node:sqlite), so
+    # Node/@types majors should ship together.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
     labels: [dependencies]
     commit-message:
       prefix: chore(deps)
