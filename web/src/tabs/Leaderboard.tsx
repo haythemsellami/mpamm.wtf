@@ -3,8 +3,9 @@ import type { LeaderboardGrouping } from '@shared';
 import { useDashboard, LB_WIN_DAYS } from '../store';
 import { C, SEM, venueColor } from '../theme';
 import { Pills, SideTag, FieldLegend } from '../components/ui';
-import { fmtUsd, fmtAmt, fmtInt, pnlFmt, sparkPath, humanAge, shortHex } from '../lib/format';
+import { fmtUsd, fmtInt, pnlFmt, sparkPath, humanAge, shortHex } from '../lib/format';
 import { avgMarkoutBps } from '../lib/markout';
+import { fillLegs } from '../lib/fill-legs';
 
 const HZ_IDX: Record<string, number> = { 'T+0S': 0, 'T+10S': 2, 'T+30S': 3, 'T+60S': 4 };
 const GROUP_ID: Record<string, LeaderboardGrouping> = {
@@ -228,11 +229,7 @@ export function LeaderboardTab() {
           </div>
           {topRows.map((x, i) => {
             const f = x.f;
-            const base = f.usd / f.execPx;
-            const [baseSym, stable] = f.market.split('/');
-            const buy = f.side.toLowerCase() === 'buy';
-            const inAmt = buy ? fmtAmt(f.usd) + ' ' + stable : fmtAmt(base) + ' ' + baseSym;
-            const outAmt = buy ? fmtAmt(base) + ' ' + baseSym : fmtAmt(f.usd) + ' ' + stable;
+            const { inAmt, outAmt } = fillLegs(f);
             return (
               <a
                 key={f.id}
