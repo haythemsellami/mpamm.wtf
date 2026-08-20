@@ -255,7 +255,7 @@ export function createCapricornAdapter(): VenueAdapter {
       // rather than silently shrinking the venue. A factory-announced pool that
       // misbehaves is simply not ours to vouch for: skip it, keep running.
       const isSeed = SEED_POOLS.some((s) => s.toLowerCase() === list[i].toLowerCase());
-      if (isSeed && verdict.reason === 'unresolved') throw new Error(`Capricorn read failed for seed pool ${list[i]}`);
+      if (isSeed && verdict.reason === 'unresolved') throw new Error(`${CAPRICORN_VENUE.name} read failed for seed pool ${list[i]}`);
       if (verdict.reason === 'unregistered-pair') {
         ctx.note('venue.market.unlisted', `Capricorn pAMM: pool ${shortHex(list[i])} (${verdict.detail}) is not a registered pair — skipped`);
       }
