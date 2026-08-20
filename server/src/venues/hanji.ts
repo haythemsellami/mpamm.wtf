@@ -36,7 +36,9 @@ import { createQuoteOutageReporter } from './quote-health.js';
 // sinceUtc = the CLOBs' on-chain deploy day (blocks 79242115–79242169, bisected).
 // color: fuchsia in BOTH themes — the old dark lavender was near-identical to
 // Clober's and to the UI accent purple. Palette validated (CVD/contrast).
-const HANJI_VENUE: VenueMeta = { id: 'hanji', name: 'Hanji', color: { light: '#A21CAF', dark: '#C026D3' }, kind: 'clob', role: 'venue', sinceUtc: '2026-06-05' };
+// `id` stays 'hanji': it is the DB key for this venue's volume/fills/gas history
+// and the frontend lookup key, so only the display name moves.
+const HANJI_VENUE: VenueMeta = { id: 'hanji', name: 'Hanji pAMM Vault', color: { light: '#A21CAF', dark: '#C026D3' }, kind: 'clob', role: 'venue', sinceUtc: '2026-06-05' };
 
 const FAST_QUOTER_HELPER = '0x237dB58fea34A35A8543b44C217d221606cE7788' as const;
 
@@ -160,7 +162,7 @@ export function createHanjiAdapter(): VenueAdapter {
         if (String(tokenX).toLowerCase() !== base.address.toLowerCase() || String(tokenY).toLowerCase() !== quote.address.toLowerCase()) {
           throw new Error(`Hanji ${m.market}: on-chain tokens ${tokenX}/${tokenY} don't match ${m.baseTok}/${m.quoteTok}`);
         }
-        if (!pairOf(m.market)) { ctx.note('venue.market.unlisted', `Hanji: ${m.market} is not a registered pair — skipped`); continue; }
+        if (!pairOf(m.market)) { ctx.note('venue.market.unlisted', `Hanji pAMM Vault: ${m.market} is not a registered pair — skipped`); continue; }
         const baseShare = Number(sx) / 10 ** base.decimals;
         const quoteShare = Number(sy) / 10 ** quote.decimals;
         found.push({
@@ -174,7 +176,7 @@ export function createHanjiAdapter(): VenueAdapter {
       markets = found;
       byClob = new Map(markets.map((m) => [m.clob.toLowerCase(), m]));
       discovered = true;
-      ctx.note('venue.discovery', `Hanji: ${markets.length} market(s), taker fee ${markets[0]?.feeBps ?? '?'}bps (on-chain config)`);
+      ctx.note('venue.discovery', `Hanji pAMM Vault: ${markets.length} market(s), taker fee ${markets[0]?.feeBps ?? '?'}bps (on-chain config)`);
     },
 
     async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {

@@ -36,8 +36,10 @@ import { createQuoteOutageReporter } from './quote-health.js';
 // sinceUtc = the factory's first (and so far only) PoolCreated block 65199911
 // — verified by scanning the factory's ENTIRE history, deploy → head.
 const CAPRICORN_VENUE: VenueMeta = {
+  // `id` stays 'capricorn': it is the DB key for this venue's volume/fills/gas
+  // history and the frontend lookup key, so only the display name moves.
   id: 'capricorn',
-  name: 'Capricorn',
+  name: 'Capricorn pAMM',
   // rose — the one hue region the venue palette leaves open. Distinct from
   // POE's orange (redder, much darker in light) and Hanji's magenta (bluer),
   // and separable from both by lightness under CVD simulation, which is what
@@ -255,7 +257,7 @@ export function createCapricornAdapter(): VenueAdapter {
       const isSeed = SEED_POOLS.some((s) => s.toLowerCase() === list[i].toLowerCase());
       if (isSeed && verdict.reason === 'unresolved') throw new Error(`Capricorn read failed for seed pool ${list[i]}`);
       if (verdict.reason === 'unregistered-pair') {
-        ctx.note('venue.market.unlisted', `Capricorn: pool ${shortHex(list[i])} (${verdict.detail}) is not a registered pair — skipped`);
+        ctx.note('venue.market.unlisted', `Capricorn pAMM: pool ${shortHex(list[i])} (${verdict.detail}) is not a registered pair — skipped`);
       }
     }
 
@@ -292,7 +294,7 @@ export function createCapricornAdapter(): VenueAdapter {
     discovered = true;
 
     const why = [paused ? `${paused} paused` : '', noQuote ? `${noQuote} not quoting` : ''].filter(Boolean);
-    ctx.note('venue.discovery', `Capricorn: ${live.length}/${admitted.length} admitted pool(s) quotable${why.length ? ` (${why.join(', ')})` : ''}`);
+    ctx.note('venue.discovery', `Capricorn pAMM: ${live.length}/${admitted.length} admitted pool(s) quotable${why.length ? ` (${why.join(', ')})` : ''}`);
     // Capital that trades but cannot be priced is a DEGRADATION, not lifecycle:
     // it gives the core's went-dark backstop the reason it cannot know.
     // Report WHAT WAS MEASURED, not an inferred root cause: `paused` is ruled
@@ -301,7 +303,7 @@ export function createCapricornAdapter(): VenueAdapter {
     // tell them apart. Naming one of them would send a reader to the wrong
     // contract — the exact failure the Metric "unfunded" note made (#58).
     if (noQuote) {
-      ctx.note('venue.quote.unavailable', `Capricorn: ${noQuote} unpaused pool(s) are not returning a quote — quoteExactIn is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
+      ctx.note('venue.quote.unavailable', `Capricorn pAMM: ${noQuote} unpaused pool(s) are not returning a quote — quoteExactIn is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
     }
   }
 
@@ -424,7 +426,7 @@ export function createCapricornAdapter(): VenueAdapter {
       });
       if (created.length) {
         for (const l of created) candidates.add(String(l.args.pool).toLowerCase());
-        ctx.note('venue.discovery', `Capricorn: factory deployed ${created.length} new pool(s) — re-running discovery`);
+        ctx.note('venue.discovery', `Capricorn pAMM: factory deployed ${created.length} new pool(s) — re-running discovery`);
         await refresh(ctx);
       }
 
