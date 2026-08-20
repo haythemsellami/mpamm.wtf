@@ -768,7 +768,7 @@ export function VolumeTab() {
                 style={{ display: 'grid', gridTemplateColumns: '1fr 70px 44px', gap: '3px 8px', fontSize: 10.5, padding: '4px 0', alignItems: 'center', width: '100%', cursor: 'pointer', opacity: r.hidden ? 0.4 : 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                   <span style={{ width: 8, height: 8, borderRadius: 2, background: r.hidden ? 'transparent' : r.color, border: `1px solid ${r.color}`, flex: 'none' }} />
-                  <span style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, textDecoration: r.hidden ? 'line-through' : 'none' }}>{r.name}</span>
+                  <span title={r.name} style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, textDecoration: r.hidden ? 'line-through' : 'none' }}>{r.name}</span>
                 </div>
                 <div style={{ textAlign: 'right', color: C.text }}>{r.vol}</div>
                 <div style={{ textAlign: 'right', color: C.dim }}>{r.share}</div>
@@ -859,7 +859,7 @@ export function VolumeTab() {
                   style={{ display: 'grid', gridTemplateColumns: '1fr 84px 66px', gap: '3px 8px', fontSize: 10.5, padding: '4px 0', alignItems: 'center', width: '100%', cursor: 'pointer', opacity: r.hidden ? 0.4 : 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                     <span style={{ width: 8, height: 8, borderRadius: 2, background: r.hidden ? 'transparent' : r.color, border: `1px solid ${r.color}`, flex: 'none' }} />
-                    <span style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, textDecoration: r.hidden ? 'line-through' : 'none' }}>{r.name}</span>
+                    <span title={r.name} style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, textDecoration: r.hidden ? 'line-through' : 'none' }}>{r.name}</span>
                   </div>
                   <div style={{ textAlign: 'right', color: C.text }}>{r.burn}</div>
                   <div style={{ textAlign: 'right', color: C.dim }}>{r.updates}</div>
