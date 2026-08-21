@@ -81,6 +81,39 @@ export const KNOWN_MEV: ReadonlyMap<string, string> = new Map([
   // caller is the operator wallet below. Admission rule holds: unverified
   // arb-only executor, caller==deployer, no user-facing entrypoints.
   ['0x415669455d93b755efe7f20ef6f1dbdce7f68f7d', 'Kubera'],
+  // Three private Monad-only searcher executors — no public identity, so each
+  // is named for its executor (the Kubera precedent). Evidence common to all,
+  // all re-checkable with one eth_call: unverified with no explorer name tag,
+  // no cross-chain twin (11 chains checked), and a CALLER ALLOWLIST that
+  // makes user entry impossible — replaying one of their own real txs from a
+  // non-allowlisted `from` reverts Unauthorized, so the admission rule holds
+  // by construction rather than by selector census alone. They are also
+  // already MEV-labeled here whenever they win FastLane's PFL auction: most of
+  // their flow enters via the AuctionHandler above, driven by the SAME
+  // operator EOAs, and those EOAs send to nothing but FastLane and their own
+  // executor. These entries just close the direct-submission half.
+  //
+  // 0x5530… — ERC-1967 proxy (impl 0x7a35a006…, owner == deployer 0x22c6a8b7…).
+  // Dispatch is searcher-only: executor-gated `execute(bytes)`, FastLane's
+  // `fastLaneCall` + `setPFLAuctionAddress`, DEX swap callbacks (uniswapV3 /
+  // algebra / pancakeV3 / metricOmm) and owner withdrawals — no user-facing
+  // swap/route/user-op entry. Census: 1673/1673 entry txs over ~8.5h were
+  // `execute(bytes)`, from exactly the four EOAs that read
+  // `approvedExecutors(addr) == true`; 44% revert outright (lost races).
+  ['0x553037bac82741e7ca05afb48e8538996fd70eca', 'Searcher 0x5530'],
+  // 0x2ee2… — ERC-1967 proxy (impl 0xf83a2347…, owner == deployer == sole
+  // caller 0x000e4334…). Same shape: one unnamed executor-gated selector,
+  // `setExecutor`/`executors` allowlist, `onMorphoFlashLoan`, `fastLaneCall`,
+  // owner-only `withdrawToken`/`withdrawETH`. Census: 322 entry txs over ~8.5h
+  // = 320 of that one selector + 2 `withdrawToken` (the owner sweeping
+  // proceeds — a router has no such tx); 84% revert.
+  ['0x2ee25bbbd6795f058876eb206c98f8a55b149d14', 'Searcher 0x2ee2'],
+  // 0x53d7… — plain (non-proxy) executor, sole caller 0x826e1446…, never seen
+  // via FastLane: direct submission only. `addExecutor`/`removeExecutor` gate
+  // one unnamed entry selector (24/24 entry txs), alongside DEX callbacks and
+  // owner withdrawals. Its own revert strings name the trade it is doing —
+  // "Insufficient profit", "No hops", "Unknown hop type", "Unauthorized".
+  ['0x53d7071e15121fd2f81958fa2899f6a0f66261fb', 'Searcher 0x53d7'],
 ]);
 
 /** Searcher OPERATOR wallets → brand, matched against tx.FROM as the LAST
@@ -90,6 +123,21 @@ export const KNOWN_MEV: ReadonlyMap<string, string> = new Map([
  *  proven deployer/sole caller of a KNOWN_MEV executor. */
 export const KNOWN_MEV_OPERATORS: ReadonlyMap<string, string> = new Map([
   ['0x256efafed786d24163bedf15d583ea5dbdb4757c', 'Kubera'],
+  // Operator EOAs of the three executors above, kept so a rotated executor
+  // contract still lands labeled. Each is tied to its executor on-chain: the
+  // four 0x5530… wallets read `approvedExecutors(addr) == true` (0x22c6a8b7…
+  // is also deployer+owner), 0x000e4334… is 0x2ee2…'s deployer+owner+sole
+  // caller, and 0x826e1446… is 0x53d7…'s sole caller (that executor exposes no
+  // allowlist view, so sole-caller is the proof). Checked for user flow before
+  // listing: over an hour of blocks every one of them sent to nothing but the
+  // FastLane AuctionHandler or its own executor. 0x5530…'s four wallets rotate
+  // through one bot — exactly what the from-fallback exists to survive.
+  ['0x22c6a8b73641e9a1e8066a01c71c388e52230659', 'Searcher 0x5530'],
+  ['0x8f1661673adb1b4524ee3436d2cb66e2ff0b6845', 'Searcher 0x5530'],
+  ['0x66cbc7e161c4683e48decd13ee1f4495ea848e18', 'Searcher 0x5530'],
+  ['0x62fd55d9d8bb20f19984b56bfec4f49a5c20f1ab', 'Searcher 0x5530'],
+  ['0x000e4334baea5ed508919eb74845f8557e942ccc', 'Searcher 0x2ee2'],
+  ['0x826e1446245a0ab5b24888b407dfeb47a4d5749d', 'Searcher 0x53d7'],
 ]);
 
 const LOOKUP_POOL = 12;   // concurrent tx lookups (batched by the transport anyway)
