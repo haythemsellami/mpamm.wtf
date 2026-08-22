@@ -1,4 +1,4 @@
-import { decodeAbiParameters, parseAbi } from 'viem';
+import { parseAbi } from 'viem';
 import type { Fill, Pair, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
 import { ASSETS, PAIRS, TOKENS } from '@shared';
 import { fromUnits, shortHex, toUnits } from '../util.js';
@@ -11,20 +11,20 @@ import { createQuoteOutageReporter } from './quote-health.js';
  * includes live spread, inventory skew, staleness and exact-token capacity,
  * so the adapter never ports or approximates the maker's private curve.
  *
- * FILLS COME FROM TWO EVENTS, AND THEY DISAGREE ABOUT WHOSE LEGS THEY NAME.
- * The proxy has always carried both — every implementation back to launch day
- * contains both topics — and they are opposite: `TakerTradeExecuted` (topic0
- * 0xb322b204…) indexes the POOL's legs, `MakerSwapExecuted` (0x4b70d42a…) the
- * taker's, so one trade reads with its two tokens in either order depending on
- * which fired. Essentially all real flow lands on TakerTradeExecuted;
- * MakerSwapExecuted fires rarely (single digits across the venue's life), and
- * this adapter filtered on THAT one alone — it was written against the single
- * such log that existed at the time (block 90,433,928). So the venue reported
- * $0 volume from its first day while quoting and burning keeper gas normally:
- * not a topic0 that drifted out from under us, but a fill path we never looked
- * at. Both are decoded now, through the one function that knows which ordering
- * is which, and `checkFillSilence` below watches for the asymmetry that hid
- * this.
+ * ONE PROXY, TWO BUSINESSES — AND ONLY ONE OF THEM IS THIS VENUE.
+ * The same contract also runs TAKERBOT's own taker side, which emits
+ * `TakerTradeExecuted` (topic0 0xb322b204…): tokenIn/amountIn are what the BOT
+ * pays into someone else's book, tokenOut/amountOut what it gets back. Those
+ * are the bot TAKING liquidity elsewhere, not this pAMM quoting a fill, so the
+ * volume behind them belongs to the venue that filled it. Counting them here
+ * books another venue's flow as ThogAMM's.
+ *
+ * The size of the temptation, over the venue's lifetime to 2026-08-21:
+ * 6,702 TakerTradeExecuted against 6 MakerSwapExecuted. So the fill filter
+ * below is deliberately MAKER-ONLY, and ThogAMM's honest number is that it
+ * makes almost no markets: near-$0 days are the finding, not a bug to fix.
+ * PR #82 mistook exactly this for ABI drift and had to be reverted — if you
+ * are here because the venue looks too quiet, that is the answer.
  */
 
 export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as const;
@@ -44,29 +44,7 @@ const thogammAbi = parseAbi([
   // eth_call. State mutability is not part of the selector.
   'function getTokens(bytes32 poolId) view returns (address[])',
   'function makerQuoteExactInput(address tokenIn, address tokenOut, uint256 amountIn) view returns (uint256 amountOut, uint256 lastPostedBlock)',
-  // The live fill event — where essentially all of this venue's flow lands.
-  // Its indexed legs are the POOL's, NOT the taker's: verified 2026-08-21
-  // against 11 consecutive fills, `poolPays` is the token leaving the pool and
-  // `poolReceives` the one entering it, each amount equal to the wei that
-  // moved in the same tx (ERC-20 Transfer, or a WMON Deposit when the taker
-  // paid native MON). That is the reverse of MakerSwapExecuted below, so the
-  // two can never share a decode path — see takerLegs().
-  // The trailing four words vary per fill and none of them could be pinned to
-  // a meaning against the unverified implementation, so they are named
-  // positionally rather than given a label this adapter cannot stand behind.
-  // Nothing reads them.
-  'event TakerTradeExecuted(address indexed poolPays, address indexed poolReceives, uint256 poolPaysAmount, uint256 poolReceivesAmount, uint256 word2, uint256 word3, uint256 word4, uint256 word5)',
-  // The legacy fill event: taker-perspective legs, and rare — single digits
-  // across the venue's lifetime against thousands on TakerTradeExecuted. Kept
-  // because those ARE real fills inside the backfill window, and because it is
-  // the regression guard on the reversed ordering above.
   'event MakerSwapExecuted(address indexed tokenIn, address indexed tokenOut, address indexed sender, address recipient, uint256 amountIn, uint256 amountOut, uint256 quoteAgeBlocks, uint256 inventoryPenaltyUsdWad)',
-  // A taker call the maker refused, carrying the raw revert data it caught
-  // ("taker: zero fill" in every sample). Tailed on the fill source so it
-  // costs no extra getLogs, and reported rather than dropped: it is quoted
-  // flow that did not land, which otherwise looks like a quiet venue.
-  // Only `reason` is read — the leg ordering here is untested.
-  'event TradeFailed(address indexed tokenA, address indexed tokenB, uint256 amount, bytes reason)',
   'event MakerPricesPushed(uint16 seq, uint32 indexed postedBlock, uint16 sideEnableBits)',
   'event MakerRiskParamsPushed(uint8 indexed fields)',
   'event Upgraded(address indexed implementation)',
@@ -144,57 +122,10 @@ export function indexThogammMarkets(markets: readonly ThogammMarket[]): Map<stri
   return out;
 }
 
-/** The two events that carry a ThogAMM fill. Everything else on the fill
- *  source (a refused taker) is telemetry, not volume. */
-export const THOGAMM_FILL_EVENTS: ReadonlySet<string> = new Set(['TakerTradeExecuted', 'MakerSwapExecuted']);
-
-/** One fill's legs in TAKER terms: `in` is always what the taker paid. */
-interface TakerLegs {
-  tokenIn: string;
-  tokenOut: string;
-  amountIn: bigint;
-  amountOut: bigint;
-  /** the event's own recipient, where it carries one (legacy event only). */
-  recipient?: string;
-}
-
 /**
- * Read one fill log in taker terms — the ONLY place that knows the two events
- * index their legs in opposite order (see the ABI above). Reversing this
- * silently inverts `side` on every fill while every amount still looks right,
- * so both orderings are pinned by a real recorded-log fixture test.
- */
-function takerLegs(eventName: string, args: any): TakerLegs | null {
-  try {
-    if (eventName === 'TakerTradeExecuted') {
-      // pool-indexed: what the pool receives is what the taker paid.
-      return {
-        tokenIn: String(args.poolReceives ?? ''),
-        tokenOut: String(args.poolPays ?? ''),
-        amountIn: BigInt(args.poolReceivesAmount),
-        amountOut: BigInt(args.poolPaysAmount),
-      };
-    }
-    if (eventName === 'MakerSwapExecuted') {
-      return {
-        tokenIn: String(args.tokenIn ?? ''),
-        tokenOut: String(args.tokenOut ?? ''),
-        amountIn: BigInt(args.amountIn),
-        amountOut: BigInt(args.amountOut),
-        recipient: String(args.recipient ?? '0x'),
-      };
-    }
-  } catch {
-    return null;  // a malformed amount is one bad log, not a held cursor
-  }
-  return null;
-}
-
-/**
- * Decode one real inventory transition, from either fill event. Malformed and
- * irrelevant logs are skipped locally; a crypto-quoted fill with no live USD
- * leg throws so the core holds the cursor rather than persisting a
- * zero-notional fill.
+ * Decode one real inventory transition. Malformed/irrelevant logs are skipped
+ * locally; a crypto-quoted fill with no live USD leg throws so the core holds
+ * the cursor rather than persisting a zero-notional fill.
  */
 export function decodeThogammSwap(
   log: any,
@@ -206,30 +137,30 @@ export function decodeThogammSwap(
   const txHash = String(log?.transactionHash ?? '');
   const logIndex = Number(log?.logIndex);
   if (String(log?.address ?? '').toLowerCase() !== THOGAMM_ADDRESS.toLowerCase()
+    || String(log?.eventName ?? '') !== 'MakerSwapExecuted'
     || !args || !/^0x[0-9a-fA-F]{64}$/.test(txHash)
     || !Number.isSafeInteger(logIndex) || logIndex < 0
     || log?.blockNumber === undefined) return null;
 
-  const legs = takerLegs(String(log?.eventName ?? ''), args);
-  if (!legs) return null;
-
-  let blockNumber: bigint;
+  let amountIn: bigint, amountOut: bigint, blockNumber: bigint;
   try {
+    amountIn = BigInt(args.amountIn);
+    amountOut = BigInt(args.amountOut);
     blockNumber = BigInt(log.blockNumber);
   } catch {
     return null;
   }
-  if (legs.amountIn <= 0n || legs.amountOut <= 0n || blockNumber <= 0n
+  if (amountIn <= 0n || amountOut <= 0n || blockNumber <= 0n
     || blockNumber > BigInt(Number.MAX_SAFE_INTEGER)) return null;
 
-  const tokenIn = legs.tokenIn.toLowerCase();
-  const tokenOut = legs.tokenOut.toLowerCase();
+  const tokenIn = String(args.tokenIn ?? '').toLowerCase();
+  const tokenOut = String(args.tokenOut ?? '').toLowerCase();
   const market = marketsByDirection.get(directionKey(tokenIn, tokenOut));
   if (!market) return null;
 
   const inputIsBase = tokenIn === market.base.address.toLowerCase();
-  const baseRaw = inputIsBase ? legs.amountIn : legs.amountOut;
-  const quoteRaw = inputIsBase ? legs.amountOut : legs.amountIn;
+  const baseRaw = inputIsBase ? amountIn : amountOut;
+  const quoteRaw = inputIsBase ? amountOut : amountIn;
   const baseAmount = fromUnits(baseRaw, market.base.decimals);
   const quoteAmount = fromUnits(quoteRaw, market.quote.decimals);
   if (baseAmount <= 0 || quoteAmount <= 0) return null;
@@ -249,9 +180,7 @@ export function decodeThogammSwap(
     baseAmount,
     execPx: quoteAmount / baseAmount,
     txHash,
-    // TakerTradeExecuted carries no address; attribution rewrites `to` to
-    // tx.from whenever its lookup lands, so this is only the fallback label.
-    to: shortHex(legs.recipient ?? '0x'),
+    to: shortHex(String(args.recipient ?? '0x')),
     pool: `thogamm ${THOGAMM_ADDRESS.slice(0, 10)}`,
     blockNumber: Number(blockNumber),
     ts,
@@ -275,31 +204,6 @@ interface PartialQuote {
   askPx?: number;
 }
 
-/** ThogAMM hands TradeFailed the raw revert data it caught from the taker
- *  call. Nearly always a plain Error(string); anything else is reported as its
- *  selector rather than guessed at. */
-export function thogammRejectReason(reason: unknown): string {
-  const hex = String(reason ?? '');
-  if (!/^0x([0-9a-fA-F]{2})*$/.test(hex)) return 'unreadable revert data';
-  if (hex === '0x') return 'no revert data';
-  if (!hex.startsWith('0x08c379a0')) return `custom error ${hex.slice(0, 10)}`;
-  try {
-    const [message] = decodeAbiParameters([{ type: 'string' }], `0x${hex.slice(10)}`);
-    return String(message);
-  } catch {
-    return `undecodable Error(string) payload`;
-  }
-}
-
-/** How long the fill filter may match NOTHING before that is itself reported.
- *  ~24h of 400ms blocks: this venue trades in bursts and routinely goes a few
- *  quiet hours, but a full day of silence from a maker that is still quoting
- *  is not quiet — it is the shape of an ABI that no longer matches the chain. */
-const FILL_SILENCE_BLOCKS = 216_000n;
-/** How recently the keeper must have posted prices for that silence to count
- *  as suspicious rather than explained (~1h; it normally posts every block). */
-const QUOTE_FRESH_BLOCKS = 9_000n;
-
 export function createThogammAdapter(): VenueAdapter {
   const byMarket = new Map<string, ThogammMarket>();
   let byDirection = new Map<string, ThogammMarket>();
@@ -308,43 +212,6 @@ export function createThogammAdapter(): VenueAdapter {
   // off: the keeper posts `sideEnableBits = 0` and every leg reverts
   // "maker: paused" (observed 2026-08-04 07:16:39 UTC, block 92,998,939).
   const reportOutage = createQuoteOutageReporter(THOGAMM_VENUE.name);
-
-  // Fill-silence alarm state. `watchFromBlock` is the head at first discovery:
-  // the historical backfill replays old ranges through decode() too, and a
-  // fill from three weeks ago must not read as "we are still landing fills".
-  let watchFromBlock = 0n;
-  let lastFillBlock = 0n;
-  // the newest block the maker's own quote view reports it posted prices at —
-  // the same keeper activity the gas metric bills, for free on a call we
-  // already make.
-  let quoteLiveAtBlock = 0n;
-  let fillsSilentReported = false;
-  let lastRejectReason: string | null = null;
-
-  /**
-   * The check that would have caught this adapter's blind spot in a day
-   * instead of a month: fills silent for a long window WHILE the venue is
-   * demonstrably still quoting. Either half alone is ordinary — a paused maker
-   * explains silence, and a live maker is allowed a quiet stretch — but the
-   * two together mean we are looking for the wrong thing on-chain.
-   *
-   * It notes rather than throws on purpose. A throw here holds the shared tail
-   * cursor for EVERY venue (datasource/live.ts skips the whole cycle when a
-   * required source fails), so failing closed on a suspicion would turn one
-   * venue's undercount into a total indexing stall.
-   */
-  const checkFillSilence = (ctx: AdapterContext, head: bigint) => {
-    const since = lastFillBlock > watchFromBlock ? lastFillBlock : watchFromBlock;
-    const silentFor = head > since ? head - since : 0n;
-    if (silentFor < FILL_SILENCE_BLOCKS) {
-      fillsSilentReported = false;
-      return;
-    }
-    if (quoteLiveAtBlock === 0n || head - quoteLiveAtBlock > QUOTE_FRESH_BLOCKS) return;
-    if (fillsSilentReported) return;
-    fillsSilentReported = true;
-    ctx.note('venue.fills.silent', `ThogAMM: no fill decoded in ${silentFor} blocks while its keeper is still posting quotes (last at block ${quoteLiveAtBlock}) — the fill event ABI has probably drifted from the live implementation`);
-  };
 
   const refresh = async (ctx: AdapterContext) => {
     const blockNumber = await ctx.client.getBlockNumber();
@@ -396,12 +263,6 @@ export function createThogammAdapter(): VenueAdapter {
     byDirection = indexThogammMarkets([...byMarket.values()]);
     discovered = true;
     ctx.note('venue.discovery', `ThogAMM: ${found.length} registered market(s) across ${addresses.length} on-chain token(s) at block ${blockNumber}`);
-
-    // Discovery is the adapter's only regular sight of the head, so the
-    // silence alarm rides on it (every 10 minutes — far finer than the day it
-    // measures).
-    if (watchFromBlock === 0n) watchFromBlock = blockNumber;
-    checkFillSilence(ctx, blockNumber);
   };
 
   return {
@@ -451,10 +312,7 @@ export function createThogammAdapter(): VenueAdapter {
         const result = results[i];
         if (result.status !== 'success') continue;
         const leg = legs[i];
-        const [amountOut, lastPostedBlock] = result.result as readonly [bigint, bigint];
-        // Captured before the size filter: a leg that quotes zero still proves
-        // the keeper is alive, which is exactly what checkFillSilence needs.
-        if (lastPostedBlock > quoteLiveAtBlock) quoteLiveAtBlock = lastPostedBlock;
+        const [amountOut] = result.result as readonly [bigint, bigint];
         if (amountOut <= 0n) continue;
         const input = fromUnits(leg.amountIn, leg.side === 'sell' ? leg.market.base.decimals : leg.market.quote.decimals);
         const output = fromUnits(amountOut, leg.side === 'sell' ? leg.market.quote.decimals : leg.market.base.decimals);
@@ -494,11 +352,10 @@ export function createThogammAdapter(): VenueAdapter {
 
     logSources() {
       return [
-        // One source, three events, ONE getLogs: same address, so the extra
-        // topics are free and decode() sorts them out by name. Filtering on a
-        // single event is what blinded this adapter — a second fill path was
-        // right there in the same log stream, one topic away.
-        { key: 'trades', address: THOGAMM_ADDRESS, events: [event('TakerTradeExecuted'), event('MakerSwapExecuted'), event('TradeFailed')], kind: 'fills' as const },
+        // MAKER-ONLY, deliberately: the proxy's TakerTradeExecuted logs are
+        // TAKERBOT taking liquidity on other venues, not fills this pAMM made
+        // (see the header). Adding them here is the PR #82 mistake.
+        { key: 'swaps', address: THOGAMM_ADDRESS, events: [event('MakerSwapExecuted')], kind: 'fills' as const },
         // A proxy upgrade can change the immutable token registry. Holding the
         // cursor on this source lets decode refresh before accepting same-range
         // fills instead of silently dropping a newly registered token.
@@ -529,10 +386,6 @@ export function createThogammAdapter(): VenueAdapter {
         // exactly like a quiet venue (the Hanji FastQuoter failure mode).
         // So announce every upgrade in state.notes — one note per new
         // implementation — as the cue to re-verify the ABIs.
-        // The blind spot this adapter actually shipped with was NOT a shifted
-        // topic0, though: the fills were on a second event that had been in
-        // the implementation all along. An upgrade note only prompts a human;
-        // checkFillSilence is what notices when nobody acts on one.
         for (const log of upgrades) {
           const impl = String(log?.args?.implementation ?? '');
           const label = /^0x[0-9a-fA-F]{40}$/.test(impl) ? shortHex(impl) : 'an unreadable implementation';
@@ -548,26 +401,11 @@ export function createThogammAdapter(): VenueAdapter {
       // Hold the cursor instead — conditionally, as Clober does, so an
       // undiscovered ThogAMM never stalls the shared tail over ranges that
       // carry nothing of ours.
-      const trades = logs.trades ?? [];
-      // Only a real FILL log may hold the cursor: a lone TradeFailed carries
-      // nothing discovery could decode, so holding on it would stall the tail
-      // over a range that has nothing of ours in it.
-      const fillLogs = trades.filter((log: any) => THOGAMM_FILL_EVENTS.has(String(log?.eventName ?? '')));
-      if (!discovered && fillLogs.length > 0) {
+      if (!discovered && (logs.swaps?.length ?? 0) > 0) {
         throw new Error('ThogAMM discovery unavailable');
       }
-      // Refused takers are reported once per distinct reason, the same shape
-      // quote-health.ts uses: the reason is the signal, and repeating it per
-      // occurrence would bury the rest of the notes window.
-      for (const log of trades) {
-        if (String(log?.eventName ?? '') !== 'TradeFailed') continue;
-        const reason = thogammRejectReason(log?.args?.reason);
-        if (reason === lastRejectReason) continue;
-        lastRejectReason = reason;
-        ctx.note('venue.fills.rejected', `ThogAMM: a taker fill reverted on-chain with "${reason}" — quoted flow that did not land`);
-      }
       const out: Fill[] = [];
-      for (const log of fillLogs) {
+      for (const log of logs.swaps ?? []) {
         let blockNumber: bigint;
         try {
           blockNumber = BigInt(log?.blockNumber);
@@ -581,10 +419,7 @@ export function createThogammAdapter(): VenueAdapter {
           tsOf(blockNumber),
           (tokenKey, amount) => ctx.pricer.usdForToken(tokenKey, amount),
         );
-        if (!fill) continue;
-        out.push(fill);
-        // feeds the silence alarm — a decoded fill is the proof it looks for.
-        if (blockNumber > lastFillBlock) lastFillBlock = blockNumber;
+        if (fill) out.push(fill);
       }
       return out;
     },
