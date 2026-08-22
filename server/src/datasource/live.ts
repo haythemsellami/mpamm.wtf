@@ -283,6 +283,36 @@ export function purgeVenueDays(days: DailyVolume[], vid: string, volume: ResetDe
   }
 }
 
+/**
+ * One-time adoption of the legacy reset marker.
+ *
+ * A single global key used to record the applied VALUE. Per-venue keys are
+ * authoritative now, so the first boot on this code has none — and without
+ * adoption every entry of a value that was ALREADY applied would run again.
+ * For a destructive replay that makes upgrading the binary itself a reset,
+ * which is the worst possible surprise from a deploy that changed no config.
+ *
+ * Gated by its own flag rather than by the legacy key, because the legacy key
+ * keeps being written as a rollback breadcrumb: re-reading it every boot would
+ * re-adopt the current value and stamp entries that had legitimately deferred.
+ *
+ * A value that was only PARTLY applied under the old code adopts as fully
+ * applied. That is what the old marker already meant — the unapplied entry was
+ * lost then too — so adoption preserves the status quo rather than repairing
+ * it, and a re-run is one value change away.
+ */
+export function adoptLegacyResetMarker(
+  store: Pick<VolumeStore, 'getMeta' | 'setMeta'>,
+  want: string,
+  vids: readonly string[],
+): void {
+  if (store.getMeta('backfill_reset_migrated') === '1') return;
+  if (store.getMeta('backfill_reset_applied') === want) {
+    for (const vid of vids) if (vid) store.setMeta(`backfill_reset_applied_${vid}`, want);
+  }
+  store.setMeta('backfill_reset_migrated', '1');
+}
+
 export function resetVenueHistory(
   store: Pick<VolumeStore, 'setMeta' | 'deleteMetaPrefix' | 'resetVenueVolume'>,
   vid: string,
@@ -836,11 +866,25 @@ export class LiveDataSource extends BaseSource {
    */
   private async applyBackfillReset(): Promise<void> {
     const want = config.backfillReset.trim();
-    if (!want || this.store.getMeta('backfill_reset_applied') === want) return;
+    if (!want) return;
+    const targets = parseBackfillReset(want);
+    adoptLegacyResetMarker(this.store, want, targets.map((t) => t.vid));
+
     const applied: string[] = [];
-    for (const t of parseBackfillReset(want)) {
+    for (const t of targets) {
+      // One-shot PER VENUE, not per value. A global marker could not record
+      // that one entry deferred: retrying it meant re-running the entries that
+      // had succeeded, throwing away replays already hours deep.
+      const marker = t.vid ? `backfill_reset_applied_${t.vid}` : '';
+      if (marker && this.store.getMeta(marker) === want) continue;
+      // Stamped only once an entry is FINISHED — done, or refused for a reason
+      // that will still hold next boot. A transient failure leaves it unstamped
+      // so this entry, and only this entry, is retried.
+      const settle = () => { if (marker) this.store.setMeta(marker, want); };
+
       if (t.from === 'invalid') {
         this.note('backfill.config.invalid', `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
+        settle();
         continue;
       }
       // A start that is not in the past is IGNORED by both resume checks
@@ -850,6 +894,7 @@ export class LiveDataSource extends BaseSource {
       const refusal = refuseResetStart(t, utcDay(), this.bootHead);
       if (refusal) {
         this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${refusal}`);
+        settle();
         continue;
       }
       // An unregistered id would delete nothing and re-scan nothing while
@@ -858,6 +903,7 @@ export class LiveDataSource extends BaseSource {
       const adapter = ADAPTERS.find((a) => a.venues().some((v) => v.id === t.vid));
       if (!adapter) {
         this.note('backfill.config.invalid', `backfill reset: no adapter declares venue '${t.vid}' — skipped`);
+        settle();
         continue;
       }
       // A targeted replay needs BOTH ends of its start: the block the cursors
@@ -869,14 +915,17 @@ export class LiveDataSource extends BaseSource {
           const b = await publicClient.getBlock({ blockNumber: t.block });
           from = { block: t.block, day: utcDay(Number(b.timestamp) * 1000) };
         } catch (e) {
-          this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve block ${t.block} to a day (${(e as Error).message}); left untouched`);
+          // no settle(): a resolve that failed on the RPC may well succeed on
+          // the next boot, and consuming the reset would strand it silently.
+          this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve block ${t.block} to a day (${(e as Error).message}); retried next boot`);
           continue;
         }
       }
       if (t.from === 'day') {
         try { from = { block: await blockAtOrAfter(Math.floor(Date.parse(`${t.day}T00:00:00Z`) / 1000), this.bootHead), day: t.day }; }
         catch (e) {
-          this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve ${t.day} to a block (${(e as Error).message}); left untouched`);
+          // no settle(): transient, same as the block form above.
+          this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve ${t.day} to a block (${(e as Error).message}); retried next boot`);
           continue;
         }
       }
@@ -885,6 +934,7 @@ export class LiveDataSource extends BaseSource {
       // the future days that used to reach here.
       if (from !== undefined && this.bootHead > 0n && from.block > this.bootHead) {
         this.note('backfill.config.invalid', `backfill reset: ${t.vid} start ${from.block} is past head ${this.bootHead} — skipped rather than replaying the lifetime`);
+        settle();
         continue;
       }
       // Delete only what the two scans will actually rebuild — and nothing at
@@ -898,12 +948,15 @@ export class LiveDataSource extends BaseSource {
       });
       const dropped = resetVenueHistory(this.store, t.vid, { from, deletes });
       purgeVenueDays(this.days, t.vid, deletes.volume);
+      settle();
       // Say what was DESTROYED, not just what will be re-scanned: this is a
       // one-shot operation with no undo, and the counts are the only record.
       const scope = from === undefined ? 'lifetime' : `from block ${from.block} (${from.day} onward)`;
       applied.push(`${t.vid} ${scope} — dropped ${dropped.volume} day-row(s), ${dropped.fills} fill(s)`);
     }
-    // marker stores the RAW value, so a bad entry is not silently retried forever
+    // Legacy breadcrumb, written for ROLLBACK only: older builds read this key
+    // and would re-run the whole value without it. Nothing here reads it after
+    // adoptLegacyResetMarker has run once.
     this.store.setMeta('backfill_reset_applied', want);
     if (applied.length) this.note('backfill.reset', `backfill reset applied (${want}) — ${applied.join('; ')}`);
   }

@@ -7,7 +7,7 @@
 // depends on how long ago onboarding ran, which is exactly the kind of
 // non-determinism a reset must not have.
 import { describe, expect, it } from 'vitest';
-import { fillsScanFromDay, parseBackfillReset, planVenueReset, purgeVenueDays, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
+import { adoptLegacyResetMarker, fillsScanFromDay, parseBackfillReset, planVenueReset, purgeVenueDays, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
 import type { DailyVolume } from '@shared';
 import type { ResetDeletes } from '../db.js';
 
@@ -18,6 +18,7 @@ function fakeStore(seed: Record<string, string> = {}, rows: Record<string, numbe
   const out = {
     meta,
     volume,
+    getMeta: (k: string) => meta.get(k),
     setMeta: (k: string, v: string) => { meta.set(k, v); },
     deleteMetaPrefix: (p: string) => { for (const k of [...meta.keys()]) if (k.startsWith(p)) meta.delete(k); },
     scoped: [] as Array<{ vid: string; deletes: ResetDeletes }>,
@@ -188,6 +189,50 @@ describe('refuseResetStart', () => {
  * two tables need two windows because their scans cover different spans: the
  * volume backfill replays a lifetime, the fills onboarding only its window.
  */
+/**
+ * The upgrade trap. A single global key used to record the applied VALUE, so
+ * the first boot on per-venue markers has none of them — and every entry of an
+ * ALREADY-APPLIED value would run again. For a destructive replay that turns
+ * deploying a binary into a reset nobody asked for.
+ */
+describe('adoptLegacyResetMarker', () => {
+  it('adopts an already-applied value, so upgrading is not itself a reset', () => {
+    const s = fakeStore({ backfill_reset_applied: 'thogamm@4,poe' });
+    adoptLegacyResetMarker(s, 'thogamm@4,poe', ['thogamm', 'poe']);
+    expect(s.meta.get('backfill_reset_applied_thogamm')).toBe('thogamm@4,poe');
+    expect(s.meta.get('backfill_reset_applied_poe')).toBe('thogamm@4,poe');
+  });
+
+  it('adopts nothing when the value CHANGED — that reset is meant to run', () => {
+    const s = fakeStore({ backfill_reset_applied: 'thogamm@4' });
+    adoptLegacyResetMarker(s, 'thogamm@5', ['thogamm']);
+    expect(s.meta.get('backfill_reset_applied_thogamm')).toBeUndefined();
+  });
+
+  it('runs once — a later boot must not re-adopt over a deferred entry', () => {
+    // the legacy key keeps being written as a rollback breadcrumb, so without
+    // its own flag this would re-stamp entries that legitimately deferred.
+    const s = fakeStore({ backfill_reset_applied: 'thogamm@5' });
+    adoptLegacyResetMarker(s, 'thogamm@5', ['thogamm']);
+    s.meta.delete('backfill_reset_applied_thogamm');          // entry deferred on a transient failure
+    adoptLegacyResetMarker(s, 'thogamm@5', ['thogamm']);
+    expect(s.meta.get('backfill_reset_applied_thogamm')).toBeUndefined();
+  });
+
+  it('marks itself migrated even with nothing to adopt, so a fresh database is quiet', () => {
+    const s = fakeStore();
+    adoptLegacyResetMarker(s, 'thogamm@4', ['thogamm']);
+    expect(s.meta.get('backfill_reset_migrated')).toBe('1');
+    expect(s.meta.get('backfill_reset_applied_thogamm')).toBeUndefined();
+  });
+
+  it('skips an entry with no parseable venue id', () => {
+    const s = fakeStore({ backfill_reset_applied: 'x' });
+    adoptLegacyResetMarker(s, 'x', ['']);
+    expect([...s.meta.keys()].some((k) => k.startsWith('backfill_reset_applied_'))).toBe(false);
+  });
+});
+
 describe('planVenueReset', () => {
   const WINDOW = '2026-07-23';       // where the fills scan starts
 
