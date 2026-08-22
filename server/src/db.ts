@@ -56,6 +56,20 @@ const nullMarkouts = (): (number | null)[] => MARKOUT_HORIZONS.map(() => null);
 /** one persisted point of a pair's CEX mid curve (pair terms). */
 export interface MidPoint { ts: number; market: string; mid: number }
 
+/**
+ * Which rows a venue reset may delete. An omitted key leaves that table
+ * untouched — used when the scan that would restore it is disabled, where
+ * deleting would destroy history nothing puts back.
+ *
+ * `volume.fromDay` omitted = every day (a lifetime replay re-scans them all).
+ * `fills` is keyed by whichever boundary the fills scan will actually resume
+ * on: its exact block for a targeted replay, else the first ms of its window.
+ */
+export interface ResetDeletes {
+  volume?: { fromDay?: string };
+  fills?: { fromBlock: bigint } | { fromDay: string };
+}
+
 export class VolumeStore {
   private db: DatabaseSync;
   private dayStmt: Stmt;
@@ -238,42 +252,43 @@ export class VolumeStore {
   }
 
   /**
-   * Drop every stored row for ONE venue: its daily volume and its fills.
+   * Drop stored rows for ONE venue so a BACKFILL_RESET is a true replay.
    *
-   * This is what makes BACKFILL_RESET mean "replay from scratch" rather than
-   * "replay and merge". The backfill only writes days it decoded fills in
-   * (mergeBackfill iterates its accumulator), so without this a re-scan can
-   * only ever RAISE a venue's history — a day that used to have volume and now
-   * decodes to nothing keeps its old number forever. That is invisible while
-   * resets are used to recover MISSED volume, and silently wrong the first time
-   * one is used to remove volume that should never have been counted
-   * (ThogAMM, PR #82/#83: 15 days and ~$4.97M would have survived the reset).
+   * Without this a reset can only ever RAISE a venue's history: the backfill
+   * writes only the days it decoded fills in (mergeBackfill iterates its
+   * accumulator), so a day that used to have volume and now decodes to nothing
+   * keeps its old number forever.
    *
-   * `from` SCOPES the delete to what the replay will actually restore, and the
-   * two halves have different boundaries because their scans do:
-   *   - volume resumes DAY-ALIGNED (backfillOnchain re-scans the whole day its
-   *     cursor lands in), so days from `from.day` onward are rewritten.
-   *   - fills resume at the exact block, id-deduped and never day-aligned
-   *     (backfillRecentFills), so `from.block` onward is re-inserted.
-   * Omitting `from` is a lifetime replay and deletes everything. Deleting wider
-   * than the replay restores is silent data loss: a targeted reset would drop
-   * the venue's pre-window history for good.
+   * The two tables are scoped SEPARATELY because their scans are. Deleting
+   * wider than the scan restores is silent data loss, so an omitted key means
+   * "leave this table alone" — which is the honest answer when the stage that
+   * would refill it is switched off. See planVenueReset(), which is the only
+   * thing that should build this.
    *
-   * Gas is deliberately untouched — it accrues from its own sources and has its
-   * own resetGas()/resetGasFrom(). One transaction, so a crash cannot leave the
-   * volume dropped and the fills behind.
+   * Gas is never touched: it accrues from its own sources and has resetGas().
+   * One transaction, so a crash cannot drop the volume and keep the fills.
    */
-  resetVenueVolume(venueId: string, from?: { block: bigint; day: string }): { volume: number; fills: number } {
+  resetVenueVolume(venueId: string, deletes: ResetDeletes): { volume: number; fills: number } {
     this.db.exec('BEGIN');
     try {
-      const v = from === undefined
-        ? this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ?`).run(venueId)
-        : this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day >= ?`).run(venueId, from.day);
-      const f = from === undefined
-        ? this.db.prepare(`DELETE FROM fills WHERE venue_id = ?`).run(venueId)
-        : this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND block_number >= ?`).run(venueId, Number(from.block));
+      let volume = 0, fills = 0;
+      if (deletes.volume) {
+        const { fromDay } = deletes.volume;
+        volume = Number((fromDay === undefined
+          ? this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ?`).run(venueId)
+          : this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day >= ?`).run(venueId, fromDay)).changes);
+      }
+      if (deletes.fills) {
+        // fills carry both a block and a timestamp; the scan's resume point is
+        // a BLOCK for a targeted replay and a DAY boundary otherwise, so each
+        // is matched on its own terms rather than converted (which would need
+        // an RPC round-trip to stay exact).
+        fills = Number(('fromBlock' in deletes.fills
+          ? this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND block_number >= ?`).run(venueId, Number(deletes.fills.fromBlock))
+          : this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND ts >= ?`).run(venueId, Date.parse(`${deletes.fills.fromDay}T00:00:00Z`))).changes);
+      }
       this.db.exec('COMMIT');
-      return { volume: Number(v.changes), fills: Number(f.changes) };
+      return { volume, fills };
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
