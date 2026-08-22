@@ -7,7 +7,7 @@
 // depends on how long ago onboarding ran, which is exactly the kind of
 // non-determinism a reset must not have.
 import { describe, expect, it } from 'vitest';
-import { parseBackfillReset, resetVenueHistory } from '../datasource/live.js';
+import { parseBackfillReset, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
 
 /** records what a reset touched, without a real SQLite file. */
 function fakeStore(seed: Record<string, string> = {}, rows: Record<string, number> = {}) {
@@ -142,6 +142,42 @@ describe('parseBackfillReset', () => {
   it('one bad entry does not take the good ones down with it', () => {
     const out = parseBackfillReset('metric:2026-08-14,poe:oops,hanji');
     expect(out.map((t) => t.from)).toEqual(['day', 'invalid', 'lifetime']);
+  });
+});
+
+/**
+ * A future start does not fail loudly on its own (Copilot review, PR #84).
+ * blockAtOrAfter converges to `hi` for a timestamp past the chain head, so a
+ * `vid:<future-day>` reset resolves to bootHead, slips a `> bootHead` test
+ * because it EQUALS head, and is reported as applied while clearing nothing
+ * and re-scanning nothing — spending the one-shot marker on a typo.
+ */
+describe('refuseResetStart', () => {
+  const TODAY = '2026-08-22';
+  const HEAD = 98_000_000n;
+
+  it('refuses a future DAY, which would otherwise resolve to head', () => {
+    expect(refuseResetStart({ vid: 'm', from: 'day', day: '2026-08-23' }, TODAY, HEAD))
+      .toMatch(/is in the future .*today is 2026-08-22/);
+  });
+
+  it('refuses a block past head before any RPC is spent on it', () => {
+    expect(refuseResetStart({ vid: 'm', from: 'block', block: HEAD + 1n }, TODAY, HEAD))
+      .toMatch(/past head/);
+  });
+
+  it('accepts today, the past, and a block at head', () => {
+    expect(refuseResetStart({ vid: 'm', from: 'day', day: TODAY }, TODAY, HEAD)).toBeNull();
+    expect(refuseResetStart({ vid: 'm', from: 'day', day: '2026-01-01' }, TODAY, HEAD)).toBeNull();
+    expect(refuseResetStart({ vid: 'm', from: 'block', block: HEAD }, TODAY, HEAD)).toBeNull();
+  });
+
+  it('never refuses a lifetime replay — it has no start to be wrong about', () => {
+    expect(refuseResetStart({ vid: 'm', from: 'lifetime' }, TODAY, HEAD)).toBeNull();
+  });
+
+  it('holds its fire before the head is known, so boot order cannot refuse a valid reset', () => {
+    expect(refuseResetStart({ vid: 'm', from: 'block', block: 99_000_000n }, TODAY, 0n)).toBeNull();
   });
 });
 

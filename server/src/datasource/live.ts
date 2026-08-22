@@ -260,6 +260,31 @@ export type BackfillResetTarget =
   | { vid: string; from: 'invalid'; spec: string };
 
 /**
+ * Why a reset start cannot be applied, or null when it can — everything
+ * knowable WITHOUT touching the chain.
+ *
+ * A start in the future does not fail loudly on its own; each form quietly
+ * becomes head-anchored instead. `eth_getBlock` on a block that does not exist
+ * yet throws, which reports an operator typo as an RPC fault. And
+ * `blockAtOrAfter` converges to `hi` for a future day (chain/rpc.ts), so a
+ * `block > bootHead` test waves it through — the block EQUALS head rather than
+ * exceeding it. Either way the reset is reported as applied while it clears
+ * nothing and re-scans nothing, and the one-shot marker is spent on it.
+ *
+ * Checked before resolving so the refusal names the real mistake, and so a
+ * typo costs no RPC.
+ */
+export function refuseResetStart(t: BackfillResetTarget, today: string, bootHead: bigint): string | null {
+  if (t.from === 'block' && bootHead > 0n && t.block > bootHead) {
+    return `start ${t.block} is past head ${bootHead} — skipped rather than replaying the lifetime`;
+  }
+  if (t.from === 'day' && t.day > today) {
+    return `start ${t.day} is in the future (today is ${today}) — skipped rather than anchoring the replay to head`;
+  }
+  return null;
+}
+
+/**
  * BACKFILL_RESET grammar: `vid[:from][@nonce]`, comma-separated.
  *
  *   metric                  replay the venue's whole lifetime (the original form)
@@ -750,15 +775,13 @@ export class LiveDataSource extends BaseSource {
         this.note('backfill.config.invalid', `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
         continue;
       }
-      // A start past head is IGNORED by both resume checks (`cb <= end + 1n`),
-      // which would quietly downgrade a targeted replay into a lifetime one.
-      // Refuse instead of doing something other than what was asked. A RAW
-      // block is checked here, before its day is resolved: eth_getBlock on a
-      // block that does not exist yet just throws, which would report a typo'd
-      // start as an RPC problem and bury the actual mistake.
-      const pastHead = (b: bigint) => this.bootHead > 0n && b > this.bootHead;
-      if (t.from === 'block' && pastHead(t.block)) {
-        this.note('backfill.config.invalid', `backfill reset: ${t.vid} start ${t.block} is past head ${this.bootHead} — skipped rather than replaying the lifetime`);
+      // A start that is not in the past is IGNORED by both resume checks
+      // (`cb <= end + 1n`), which would quietly downgrade a targeted replay
+      // into a head-anchored one. Refuse instead of doing something other than
+      // what was asked — see refuseResetStart for why neither form self-reports.
+      const refusal = refuseResetStart(t, utcDay(), this.bootHead);
+      if (refusal) {
+        this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${refusal}`);
         continue;
       }
       // A targeted replay needs BOTH ends of its start: the block the cursors
@@ -781,9 +804,10 @@ export class LiveDataSource extends BaseSource {
           continue;
         }
       }
-      // The same guard for a DAY start, whose block only exists after the
-      // resolve above (blockAtOrAfter converges to `hi` for a future day).
-      if (from !== undefined && pastHead(from.block)) {
+      // Backstop for a resolve that still lands past head (clock skew between
+      // the day boundary and the node). refuseResetStart already turned away
+      // the future days that used to reach here.
+      if (from !== undefined && this.bootHead > 0n && from.block > this.bootHead) {
         this.note('backfill.config.invalid', `backfill reset: ${t.vid} start ${from.block} is past head ${this.bootHead} — skipped rather than replaying the lifetime`);
         continue;
       }
