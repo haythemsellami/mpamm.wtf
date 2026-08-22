@@ -13,17 +13,20 @@ import { parseBackfillReset, resetVenueHistory } from '../datasource/live.js';
 function fakeStore(seed: Record<string, string> = {}, rows: Record<string, number> = {}) {
   const meta = new Map(Object.entries(seed));
   const volume = new Map(Object.entries(rows));   // venueId -> stored day-rows
-  return {
+  const out = {
     meta,
     volume,
     setMeta: (k: string, v: string) => { meta.set(k, v); },
     deleteMetaPrefix: (p: string) => { for (const k of [...meta.keys()]) if (k.startsWith(p)) meta.delete(k); },
-    resetVenueVolume: (vid: string) => {
+    scoped: [] as Array<{ vid: string; from?: { block: bigint; day: string } }>,
+    resetVenueVolume: (vid: string, from?: { block: bigint; day: string }) => {
+      out.scoped.push({ vid, from });
       const n = volume.get(vid) ?? 0;
-      volume.delete(vid);
+      if (from === undefined) volume.delete(vid);   // lifetime: everything goes
       return { volume: n, fills: n };
     },
   };
+  return out;
 }
 
 const seeded = (vid: string) => ({
@@ -73,9 +76,22 @@ describe('resetVenueHistory', () => {
     expect(s.volume.get('poe')).toBe(9);          // other venues keep their history
   });
 
-  it('drops the rows for a TARGETED replay too — a stale day is stale either way', () => {
+  /**
+   * The other half of the same edge (Copilot review, PR #84). A targeted replay
+   * only re-scans from its start, so deleting the venue's WHOLE history would
+   * drop pre-window days nothing ever restores. The delete must be scoped to
+   * exactly what comes back.
+   */
+  it('scopes a TARGETED replay to its window instead of wiping the lifetime', () => {
     const s = fakeStore(seeded('metric'), { metric: 20 });
-    resetVenueHistory(s, 'metric', 95_000_000n);
+    resetVenueHistory(s, 'metric', { block: 95_000_000n, day: '2026-08-14' });
+    expect(s.scoped).toEqual([{ vid: 'metric', from: { block: 95_000_000n, day: '2026-08-14' } }]);
+  });
+
+  it('passes no scope for a lifetime replay, so everything is dropped', () => {
+    const s = fakeStore(seeded('metric'), { metric: 20 });
+    resetVenueHistory(s, 'metric');
+    expect(s.scoped).toEqual([{ vid: 'metric', from: undefined }]);
     expect(s.volume.has('metric')).toBe(false);
   });
 
@@ -132,7 +148,7 @@ describe('parseBackfillReset', () => {
 describe('resetVenueHistory — targeted', () => {
   it('SETS both cursors to the start block instead of clearing them', () => {
     const s = fakeStore(seeded('metric'));
-    resetVenueHistory(s, 'metric', 95836845n);
+    resetVenueHistory(s, 'metric', { block: 95836845n, day: '2026-08-14' });
     expect(s.meta.get('backfill_done_metric')).toBe('');      // re-armed
     expect(s.meta.get('mkfill_done_metric')).toBe('');
     expect(s.meta.get('backfill_cursor_metric')).toBe('95836845');
@@ -141,7 +157,7 @@ describe('resetVenueHistory — targeted', () => {
 
   it('still drops the markout walk cursors, which are days not blocks', () => {
     const s = fakeStore(seeded('metric'));
-    resetVenueHistory(s, 'metric', 95836845n);
+    resetVenueHistory(s, 'metric', { block: 95836845n, day: '2026-08-14' });
     expect([...s.meta.keys()].filter((k) => k.startsWith('mkhist_cursor_metric_'))).toEqual([]);
   });
 

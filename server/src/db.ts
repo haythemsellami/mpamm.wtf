@@ -249,15 +249,29 @@ export class VolumeStore {
    * one is used to remove volume that should never have been counted
    * (ThogAMM, PR #82/#83: 15 days and ~$4.97M would have survived the reset).
    *
+   * `from` SCOPES the delete to what the replay will actually restore, and the
+   * two halves have different boundaries because their scans do:
+   *   - volume resumes DAY-ALIGNED (backfillOnchain re-scans the whole day its
+   *     cursor lands in), so days from `from.day` onward are rewritten.
+   *   - fills resume at the exact block, id-deduped and never day-aligned
+   *     (backfillRecentFills), so `from.block` onward is re-inserted.
+   * Omitting `from` is a lifetime replay and deletes everything. Deleting wider
+   * than the replay restores is silent data loss: a targeted reset would drop
+   * the venue's pre-window history for good.
+   *
    * Gas is deliberately untouched — it accrues from its own sources and has its
    * own resetGas()/resetGasFrom(). One transaction, so a crash cannot leave the
    * volume dropped and the fills behind.
    */
-  resetVenueVolume(venueId: string): { volume: number; fills: number } {
+  resetVenueVolume(venueId: string, from?: { block: bigint; day: string }): { volume: number; fills: number } {
     this.db.exec('BEGIN');
     try {
-      const v = this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ?`).run(venueId);
-      const f = this.db.prepare(`DELETE FROM fills WHERE venue_id = ?`).run(venueId);
+      const v = from === undefined
+        ? this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ?`).run(venueId)
+        : this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day >= ?`).run(venueId, from.day);
+      const f = from === undefined
+        ? this.db.prepare(`DELETE FROM fills WHERE venue_id = ?`).run(venueId)
+        : this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND block_number >= ?`).run(venueId, Number(from.block));
       this.db.exec('COMMIT');
       return { volume: Number(v.changes), fills: Number(f.changes) };
     } catch (e) {

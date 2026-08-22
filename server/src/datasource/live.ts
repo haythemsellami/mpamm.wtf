@@ -223,19 +223,23 @@ export function checkGapFill(
 export function resetVenueHistory(
   store: Pick<VolumeStore, 'setMeta' | 'deleteMetaPrefix' | 'resetVenueVolume'>,
   vid: string,
-  /** resume point; omitted = replay the venue's whole lifetime. */
-  fromBlock?: bigint,
+  /** resume point AND the UTC day it falls in; omitted = replay the whole
+   *  lifetime. Both travel together because the delete below needs the day and
+   *  the cursors need the block — one without the other is a scoping bug. */
+  from?: { block: bigint; day: string },
 ): void {
   // Drop what the venue already has BEFORE re-scanning. mergeBackfill only
   // writes days it decoded fills in, so a merge-only reset can raise a venue's
   // history but never lower it: any day that stops producing fills keeps its
   // stale number. Clearing first is what makes a reset a true replay.
+  // Scoped to `from`, never wider: the replay only restores what it re-scans,
+  // so deleting past its start would drop pre-window history permanently.
   // NOTE: this is why the reset is one-shot per value — it is destructive, and
   // the re-scan is what puts the history back.
-  store.resetVenueVolume(vid);
+  store.resetVenueVolume(vid, from);
   // Both crawls resume from their cursor (`if (cb > from) from = cb`), so SETTING
   // it is how a replay is targeted and CLEARING it is how a replay is made total.
-  const cursor = fromBlock === undefined ? '' : String(fromBlock);
+  const cursor = from === undefined ? '' : String(from.block);
   store.setMeta(`backfill_done_${vid}`, '');
   store.setMeta(`backfill_cursor_${vid}`, cursor);
   store.setMeta(`mkfill_done_${vid}`, '');
@@ -746,10 +750,21 @@ export class LiveDataSource extends BaseSource {
         this.note('backfill.config.invalid', `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
         continue;
       }
-      let block: bigint | undefined;
-      if (t.from === 'block') block = t.block;
+      // A targeted replay needs BOTH ends of its start: the block the cursors
+      // resume at, and the day the volume delete is scoped to (the volume scan
+      // day-aligns, so it restores from that day's start).
+      let from: { block: bigint; day: string } | undefined;
+      if (t.from === 'block') {
+        try {
+          const b = await publicClient.getBlock({ blockNumber: t.block });
+          from = { block: t.block, day: utcDay(Number(b.timestamp) * 1000) };
+        } catch (e) {
+          this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve block ${t.block} to a day (${(e as Error).message}); left untouched`);
+          continue;
+        }
+      }
       if (t.from === 'day') {
-        try { block = await blockAtOrAfter(Math.floor(Date.parse(`${t.day}T00:00:00Z`) / 1000), this.bootHead); }
+        try { from = { block: await blockAtOrAfter(Math.floor(Date.parse(`${t.day}T00:00:00Z`) / 1000), this.bootHead), day: t.day }; }
         catch (e) {
           this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve ${t.day} to a block (${(e as Error).message}); left untouched`);
           continue;
@@ -758,16 +773,18 @@ export class LiveDataSource extends BaseSource {
       // A start past head is IGNORED by both resume checks (`cb <= end + 1n`),
       // which would quietly downgrade a targeted replay into a lifetime one.
       // Refuse instead of doing something other than what was asked.
-      if (block !== undefined && this.bootHead > 0n && block > this.bootHead) {
-        this.note('backfill.config.invalid', `backfill reset: ${t.vid} start ${block} is past head ${this.bootHead} — skipped rather than replaying the lifetime`);
+      if (from !== undefined && this.bootHead > 0n && from.block > this.bootHead) {
+        this.note('backfill.config.invalid', `backfill reset: ${t.vid} start ${from.block} is past head ${this.bootHead} — skipped rather than replaying the lifetime`);
         continue;
       }
-      resetVenueHistory(this.store, t.vid, block);
+      resetVenueHistory(this.store, t.vid, from);
       // The store is not the only copy: `this.days` is the in-memory mirror the
       // snapshot writes back, so a row deleted only in SQLite returns on the
-      // next persist. `byVenue` absent = 0 for that day (@shared: DailyVolume).
-      for (const d of this.days) delete d.byVenue[t.vid];
-      applied.push(block === undefined ? `${t.vid} (lifetime)` : `${t.vid} from block ${block}`);
+      // next persist. Scoped exactly like the delete — erasing a pre-window day
+      // here would persist that zero over history the replay never revisits.
+      // `byVenue` absent = 0 for that day (@shared: DailyVolume).
+      for (const d of this.days) if (from === undefined || d.utcDay >= from.day) delete d.byVenue[t.vid];
+      applied.push(from === undefined ? `${t.vid} (lifetime)` : `${t.vid} from block ${from.block} (${t.from === 'day' ? 'day' : 'block'} start, clearing ${from.day} onward)`);
     }
     // marker stores the RAW value, so a bad entry is not silently retried forever
     this.store.setMeta('backfill_reset_applied', want);
