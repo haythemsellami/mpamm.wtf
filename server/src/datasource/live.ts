@@ -221,11 +221,18 @@ export function checkGapFill(
  * is a reset that reports success and recovers nothing.
  */
 export function resetVenueHistory(
-  store: Pick<VolumeStore, 'setMeta' | 'deleteMetaPrefix'>,
+  store: Pick<VolumeStore, 'setMeta' | 'deleteMetaPrefix' | 'resetVenueVolume'>,
   vid: string,
   /** resume point; omitted = replay the venue's whole lifetime. */
   fromBlock?: bigint,
 ): void {
+  // Drop what the venue already has BEFORE re-scanning. mergeBackfill only
+  // writes days it decoded fills in, so a merge-only reset can raise a venue's
+  // history but never lower it: any day that stops producing fills keeps its
+  // stale number. Clearing first is what makes a reset a true replay.
+  // NOTE: this is why the reset is one-shot per value — it is destructive, and
+  // the re-scan is what puts the history back.
+  store.resetVenueVolume(vid);
   // Both crawls resume from their cursor (`if (cb > from) from = cb`), so SETTING
   // it is how a replay is targeted and CLEARING it is how a replay is made total.
   const cursor = fromBlock === undefined ? '' : String(fromBlock);
@@ -756,6 +763,10 @@ export class LiveDataSource extends BaseSource {
         continue;
       }
       resetVenueHistory(this.store, t.vid, block);
+      // The store is not the only copy: `this.days` is the in-memory mirror the
+      // snapshot writes back, so a row deleted only in SQLite returns on the
+      // next persist. `byVenue` absent = 0 for that day (@shared: DailyVolume).
+      for (const d of this.days) delete d.byVenue[t.vid];
       applied.push(block === undefined ? `${t.vid} (lifetime)` : `${t.vid} from block ${block}`);
     }
     // marker stores the RAW value, so a bad entry is not silently retried forever

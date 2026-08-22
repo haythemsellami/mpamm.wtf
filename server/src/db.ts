@@ -237,6 +237,35 @@ export class VolumeStore {
     return { volume: Number(v.changes), fills: Number(f.changes) };
   }
 
+  /**
+   * Drop every stored row for ONE venue: its daily volume and its fills.
+   *
+   * This is what makes BACKFILL_RESET mean "replay from scratch" rather than
+   * "replay and merge". The backfill only writes days it decoded fills in
+   * (mergeBackfill iterates its accumulator), so without this a re-scan can
+   * only ever RAISE a venue's history — a day that used to have volume and now
+   * decodes to nothing keeps its old number forever. That is invisible while
+   * resets are used to recover MISSED volume, and silently wrong the first time
+   * one is used to remove volume that should never have been counted
+   * (ThogAMM, PR #82/#83: 15 days and ~$4.97M would have survived the reset).
+   *
+   * Gas is deliberately untouched — it accrues from its own sources and has its
+   * own resetGas()/resetGasFrom(). One transaction, so a crash cannot leave the
+   * volume dropped and the fills behind.
+   */
+  resetVenueVolume(venueId: string): { volume: number; fills: number } {
+    this.db.exec('BEGIN');
+    try {
+      const v = this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ?`).run(venueId);
+      const f = this.db.prepare(`DELETE FROM fills WHERE venue_id = ?`).run(venueId);
+      this.db.exec('COMMIT');
+      return { volume: Number(v.changes), fills: Number(f.changes) };
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
   // ── quote-update gas (QUOTE_UPDATE_BURN) ──────────────────────────────────
   /**
    * Accrue gas increments AND advance the venue's cursor in ONE transaction —

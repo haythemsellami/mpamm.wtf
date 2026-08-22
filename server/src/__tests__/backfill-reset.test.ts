@@ -10,12 +10,19 @@ import { describe, expect, it } from 'vitest';
 import { parseBackfillReset, resetVenueHistory } from '../datasource/live.js';
 
 /** records what a reset touched, without a real SQLite file. */
-function fakeStore(seed: Record<string, string> = {}) {
+function fakeStore(seed: Record<string, string> = {}, rows: Record<string, number> = {}) {
   const meta = new Map(Object.entries(seed));
+  const volume = new Map(Object.entries(rows));   // venueId -> stored day-rows
   return {
     meta,
+    volume,
     setMeta: (k: string, v: string) => { meta.set(k, v); },
     deleteMetaPrefix: (p: string) => { for (const k of [...meta.keys()]) if (k.startsWith(p)) meta.delete(k); },
+    resetVenueVolume: (vid: string) => {
+      const n = volume.get(vid) ?? 0;
+      volume.delete(vid);
+      return { volume: n, fills: n };
+    },
   };
 }
 
@@ -50,6 +57,26 @@ describe('resetVenueHistory', () => {
     expect(s.meta.get('backfill_done_poe')).toBe('1');
     expect(s.meta.get('mkfill_cursor_poe')).toBe('96000000');
     expect(s.meta.get('mkhist_cursor_poe_MON/USDC')).toBe('2026-08-16');
+  });
+
+  /**
+   * The merge-only reset bug (ThogAMM, PR #82/#83). mergeBackfill writes only
+   * the days its scan decoded fills in, so if the rows are not dropped first a
+   * re-scan can RAISE a venue's history but never lower it: 15 ThogAMM days
+   * carrying ~$4.97M of wrongly-counted volume decoded to nothing on the
+   * corrected scan and would have kept their old numbers forever.
+   */
+  it('drops the stored rows, so a re-scan can lower a venue and not just raise it', () => {
+    const s = fakeStore(seeded('metric'), { metric: 20, poe: 9 });
+    resetVenueHistory(s, 'metric');
+    expect(s.volume.has('metric')).toBe(false);
+    expect(s.volume.get('poe')).toBe(9);          // other venues keep their history
+  });
+
+  it('drops the rows for a TARGETED replay too — a stale day is stale either way', () => {
+    const s = fakeStore(seeded('metric'), { metric: 20 });
+    resetVenueHistory(s, 'metric', 95_000_000n);
+    expect(s.volume.has('metric')).toBe(false);
   });
 
   it('does not clear the applied-marker, so a reset stays one-shot', () => {
