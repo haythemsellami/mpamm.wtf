@@ -750,6 +750,17 @@ export class LiveDataSource extends BaseSource {
         this.note('backfill.config.invalid', `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
         continue;
       }
+      // A start past head is IGNORED by both resume checks (`cb <= end + 1n`),
+      // which would quietly downgrade a targeted replay into a lifetime one.
+      // Refuse instead of doing something other than what was asked. A RAW
+      // block is checked here, before its day is resolved: eth_getBlock on a
+      // block that does not exist yet just throws, which would report a typo'd
+      // start as an RPC problem and bury the actual mistake.
+      const pastHead = (b: bigint) => this.bootHead > 0n && b > this.bootHead;
+      if (t.from === 'block' && pastHead(t.block)) {
+        this.note('backfill.config.invalid', `backfill reset: ${t.vid} start ${t.block} is past head ${this.bootHead} — skipped rather than replaying the lifetime`);
+        continue;
+      }
       // A targeted replay needs BOTH ends of its start: the block the cursors
       // resume at, and the day the volume delete is scoped to (the volume scan
       // day-aligns, so it restores from that day's start).
@@ -770,10 +781,9 @@ export class LiveDataSource extends BaseSource {
           continue;
         }
       }
-      // A start past head is IGNORED by both resume checks (`cb <= end + 1n`),
-      // which would quietly downgrade a targeted replay into a lifetime one.
-      // Refuse instead of doing something other than what was asked.
-      if (from !== undefined && this.bootHead > 0n && from.block > this.bootHead) {
+      // The same guard for a DAY start, whose block only exists after the
+      // resolve above (blockAtOrAfter converges to `hi` for a future day).
+      if (from !== undefined && pastHead(from.block)) {
         this.note('backfill.config.invalid', `backfill reset: ${t.vid} start ${from.block} is past head ${this.bootHead} — skipped rather than replaying the lifetime`);
         continue;
       }
