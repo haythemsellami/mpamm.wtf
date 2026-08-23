@@ -377,8 +377,37 @@ export function refuseResetStart(t: BackfillResetTarget, today: string, bootHead
   if (t.from === 'block' && bootHead > 0n && t.block > bootHead) {
     return `start ${t.block} is past head ${bootHead} — skipped rather than replaying the lifetime`;
   }
-  if (t.from === 'day' && t.day > today) {
-    return `start ${t.day} is in the future (today is ${today}) — skipped rather than anchoring the replay to head`;
+  if (t.from === 'day' && t.day >= today) {
+    return t.day === today
+      ? `start ${t.day} is TODAY — the live tail owns today, so a replay from it would delete nothing and re-scan nothing; use an earlier day`
+      : `start ${t.day} is in the future (today is ${today}) — skipped rather than anchoring the replay to head`;
+  }
+  return null;
+}
+
+/**
+ * The same question for a start only knowable after the chain answered: a RAW
+ * block carries no day until eth_getBlock resolves one.
+ *
+ * A start landing on today is a total no-op — both deletes bound exclusively at
+ * today and both scans skip it — so it would spend the venue's one-shot marker
+ * on nothing at all. Refused rather than applied, and refused PERMANENTLY even
+ * though the same start becomes valid after midnight: a destructive replay must
+ * not lie in wait to fire at a boundary the operator did not choose. The note
+ * says what to do instead, and bumping the nonce re-arms it deliberately.
+ */
+export function refuseResolvedStart(
+  from: { block: bigint; day: string },
+  today: string,
+  bootHead: bigint,
+): string | null {
+  // Clock skew between the day boundary and the node can still land a resolved
+  // day start past head; refuseResetStart cannot see that before resolving.
+  if (bootHead > 0n && from.block > bootHead) {
+    return `start ${from.block} is past head ${bootHead} — skipped rather than replaying the lifetime`;
+  }
+  if (from.day >= today) {
+    return `start block ${from.block} falls on ${from.day}, which the live tail owns — a replay from it would delete nothing and re-scan nothing; use an earlier block`;
   }
   return null;
 }
@@ -941,11 +970,11 @@ export class LiveDataSource extends BaseSource {
           continue;
         }
       }
-      // Backstop for a resolve that still lands past head (clock skew between
-      // the day boundary and the node). refuseResetStart already turned away
-      // the future days that used to reach here.
-      if (from !== undefined && this.bootHead > 0n && from.block > this.bootHead) {
-        this.note('backfill.config.invalid', `backfill reset: ${t.vid} start ${from.block} is past head ${this.bootHead} — skipped rather than replaying the lifetime`);
+      // Now that a day exists for it, ask the same question again — a RAW
+      // block could only be judged against head before this point.
+      const resolvedRefusal = from !== undefined ? refuseResolvedStart(from, utcDay(nowMs), this.bootHead) : null;
+      if (resolvedRefusal) {
+        this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${resolvedRefusal}`);
         settle();
         continue;
       }

@@ -7,7 +7,7 @@
 // depends on how long ago onboarding ran, which is exactly the kind of
 // non-determinism a reset must not have.
 import { describe, expect, it } from 'vitest';
-import { adoptLegacyResetMarker, fillsScanFromDay, parseBackfillReset, planVenueReset, purgeVenueDays, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
+import { adoptLegacyResetMarker, fillsScanFromDay, parseBackfillReset, refuseResolvedStart, planVenueReset, purgeVenueDays, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
 import type { DailyVolume } from '@shared';
 import type { ResetDeletes } from '../db.js';
 
@@ -180,10 +180,30 @@ describe('refuseResetStart', () => {
       .toMatch(/past head/);
   });
 
-  it('accepts today, the past, and a block at head', () => {
-    expect(refuseResetStart({ vid: 'm', from: 'day', day: TODAY }, TODAY, HEAD)).toBeNull();
+  /**
+   * A start on TODAY is a total no-op: both deletes bound exclusively at today
+   * and both scans skip it (the live tail owns today). Applying it would spend
+   * the venue's one-shot marker on nothing — the very silence this guards.
+   */
+  it('refuses TODAY, which deletes nothing and re-scans nothing', () => {
+    expect(refuseResetStart({ vid: 'm', from: 'day', day: TODAY }, TODAY, HEAD))
+      .toMatch(/is TODAY .*use an earlier day/);
+  });
+
+  it('accepts a past day and a block at head', () => {
+    expect(refuseResetStart({ vid: 'm', from: 'day', day: '2026-08-21' }, TODAY, HEAD)).toBeNull();
     expect(refuseResetStart({ vid: 'm', from: 'day', day: '2026-01-01' }, TODAY, HEAD)).toBeNull();
     expect(refuseResetStart({ vid: 'm', from: 'block', block: HEAD }, TODAY, HEAD)).toBeNull();
+  });
+
+  it('says the day is in the FUTURE only when it actually is', () => {
+    expect(refuseResetStart({ vid: 'm', from: 'day', day: '2026-08-23' }, TODAY, HEAD))
+      .toMatch(/is in the future/);
+  });
+
+  it('cannot judge a raw block by day — that is refuseResolvedStart\u2019s job', () => {
+    // a block from earlier today is <= head and carries no day until resolved
+    expect(refuseResetStart({ vid: 'm', from: 'block', block: HEAD - 1n }, TODAY, HEAD)).toBeNull();
   });
 
   it('never refuses a lifetime replay — it has no start to be wrong about', () => {
@@ -207,6 +227,39 @@ describe('refuseResetStart', () => {
  * ALREADY-APPLIED value would run again. For a destructive replay that turns
  * deploying a binary into a reset nobody asked for.
  */
+/**
+ * The second half of the same guard, for a start only knowable after the chain
+ * answered. A RAW block carries no day until eth_getBlock resolves one, so
+ * `vid:<block>` pointing anywhere inside today reaches here looking valid.
+ */
+describe('refuseResolvedStart', () => {
+  const TODAY = '2026-08-22';
+  const HEAD = 98_000_000n;
+
+  it('refuses a block that resolves onto today', () => {
+    expect(refuseResolvedStart({ block: 97_999_000n, day: TODAY }, TODAY, HEAD))
+      .toMatch(/falls on 2026-08-22.*use an earlier block/);
+  });
+
+  it('refuses one that resolves past today', () => {
+    expect(refuseResolvedStart({ block: 97_999_000n, day: '2026-08-25' }, TODAY, HEAD))
+      .toMatch(/falls on 2026-08-25/);
+  });
+
+  it('accepts a block on a closed day', () => {
+    expect(refuseResolvedStart({ block: 97_000_000n, day: '2026-08-21' }, TODAY, HEAD)).toBeNull();
+  });
+
+  it('still catches a resolve that lands past head, which no day check would', () => {
+    expect(refuseResolvedStart({ block: HEAD + 1n, day: '2026-08-21' }, TODAY, HEAD))
+      .toMatch(/past head/);
+  });
+
+  it('holds its fire before the head is known', () => {
+    expect(refuseResolvedStart({ block: 99_000_000n, day: '2026-08-21' }, TODAY, 0n)).toBeNull();
+  });
+});
+
 describe('adoptLegacyResetMarker', () => {
   it('adopts an already-applied value, so upgrading is not itself a reset', () => {
     const s = fakeStore({ backfill_reset_applied: 'thogamm@4,poe' });
