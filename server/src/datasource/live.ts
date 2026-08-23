@@ -206,21 +206,6 @@ export function checkGapFill(
 }
 
 /**
- * Every meta key a one-shot history reset must clear for one venue.
- *
- * Both halves matter, and each has a done-flag AND a cursor:
- *  - volume backfill: `backfill_done` gates the re-run, `backfill_cursor` says
- *    where it resumes.
- *  - fills onboarding: `mkfill_done` gates it, `mkfill_cursor` is consulted as
- *    `if (cb > from) from = cb` — so clearing only the flag restarts the scan
- *    wherever the LAST onboarding finished and silently skips the earlier
- *    window the reset was reached for. `mkhist_cursor_<vid>_<market>` are the
- *    per-market markout walk positions.
- *
- * Listed in one place, and exported, because the failure mode of forgetting one
- * is a reset that reports success and recovers nothing.
- */
-/**
  * The first UTC day the fills onboarding scan covers for a venue: its rolling
  * window, floored at the venue's own first day. Shared with the scan itself so
  * the reset's delete boundary and the scan's start can never drift apart —
@@ -241,13 +226,13 @@ export function fillsScanFromDay(backfillFromUtc: string | undefined, nowMs: num
  * while the fills onboarding only ever covers its rolling window. A single
  * shared window is what made the lifetime reset delete fills nothing put back.
  *
- * A disabled stage yields NO delete for its table. With BACKFILL=off or
- * MARKOUT_BACKFILL=off the reset still runs (it re-arms the flags for a later
- * boot), so deleting there would destroy history that nothing is coming to
- * rebuild. TODAY is excluded for the same reason: it belongs to the live tail
- * and neither scan writes it, so a mid-day reset that dropped it would erase
- * what had already been counted since midnight. A reset re-run the next day
- * rewrites that day properly, once it is closed.
+ * A disabled stage yields NO delete for its table, and its done-flag/cursor stay
+ * untouched too. Re-arming a disabled stage without clearing its rows would
+ * only recreate the merge-only bug on a later boot; the operator must re-run
+ * the reset with that stage enabled. TODAY is excluded for the same reason: it
+ * belongs to the live tail and neither scan writes it, so a mid-day reset that
+ * dropped it would erase what had already been counted since midnight. A reset
+ * re-run the next day rewrites that day properly, once it is closed.
  *
  * The fills boundary is the scan's own resume point: backfillRecentFills takes
  * `max(window start, cursor)`, so a targeted start LATER than the window wins
@@ -288,6 +273,32 @@ export function purgeVenueDays(days: DailyVolume[], vid: string, deletes: ResetD
     if (d.utcDay >= beforeDay) continue;                                  // today: the tail owns it
     if (volume.fromDay === undefined || d.utcDay >= volume.fromDay) delete d.byVenue[vid];
   }
+}
+
+/** Remove deleted DB fills from every in-memory owner too. Otherwise the
+ * `/api/markets` ring keeps serving stale rows and a pending/dirty fill can be
+ * written straight back on the next snapshot. */
+export function purgeVenueFills(
+  state: { fills: Fill[]; pending: Set<Fill>; dirty: Set<Fill>; countedIds: Set<string> },
+  vid: string,
+  deletes: ResetDeletes,
+): void {
+  const fillDelete = deletes.fills;
+  if (!fillDelete) return;
+  const beforeMs = Date.parse(`${deletes.beforeDay}T00:00:00Z`);
+  const fromMs = 'fromDay' in fillDelete
+    ? Date.parse(`${fillDelete.fromDay}T00:00:00Z`)
+    : 0;
+  const dropped = (f: Fill) => f.venueId === vid && f.ts < beforeMs && (
+    'fromBlock' in fillDelete ? BigInt(f.blockNumber) >= fillDelete.fromBlock : f.ts >= fromMs
+  );
+  const ids = new Set<string>();
+  for (const f of state.fills) if (dropped(f)) ids.add(f.id);
+  for (const set of [state.pending, state.dirty]) {
+    for (const f of set) if (dropped(f)) { ids.add(f.id); set.delete(f); }
+  }
+  state.fills.splice(0, state.fills.length, ...state.fills.filter((f) => !dropped(f)));
+  for (const id of ids) state.countedIds.delete(id);
 }
 
 /**
@@ -361,7 +372,7 @@ export function adoptLegacyResetMarker(
 }
 
 export function resetVenueHistory(
-  store: Pick<VolumeStore, 'setMeta' | 'deleteMetaPrefix' | 'resetVenueVolume'>,
+  store: Pick<VolumeStore, 'resetVenueHistory'>,
   vid: string,
   /** `from` moves the cursors (omitted = whole lifetime); `deletes` says which
    *  rows may go. Build `deletes` with planVenueReset — hand-rolling it is how
@@ -372,26 +383,11 @@ export function resetVenueHistory(
   // writes days it decoded fills in, so a merge-only reset can raise a venue's
   // history but never lower it: any day that stops producing fills keeps its
   // stale number. Clearing first is what makes a reset a true replay.
-  // NOTE: this is why the reset is one-shot per value — it is destructive, and
-  // the re-scan is what puts the history back.
-  const dropped = store.resetVenueVolume(vid, plan.deletes);
-  // Both crawls resume from their cursor (`if (cb > from) from = cb`), so SETTING
-  // it is how a replay is targeted and CLEARING it is how a replay is made total.
-  const cursor = plan.from === undefined ? '' : String(plan.from.block);
-  store.setMeta(`backfill_done_${vid}`, '');
-  store.setMeta(`backfill_cursor_${vid}`, cursor);
-  store.setMeta(`mkfill_done_${vid}`, '');
-  store.setMeta(`mkfill_cursor_${vid}`, cursor);
-  // The markout walk cursors are per-market DAYS. Deleting them is always safe —
-  // the walk restarts from the earliest still-unmarked fill and re-marking is
-  // idempotent — whereas setting one too high would skip the very window a
-  // targeted replay exists to recover.
-  store.deleteMetaPrefix(`mkhist_cursor_${vid}_`);
-  return dropped;
+  // The matching cursor resets are inside the store transaction. Separating
+  // them would let a crash strand deleted rows behind a still-set done-flag.
+  return store.resetVenueHistory(vid, plan.deletes, plan.from?.block);
 }
 
-/** One parsed BACKFILL_RESET entry. `invalid` is carried rather than thrown so
- *  one bad entry cannot stop the others, and so it can be reported loudly. */
 /** One parsed entry. `spec` is that entry's own raw text — NOT the whole
  *  BACKFILL_RESET value — because it is what the venue's one-shot marker is
  *  keyed on: keyed on the whole value, adding a venue to the list would re-run
@@ -402,6 +398,20 @@ export type BackfillResetTarget = { vid: string; spec: string } & (
   | { from: 'day'; day: string }
   | { from: 'invalid' }
 );
+
+/** Date.parse normalizes impossible dates (2026-02-30 becomes March 2), which
+ * is too permissive for a destructive operator command. */
+function isUtcDay(day: string): boolean {
+  const ms = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(ms) && utcDay(ms) === day;
+}
+
+/** Pair a resolved block with the block's real UTC day. A requested day can
+ * land later after a chain halt, and delete scopes must follow what the replay
+ * actually starts from rather than the calendar text the operator entered. */
+export function resetStartFromBlock(block: bigint, timestampSec: bigint | number): { block: bigint; day: string } {
+  return { block, day: utcDay(Number(timestampSec) * 1000) };
+}
 
 /**
  * Why a reset start cannot be applied, or null when it can — everything
@@ -466,8 +476,9 @@ export function refuseResolvedStart(
  *   metric@2                lifetime again — `@` stays a re-run nonce, not a start
  *   metric:2026-08-14@2     both
  *
- * `:` carries the start and `@` the nonce so the two can never be confused:
- * the whole raw string remains the applied-marker, so changing either re-runs.
+ * `:` carries the start and `@` the nonce so the two can never be confused.
+ * Each venue records its own normalized entry, so changing either re-runs that
+ * venue without disturbing the other entries in the list.
  */
 export function parseBackfillReset(spec: string): BackfillResetTarget[] {
   return spec.split(',').map((x) => x.trim()).filter(Boolean).map((entry) => {
@@ -484,7 +495,7 @@ export function parseBackfillReset(spec: string): BackfillResetTarget[] {
     if (from === undefined) return { vid, spec: entry, from: 'lifetime' as const };
     // day first: a date can never be read as a block number, and vice versa.
     if (/^\d{4}-\d{2}-\d{2}$/.test(from)) {
-      return Number.isFinite(Date.parse(`${from}T00:00:00Z`))
+      return isUtcDay(from)
         ? { vid, spec: entry, from: 'day' as const, day: from }
         : { vid, spec: entry, from: 'invalid' as const };
     }
@@ -661,21 +672,18 @@ export class LiveDataSource extends BaseSource {
     if (this.historyRunning) return;
     this.historyRunning = true;
     try {
-      // BEFORE both stages, and NOT behind config.backfillEnabled: the reset
-      // re-arms the fills/markout onboarding too, so running it inside
-      // backfillOnchain() meant BACKFILL=off skipped it entirely, and with both
-      // enabled the markout pass had already gone by on that boot.
-      // ONE clock for the run. The reset's fills delete boundary and the scan's
-      // window start are the same day computed twice; from two Date.now() calls
-      // a UTC midnight landing between them shifts the scan forward a day and
-      // strands the day the delete already removed.
+      // BEFORE both stages, and NOT behind either individual switch: whichever
+      // scan is enabled must see its reset before it starts.
+      // ONE clock for the run. The reset's delete boundary and both scans must
+      // agree on which day the live tail owns; a UTC midnight between separate
+      // clocks otherwise leaves a preserved/stale day inside a replay window.
       const nowMs = Date.now();
       await this.applyBackfillReset(nowMs);
       if (config.markoutBackfill) {
         try { await this.markoutOnboarding(nowMs); }
         catch (e) { this.noteOnce('markout.paused', `markout onboarding stopped: ${(e as Error).message}; retried automatically`); }
       }
-      if (config.backfillEnabled) await this.backfillOnchain();
+      if (config.backfillEnabled) await this.backfillOnchain(nowMs);
     } catch (e) {
       // This chain is started with `void`, so anything escaping here is an
       // unhandled rejection that takes the whole stage down silently. The
@@ -936,9 +944,10 @@ export class LiveDataSource extends BaseSource {
   }
 
   /**
-   * ONE-SHOT history reset. Re-arms BOTH halves for the listed venues — the
-   * volume backfill and the fills/markout onboarding — after switching to a
-   * better archive RPC, or to recover a window the live tail could not see.
+   * ONE-SHOT history reset for the listed venues after switching to a better
+   * archive RPC, or to recover a window the live tail could not see. Each
+   * enabled history stage is cleared and re-armed as one atomic unit; a stage
+   * switched off for this run stays untouched.
    *
    * BACKFILL_RESET is `vid[:from][@nonce]`, comma-separated:
    *   metric                lifetime replay
@@ -946,8 +955,8 @@ export class LiveDataSource extends BaseSource {
    *   metric:2026-08-14     replay from that UTC day
    *   metric@2              lifetime; `@` is a re-run nonce, never a start
    *
-   * A marker meta remembers the applied VALUE, so redeploys don't re-trigger a
-   * multi-hour scan; change any part of the string to re-run. Runs from
+   * A per-venue marker remembers its applied entry, so redeploys and edits to a
+   * different venue do not re-trigger a multi-hour scan. Runs from
    * backgroundHistory() ahead of both stages so neither can miss it.
    */
   private async applyBackfillReset(nowMs: number): Promise<void> {
@@ -1007,7 +1016,7 @@ export class LiveDataSource extends BaseSource {
       if (t.from === 'block') {
         try {
           const b = await publicClient.getBlock({ blockNumber: t.block });
-          from = { block: t.block, day: utcDay(Number(b.timestamp) * 1000) };
+          from = resetStartFromBlock(t.block, b.timestamp);
         } catch (e) {
           // no settle(): a resolve that failed on the RPC may well succeed on
           // the next boot, and consuming the reset would strand it silently.
@@ -1016,7 +1025,11 @@ export class LiveDataSource extends BaseSource {
         }
       }
       if (t.from === 'day') {
-        try { from = { block: await blockAtOrAfter(Math.floor(Date.parse(`${t.day}T00:00:00Z`) / 1000), this.bootHead), day: t.day }; }
+        try {
+          const block = await blockAtOrAfter(Math.floor(Date.parse(`${t.day}T00:00:00Z`) / 1000), this.bootHead);
+          const b = await publicClient.getBlock({ blockNumber: block });
+          from = resetStartFromBlock(block, b.timestamp);
+        }
         catch (e) {
           // no settle(): transient, same as the block form above.
           this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve ${t.day} to a block (${(e as Error).message}); retried next boot`);
@@ -1031,9 +1044,9 @@ export class LiveDataSource extends BaseSource {
         settle();
         continue;
       }
-      // Delete only what the two scans will actually rebuild — and nothing at
-      // all for a stage that is switched off (the reset still re-arms its flag
-      // for a later boot, but no scan is coming to restore the rows now).
+      // Delete only what the two scans will actually rebuild. A switched-off
+      // stage keeps its rows AND its cursor/done-flag; re-run with that stage
+      // enabled if it also needs a true replay.
       const deletes = planVenueReset({
         from,
         fillsFromDay: fillsScanFromDay(adapter.backfillFromUtc, nowMs, config.markoutBackfillDays),
@@ -1043,6 +1056,8 @@ export class LiveDataSource extends BaseSource {
       });
       const dropped = resetVenueHistory(this.store, t.vid, { from, deletes });
       purgeVenueDays(this.days, t.vid, deletes);
+      purgeVenueFills({ fills: this.fills, pending: this.pending, dirty: this.dirty, countedIds: this.countedIds }, t.vid, deletes);
+      if (dropped.fills) this.lbCache.clear();
       settle();
       // Say what was DESTROYED, not just what will be re-scanned: this is a
       // one-shot operation with no undo, and the counts are the only record.
@@ -1064,7 +1079,7 @@ export class LiveDataSource extends BaseSource {
    * paced under the RPC's limits, resumable across restarts, and self-healing
    * (retried each boot and on the rediscovery tick until `backfill_done_<venue>` is set).
    */
-  private async backfillOnchain(): Promise<void> {
+  private async backfillOnchain(nowMs: number): Promise<void> {
     for (const a of ADAPTERS) {
       const sinceUtc = a.backfillFromUtc;
       const vid = a.venues()[0]?.id ?? '';
@@ -1076,12 +1091,12 @@ export class LiveDataSource extends BaseSource {
       // silently drop the venue's lifetime history (issue: seed vs quarantine).
       if (seed.action === 'skip') { this.store.setMeta(`backfill_done_${vid}`, '1'); continue; }
       if (seed.action === 'defer') { this.noteOnce('backfill.deferred', `${name} backfill deferred — ${seed.reason}`, vid); continue; }
-      try { await this.backfillAdapter(a, vid, name, sinceUtc, seed.fills); }
+      try { await this.backfillAdapter(a, vid, name, sinceUtc, seed.fills, nowMs); }
       catch (e) { this.noteOnce('backfill.paused', `${name} backfill paused (${(e as Error).message}); retried automatically`, vid); }
     }
   }
 
-  private async backfillAdapter(a: VenueAdapter, vid: string, name: string, sinceUtc: string, sources: LogSource[]): Promise<void> {
+  private async backfillAdapter(a: VenueAdapter, vid: string, name: string, sinceUtc: string, sources: LogSource[], nowMs: number): Promise<void> {
     const end = this.bootHead;
     if (end <= 0n) return;
     const startSec = Math.floor(Date.parse(`${sinceUtc}T00:00:00Z`) / 1000);
@@ -1103,7 +1118,11 @@ export class LiveDataSource extends BaseSource {
     }
     if (from > end) { this.store.setMeta(`backfill_done_${vid}`, '1'); return; }
 
-    const today = utcDay();
+    // The reset and both scans share one closed-day boundary. If this replay
+    // begins before midnight and reaches this stage after it, consulting the
+    // live clock would scan the newly closed day even though the reset kept it;
+    // a zero-fill result would then leave its stale row untouched.
+    const today = utcDay(nowMs);
     const acc = new Map<string, { usd: number; swaps: number }>(); // closed utcDay -> totals
     let chunk = BigInt(config.backfillChunk);
     const floor = BigInt(config.getLogsMinChunk);
@@ -1332,9 +1351,9 @@ export class LiveDataSource extends BaseSource {
     // ones. Venue scans run back to back for hours, so whether that happened
     // depended on how long earlier venues took. Sharing the anchor makes the
     // preserved day the same day for every stage of the run.
-    // (backfillOnchain deliberately keeps the live clock: it SETS whole days
-    // rather than adding to them, so a day closing mid-run is healed, not
-    // contaminated — and a venue-lifetime replay genuinely should pick it up.)
+    // The volume replay uses this same anchor: mergeBackfill only SETS days
+    // that decoded at least one fill, so a newly closed zero-fill day cannot be
+    // allowed into one scan after the reset deliberately preserved it.
     const today = utcDay(nowMs);
     let chunk = BigInt(config.backfillChunk);
     const floor = BigInt(config.getLogsMinChunk);

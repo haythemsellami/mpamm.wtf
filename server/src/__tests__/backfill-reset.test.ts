@@ -7,8 +7,8 @@
 // depends on how long ago onboarding ran, which is exactly the kind of
 // non-determinism a reset must not have.
 import { describe, expect, it } from 'vitest';
-import { adoptLegacyResetMarker, classifyMissingResetVenue, fillsScanFromDay, markResetApplied, parseBackfillReset, refuseResolvedStart, resetAlreadyApplied, planVenueReset, purgeVenueDays, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
-import type { DailyVolume } from '@shared';
+import { adoptLegacyResetMarker, classifyMissingResetVenue, fillsScanFromDay, markResetApplied, parseBackfillReset, refuseResolvedStart, resetAlreadyApplied, planVenueReset, purgeVenueDays, purgeVenueFills, refuseResetStart, resetStartFromBlock, resetVenueHistory } from '../datasource/live.js';
+import type { DailyVolume, Fill } from '@shared';
 import type { ResetDeletes } from '../db.js';
 
 /** records what a reset touched, without a real SQLite file. */
@@ -20,15 +20,23 @@ function fakeStore(seed: Record<string, string> = {}, rows: Record<string, numbe
     volume,
     getMeta: (k: string) => meta.get(k),
     setMeta: (k: string, v: string) => { meta.set(k, v); },
-    deleteMetaPrefix: (p: string) => { for (const k of [...meta.keys()]) if (k.startsWith(p)) meta.delete(k); },
-    scoped: [] as Array<{ vid: string; deletes: ResetDeletes }>,
-    // Mirrors VolumeStore.resetVenueVolume: a table with no window asked for is
-    // untouched and reports 0. A fake that counted rows nobody asked to delete
-    // would let a real over-wide delete pass its own assertions.
-    resetVenueVolume: (vid: string, deletes: ResetDeletes) => {
-      out.scoped.push({ vid, deletes });
+    scoped: [] as Array<{ vid: string; deletes: ResetDeletes; fromBlock?: bigint }>,
+    // Mirrors VolumeStore.resetVenueHistory: rows and their matching cursors
+    // move together; a stage with no window remains completely untouched.
+    resetVenueHistory: (vid: string, deletes: ResetDeletes, fromBlock?: bigint) => {
+      out.scoped.push({ vid, deletes, fromBlock });
       const n = volume.get(vid) ?? 0;
-      if (deletes.volume && deletes.volume.fromDay === undefined) volume.delete(vid);
+      const cursor = fromBlock === undefined ? '' : String(fromBlock);
+      if (deletes.volume) {
+        if (deletes.volume.fromDay === undefined) volume.delete(vid);
+        meta.set(`backfill_done_${vid}`, '');
+        meta.set(`backfill_cursor_${vid}`, cursor);
+      }
+      if (deletes.fills) {
+        meta.set(`mkfill_done_${vid}`, '');
+        meta.set(`mkfill_cursor_${vid}`, cursor);
+        for (const k of [...meta.keys()]) if (k.startsWith(`mkhist_cursor_${vid}_`)) meta.delete(k);
+      }
       return { volume: deletes.volume ? n : 0, fills: deletes.fills ? n : 0 };
     },
   };
@@ -94,7 +102,7 @@ describe('resetVenueHistory', () => {
     const s = fakeStore(seeded('metric'), { metric: 20 });
     const deletes: ResetDeletes = { beforeDay: TODAY, volume: { fromDay: '2026-08-14' }, fills: { fromBlock: 95_000_000n } };
     resetVenueHistory(s, 'metric', { from: { block: 95_000_000n, day: '2026-08-14' }, deletes });
-    expect(s.scoped).toEqual([{ vid: 'metric', deletes }]);
+    expect(s.scoped).toEqual([{ vid: 'metric', deletes, fromBlock: 95_000_000n }]);
   });
 
   it('reports what was dropped, so a one-shot destructive step leaves a record', () => {
@@ -107,6 +115,9 @@ describe('resetVenueHistory', () => {
     const s = fakeStore(seeded('metric'), { metric: 20 });
     expect(resetVenueHistory(s, 'metric', { deletes: { beforeDay: TODAY, volume: {} } }))
       .toEqual({ volume: 20, fills: 0 });
+    expect(s.meta.get('mkfill_done_metric')).toBe('1');
+    expect(s.meta.get('mkfill_cursor_metric')).toBe('96000000');
+    expect(s.meta.get('mkhist_cursor_metric_MON/USDC')).toBe('2026-08-16');
   });
 
   it('does not clear the applied-marker, so a reset stays one-shot', () => {
@@ -140,7 +151,7 @@ describe('parseBackfillReset', () => {
   });
 
   it('reports a malformed start instead of guessing at one', () => {
-    for (const bad of ['metric:', 'metric:abc', 'metric:0', 'metric:-5', 'metric:2026-13-45', 'metric:1:2']) {
+    for (const bad of ['metric:', 'metric:abc', 'metric:0', 'metric:-5', 'metric:2026-13-45', 'metric:2026-02-30', 'metric:2025-02-29', 'metric:1:2']) {
       expect(parseBackfillReset(bad)[0].from).toBe('invalid');
     }
   });
@@ -290,6 +301,14 @@ describe('refuseResolvedStart', () => {
 
   it('holds its fire before the head is known', () => {
     expect(refuseResolvedStart({ block: 99_000_000n, day: '2026-08-21' }, TODAY, 0n)).toBeNull();
+  });
+});
+
+describe('resetStartFromBlock', () => {
+  it('uses the resolved block day, not a requested day a chain halt skipped over', () => {
+    const timestamp = BigInt(Date.parse('2026-08-16T03:00:00Z') / 1000);
+    expect(resetStartFromBlock(97_000_000n, timestamp))
+      .toEqual({ block: 97_000_000n, day: '2026-08-16' });
   });
 });
 
@@ -462,6 +481,42 @@ describe('purgeVenueDays', () => {
     const d = [...days(), { utcDay: TODAY, partial: true, byVenue: { metric: { usd: 9, swaps: 9 } } }];
     purgeVenueDays(d, 'metric', { beforeDay: TODAY, volume: {} });
     expect(d[2].byVenue.metric).toEqual({ usd: 9, swaps: 9 });
+  });
+});
+
+describe('purgeVenueFills', () => {
+  const makeFill = (id: string, venueId: string, blockNumber: number, day: string): Fill => ({
+    id, venueId, blockNumber, ts: Date.parse(`${day}T12:00:00Z`), market: 'MON/USDC', side: 'buy',
+    category: 'UNKNOWN', usd: 1, baseAmount: 1, execPx: 1, txHash: `0x${id}`, to: '0x', pool: 'p',
+    markoutsBps: [null, null, null, null, null],
+  });
+
+  it('drops reset rows from the served, pending, dirty and dedup owners', () => {
+    const old = makeFill('old', 'metric', 90, '2026-08-01');
+    const drop = makeFill('drop', 'metric', 100, '2026-08-20');
+    const today = makeFill('today', 'metric', 110, TODAY);
+    const other = makeFill('other', 'poe', 120, '2026-08-20');
+    const state = {
+      fills: [old, drop, today, other],
+      pending: new Set([drop, today]),
+      dirty: new Set([drop, other]),
+      countedIds: new Set(['old', 'drop', 'today', 'other']),
+    };
+    purgeVenueFills(state, 'metric', { beforeDay: TODAY, fills: { fromBlock: 100n } });
+    expect(state.fills.map((f) => f.id)).toEqual(['old', 'today', 'other']);
+    expect([...state.pending].map((f) => f.id)).toEqual(['today']);
+    expect([...state.dirty].map((f) => f.id)).toEqual(['other']);
+    expect([...state.countedIds]).toEqual(['old', 'today', 'other']);
+  });
+
+  it('does nothing when the fills stage is disabled', () => {
+    const keep = makeFill('keep', 'metric', 100, '2026-08-20');
+    const state = { fills: [keep], pending: new Set([keep]), dirty: new Set([keep]), countedIds: new Set(['keep']) };
+    purgeVenueFills(state, 'metric', { beforeDay: TODAY, volume: {} });
+    expect(state.fills).toEqual([keep]);
+    expect(state.pending.has(keep)).toBe(true);
+    expect(state.dirty.has(keep)).toBe(true);
+    expect(state.countedIds.has('keep')).toBe(true);
   });
 });
 
