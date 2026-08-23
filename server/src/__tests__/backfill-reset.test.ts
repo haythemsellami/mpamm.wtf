@@ -22,15 +22,20 @@ function fakeStore(seed: Record<string, string> = {}, rows: Record<string, numbe
     setMeta: (k: string, v: string) => { meta.set(k, v); },
     deleteMetaPrefix: (p: string) => { for (const k of [...meta.keys()]) if (k.startsWith(p)) meta.delete(k); },
     scoped: [] as Array<{ vid: string; deletes: ResetDeletes }>,
+    // Mirrors VolumeStore.resetVenueVolume: a table with no window asked for is
+    // untouched and reports 0. A fake that counted rows nobody asked to delete
+    // would let a real over-wide delete pass its own assertions.
     resetVenueVolume: (vid: string, deletes: ResetDeletes) => {
       out.scoped.push({ vid, deletes });
       const n = volume.get(vid) ?? 0;
       if (deletes.volume && deletes.volume.fromDay === undefined) volume.delete(vid);
-      return { volume: n, fills: n };
+      return { volume: deletes.volume ? n : 0, fills: deletes.fills ? n : 0 };
     },
   };
   return out;
 }
+
+const TODAY = '2026-08-22';
 
 const seeded = (vid: string) => ({
   [`backfill_done_${vid}`]: '1',
@@ -44,7 +49,7 @@ const seeded = (vid: string) => ({
 describe('resetVenueHistory', () => {
   it('clears BOTH halves — volume and fills — flags and cursors alike', () => {
     const s = fakeStore(seeded('metric'));
-    resetVenueHistory(s, 'metric', { deletes: { volume: {}, fills: { fromDay: '2026-07-23' } } });
+    resetVenueHistory(s, 'metric', { deletes: { beforeDay: TODAY, volume: {}, fills: { fromDay: '2026-07-23' } } });
     expect(s.meta.get('backfill_done_metric')).toBe('');
     expect(s.meta.get('backfill_cursor_metric')).toBe('');
     expect(s.meta.get('mkfill_done_metric')).toBe('');
@@ -53,13 +58,13 @@ describe('resetVenueHistory', () => {
 
   it('drops every per-market markout walk cursor', () => {
     const s = fakeStore(seeded('metric'));
-    resetVenueHistory(s, 'metric', { deletes: { volume: {}, fills: { fromDay: '2026-07-23' } } });
+    resetVenueHistory(s, 'metric', { deletes: { beforeDay: TODAY, volume: {}, fills: { fromDay: '2026-07-23' } } });
     expect([...s.meta.keys()].filter((k) => k.startsWith('mkhist_cursor_metric_'))).toEqual([]);
   });
 
   it('leaves other venues completely untouched', () => {
     const s = fakeStore({ ...seeded('metric'), ...seeded('poe') });
-    resetVenueHistory(s, 'metric', { deletes: { volume: {}, fills: { fromDay: '2026-07-23' } } });
+    resetVenueHistory(s, 'metric', { deletes: { beforeDay: TODAY, volume: {}, fills: { fromDay: '2026-07-23' } } });
     expect(s.meta.get('backfill_done_poe')).toBe('1');
     expect(s.meta.get('mkfill_cursor_poe')).toBe('96000000');
     expect(s.meta.get('mkhist_cursor_poe_MON/USDC')).toBe('2026-08-16');
@@ -74,7 +79,7 @@ describe('resetVenueHistory', () => {
    */
   it('drops the stored rows, so a re-scan can lower a venue and not just raise it', () => {
     const s = fakeStore(seeded('metric'), { metric: 20, poe: 9 });
-    resetVenueHistory(s, 'metric', { deletes: { volume: {}, fills: { fromDay: '2026-07-23' } } });
+    resetVenueHistory(s, 'metric', { deletes: { beforeDay: TODAY, volume: {}, fills: { fromDay: '2026-07-23' } } });
     expect(s.volume.has('metric')).toBe(false);
     expect(s.volume.get('poe')).toBe(9);          // other venues keep their history
   });
@@ -87,19 +92,26 @@ describe('resetVenueHistory', () => {
    */
   it('hands the store the scope it was given, verbatim', () => {
     const s = fakeStore(seeded('metric'), { metric: 20 });
-    const deletes: ResetDeletes = { volume: { fromDay: '2026-08-14' }, fills: { fromBlock: 95_000_000n } };
+    const deletes: ResetDeletes = { beforeDay: TODAY, volume: { fromDay: '2026-08-14' }, fills: { fromBlock: 95_000_000n } };
     resetVenueHistory(s, 'metric', { from: { block: 95_000_000n, day: '2026-08-14' }, deletes });
     expect(s.scoped).toEqual([{ vid: 'metric', deletes }]);
   });
 
   it('reports what was dropped, so a one-shot destructive step leaves a record', () => {
     const s = fakeStore(seeded('metric'), { metric: 20 });
-    expect(resetVenueHistory(s, 'metric', { deletes: { volume: {} } })).toEqual({ volume: 20, fills: 20 });
+    expect(resetVenueHistory(s, 'metric', { deletes: { beforeDay: TODAY, volume: {}, fills: { fromDay: '2026-07-23' } } }))
+      .toEqual({ volume: 20, fills: 20 });
+  });
+
+  it('counts nothing for a table it was not asked to touch', () => {
+    const s = fakeStore(seeded('metric'), { metric: 20 });
+    expect(resetVenueHistory(s, 'metric', { deletes: { beforeDay: TODAY, volume: {} } }))
+      .toEqual({ volume: 20, fills: 0 });
   });
 
   it('does not clear the applied-marker, so a reset stays one-shot', () => {
     const s = fakeStore({ ...seeded('metric'), backfill_reset_applied: 'metric' });
-    resetVenueHistory(s, 'metric', { deletes: { volume: {}, fills: { fromDay: '2026-07-23' } } });
+    resetVenueHistory(s, 'metric', { deletes: { beforeDay: TODAY, volume: {}, fills: { fromDay: '2026-07-23' } } });
     expect(s.meta.get('backfill_reset_applied')).toBe('metric');
   });
 });
@@ -237,28 +249,28 @@ describe('planVenueReset', () => {
   const WINDOW = '2026-07-23';       // where the fills scan starts
 
   it('lifetime: every day-row, but fills only back to the scan window', () => {
-    expect(planVenueReset({ fillsFromDay: WINDOW, volumeEnabled: true, fillsEnabled: true }))
-      .toEqual({ volume: { fromDay: undefined }, fills: { fromDay: WINDOW } });
+    expect(planVenueReset({ fillsFromDay: WINDOW, today: TODAY, volumeEnabled: true, fillsEnabled: true }))
+      .toEqual({ beforeDay: TODAY, volume: { fromDay: undefined }, fills: { fromDay: WINDOW } });
   });
 
   it('targeted inside the window: fills match the scan\u2019s exact resume block', () => {
-    expect(planVenueReset({ from: { block: 97_000_000n, day: '2026-08-10' }, fillsFromDay: WINDOW, volumeEnabled: true, fillsEnabled: true }))
-      .toEqual({ volume: { fromDay: '2026-08-10' }, fills: { fromBlock: 97_000_000n } });
+    expect(planVenueReset({ from: { block: 97_000_000n, day: '2026-08-10' }, fillsFromDay: WINDOW, today: TODAY, volumeEnabled: true, fillsEnabled: true }))
+      .toEqual({ beforeDay: TODAY, volume: { fromDay: '2026-08-10' }, fills: { fromBlock: 97_000_000n } });
   });
 
   it('targeted before the window: fills stop at the window, where the scan starts', () => {
     // the scan takes max(window, cursor), so deleting from the older targeted
     // block would drop fills it is never going to re-insert.
-    expect(planVenueReset({ from: { block: 90_000_000n, day: '2026-07-01' }, fillsFromDay: WINDOW, volumeEnabled: true, fillsEnabled: true }))
-      .toEqual({ volume: { fromDay: '2026-07-01' }, fills: { fromDay: WINDOW } });
+    expect(planVenueReset({ from: { block: 90_000_000n, day: '2026-07-01' }, fillsFromDay: WINDOW, today: TODAY, volumeEnabled: true, fillsEnabled: true }))
+      .toEqual({ beforeDay: TODAY, volume: { fromDay: '2026-07-01' }, fills: { fromDay: WINDOW } });
   });
 
   it('a disabled stage deletes NOTHING — no scan is coming to rebuild it', () => {
-    expect(planVenueReset({ fillsFromDay: WINDOW, volumeEnabled: false, fillsEnabled: true }))
-      .toEqual({ fills: { fromDay: WINDOW } });
-    expect(planVenueReset({ fillsFromDay: WINDOW, volumeEnabled: true, fillsEnabled: false }))
-      .toEqual({ volume: { fromDay: undefined } });
-    expect(planVenueReset({ fillsFromDay: WINDOW, volumeEnabled: false, fillsEnabled: false })).toEqual({});
+    expect(planVenueReset({ fillsFromDay: WINDOW, today: TODAY, volumeEnabled: false, fillsEnabled: true }))
+      .toEqual({ beforeDay: TODAY, fills: { fromDay: WINDOW } });
+    expect(planVenueReset({ fillsFromDay: WINDOW, today: TODAY, volumeEnabled: true, fillsEnabled: false }))
+      .toEqual({ beforeDay: TODAY, volume: { fromDay: undefined } });
+    expect(planVenueReset({ fillsFromDay: WINDOW, today: TODAY, volumeEnabled: false, fillsEnabled: false })).toEqual({ beforeDay: TODAY });
   });
 });
 
@@ -286,27 +298,33 @@ describe('purgeVenueDays', () => {
 
   it('mirrors a lifetime delete', () => {
     const d = days();
-    purgeVenueDays(d, 'metric', {});
+    purgeVenueDays(d, 'metric', { beforeDay: TODAY, volume: {} });
     expect(d.map((x) => Object.keys(x.byVenue))).toEqual([['poe'], []]);
   });
 
   it('mirrors a targeted delete, keeping pre-window days', () => {
     const d = days();
-    purgeVenueDays(d, 'metric', { fromDay: '2026-08-15' });
+    purgeVenueDays(d, 'metric', { beforeDay: TODAY, volume: { fromDay: '2026-08-15' } });
     expect(d.map((x) => Object.keys(x.byVenue))).toEqual([['metric', 'poe'], []]);
   });
 
   it('touches nothing when the store kept the rows', () => {
     const d = days();
-    purgeVenueDays(d, 'metric', undefined);
+    purgeVenueDays(d, 'metric', { beforeDay: TODAY });
     expect(d.map((x) => Object.keys(x.byVenue))).toEqual([['metric', 'poe'], ['metric']]);
+  });
+
+  it('leaves TODAY alone — the live tail owns it and no scan rebuilds it', () => {
+    const d = [...days(), { utcDay: TODAY, partial: true, byVenue: { metric: { usd: 9, swaps: 9 } } }];
+    purgeVenueDays(d, 'metric', { beforeDay: TODAY, volume: {} });
+    expect(d[2].byVenue.metric).toEqual({ usd: 9, swaps: 9 });
   });
 });
 
 describe('resetVenueHistory — targeted', () => {
   it('SETS both cursors to the start block instead of clearing them', () => {
     const s = fakeStore(seeded('metric'));
-    resetVenueHistory(s, 'metric', { from: { block: 95836845n, day: '2026-08-14' }, deletes: { volume: { fromDay: '2026-08-14' }, fills: { fromBlock: 95836845n } } });
+    resetVenueHistory(s, 'metric', { from: { block: 95836845n, day: '2026-08-14' }, deletes: { beforeDay: TODAY, volume: { fromDay: '2026-08-14' }, fills: { fromBlock: 95836845n } } });
     expect(s.meta.get('backfill_done_metric')).toBe('');      // re-armed
     expect(s.meta.get('mkfill_done_metric')).toBe('');
     expect(s.meta.get('backfill_cursor_metric')).toBe('95836845');
@@ -315,13 +333,13 @@ describe('resetVenueHistory — targeted', () => {
 
   it('still drops the markout walk cursors, which are days not blocks', () => {
     const s = fakeStore(seeded('metric'));
-    resetVenueHistory(s, 'metric', { from: { block: 95836845n, day: '2026-08-14' }, deletes: { volume: { fromDay: '2026-08-14' }, fills: { fromBlock: 95836845n } } });
+    resetVenueHistory(s, 'metric', { from: { block: 95836845n, day: '2026-08-14' }, deletes: { beforeDay: TODAY, volume: { fromDay: '2026-08-14' }, fills: { fromBlock: 95836845n } } });
     expect([...s.meta.keys()].filter((k) => k.startsWith('mkhist_cursor_metric_'))).toEqual([]);
   });
 
   it('omitting the block is still a lifetime replay', () => {
     const s = fakeStore(seeded('metric'));
-    resetVenueHistory(s, 'metric', { deletes: { volume: {}, fills: { fromDay: '2026-07-23' } } });
+    resetVenueHistory(s, 'metric', { deletes: { beforeDay: TODAY, volume: {}, fills: { fromDay: '2026-07-23' } } });
     expect(s.meta.get('backfill_cursor_metric')).toBe('');
     expect(s.meta.get('mkfill_cursor_metric')).toBe('');
   });

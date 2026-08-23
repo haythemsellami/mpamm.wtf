@@ -66,6 +66,12 @@ export interface MidPoint { ts: number; market: string; mid: number }
  * on: its exact block for a targeted replay, else the first ms of its window.
  */
 export interface ResetDeletes {
+  /** Exclusive upper bound shared by both tables — always the current UTC day.
+   *  Today is owned by the LIVE TAIL: the volume backfill skips `day >= today`
+   *  and the fills scan batches only `utcDay(f.ts) < today`, so nothing a
+   *  replay does rebuilds it. Deleting it would drop what the tail already
+   *  counted this morning, and the tail's cursor is long past re-emitting it. */
+  beforeDay: string;
   volume?: { fromDay?: string };
   fills?: { fromBlock: bigint } | { fromDay: string };
 }
@@ -271,21 +277,24 @@ export class VolumeStore {
   resetVenueVolume(venueId: string, deletes: ResetDeletes): { volume: number; fills: number } {
     this.db.exec('BEGIN');
     try {
+      const beforeMs = Date.parse(`${deletes.beforeDay}T00:00:00Z`);
       let volume = 0, fills = 0;
       if (deletes.volume) {
         const { fromDay } = deletes.volume;
         volume = Number((fromDay === undefined
-          ? this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ?`).run(venueId)
-          : this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day >= ?`).run(venueId, fromDay)).changes);
+          ? this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day < ?`).run(venueId, deletes.beforeDay)
+          : this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day >= ? AND utc_day < ?`).run(venueId, fromDay, deletes.beforeDay)).changes);
       }
       if (deletes.fills) {
         // fills carry both a block and a timestamp; the scan's resume point is
         // a BLOCK for a targeted replay and a DAY boundary otherwise, so each
         // is matched on its own terms rather than converted (which would need
-        // an RPC round-trip to stay exact).
+        // an RPC round-trip to stay exact). The block bound is bound AS a
+        // bigint — node:sqlite takes it natively, so there is no lossy
+        // bigint→number narrowing to guard.
         fills = Number(('fromBlock' in deletes.fills
-          ? this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND block_number >= ?`).run(venueId, Number(deletes.fills.fromBlock))
-          : this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND ts >= ?`).run(venueId, Date.parse(`${deletes.fills.fromDay}T00:00:00Z`))).changes);
+          ? this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND block_number >= ? AND ts < ?`).run(venueId, deletes.fills.fromBlock, beforeMs)
+          : this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND ts >= ? AND ts < ?`).run(venueId, Date.parse(`${deletes.fills.fromDay}T00:00:00Z`), beforeMs)).changes);
       }
       this.db.exec('COMMIT');
       return { volume, fills };

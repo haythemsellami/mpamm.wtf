@@ -244,7 +244,10 @@ export function fillsScanFromDay(backfillFromUtc: string | undefined, nowMs: num
  * A disabled stage yields NO delete for its table. With BACKFILL=off or
  * MARKOUT_BACKFILL=off the reset still runs (it re-arms the flags for a later
  * boot), so deleting there would destroy history that nothing is coming to
- * rebuild.
+ * rebuild. TODAY is excluded for the same reason: it belongs to the live tail
+ * and neither scan writes it, so a mid-day reset that dropped it would erase
+ * what had already been counted since midnight. A reset re-run the next day
+ * rewrites that day properly, once it is closed.
  *
  * The fills boundary is the scan's own resume point: backfillRecentFills takes
  * `max(window start, cursor)`, so a targeted start LATER than the window wins
@@ -255,11 +258,13 @@ export function fillsScanFromDay(backfillFromUtc: string | undefined, nowMs: num
 export function planVenueReset(opts: {
   from?: { block: bigint; day: string };
   fillsFromDay: string;
+  /** the current UTC day — the exclusive upper bound on both deletes */
+  today: string;
   volumeEnabled: boolean;
   fillsEnabled: boolean;
 }): ResetDeletes {
-  const { from, fillsFromDay, volumeEnabled, fillsEnabled } = opts;
-  const deletes: ResetDeletes = {};
+  const { from, fillsFromDay, today, volumeEnabled, fillsEnabled } = opts;
+  const deletes: ResetDeletes = { beforeDay: today };
   if (volumeEnabled) deletes.volume = { fromDay: from?.day };
   if (fillsEnabled) {
     deletes.fills = from !== undefined && from.day >= fillsFromDay
@@ -276,9 +281,11 @@ export function planVenueReset(opts: {
  * persist — and a row cleared only in memory persists a zero over history the
  * replay never revisits. `byVenue` absent = 0 (@shared: DailyVolume).
  */
-export function purgeVenueDays(days: DailyVolume[], vid: string, volume: ResetDeletes['volume']): void {
+export function purgeVenueDays(days: DailyVolume[], vid: string, deletes: ResetDeletes): void {
+  const { volume, beforeDay } = deletes;
   if (!volume) return;                       // the store kept these rows too
   for (const d of days) {
+    if (d.utcDay >= beforeDay) continue;                                  // today: the tail owns it
     if (volume.fromDay === undefined || d.utcDay >= volume.fromDay) delete d.byVenue[vid];
   }
 }
@@ -584,9 +591,14 @@ export class LiveDataSource extends BaseSource {
       // re-arms the fills/markout onboarding too, so running it inside
       // backfillOnchain() meant BACKFILL=off skipped it entirely, and with both
       // enabled the markout pass had already gone by on that boot.
-      await this.applyBackfillReset();
+      // ONE clock for the run. The reset's fills delete boundary and the scan's
+      // window start are the same day computed twice; from two Date.now() calls
+      // a UTC midnight landing between them shifts the scan forward a day and
+      // strands the day the delete already removed.
+      const nowMs = Date.now();
+      await this.applyBackfillReset(nowMs);
       if (config.markoutBackfill) {
-        try { await this.markoutOnboarding(); }
+        try { await this.markoutOnboarding(nowMs); }
         catch (e) { this.noteOnce('markout.paused', `markout onboarding stopped: ${(e as Error).message}; retried automatically`); }
       }
       if (config.backfillEnabled) await this.backfillOnchain();
@@ -864,7 +876,7 @@ export class LiveDataSource extends BaseSource {
    * multi-hour scan; change any part of the string to re-run. Runs from
    * backgroundHistory() ahead of both stages so neither can miss it.
    */
-  private async applyBackfillReset(): Promise<void> {
+  private async applyBackfillReset(nowMs: number): Promise<void> {
     const want = config.backfillReset.trim();
     if (!want) return;
     const targets = parseBackfillReset(want);
@@ -891,7 +903,7 @@ export class LiveDataSource extends BaseSource {
       // (`cb <= end + 1n`), which would quietly downgrade a targeted replay
       // into a head-anchored one. Refuse instead of doing something other than
       // what was asked — see refuseResetStart for why neither form self-reports.
-      const refusal = refuseResetStart(t, utcDay(), this.bootHead);
+      const refusal = refuseResetStart(t, utcDay(nowMs), this.bootHead);
       if (refusal) {
         this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${refusal}`);
         settle();
@@ -942,12 +954,13 @@ export class LiveDataSource extends BaseSource {
       // for a later boot, but no scan is coming to restore the rows now).
       const deletes = planVenueReset({
         from,
-        fillsFromDay: fillsScanFromDay(adapter.backfillFromUtc, Date.now(), config.markoutBackfillDays),
+        fillsFromDay: fillsScanFromDay(adapter.backfillFromUtc, nowMs, config.markoutBackfillDays),
+        today: utcDay(nowMs),
         volumeEnabled: config.backfillEnabled,
         fillsEnabled: config.markoutBackfill,
       });
       const dropped = resetVenueHistory(this.store, t.vid, { from, deletes });
-      purgeVenueDays(this.days, t.vid, deletes.volume);
+      purgeVenueDays(this.days, t.vid, deletes);
       settle();
       // Say what was DESTROYED, not just what will be re-scanned: this is a
       // one-shot operation with no undo, and the counts are the only record.
@@ -1160,10 +1173,10 @@ export class LiveDataSource extends BaseSource {
    * later boots so days deferred on an unpublished archive (the current month's
    * Bybit dump) self-heal once it publishes.
    */
-  private async markoutOnboarding(): Promise<void> {
+  private async markoutOnboarding(nowMs: number): Promise<void> {
     if (this.remarkRunning) return;
     this.remarkRunning = true;
-    try { await this.markoutOnboardingInner(); }
+    try { await this.markoutOnboardingInner(nowMs); }
     finally { this.remarkRunning = false; }
   }
 
@@ -1187,7 +1200,7 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
-  private async markoutOnboardingInner(): Promise<void> {
+  private async markoutOnboardingInner(nowMs: number): Promise<void> {
     for (const a of ADAPTERS) {
       const vid = a.venues()[0]?.id ?? '';
       const name = a.venues()[0]?.name ?? vid;
@@ -1199,7 +1212,7 @@ export class LiveDataSource extends BaseSource {
       if (seed.action === 'skip') { this.store.setMeta(`mkfill_done_${vid}`, '1'); continue; }
       if (seed.action === 'defer') { this.noteOnce('markout.deferred', `${name} markout onboarding deferred — ${seed.reason}`, vid); continue; }
       try {
-        if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') await this.backfillRecentFills(a, vid, name, seed.all);
+        if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') await this.backfillRecentFills(a, vid, name, seed.all, nowMs);
         await this.remarkVenue(vid, name);
       } catch (e) {
         this.noteOnce('markout.paused', `${name} markout onboarding paused (${(e as Error).message}); retried automatically`, vid);
@@ -1211,7 +1224,7 @@ export class LiveDataSource extends BaseSource {
    *  timestamps) and persist them. Volume buckets are NOT touched — closed-day
    *  volume is owned by the venue's volume backfill / subgraph seed, and the
    *  deterministic fill ids make this idempotent against both. */
-  private async backfillRecentFills(a: VenueAdapter, vid: string, name: string, sources: LogSource[]): Promise<void> {
+  private async backfillRecentFills(a: VenueAdapter, vid: string, name: string, sources: LogSource[], nowMs: number): Promise<void> {
     const end = this.bootHead;
     if (end <= 0n) return;
     // Day-ALIGNED window start so every scanned day is complete — a partial
@@ -1219,7 +1232,7 @@ export class LiveDataSource extends BaseSource {
     // volume backfill counted fully.
     // Shared with the reset's delete boundary (fillsScanFromDay) so the two
     // cannot drift: anything deleted below this start is never re-inserted.
-    const sinceDay = fillsScanFromDay(a.backfillFromUtc, Date.now(), config.markoutBackfillDays);
+    const sinceDay = fillsScanFromDay(a.backfillFromUtc, nowMs, config.markoutBackfillDays);
     const startSec = Math.floor(Date.parse(`${sinceDay}T00:00:00Z`) / 1000);
     let from = await blockAtOrAfter(startSec, end);
     const cur = this.store.getMeta(`mkfill_cursor_${vid}`);
