@@ -291,6 +291,24 @@ export function purgeVenueDays(days: DailyVolume[], vid: string, deletes: ResetD
 }
 
 /**
+ * Has this entry already been applied?
+ *
+ * Keyed on the ENTRY's own text, never the whole BACKFILL_RESET value: keyed
+ * on the value, appending a venue to the list — or bumping one venue's nonce —
+ * would re-run the destructive replay for every venue already done. Entry text
+ * is trimmed by the parser, so padding cannot masquerade as a change either.
+ */
+export function resetAlreadyApplied(store: Pick<VolumeStore, 'getMeta'>, t: BackfillResetTarget): boolean {
+  return !!t.vid && store.getMeta(`backfill_reset_applied_${t.vid}`) === t.spec;
+}
+
+/** Record an entry as finished — done, or refused for a reason that will still
+ *  hold next boot. An entry with no parseable venue id has nowhere to record. */
+export function markResetApplied(store: Pick<VolumeStore, 'setMeta'>, t: BackfillResetTarget): void {
+  if (t.vid) store.setMeta(`backfill_reset_applied_${t.vid}`, t.spec);
+}
+
+/**
  * One-time adoption of the legacy reset marker.
  *
  * A single global key used to record the applied VALUE. Per-venue keys are
@@ -311,11 +329,12 @@ export function purgeVenueDays(days: DailyVolume[], vid: string, deletes: ResetD
 export function adoptLegacyResetMarker(
   store: Pick<VolumeStore, 'getMeta' | 'setMeta'>,
   want: string,
-  vids: readonly string[],
+  entries: readonly { vid: string; spec: string }[],
 ): void {
   if (store.getMeta('backfill_reset_migrated') === '1') return;
   if (store.getMeta('backfill_reset_applied') === want) {
-    for (const vid of vids) if (vid) store.setMeta(`backfill_reset_applied_${vid}`, want);
+    // each venue adopts ITS OWN entry, matching what settle() will write
+    for (const e of entries) if (e.vid) store.setMeta(`backfill_reset_applied_${e.vid}`, e.spec);   // its OWN entry
   }
   store.setMeta('backfill_reset_migrated', '1');
 }
@@ -352,11 +371,16 @@ export function resetVenueHistory(
 
 /** One parsed BACKFILL_RESET entry. `invalid` is carried rather than thrown so
  *  one bad entry cannot stop the others, and so it can be reported loudly. */
-export type BackfillResetTarget =
-  | { vid: string; from: 'lifetime' }
-  | { vid: string; from: 'block'; block: bigint }
-  | { vid: string; from: 'day'; day: string }
-  | { vid: string; from: 'invalid'; spec: string };
+/** One parsed entry. `spec` is that entry's own raw text — NOT the whole
+ *  BACKFILL_RESET value — because it is what the venue's one-shot marker is
+ *  keyed on: keyed on the whole value, adding a venue to the list would re-run
+ *  the destructive replay for every venue already done. */
+export type BackfillResetTarget = { vid: string; spec: string } & (
+  | { from: 'lifetime' }
+  | { from: 'block'; block: bigint }
+  | { from: 'day'; day: string }
+  | { from: 'invalid' }
+);
 
 /**
  * Why a reset start cannot be applied, or null when it can — everything
@@ -432,19 +456,19 @@ export function parseBackfillReset(spec: string): BackfillResetTarget[] {
     const at = entry.split('@');
     const nonce = at[1];
     if (at.length > 2 || (nonce !== undefined && (nonce === '' || nonce.includes(':')))) {
-      return { vid: at[0]?.split(':')[0] ?? '', from: 'invalid' as const, spec: entry };
+      return { vid: at[0]?.split(':')[0] ?? '', spec: entry, from: 'invalid' as const };
     }
     const [vid, from, ...rest] = at[0].split(':');
-    if (!vid || rest.length) return { vid: vid ?? '', from: 'invalid' as const, spec: entry };
-    if (from === undefined) return { vid, from: 'lifetime' as const };
+    if (!vid || rest.length) return { vid: vid ?? '', spec: entry, from: 'invalid' as const };
+    if (from === undefined) return { vid, spec: entry, from: 'lifetime' as const };
     // day first: a date can never be read as a block number, and vice versa.
     if (/^\d{4}-\d{2}-\d{2}$/.test(from)) {
       return Number.isFinite(Date.parse(`${from}T00:00:00Z`))
-        ? { vid, from: 'day' as const, day: from }
-        : { vid, from: 'invalid' as const, spec: entry };
+        ? { vid, spec: entry, from: 'day' as const, day: from }
+        : { vid, spec: entry, from: 'invalid' as const };
     }
-    if (/^\d+$/.test(from) && BigInt(from) > 0n) return { vid, from: 'block' as const, block: BigInt(from) };
-    return { vid, from: 'invalid' as const, spec: entry };
+    if (/^\d+$/.test(from) && BigInt(from) > 0n) return { vid, spec: entry, from: 'block' as const, block: BigInt(from) };
+    return { vid, spec: entry, from: 'invalid' as const };
   });
 }
 
@@ -909,19 +933,18 @@ export class LiveDataSource extends BaseSource {
     const want = config.backfillReset.trim();
     if (!want) return;
     const targets = parseBackfillReset(want);
-    adoptLegacyResetMarker(this.store, want, targets.map((t) => t.vid));
+    adoptLegacyResetMarker(this.store, want, targets);
 
     const applied: string[] = [];
     for (const t of targets) {
       // One-shot PER VENUE, not per value. A global marker could not record
       // that one entry deferred: retrying it meant re-running the entries that
       // had succeeded, throwing away replays already hours deep.
-      const marker = t.vid ? `backfill_reset_applied_${t.vid}` : '';
-      if (marker && this.store.getMeta(marker) === want) continue;
+      if (resetAlreadyApplied(this.store, t)) continue;
       // Stamped only once an entry is FINISHED — done, or refused for a reason
       // that will still hold next boot. A transient failure leaves it unstamped
       // so this entry, and only this entry, is retried.
-      const settle = () => { if (marker) this.store.setMeta(marker, want); };
+      const settle = () => markResetApplied(this.store, t);
 
       if (t.from === 'invalid') {
         this.note('backfill.config.invalid', `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);

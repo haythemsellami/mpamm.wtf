@@ -7,7 +7,7 @@
 // depends on how long ago onboarding ran, which is exactly the kind of
 // non-determinism a reset must not have.
 import { describe, expect, it } from 'vitest';
-import { adoptLegacyResetMarker, fillsScanFromDay, parseBackfillReset, refuseResolvedStart, planVenueReset, purgeVenueDays, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
+import { adoptLegacyResetMarker, fillsScanFromDay, markResetApplied, parseBackfillReset, refuseResolvedStart, resetAlreadyApplied, planVenueReset, purgeVenueDays, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
 import type { DailyVolume } from '@shared';
 import type { ResetDeletes } from '../db.js';
 
@@ -118,22 +118,25 @@ describe('resetVenueHistory', () => {
 
 describe('parseBackfillReset', () => {
   it('bare vid means the whole lifetime — the original behaviour is unchanged', () => {
-    expect(parseBackfillReset('metric')).toEqual([{ vid: 'metric', from: 'lifetime' }]);
+    expect(parseBackfillReset('metric')).toEqual([{ vid: 'metric', spec: 'metric', from: 'lifetime' }]);
+    // whitespace is trimmed into the spec too, so padding cannot look like a
+    // different entry and re-run a venue that is already done.
     expect(parseBackfillReset(' metric , poe ')).toEqual([
-      { vid: 'metric', from: 'lifetime' }, { vid: 'poe', from: 'lifetime' },
+      { vid: 'metric', spec: 'metric', from: 'lifetime' },
+      { vid: 'poe', spec: 'poe', from: 'lifetime' },
     ]);
   });
 
   it('`@` stays a re-run nonce, never a start point', () => {
     // pre-existing operators use metric@2 to force a repeat; that must not
     // silently become "replay from block 2".
-    expect(parseBackfillReset('metric@2')).toEqual([{ vid: 'metric', from: 'lifetime' }]);
+    expect(parseBackfillReset('metric@2')).toEqual([{ vid: 'metric', spec: 'metric@2', from: 'lifetime' }]);
   });
 
   it('`:` carries a block or a day', () => {
-    expect(parseBackfillReset('metric:95836845')).toEqual([{ vid: 'metric', from: 'block', block: 95836845n }]);
-    expect(parseBackfillReset('metric:2026-08-14')).toEqual([{ vid: 'metric', from: 'day', day: '2026-08-14' }]);
-    expect(parseBackfillReset('metric:2026-08-14@2')).toEqual([{ vid: 'metric', from: 'day', day: '2026-08-14' }]);
+    expect(parseBackfillReset('metric:95836845')).toEqual([{ vid: 'metric', spec: 'metric:95836845', from: 'block', block: 95836845n }]);
+    expect(parseBackfillReset('metric:2026-08-14')).toEqual([{ vid: 'metric', spec: 'metric:2026-08-14', from: 'day', day: '2026-08-14' }]);
+    expect(parseBackfillReset('metric:2026-08-14@2')).toEqual([{ vid: 'metric', spec: 'metric:2026-08-14@2', from: 'day', day: '2026-08-14' }]);
   });
 
   it('reports a malformed start instead of guessing at one', () => {
@@ -171,12 +174,12 @@ describe('refuseResetStart', () => {
   const HEAD = 98_000_000n;
 
   it('refuses a future DAY, which would otherwise resolve to head', () => {
-    expect(refuseResetStart({ vid: 'm', from: 'day', day: '2026-08-23' }, TODAY, HEAD))
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'day', day: '2026-08-23' }, TODAY, HEAD))
       .toMatch(/is in the future .*today is 2026-08-22/);
   });
 
   it('refuses a block past head before any RPC is spent on it', () => {
-    expect(refuseResetStart({ vid: 'm', from: 'block', block: HEAD + 1n }, TODAY, HEAD))
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'block', block: HEAD + 1n }, TODAY, HEAD))
       .toMatch(/past head/);
   });
 
@@ -186,32 +189,32 @@ describe('refuseResetStart', () => {
    * the venue's one-shot marker on nothing — the very silence this guards.
    */
   it('refuses TODAY, which deletes nothing and re-scans nothing', () => {
-    expect(refuseResetStart({ vid: 'm', from: 'day', day: TODAY }, TODAY, HEAD))
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'day', day: TODAY }, TODAY, HEAD))
       .toMatch(/is TODAY .*use an earlier day/);
   });
 
   it('accepts a past day and a block at head', () => {
-    expect(refuseResetStart({ vid: 'm', from: 'day', day: '2026-08-21' }, TODAY, HEAD)).toBeNull();
-    expect(refuseResetStart({ vid: 'm', from: 'day', day: '2026-01-01' }, TODAY, HEAD)).toBeNull();
-    expect(refuseResetStart({ vid: 'm', from: 'block', block: HEAD }, TODAY, HEAD)).toBeNull();
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'day', day: '2026-08-21' }, TODAY, HEAD)).toBeNull();
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'day', day: '2026-01-01' }, TODAY, HEAD)).toBeNull();
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'block', block: HEAD }, TODAY, HEAD)).toBeNull();
   });
 
   it('says the day is in the FUTURE only when it actually is', () => {
-    expect(refuseResetStart({ vid: 'm', from: 'day', day: '2026-08-23' }, TODAY, HEAD))
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'day', day: '2026-08-23' }, TODAY, HEAD))
       .toMatch(/is in the future/);
   });
 
   it('cannot judge a raw block by day — that is refuseResolvedStart\u2019s job', () => {
     // a block from earlier today is <= head and carries no day until resolved
-    expect(refuseResetStart({ vid: 'm', from: 'block', block: HEAD - 1n }, TODAY, HEAD)).toBeNull();
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'block', block: HEAD - 1n }, TODAY, HEAD)).toBeNull();
   });
 
   it('never refuses a lifetime replay — it has no start to be wrong about', () => {
-    expect(refuseResetStart({ vid: 'm', from: 'lifetime' }, TODAY, HEAD)).toBeNull();
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'lifetime' }, TODAY, HEAD)).toBeNull();
   });
 
   it('holds its fire before the head is known, so boot order cannot refuse a valid reset', () => {
-    expect(refuseResetStart({ vid: 'm', from: 'block', block: 99_000_000n }, TODAY, 0n)).toBeNull();
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'block', block: 99_000_000n }, TODAY, 0n)).toBeNull();
   });
 });
 
@@ -263,14 +266,15 @@ describe('refuseResolvedStart', () => {
 describe('adoptLegacyResetMarker', () => {
   it('adopts an already-applied value, so upgrading is not itself a reset', () => {
     const s = fakeStore({ backfill_reset_applied: 'thogamm@4,poe' });
-    adoptLegacyResetMarker(s, 'thogamm@4,poe', ['thogamm', 'poe']);
-    expect(s.meta.get('backfill_reset_applied_thogamm')).toBe('thogamm@4,poe');
-    expect(s.meta.get('backfill_reset_applied_poe')).toBe('thogamm@4,poe');
+    adoptLegacyResetMarker(s, 'thogamm@4,poe', [{ vid: 'thogamm', spec: 'thogamm@4' }, { vid: 'poe', spec: 'poe' }]);
+    // each venue adopts ITS entry, not the whole value
+    expect(s.meta.get('backfill_reset_applied_thogamm')).toBe('thogamm@4');
+    expect(s.meta.get('backfill_reset_applied_poe')).toBe('poe');
   });
 
   it('adopts nothing when the value CHANGED — that reset is meant to run', () => {
     const s = fakeStore({ backfill_reset_applied: 'thogamm@4' });
-    adoptLegacyResetMarker(s, 'thogamm@5', ['thogamm']);
+    adoptLegacyResetMarker(s, 'thogamm@5', [{ vid: 'thogamm', spec: 'thogamm@5' }]);
     expect(s.meta.get('backfill_reset_applied_thogamm')).toBeUndefined();
   });
 
@@ -278,22 +282,79 @@ describe('adoptLegacyResetMarker', () => {
     // the legacy key keeps being written as a rollback breadcrumb, so without
     // its own flag this would re-stamp entries that legitimately deferred.
     const s = fakeStore({ backfill_reset_applied: 'thogamm@5' });
-    adoptLegacyResetMarker(s, 'thogamm@5', ['thogamm']);
+    adoptLegacyResetMarker(s, 'thogamm@5', [{ vid: 'thogamm', spec: 'thogamm@5' }]);
     s.meta.delete('backfill_reset_applied_thogamm');          // entry deferred on a transient failure
-    adoptLegacyResetMarker(s, 'thogamm@5', ['thogamm']);
+    adoptLegacyResetMarker(s, 'thogamm@5', [{ vid: 'thogamm', spec: 'thogamm@5' }]);
     expect(s.meta.get('backfill_reset_applied_thogamm')).toBeUndefined();
   });
 
   it('marks itself migrated even with nothing to adopt, so a fresh database is quiet', () => {
     const s = fakeStore();
-    adoptLegacyResetMarker(s, 'thogamm@4', ['thogamm']);
+    adoptLegacyResetMarker(s, 'thogamm@4', [{ vid: 'thogamm', spec: 'thogamm@4' }]);
     expect(s.meta.get('backfill_reset_migrated')).toBe('1');
     expect(s.meta.get('backfill_reset_applied_thogamm')).toBeUndefined();
   });
 
+  /**
+   * Markers are keyed on the ENTRY, so editing the list elsewhere cannot
+   * disturb a venue already done. Keyed on the whole BACKFILL_RESET value,
+   * appending one venue would re-run every destructive replay in it.
+   *
+   * These drive the real predicates applyBackfillReset uses, not a restated
+   * copy of them — a rule asserted twice is not a rule that is tested.
+   */
+  const applyAll = (s: ReturnType<typeof fakeStore>, value: string) => {
+    for (const t of parseBackfillReset(value)) markResetApplied(s, t);
+  };
+  const wouldRun = (s: ReturnType<typeof fakeStore>, value: string) =>
+    parseBackfillReset(value).filter((t) => !resetAlreadyApplied(s, t)).map((t) => t.vid);
+
+  it('leaves a venue alone when another is appended to the list', () => {
+    const s = fakeStore();
+    applyAll(s, 'thogamm@4');
+    expect(wouldRun(s, 'thogamm@4,metric')).toEqual(['metric']);
+  });
+
+  it('leaves a venue alone when a DIFFERENT venue\u2019s nonce is bumped', () => {
+    const s = fakeStore();
+    applyAll(s, 'thogamm@4,metric');
+    expect(wouldRun(s, 'thogamm@5,metric')).toEqual(['thogamm']);
+  });
+
+  it('is order-independent — reordering the list re-runs nothing', () => {
+    const s = fakeStore();
+    applyAll(s, 'thogamm@4,metric');
+    expect(wouldRun(s, 'metric,thogamm@4')).toEqual([]);
+  });
+
+  it('ignores padding — whitespace is not a new entry', () => {
+    const s = fakeStore();
+    applyAll(s, 'thogamm@4,metric');
+    expect(wouldRun(s, ' thogamm@4 ,  metric ')).toEqual([]);
+  });
+
+  it('re-runs the venue whose OWN entry changed', () => {
+    const s = fakeStore();
+    applyAll(s, 'thogamm@4');
+    expect(wouldRun(s, 'thogamm:2026-08-14')).toEqual(['thogamm']);
+  });
+
+  it('re-runs nothing on an unchanged value', () => {
+    const s = fakeStore();
+    applyAll(s, 'thogamm@4,metric,poe');
+    expect(wouldRun(s, 'thogamm@4,metric,poe')).toEqual([]);
+  });
+
+  it('never treats an unrecordable entry as applied', () => {
+    const s = fakeStore();
+    const t = { vid: '', spec: ':5', from: 'invalid' as const };
+    markResetApplied(s, t);                       // nowhere to record it
+    expect(resetAlreadyApplied(s, t)).toBe(false);
+  });
+
   it('skips an entry with no parseable venue id', () => {
     const s = fakeStore({ backfill_reset_applied: 'x' });
-    adoptLegacyResetMarker(s, 'x', ['']);
+    adoptLegacyResetMarker(s, 'x', [{ vid: '', spec: 'x' }]);
     expect([...s.meta.keys()].some((k) => k.startsWith('backfill_reset_applied_'))).toBe(false);
   });
 });
