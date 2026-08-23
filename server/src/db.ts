@@ -56,6 +56,26 @@ const nullMarkouts = (): (number | null)[] => MARKOUT_HORIZONS.map(() => null);
 /** one persisted point of a pair's CEX mid curve (pair terms). */
 export interface MidPoint { ts: number; market: string; mid: number }
 
+/**
+ * Which rows a venue reset may delete. An omitted key leaves that table
+ * untouched — used when the scan that would restore it is disabled, where
+ * deleting would destroy history nothing puts back.
+ *
+ * `volume.fromDay` omitted = every day (a lifetime replay re-scans them all).
+ * `fills` is keyed by whichever boundary the fills scan will actually resume
+ * on: its exact block for a targeted replay, else the first ms of its window.
+ */
+export interface ResetDeletes {
+  /** Exclusive upper bound shared by both tables — always the current UTC day.
+   *  Today is owned by the LIVE TAIL: the volume backfill skips `day >= today`
+   *  and the fills scan batches only `utcDay(f.ts) < today`, so nothing a
+   *  replay does rebuilds it. Deleting it would drop what the tail already
+   *  counted this morning, and the tail's cursor is long past re-emitting it. */
+  beforeDay: string;
+  volume?: { fromDay?: string };
+  fills?: { fromBlock: bigint } | { fromDay: string };
+}
+
 export class VolumeStore {
   private db: DatabaseSync;
   private dayStmt: Stmt;
@@ -88,6 +108,7 @@ export class VolumeStore {
         swaps    INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (utc_day, venue_id)
       );
+      CREATE INDEX IF NOT EXISTS daily_volume_venue_day ON daily_volume (venue_id, utc_day);
       CREATE TABLE IF NOT EXISTS day_meta (
         utc_day TEXT PRIMARY KEY,
         partial INTEGER NOT NULL DEFAULT 0
@@ -110,6 +131,8 @@ export class VolumeStore {
         markouts_bps TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS fills_ts ON fills (ts);
+      CREATE INDEX IF NOT EXISTS fills_venue_block ON fills (venue_id, block_number);
+      CREATE INDEX IF NOT EXISTS fills_venue_ts ON fills (venue_id, ts);
       -- per-pair CEX mid curve (pair terms), sampled every ~PERSIST_MS: lets a
       -- future markout-model bump REPLAY retained fills' markouts instead of
       -- nulling them (see REMARK_FROM_MID_HISTORY). Same retention as fills.
@@ -235,6 +258,79 @@ export class VolumeStore {
     const f = this.db.prepare(`DELETE FROM fills WHERE venue_id NOT IN (${q})`).run(...keepIds);
     this.db.prepare(`DELETE FROM daily_gas WHERE venue_id NOT IN (${q})`).run(...keepIds);
     return { volume: Number(v.changes), fills: Number(f.changes) };
+  }
+
+  /**
+   * Drop stored rows for ONE venue so a BACKFILL_RESET is a true replay.
+   *
+   * Without this a reset can only ever RAISE a venue's history: the backfill
+   * writes only the days it decoded fills in (mergeBackfill iterates its
+   * accumulator), so a day that used to have volume and now decodes to nothing
+   * keeps its old number forever.
+   *
+   * The two tables are scoped SEPARATELY because their scans are. Deleting
+   * wider than the scan restores is silent data loss, so an omitted key means
+   * "leave this table alone" — which is the honest answer when the stage that
+   * would refill it is switched off. See planVenueReset(), which is the only
+   * thing that should build this.
+   *
+   * The matching scan flags/cursors are re-armed in the SAME transaction as
+   * their rows. A crash must never leave history deleted behind a done-flag
+   * that prevents the replay from putting it back. A disabled stage has no
+   * delete key and keeps its rows, flag and cursor together.
+   *
+   * Gas is never touched: it accrues from its own sources and has resetGas().
+   */
+  resetVenueHistory(venueId: string, deletes: ResetDeletes, fromBlock?: bigint): { volume: number; fills: number } {
+    this.db.exec('BEGIN');
+    try {
+      const beforeMs = Date.parse(`${deletes.beforeDay}T00:00:00Z`);
+      if (!Number.isFinite(beforeMs) || new Date(beforeMs).toISOString().slice(0, 10) !== deletes.beforeDay) {
+        throw new Error(`invalid reset upper day '${deletes.beforeDay}'`);
+      }
+      let volume = 0, fills = 0;
+      if (deletes.volume) {
+        const { fromDay } = deletes.volume;
+        if (fromDay !== undefined) {
+          const fromMs = Date.parse(`${fromDay}T00:00:00Z`);
+          if (!Number.isFinite(fromMs) || new Date(fromMs).toISOString().slice(0, 10) !== fromDay) {
+            throw new Error(`invalid volume reset day '${fromDay}'`);
+          }
+        }
+        volume = Number((fromDay === undefined
+          ? this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day < ?`).run(venueId, deletes.beforeDay)
+          : this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day >= ? AND utc_day < ?`).run(venueId, fromDay, deletes.beforeDay)).changes);
+        this.metaStmt.run(`backfill_done_${venueId}`, '');
+        this.metaStmt.run(`backfill_cursor_${venueId}`, fromBlock === undefined ? '' : String(fromBlock));
+      }
+      if (deletes.fills) {
+        // fills carry both a block and a timestamp; the scan's resume point is
+        // a BLOCK for a targeted replay and a DAY boundary otherwise, so each
+        // is matched on its own terms rather than converted (which would need
+        // an RPC round-trip to stay exact). The block bound is bound AS a
+        // bigint — node:sqlite takes it natively, so there is no lossy
+        // bigint→number narrowing to guard.
+        let fillFromMs = 0;
+        if ('fromDay' in deletes.fills) {
+          fillFromMs = Date.parse(`${deletes.fills.fromDay}T00:00:00Z`);
+          if (!Number.isFinite(fillFromMs) || new Date(fillFromMs).toISOString().slice(0, 10) !== deletes.fills.fromDay) {
+            throw new Error(`invalid fills reset day '${deletes.fills.fromDay}'`);
+          }
+        }
+        fills = Number(('fromBlock' in deletes.fills
+          ? this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND block_number >= ? AND ts < ?`).run(venueId, deletes.fills.fromBlock, beforeMs)
+          : this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND ts >= ? AND ts < ?`).run(venueId, fillFromMs, beforeMs)).changes);
+        this.metaStmt.run(`mkfill_done_${venueId}`, '');
+        this.metaStmt.run(`mkfill_cursor_${venueId}`, fromBlock === undefined ? '' : String(fromBlock));
+        this.db.prepare(`DELETE FROM meta WHERE substr(key, 1, length(?)) = ?`)
+          .run(`mkhist_cursor_${venueId}_`, `mkhist_cursor_${venueId}_`);
+      }
+      this.db.exec('COMMIT');
+      return { volume, fills };
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
   }
 
   // ── quote-update gas (QUOTE_UPDATE_BURN) ──────────────────────────────────
