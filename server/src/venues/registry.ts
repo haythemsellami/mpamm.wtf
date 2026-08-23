@@ -70,6 +70,15 @@ export function allVenueIds(): Set<string> {
   return new Set([...ALL_ADAPTERS.flatMap((a) => a.venues().map((v) => v.id)), ...REFERENCES.metas().map((v) => v.id)]);
 }
 
+/** Every ADAPTER venue id in the code, ignoring the VENUES runtime filter and
+ *  excluding the CEX references. Distinguishes a venue that is merely sat out
+ *  this boot from one that does not exist: an operation that refuses the first
+ *  as if it were the second (BACKFILL_RESET) would consume itself against a dev
+ *  loop and never run on a full boot. */
+export function allAdapterVenueIds(): Set<string> {
+  return new Set(ALL_ADAPTERS.flatMap((a) => a.venues().map((v) => v.id)));
+}
+
 /**
  * Fail loud on a misconfigured registry — a plugin whose id collides with
  * another's would silently MERGE two venues' data, and a malformed id would

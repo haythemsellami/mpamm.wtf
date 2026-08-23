@@ -7,7 +7,7 @@
 // depends on how long ago onboarding ran, which is exactly the kind of
 // non-determinism a reset must not have.
 import { describe, expect, it } from 'vitest';
-import { adoptLegacyResetMarker, fillsScanFromDay, markResetApplied, parseBackfillReset, refuseResolvedStart, resetAlreadyApplied, planVenueReset, purgeVenueDays, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
+import { adoptLegacyResetMarker, classifyMissingResetVenue, fillsScanFromDay, markResetApplied, parseBackfillReset, refuseResolvedStart, resetAlreadyApplied, planVenueReset, purgeVenueDays, refuseResetStart, resetVenueHistory } from '../datasource/live.js';
 import type { DailyVolume } from '@shared';
 import type { ResetDeletes } from '../db.js';
 
@@ -235,6 +235,36 @@ describe('refuseResetStart', () => {
  * answered. A RAW block carries no day until eth_getBlock resolves one, so
  * `vid:<block>` pointing anywhere inside today reaches here looking valid.
  */
+/**
+ * A reset naming a venue this boot is not running must survive to a boot that
+ * IS. `VENUES=<subset>` is the documented adapter-dev loop, so treating a
+ * filtered-out venue like a typo would spend the reset against a dev boot and
+ * skip it forever afterwards — the same trap allVenueIds() exists to avoid on
+ * the DB-reconciliation side.
+ */
+describe('classifyMissingResetVenue', () => {
+  const ADAPTERS_ALL = new Set(['thogamm', 'metric', 'poe']);
+  const REFS = new Set(['bybit', 'binance']);
+
+  it('calls a filtered-out adapter venue INACTIVE, so the reset stays pending', () => {
+    expect(classifyMissingResetVenue('metric', ADAPTERS_ALL, REFS)).toBe('inactive');
+  });
+
+  it('calls a CEX reference what it is — it has no history to reset', () => {
+    expect(classifyMissingResetVenue('bybit', ADAPTERS_ALL, REFS)).toBe('reference');
+  });
+
+  it('calls a typo unknown', () => {
+    expect(classifyMissingResetVenue('thogam', ADAPTERS_ALL, REFS)).toBe('unknown');
+    expect(classifyMissingResetVenue('', ADAPTERS_ALL, REFS)).toBe('unknown');
+  });
+
+  it('prefers ADAPTER over reference if an id somehow appears in both', () => {
+    // an adapter venue is resettable; the reference reading would spend it
+    expect(classifyMissingResetVenue('metric', ADAPTERS_ALL, new Set(['metric']))).toBe('inactive');
+  });
+});
+
 describe('refuseResolvedStart', () => {
   const TODAY = '2026-08-22';
   const HEAD = 98_000_000n;

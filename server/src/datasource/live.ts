@@ -15,7 +15,7 @@ import { VolumeStore, type ResetDeletes } from '../db.js';
 import { NoteBuffer } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
-import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, validateRegistry } from '../venues/registry.js';
+import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, allAdapterVenueIds, validateRegistry } from '../venues/registry.js';
 import type { AdapterContext, LogBundle, LogSource, VenueAdapter } from '../venues/adapter.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -288,6 +288,27 @@ export function purgeVenueDays(days: DailyVolume[], vid: string, deletes: ResetD
     if (d.utcDay >= beforeDay) continue;                                  // today: the tail owns it
     if (volume.fromDay === undefined || d.utcDay >= volume.fromDay) delete d.byVenue[vid];
   }
+}
+
+/**
+ * Why a reset names a venue this boot cannot resolve to a running adapter.
+ *
+ *  - 'inactive'  — a real adapter venue the VENUES filter sat out (the adapter
+ *    dev loop). The reset must stay PENDING: stamping it applied would consume
+ *    it against a subset boot and skip it forever on a full one. Same rule
+ *    allVenueIds() exists for on the DB-reconciliation side.
+ *  - 'reference' — a CEX benchmark. It has no adapter, no backfill and no rows
+ *    of its own, so it can never be reset; asking again would not help.
+ *  - 'unknown'   — not in the code at all, i.e. a typo.
+ */
+export function classifyMissingResetVenue(
+  vid: string,
+  allAdapterIds: ReadonlySet<string>,
+  referenceIds: ReadonlySet<string>,
+): 'inactive' | 'reference' | 'unknown' {
+  if (allAdapterIds.has(vid)) return 'inactive';
+  if (referenceIds.has(vid)) return 'reference';
+  return 'unknown';
 }
 
 /**
@@ -961,12 +982,21 @@ export class LiveDataSource extends BaseSource {
         settle();
         continue;
       }
-      // An unregistered id would delete nothing and re-scan nothing while
-      // still reporting "applied" — the exact silent no-op this pass exists to
-      // stamp out. It also owns backfillFromUtc, which scopes the fills delete.
+      // An unresolvable id would delete nothing and re-scan nothing while still
+      // reporting "applied" — the exact silent no-op this pass exists to stamp
+      // out. The adapter also owns backfillFromUtc, which scopes the fills
+      // delete. Which KIND of unresolvable decides whether the reset is spent.
       const adapter = ADAPTERS.find((a) => a.venues().some((v) => v.id === t.vid));
       if (!adapter) {
-        this.note('backfill.config.invalid', `backfill reset: no adapter declares venue '${t.vid}' — skipped`);
+        const missing = classifyMissingResetVenue(t.vid, allAdapterVenueIds(), new Set(REFERENCES.metas().map((v) => v.id)));
+        if (missing === 'inactive') {
+          // deliberately NOT settled — it has to survive to a boot that runs it
+          this.note('backfill.deferred', `backfill reset: venue '${t.vid}' is not running this boot (VENUES filter) — left pending for a boot that includes it`);
+          continue;
+        }
+        this.note('backfill.config.invalid', missing === 'reference'
+          ? `backfill reset: '${t.vid}' is a CEX reference, which has no history to reset — skipped`
+          : `backfill reset: no adapter declares venue '${t.vid}' — skipped`);
         settle();
         continue;
       }
