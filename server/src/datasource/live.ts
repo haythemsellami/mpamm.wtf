@@ -1271,7 +1271,18 @@ export class LiveDataSource extends BaseSource {
     }
     if (from > end) { this.store.setMeta(`mkfill_done_${vid}`, '1'); return; }
 
-    const today = utcDay();
+    // The RUN's day, not this venue's start day. A reset earlier in the same
+    // run preserved its "today" — the one day it may not delete — and fills are
+    // insert-if-absent (ON CONFLICT DO NOTHING), so a scan working from a LATER
+    // day cannot correct that day's rows, only add to them: the stale fills
+    // survive and reconcileSwapCounts then counts them alongside the fresh
+    // ones. Venue scans run back to back for hours, so whether that happened
+    // depended on how long earlier venues took. Sharing the anchor makes the
+    // preserved day the same day for every stage of the run.
+    // (backfillOnchain deliberately keeps the live clock: it SETS whole days
+    // rather than adding to them, so a day closing mid-run is healed, not
+    // contaminated — and a venue-lifetime replay genuinely should pick it up.)
+    const today = utcDay(nowMs);
     let chunk = BigInt(config.backfillChunk);
     const floor = BigInt(config.getLogsMinChunk);
     const maxChunk = BigInt(config.backfillChunk);
