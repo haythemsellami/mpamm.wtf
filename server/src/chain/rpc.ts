@@ -1,14 +1,18 @@
 import { createPublicClient, createTransport, defineChain, http, type PublicClient, type Transport } from 'viem';
 import { config } from '../config.js';
 import { ADDR, MONAD_CHAIN_ID } from '@shared';
-import { RpcBreaker, type RpcNote, type RpcStatusView } from './failover.js';
+import { RpcBreaker, guardRpcRead, isAvailabilityFailure, type RpcNote, type RpcStatusView, type RpcVerifyResult } from './failover.js';
 
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
   name: 'Monad',
-  // Viem derives its polling interval from this. Without it, a custom chain
-  // falls back to 12s blocks and caches eth_blockNumber for 4s.
-  blockTime: 400,
+  // Monad's official block time. Viem derives its polling interval from this;
+  // without it, a custom chain falls back to 12s blocks and caches
+  // eth_blockNumber for 4s. Every "N blocks ≈ T" comment in the indexer is
+  // derived from this number — if it ever changes, grep for the derivations
+  // (finality margins, the backfill hole-skip stride) rather than editing here
+  // alone.
+  blockTime: 300,
   nativeCurrency: { name: 'Monad', symbol: 'MON', decimals: 18 },
   rpcUrls: {
     default: { http: [config.rpcHttp] },
@@ -18,66 +22,132 @@ export const monad = defineChain({
   },
 });
 
-/** Ordered endpoints: primary first, then backups (deduped — with no
- *  RPC_HTTP_URL set the default backup IS the primary). Labels are the only
- *  thing that may ever surface publicly; URLs embed keys. */
-const RPC_URLS = [config.rpcHttp, ...config.rpcBackups.filter((u) => u !== config.rpcHttp)];
+/** The public endpoint, called out in labels so a note reader can tell a paid
+ *  node from the free fallback. Labels are the only thing that may ever surface
+ *  publicly; URLs embed keys. */
 const PUBLIC_RPC = 'https://rpc.monad.xyz';
-const rpcLabel = (i: number) =>
-  i === 0 ? 'primary' : `backup-${i}${RPC_URLS[i] === PUBLIC_RPC ? ' (public)' : ''}`;
 
-const breaker = new RpcBreaker();
+/** One ordered endpoint list behind one breaker behind one viem client.
+ *  `pool` names the pool in every note it raises (chain/failover.ts). */
+interface RpcPool {
+  client: PublicClient;
+  status: () => RpcStatusView;
+  generation: () => number;
+  onEvent: (cb: (n: RpcNote) => void) => void;
+  verify: () => Promise<RpcVerifyResult>;
+}
 
-/** All endpoints share one failover breaker (chain/failover.ts): K consecutive
- *  transport failures advance to the next endpoint; a 60s probe snaps back to
- *  the primary once it recovers. Inner transports keep their own retry/backoff
- *  (so the breaker only sees post-retry failures); the outer transport must
- *  not retry again on top. */
-const failoverTransport: Transport = ({ chain }) => {
-  breaker.attach(RPC_URLS.map((url, i) => ({
-    label: rpcLabel(i),
-    request: http(url, {
-      batch: { batchSize: 256, wait: 8 },
-      retryCount: 2,
-      timeout: 12_000,
-    })({ chain }).request as (args: { method: string; params?: unknown }) => Promise<unknown>,
-  })));
-  return createTransport({
-    key: 'failover',
-    name: 'Failover HTTP',
-    type: 'failover',
-    retryCount: 0,
-    request: (args) => breaker.request(args) as Promise<any>,
+/**
+ * Build a failover pool: K consecutive transport failures advance to the next
+ * endpoint; a 60s probe snaps back to the primary once it recovers. Inner
+ * transports keep their own retry/backoff (so the breaker only sees post-retry
+ * failures); the outer transport must not retry again on top.
+ */
+function createPool(primary: string, backups: readonly string[], pool: string, label: (i: number) => string): RpcPool {
+  // deduped — with no primary configured the default backup IS the primary.
+  const urls = [primary, ...backups.filter((u) => u !== primary)];
+  const breaker = new RpcBreaker({ pool });
+  const transport: Transport = ({ chain }) => {
+    breaker.attach(urls.map((url, i) => ({
+      label: `${label(i)}${url === PUBLIC_RPC && i > 0 ? ' (public)' : ''}`,
+      request: http(url, {
+        batch: { batchSize: 256, wait: 8 },
+        retryCount: 2,
+        timeout: 12_000,
+      })({ chain }).request as (args: { method: string; params?: unknown }) => Promise<unknown>,
+    })));
+    return createTransport({
+      key: 'failover',
+      name: 'Failover HTTP',
+      type: 'failover',
+      retryCount: 0,
+      request: (args) => breaker.request(args) as Promise<any>,
+    });
+  };
+  const client = createPublicClient({
+    chain: monad,
+    // Quote and fill-tail loops need the actual head on every pass. A cached
+    // head makes the UI jump blocks and adds the cache window to fill latency.
+    cacheTime: 0,
+    transport,
   });
-};
+  return {
+    client,
+    status: () => breaker.status(),
+    generation: () => breaker.generation(),
+    onEvent: (cb) => breaker.subscribe(cb),
+    verify: () => breaker.verify(MONAD_CHAIN_ID),
+  };
+}
 
-/** HTTP public client. JSON-RPC batching is enabled so the quote poller's
- *  per-market reads collapse toward a single round-trip (docs/architecture.md: quote poller). */
-export const publicClient: PublicClient = createPublicClient({
-  chain: monad,
-  // Quote and fill-tail loops need the actual head on every pass. A cached
-  // head makes the UI jump blocks and adds the cache window to fill latency.
-  cacheTime: 0,
-  transport: failoverTransport,
-});
+/** HOT pool — quotes + fills tail. JSON-RPC batching is enabled so the quote
+ *  poller's per-market reads collapse toward a single round-trip
+ *  (docs/architecture.md: quote poller). */
+const hotPool = createPool(config.rpcHttp, config.rpcBackups, 'RPC', (i) => (i === 0 ? 'primary' : `backup-${i}`));
+
+/** True when a DEDICATED deep-history pool is configured. When false the
+ *  archive client below is literally the hot client — same breaker, same
+ *  status, one set of notes — which is the pre-split behavior exactly. */
+export const hasDedicatedArchive = config.rpcArchive !== '';
+
+/** ARCHIVE pool — deep crawls only (volume backfill, markout onboarding, gas,
+ *  blockAtOrAfter). Chosen for RETENTION, not for tip freshness: these reads
+ *  are months old, so a node several blocks behind the head costs nothing here
+ *  and buys the history the hot node has pruned (see config.ts: RPC pools). */
+const archivePool = hasDedicatedArchive
+  ? createPool(config.rpcArchive, config.rpcArchiveBackups, 'RPC archive', (i) => (i === 0 ? 'archive' : `archive-backup-${i}`))
+  : hotPool;
+
+export const publicClient: PublicClient = hotPool.client;
+export const archiveClient: PublicClient = archivePool.client;
 
 /** Failover status for /api/markets (labels only) + event sink for state.notes
  *  (each event carries its own note code — see failover.ts RpcNote). */
-export const rpcStatus = (): RpcStatusView => breaker.status();
-export const onRpcEvent = (cb: (n: RpcNote) => void): void => breaker.subscribe(cb);
+export const rpcStatus = (): RpcStatusView => hotPool.status();
+export const rpcGeneration = (): number => hotPool.generation();
+export const onRpcEvent = (cb: (n: RpcNote) => void): void => hotPool.onEvent(cb);
+
+/** Same, for the deep-history pool. With no dedicated archive these mirror the
+ *  hot pool — callers get one consistent answer either way, and the live source
+ *  only PUBLISHES the archive status when the pools actually differ. */
+export const archiveRpcStatus = (): RpcStatusView => archivePool.status();
+export const archiveRpcGeneration = (): number => archivePool.generation();
+export const onArchiveRpcEvent = (cb: (n: RpcNote) => void): void => archivePool.onEvent(cb);
 
 /** Boot sanity check — verifies chain id 143 on EVERY endpoint (wrong-chain
  *  backups are dropped, wrong-chain primary is fatal) and pre-positions onto
  *  the first healthy endpoint when the primary is mid-outage. Boot proceeds if
  *  ANY endpoint serves (docs/architecture.md: operations). */
-export async function probeChain(): Promise<{ ok: boolean; block: number; reason?: string }> {
-  return breaker.verify(MONAD_CHAIN_ID);
+export async function probeChain(): Promise<RpcVerifyResult> {
+  return hotPool.verify();
+}
+
+/** Same for the archive pool. NOT fatal to boot: the deep crawls are background
+ *  work, so a dead archive must degrade to "history stalls, loudly" rather than
+ *  take down live quoting — the one job that still works without any history.
+ *  A no-op when the pools are shared (probeChain already verified them). */
+export async function probeArchiveChain(): Promise<RpcVerifyResult> {
+  return hasDedicatedArchive ? archivePool.verify() : { ok: true, block: 0 };
 }
 
 /** Earliest block whose timestamp >= `targetSec`, by binary search over [0, hi]
  *  (~log2(hi) getBlock calls). Maps a backfill start date → a start block. A
- *  pruned/missing block just pushes the search higher. */
-export async function blockAtOrAfter(targetSec: number, hi: bigint): Promise<bigint> {
+ *  pruned/missing block just pushes the search higher.
+ *
+ *  Rides the ARCHIVE pool: the search probes mid-points across the whole chain
+ *  (the first probe is ~block hi/2), so on a pruning fullnode nearly every early
+ *  probe 404s, the failure budget below is spent in seconds, and it throws. */
+export async function blockAtOrAfter(
+  targetSec: number,
+  hi: bigint,
+  getBlock: (blockNumber: bigint) => Promise<{ timestamp: bigint }>
+    = (blockNumber) => archiveClient.getBlock({ blockNumber }) as Promise<{ timestamp: bigint }>,
+  unavailable: () => boolean = () => {
+    const status = archiveRpcStatus();
+    return status.degraded || status.down;
+  },
+  generation: () => number = archiveRpcGeneration,
+): Promise<bigint> {
   let lo = 0n, h = hi, ans = hi;
   // a single failed probe usually IS a pruned block (search higher), but a
   // string of failures is an RPC brownout — converging to `hi` then would hand
@@ -87,8 +157,13 @@ export async function blockAtOrAfter(targetSec: number, hi: bigint): Promise<big
   while (lo <= h) {
     const mid = lo + (h - lo) / 2n;
     let ts: number | undefined;
-    try { ts = Number((await publicClient.getBlock({ blockNumber: mid })).timestamp); }
-    catch {
+    try { ts = Number((await guardRpcRead(() => getBlock(mid), unavailable, generation)).timestamp); }
+    catch (e) {
+      // A timeout/transport outage/429 says nothing about this block. Advancing
+      // `lo` on it biases the search late, and callers persist that answer as a
+      // permanent backfill/reset boundary. Only an answer-level missing/pruned
+      // block may move the lower bound; availability failures hold the caller.
+      if (isAvailabilityFailure(e)) throw e;
       if (++failures > 8) throw new Error(`blockAtOrAfter: ${failures} probe failures — RPC unhealthy, not converging to head`);
       lo = mid + 1n; continue;
     }

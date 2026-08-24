@@ -8,7 +8,7 @@ import { monad, publicClient } from '../rpc.js';
  */
 describe('Monad RPC client timing', () => {
   it('declares Monad block timing and never caches the live head', () => {
-    expect(monad.blockTime).toBe(400);
+    expect(monad.blockTime).toBe(300);
     expect(publicClient.cacheTime).toBe(0);
   });
 });

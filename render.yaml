@@ -3,9 +3,20 @@
 # serves the REST/WS API AND the built frontend (same origin), with a persistent
 # disk for the SQLite history. Mirrors the Railway setup (railway.json).
 #
-# The two RPC vars are secrets (sync: false) — Render prompts for them on create;
+# The RPC vars are secrets (sync: false) — Render prompts for them on create;
 # they are NOT committed. DB_PATH=/data/mpamm.db and WEB_DIST are already baked
 # into the Dockerfile's ENV, so they don't need repeating here.
+#
+# RPC_HTTP_URL and RPC_ARCHIVE_URL are two DIFFERENT jobs (docs/deploy.md):
+# the hot node is chosen for distance to the chain tip (it decides quote
+# freshness), the archive node for retention (it serves the venue-lifetime
+# backfills). Leaving RPC_ARCHIVE_URL unset runs both on the hot node, which is
+# correct only when that node keeps full history.
+#
+# REGION: unset means Render's default (Oregon). The region is fixed at service
+# creation and the disk below is region-bound, so changing it later means a NEW
+# service with an EMPTY disk — copy /data/mpamm.db across before cutover, or the
+# service re-runs every venue-lifetime backfill from scratch.
 services:
   - type: web
     name: mpamm
@@ -19,7 +30,9 @@ services:
         value: live
       - key: NODE_OPTIONS      # cap the JS heap well under the instance limit
         value: --max-old-space-size=320
-      - key: RPC_HTTP_URL    # trusted Monad node (Multicall3 + getLogs)
+      - key: RPC_HTTP_URL    # hot node: quotes + fills tail (Multicall3 + getLogs)
+        sync: false
+      - key: RPC_ARCHIVE_URL # deep-history node; unset ⇒ reuses RPC_HTTP_URL
         sync: false
     disk:
       name: mpamm-data       # SQLite history survives deploys/restarts

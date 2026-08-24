@@ -3,6 +3,7 @@
 // the next pass must resume exactly where it stopped. Runs the REAL pass()
 // against a stubbed client — no network.
 import { describe, expect, it } from 'vitest';
+import { HttpRequestError } from 'viem';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -156,6 +157,132 @@ describe('logs-mode time slice', () => {
     await (tracker as any).pass();
     tracker.stop();
     expect(BigInt(store.getMeta('gas_cursor_lg')!)).toBe(START + 3_200n);
+    unlinkSync(path);
+  });
+});
+
+describe('archive availability cursor holds', () => {
+  const STRAT = '0x00000000000000000000000000000000000000ee';
+  const TOPIC = '0x9999999999999999999999999999999999999999999999999999999999999999';
+  const START = 3_000_000n;
+
+  it.each(['logs', 'timestamp', 'receipt'] as const)('holds a logs-mode chunk when %s is unavailable, then resumes', async (stage) => {
+    const { store, path } = freshStore();
+    seed(store, 'held-logs', STRAT, START);
+    let unavailable = true;
+    const denied = () => new HttpRequestError({ url: 'http://x', status: 429 });
+    const client: any = {
+      getBlockNumber: async () => START + 804n, // finalized head = START+799: one 800-block chunk
+      getBlock: async () => {
+        if (unavailable && stage === 'timestamp') throw denied();
+        return { timestamp: BigInt(DAY0) };
+      },
+      getTransactionReceipt: async () => {
+        if (unavailable && stage === 'receipt') throw denied();
+        return { gasUsed: 30_000n, effectiveGasPrice: 1_000_000_000n };
+      },
+      request: async ({ method }: { method: string }) => {
+        if (method !== 'eth_getLogs') throw new Error(`unexpected ${method}`);
+        if (unavailable && stage === 'logs') throw denied();
+        return [{ transactionHash: '0xabc', blockNumber: `0x${START.toString(16)}` }];
+      },
+    };
+    const adapter = {
+      venues: () => [venueMeta('held-logs')],
+      discover: async () => {},
+      logSources: () => [],
+      decode: () => [],
+      gasSources: () => [{ mode: 'logs' as const, address: STRAT as `0x${string}`, topic0: TOPIC as `0x${string}` }],
+    } as unknown as VenueAdapter;
+    const tracker = new GasTracker(client, store, [adapter], () => {}, () => false, 1);
+
+    await (tracker as any).pass();
+    clearTimeout((tracker as any).timer);
+    expect(store.getMeta('gas_cursor_held-logs')).toBe(String(START));
+    expect(store.gasDays('2099-01-01').some((d) => d.byVenue['held-logs'])).toBe(false);
+
+    unavailable = false;
+    await (tracker as any).pass();
+    tracker.stop();
+    expect(store.getMeta('gas_cursor_held-logs')).toBe(String(START + 800n));
+    expect(store.gasDays('2099-01-01').some((d) => d.byVenue['held-logs'])).toBe(true);
+    unlinkSync(path);
+  });
+
+  it('holds a blocks-mode segment on a 5xx, then resumes without losing it', async () => {
+    const { store, path } = freshStore();
+    seed(store, 'held-blocks', STRAT, START);
+    let unavailable = true;
+    const client: any = {
+      getBlockNumber: async () => START + 1_004n, // finalized head = START+999: one stride
+      getBlock: async () => ({ timestamp: BigInt(DAY0) }),
+      request: async ({ method }: { method: string }) => {
+        if (method !== 'eth_getBlockReceipts') throw new Error(`unexpected ${method}`);
+        if (unavailable) throw new HttpRequestError({ url: 'http://x', status: 502 });
+        return [{ to: STRAT, gasUsed: '0x7530', effectiveGasPrice: '0x3b9aca00' }];
+      },
+    };
+    const adapter = {
+      venues: () => [venueMeta('held-blocks')],
+      discover: async () => {},
+      logSources: () => [],
+      decode: () => [],
+      gasSources: () => [{ mode: 'blocks' as const, address: STRAT as `0x${string}` }],
+    } as unknown as VenueAdapter;
+    const tracker = new GasTracker(client, store, [adapter], () => {}, () => false, 1);
+
+    await (tracker as any).pass();
+    clearTimeout((tracker as any).timer);
+    expect(store.getMeta('gas_cursor_held-blocks')).toBe(String(START));
+    expect(store.gasDays('2099-01-01').some((d) => d.byVenue['held-blocks'])).toBe(false);
+
+    unavailable = false;
+    await (tracker as any).pass();
+    tracker.stop();
+    expect(store.getMeta('gas_cursor_held-blocks')).toBe(String(START + 1_000n));
+    expect(store.gasDays('2099-01-01').some((d) => d.byVenue['held-blocks'])).toBe(true);
+    unlinkSync(path);
+  });
+
+  it.each(['success', 'hole'] as const)('discards a logs-mode %s completed after transparent failover', async (outcome) => {
+    const { store, path } = freshStore();
+    const vid = `failover-${outcome}`;
+    seed(store, vid, STRAT, START);
+    let degraded = false;
+    let first = true;
+    const client: any = {
+      getBlockNumber: async () => START + 804n,
+      getBlock: async () => ({ timestamp: BigInt(DAY0) }),
+      getTransactionReceipt: async () => ({ gasUsed: 30_000n, effectiveGasPrice: 1_000_000_000n }),
+      request: async ({ method }: { method: string }) => {
+        if (method !== 'eth_getLogs') throw new Error(`unexpected ${method}`);
+        if (first) {
+          first = false;
+          degraded = true;
+          if (outcome === 'hole') throw new Error('error getting block header from triedb and archive');
+        }
+        return [{ transactionHash: '0xabc', blockNumber: `0x${START.toString(16)}` }];
+      },
+    };
+    const adapter = {
+      venues: () => [venueMeta(vid)],
+      discover: async () => {},
+      logSources: () => [],
+      decode: () => [],
+      gasSources: () => [{ mode: 'logs' as const, address: STRAT as `0x${string}`, topic0: TOPIC as `0x${string}` }],
+    } as unknown as VenueAdapter;
+    const tracker = new GasTracker(client, store, [adapter], () => {}, () => degraded, 1);
+
+    await (tracker as any).pass();
+    clearTimeout((tracker as any).timer);
+    expect(store.getMeta(`gas_cursor_${vid}`)).toBe(String(START));
+    expect(store.gasDays('2099-01-01').some((d) => d.byVenue[vid])).toBe(false);
+
+    degraded = false;
+    await (tracker as any).pass();
+    tracker.stop();
+    expect(store.getMeta(`gas_cursor_${vid}`)).toBe(String(START + 800n));
+    expect(store.gasDays('2099-01-01').some((d) => d.byVenue[vid])).toBe(true);
     unlinkSync(path);
   });
 });

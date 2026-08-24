@@ -214,7 +214,7 @@ export function createPoeAdapter(): VenueAdapter {
     entryPoints: () => [...byMarket.values()].map((p) => ({ address: p.pool })),
 
     // QUOTE_UPDATE_BURN: the oracle operator pushes setData() to the
-    // ClapOracle every block (~400ms) with NO event, so updates can't be
+    // ClapOracle every block (~300ms) with NO event, so updates can't be
     // enumerated from logs — 'blocks' mode samples eth_getBlockReceipts for
     // txs to the oracle and scales by the stride. Sound here precisely
     // BECAUSE the cadence is one-per-block; the UI shows ≈.

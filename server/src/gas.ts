@@ -3,6 +3,7 @@ import type { NoteCode } from '@shared';
 import { config } from './config.js';
 import { utcDay } from './util.js';
 import { blockAtOrAfter } from './chain/rpc.js';
+import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from './chain/failover.js';
 import type { VolumeStore } from './db.js';
 import type { NoteFn } from './notes.js';
 import type { GasSource, VenueAdapter } from './venues/adapter.js';
@@ -115,6 +116,8 @@ export class GasTracker {
     private degraded: () => boolean = () => false,
     /** per-pass tail budget override (tests); production uses the config knob. */
     private sliceChunks: number = config.gasSliceChunks,
+    /** Monotonic pool generation; detects primary → backup → primary inside one read. */
+    private rpcGeneration: () => number = () => 0,
   ) {
     for (const a of adapters) {
       const vid = a.venues()[0]?.id;
@@ -133,6 +136,12 @@ export class GasTracker {
 
   /** venue ids whose values are sampled estimates (blocks mode). */
   approxVenueIds(): string[] { return [...this.approx].sort(); }
+
+  /** The breaker may retry a failed primary request on a backup inside one
+   *  await. No deep result is accepted unless the pool stayed fully healthy. */
+  private rpc<T>(read: () => Promise<T>): Promise<T> {
+    return guardRpcRead(read, this.degraded, this.rpcGeneration);
+  }
 
   /** one pass: tail every gas-declaring venue to head, then reschedule. */
   private async pass(): Promise<void> {
@@ -222,8 +231,8 @@ export class GasTracker {
       this.store.setMeta(`gas_approx_${vid}`, '1');
     }
 
-    // finality margin: Monad receipts/logs can mutate for ~2 blocks (~800ms).
-    const head = (await this.client.getBlockNumber()) - 5n;
+    // finality margin: Monad receipts/logs can mutate for ~2 blocks (~600ms).
+    const head = (await this.rpc(() => this.client.getBlockNumber())) - 5n;
     const cursorKey = `gas_cursor_${vid}`;
 
     // VENUE-LIFETIME series, same anchor as the volume backfill: the burn
@@ -261,7 +270,7 @@ export class GasTracker {
         for (const addr of sig.split(',').filter(Boolean)) {
           const cb = await this.creationBlock(addr as `0x${string}`, head);
           if (cb === null) continue; // undeployed → contributes no txs
-          const blk = await this.client.getBlock({ blockNumber: cb });
+          const blk = await this.rpc(() => this.client.getBlock({ blockNumber: cb }));
           days.push(utcDay(Number(blk.timestamp) * 1000));
         }
         const day = bootstrapRebuildDay(days, anchor);
@@ -279,7 +288,7 @@ export class GasTracker {
           const covered = single && window.length > 0
             && hasCoverageEvidence(window, this.store.gasNonzeroDays(vid, window[0], window[window.length - 1]));
           if (!covered) {
-            const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
+            const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
             this.store.resetGasFrom(vid, day);
             this.store.setMeta(cursorKey, String(startBlock));
             this.note('gas.series.reset', `${name}: verifying quote-update coverage — rebuilding from ${day}`, vid);
@@ -303,7 +312,7 @@ export class GasTracker {
     if (cur) {
       cursor = BigInt(cur);
     } else {
-      cursor = await blockAtOrAfter(Math.floor(Date.parse(`${sinceDay}T00:00:00Z`) / 1000), head);
+      cursor = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${sinceDay}T00:00:00Z`) / 1000), head));
       this.store.setMeta(fromKey, sinceDay);
       this.noteOnce('gas.scan.start', `${name}: quote-update gas scan from ${sinceDay} — blocks ${cursor}→${head}`, vid);
     }
@@ -340,10 +349,10 @@ export class GasTracker {
           if (earliest === null || cb < earliest) earliest = cb;
         }
         if (earliest !== null) {
-          const blk = await this.client.getBlock({ blockNumber: earliest });
+          const blk = await this.rpc(() => this.client.getBlock({ blockNumber: earliest }));
           const day = utcDay(Number(blk.timestamp) * 1000);
           if (day > sinceDay) {
-            const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
+            const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
             this.store.resetGasFrom(vid, day);
             this.store.setMeta(cursorKey, String(startBlock));
             this.note('gas.series.reset', `${name}: quote-update destination added — rebuilding from ${day} (earlier history unaffected)`, vid);
@@ -363,7 +372,7 @@ export class GasTracker {
    *  code yet" would push the boundary later and silently lose burn days —
    *  the caller's fallback (full rebuild) is the safe shape. */
   private async creationBlock(addr: `0x${string}`, head: bigint): Promise<bigint | null> {
-    const has = async (bn: bigint) => ((await this.client.getCode({ address: addr, blockNumber: bn })) ?? '0x') !== '0x';
+    const has = async (bn: bigint) => ((await this.rpc(() => this.client.getCode({ address: addr, blockNumber: bn }))) ?? '0x') !== '0x';
     if (!(await has(head))) return null;
     let lo = 0n, hi = head; // invariant: !has(lo) … has(hi)
     if (await has(lo)) return lo;
@@ -391,29 +400,40 @@ export class GasTracker {
     let sliced = 0;
 
     const fetchLogs = async (from: bigint, to: bigint): Promise<any[]> => {
-      const batches = await Promise.all(sources.map((s) => {
+      const batches = await allPreferAvailability(sources.map((s) => {
         if (s.mode !== 'logs') return Promise.resolve([] as any[]);
         if (s.topic0) {
           // unverified destination — only the event's topic hash is known.
-          return this.client.request({
+          return this.rpc(() => this.client.request({
             method: 'eth_getLogs',
             params: [{ address: s.address, topics: [s.topic0], fromBlock: `0x${from.toString(16)}`, toBlock: `0x${to.toString(16)}` }],
-          }) as Promise<any[]>;
+          } as any) as Promise<any[]>);
         }
-        return this.client.getLogs({ address: s.address as any, fromBlock: from, toBlock: to, events: s.events as any } as any) as Promise<any[]>;
+        return this.rpc(() => this.client.getLogs({ address: s.address as any, fromBlock: from, toBlock: to, events: s.events as any } as any) as Promise<any[]>);
       }));
       return batches.flat();
     };
 
     while (cursor <= head && !this.stopped) {
+      // Re-checked EVERY chunk, not just at pass start: a pool that dies
+      // mid-pass would otherwise burn its retries and skip real ranges.
+      if (this.degraded()) break;
       const to = cursor + chunk - 1n > head ? head : cursor + chunk - 1n;
       let logs: any[] | null = null;
       let tries = 0;
+      let unavailable = false;
       while (logs === null) {
         try {
           logs = await fetchLogs(cursor, to);
           if (chunk < maxChunk) chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n; // recover after shrinks
-        } catch {
+        } catch (e) {
+          // The pool being unreachable or throttling us says NOTHING about this
+          // range. Shrinking on it is meaningless (the node never served the
+          // request) and skipping it loses gas the archive holds perfectly well.
+          // Yield the slice instead: cursor and acc persist in the trailing
+          // commit, and the next pass's degraded() gate parks us until the pool
+          // is back. Only a node that ANSWERS may consume a range.
+          if (isAvailabilityFailure(e)) { unavailable = true; break; }
           if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; break; } // too wide → shrink, retry cursor
           if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; } // transient → back off
           // a range the RPC can't serve is skipped LOUDLY (undercount, never a stall).
@@ -421,6 +441,7 @@ export class GasTracker {
           logs = [];
         }
       }
+      if (unavailable) break; // pool gone — hold the cursor, resume next pass
       if (logs === null) continue; // shrank — retry same cursor with a narrower span
 
       if (logs.length) {
@@ -432,13 +453,22 @@ export class GasTracker {
         }
         // ONE anchor timestamp per chunk (≤ ~5 min span) is enough for DAILY buckets.
         let anchorMs = NaN;
+        // The pool can die BETWEEN the getLogs above and these reads. Holding
+        // then costs one re-fetch; skipping drops the whole chunk's burn, and
+        // nothing revisits it. Nothing has been accumulated yet, so breaking out
+        // here is idempotent — the trailing commit persists the unchanged cursor.
+        let anchorUnavailable = false;
         for (const bn of new Set(txBlocks.values())) {
           for (let i = 0; i < 3 && !Number.isFinite(anchorMs); i++) {
-            try { anchorMs = Number((await this.client.getBlock({ blockNumber: bn })).timestamp) * 1000; }
-            catch { await sleep(config.backfillPaceMs * 5 * (i + 1)); }
+            try { anchorMs = Number((await this.rpc(() => this.client.getBlock({ blockNumber: bn }))).timestamp) * 1000; }
+            catch (e) {
+              if (isAvailabilityFailure(e)) { anchorUnavailable = true; break; }
+              await sleep(config.backfillPaceMs * 5 * (i + 1));
+            }
           }
-          if (Number.isFinite(anchorMs)) break;
+          if (Number.isFinite(anchorMs) || anchorUnavailable) break;
         }
+        if (anchorUnavailable) break; // hold the cursor — resume this chunk next pass
         if (!Number.isFinite(anchorMs)) {
           this.noteOnce('gas.range.skipped', `${name}: gas scan block timestamps unresolved near ${cursor} — chunk skipped`, vid);
         } else {
@@ -451,20 +481,29 @@ export class GasTracker {
           const sample = hashes.filter((_, i) => i % stride === 0);
           let sampledMon = 0;
           let sampledN = 0;
+          let receiptsUnavailable = false;
           const POOL = 15;
           for (let i = 0; i < sample.length; i += POOL) {
             await Promise.all(sample.slice(i, i + POOL).map(async (h) => {
               for (let r = 0; r < 3; r++) {
                 try {
-                  const rc = await this.client.getTransactionReceipt({ hash: h as `0x${string}` });
+                  const rc = await this.rpc(() => this.client.getTransactionReceipt({ hash: h as `0x${string}` }));
                   sampledMon += Number(rc.gasUsed * rc.effectiveGasPrice) / 1e18;
                   sampledN++;
                   return;
-                } catch { await sleep(config.backfillPaceMs * 5 * (r + 1)); }
+                } catch (e) {
+                  if (isAvailabilityFailure(e)) { receiptsUnavailable = true; return; }
+                  await sleep(config.backfillPaceMs * 5 * (r + 1));
+                }
               }
             }));
+            if (receiptsUnavailable) break;
             await sleep(config.backfillPaceMs);
           }
+          // Same rule as the anchor above: an outage mid-sample means the chunk
+          // is UNKNOWN, not zero. Accumulation happens below, so we have added
+          // nothing yet and the chunk is re-scanned intact next pass.
+          if (receiptsUnavailable) break;
           if (sampledN > 0) {
             const day = utcDay(anchorMs);
             const e = acc.get(day) ?? { mon: 0, txs: 0 };
@@ -499,26 +538,36 @@ export class GasTracker {
     let sliced = 0;
 
     while (cursor <= head && !this.stopped) {
+      // Re-checked EVERY segment — see tailLogs.
+      if (this.degraded()) break;
       const segEnd = cursor + stride - 1n > head ? head : cursor + stride - 1n;
       const segLen = Number(segEnd - cursor + 1n);
       let ok = false;
+      let unavailable = false;
       for (let r = 0; r < 3 && !ok; r++) {
         try {
-          const [receipts, block] = await Promise.all([
-            this.client.request({ method: 'eth_getBlockReceipts', params: [`0x${cursor.toString(16)}`] }) as Promise<any[]>,
-            this.client.getBlock({ blockNumber: cursor }),
+          const [receipts, block] = await allPreferAvailability<any>([
+            this.rpc(() => this.client.request({ method: 'eth_getBlockReceipts', params: [`0x${cursor.toString(16)}`] }) as Promise<any>),
+            this.rpc(() => this.client.getBlock({ blockNumber: cursor }) as Promise<any>),
           ]);
           // includes reverted txs on purpose — Monad charges their full limit too.
-          const mine = (receipts ?? []).filter((rc) => targets.has(String(rc.to ?? '').toLowerCase()));
-          const mon = mine.reduce((a, rc) => a + Number(BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice)) / 1e18, 0);
+          const mine = ((receipts ?? []) as any[]).filter((rc: any) => targets.has(String(rc.to ?? '').toLowerCase()));
+          const mon = mine.reduce((a: number, rc: any) => a + Number(BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice)) / 1e18, 0);
           const day = utcDay(Number(block.timestamp) * 1000);
           const e = acc.get(day) ?? { mon: 0, txs: 0 };
           e.mon += mon * segLen;
           e.txs += mine.length * segLen;
           acc.set(day, e);
           ok = true;
-        } catch { await sleep(config.backfillPaceMs * 5 * (r + 1)); }
+        } catch (e) {
+          // Unreachable/throttled → the SEGMENT is unknown, not empty. Skipping
+          // it here scales a missing sample by the whole stride, so an outage
+          // would silently erase a chunk of the series.
+          if (isAvailabilityFailure(e)) { unavailable = true; break; }
+          await sleep(config.backfillPaceMs * 5 * (r + 1));
+        }
       }
+      if (unavailable) break; // pool gone — hold the cursor, resume next pass
       // an unreadable sample block skips its segment (tiny undercount, no stall)
       cursor = segEnd + 1n;
       if (++sinceCommit >= config.backfillMergeEvery || cursor > head) {

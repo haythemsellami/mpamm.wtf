@@ -482,8 +482,9 @@ export function percentile(arr: number[], p: number): number {
 // Market state / service status
 // ──────────────────────────────────────────────────────────────────────────
 
-/** Live-source RPC failover status. Labels only ("primary", "backup-1") —
- *  endpoint URLs embed keys and must never reach this public shape. */
+/** Live-source RPC failover status, per pool. Labels only ("primary",
+ *  "backup-1", "archive", "archive-backup-1") — endpoint URLs embed keys and
+ *  must never reach this public shape. */
 export interface RpcStatus {
   /** label of the endpoint currently serving requests. */
   active: string;
@@ -595,6 +596,11 @@ export interface MarketState {
   notes?: StateNote[];
   /** RPC failover health (absent in sim — there is no RPC). */
   rpc?: RpcStatus;
+  /** Deep-history RPC pool health — quote/tail freshness and history depth need
+   *  different nodes, so they are separate failover pools (server config: RPC
+   *  pools). Absent when no dedicated archive is configured (the pools are the
+   *  same one) and in sim. */
+  rpcArchive?: RpcStatus;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
