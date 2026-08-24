@@ -6,9 +6,13 @@ import { RpcBreaker, type RpcNote, type RpcStatusView } from './failover.js';
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
   name: 'Monad',
-  // Viem derives its polling interval from this. Without it, a custom chain
-  // falls back to 12s blocks and caches eth_blockNumber for 4s.
-  blockTime: 400,
+  // Monad's official block time. Viem derives its polling interval from this;
+  // without it, a custom chain falls back to 12s blocks and caches
+  // eth_blockNumber for 4s. Every "N blocks ≈ T" comment in the indexer is
+  // derived from this number — if it ever changes, grep for the derivations
+  // (finality margins, the backfill hole-skip stride) rather than editing here
+  // alone.
+  blockTime: 300,
   nativeCurrency: { name: 'Monad', symbol: 'MON', decimals: 18 },
   rpcUrls: {
     default: { http: [config.rpcHttp] },

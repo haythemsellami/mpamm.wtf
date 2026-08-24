@@ -1162,7 +1162,12 @@ export class LiveDataSource extends BaseSource {
     let skipped = 0n;
     let holeRun = 0;
     let skipStride = floor;
-    const MAX_STRIDE = 216_000n; // ≈ one UTC day of Monad blocks (~0.4s/block)
+    // ≈ 18h of Monad blocks at the official 0.3s/block. Left at the value
+    // chosen when 0.4s/block was assumed (where it WAS a full UTC day): this is
+    // a cap on how far one hole-skip hop may leap, and raising it only widens
+    // the last hop's overshoot — which is real blocks, counted in `skipped` and
+    // reported loudly. Bump to 288_000n to restore the "one UTC day" intent.
+    const MAX_STRIDE = 216_000n;
     const maxChunk = BigInt(config.backfillChunk);
     this.noteOnce('backfill.start', `${name}: on-chain backfill — blocks ${from}→${end} (venue history since ${sinceUtc})`, vid);
 
@@ -1692,7 +1697,7 @@ export class LiveDataSource extends BaseSource {
     // Defer the tail until at least one CEX reference is warm so markout anchors are
     // sound; lastBlock is not advanced, so the range is re-decoded once warm (audit C3).
     if (!Object.keys(ASSETS).some((k) => REFERENCES.assetUsd(k) > 0)) return;
-    // finality margin: Monad logs/receipts can mutate for ~2 blocks (~800ms).
+    // finality margin: Monad logs/receipts can mutate for ~2 blocks (~600ms).
     // A speculative log that mutates away after ingest would be PERMANENT
     // phantom volume — there is no un-count path. Same margin as the gas tracker.
     const head = (await publicClient.getBlockNumber()) - 5n;

@@ -222,7 +222,7 @@ export class GasTracker {
       this.store.setMeta(`gas_approx_${vid}`, '1');
     }
 
-    // finality margin: Monad receipts/logs can mutate for ~2 blocks (~800ms).
+    // finality margin: Monad receipts/logs can mutate for ~2 blocks (~600ms).
     const head = (await this.client.getBlockNumber()) - 5n;
     const cursorKey = `gas_cursor_${vid}`;
 
