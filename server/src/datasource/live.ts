@@ -878,6 +878,17 @@ export class LiveDataSource extends BaseSource {
     });
   }
 
+  /** An operator reset is its own retryable history task. Existing seed flags
+   *  may all be done when its first attempt loses the hot primary before the
+   *  reset is applied, so those flags alone cannot decide whether to re-run.
+   *  Filter to adapters active in this boot: a VENUES-filtered reset is meant
+   *  to wait for a later boot, not launch a no-op history pass every 10 minutes. */
+  private resetPending(): boolean {
+    const active = new Set(ADAPTERS.flatMap((a) => a.venues().map((v) => v.id)));
+    return parseBackfillReset(config.backfillReset)
+      .some((target) => active.has(target.vid) && !resetAlreadyApplied(this.store, target));
+  }
+
   stop(): void {
     this.loopsStopped = true;
     if (this.quoteTimer) clearTimeout(this.quoteTimer);
@@ -907,7 +918,7 @@ export class LiveDataSource extends BaseSource {
     // seeds deferred at boot (pools quarantined / not discovered) retry here —
     // no-op when everything is seeded, and the in-flight guard makes an extra
     // kick free while a multi-hour backfill is still running.
-    if (this.archiveVerified && this.seedsPending()) void this.backgroundHistory();
+    if (this.archiveVerified && (this.seedsPending() || this.resetPending())) void this.backgroundHistory();
   }
 
   getState(): MarketState {

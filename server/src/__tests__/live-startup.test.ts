@@ -22,13 +22,14 @@ afterEach(() => {
   }
 });
 
-async function setup() {
+async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
   const path = join(tmpdir(), `live-startup-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   paths.push(path);
   vi.stubEnv('DB_PATH', path);
   vi.stubEnv('BACKFILL', 'on');
   vi.stubEnv('MARKOUT_BACKFILL', 'on');
   vi.stubEnv('GAS_METRIC', 'on');
+  if (opts.reset) vi.stubEnv('BACKFILL_RESET', opts.reset);
   vi.resetModules();
 
   const archiveProbe = deferred<{ ok: boolean; block: number; reason?: string; wrongChain?: boolean }>();
@@ -39,14 +40,28 @@ async function setup() {
     changePctFor: vi.fn(() => 0),
     midForPair: vi.fn(() => 1),
     quote: vi.fn(() => []),
+    metas: vi.fn(() => []),
   };
+  const adapter = {
+    venues: () => [{
+      id: 'test-venue',
+      name: 'Test Venue',
+      color: { light: '#000', dark: '#fff' },
+      kind: 'amm' as const,
+      role: 'venue' as const,
+    }],
+    discover: vi.fn(async () => {}),
+    logSources: () => [],
+    decode: vi.fn(async () => []),
+  };
+  const adapters = opts.withAdapter ? [adapter] : [];
   vi.doMock('../venues/registry.js', () => ({
-    ADAPTERS: [],
+    ADAPTERS: adapters,
     REFERENCES: references,
     venueMeta: () => [],
     venueIds: () => [],
-    allVenueIds: () => [],
-    allAdapterVenueIds: () => [],
+    allVenueIds: () => adapters.map((a) => a.venues()[0].id),
+    allAdapterVenueIds: () => new Set(adapters.map((a) => a.venues()[0].id)),
     validateRegistry: vi.fn(),
   }));
   vi.doMock('../chain/rpc.js', () => ({
@@ -72,7 +87,7 @@ async function setup() {
   source.scheduleLoop = vi.fn();
   source.backgroundHistory = vi.fn(async () => {});
   source.gas = { start: vi.fn(), stop: vi.fn() };
-  return { source, archiveProbe };
+  return { source, archiveProbe, adapter };
 }
 
 describe('live startup archive gate', () => {
@@ -108,6 +123,29 @@ describe('live startup archive gate', () => {
     expect(error?.message).toMatch(/Archive RPC sanity check failed.*wrong chain/i);
     expect(source.backgroundHistory).not.toHaveBeenCalled();
     expect(source.gas.start).not.toHaveBeenCalled();
+    source.stop();
+  });
+
+  it('retries an unapplied reset even when every venue seed is already done', async () => {
+    const reset = 'test-venue@2';
+    const { source, archiveProbe, adapter } = await setup({ reset, withAdapter: true });
+    const started = source.start();
+    archiveProbe.resolve({ ok: true, block: 100 });
+    await started;
+
+    source.store.setMeta('backfill_done_test-venue', '1');
+    source.store.setMeta('mkfill_done_test-venue', '1');
+    source.backgroundHistory.mockClear();
+    await source.rediscover();
+    expect(adapter.discover).toHaveBeenCalled();
+    expect(source.backgroundHistory).toHaveBeenCalledOnce();
+
+    // Once the per-venue marker records this exact entry, rediscovery becomes
+    // a no-op again instead of repeatedly launching history work.
+    source.store.setMeta('backfill_reset_applied_test-venue', reset);
+    source.backgroundHistory.mockClear();
+    await source.rediscover();
+    expect(source.backgroundHistory).not.toHaveBeenCalled();
     source.stop();
   });
 });
