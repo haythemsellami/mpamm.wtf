@@ -113,8 +113,10 @@ export interface VenueAdapter {
    *  volume. The core owns the chunking/pacing/resume so the adapter stays thin.
    *  Use for venues with no keyless subgraph; leave unset to accrue forward only. */
   backfillFromUtc?: string;
-  /** optional live bid/ask per market×size for the Execution tab. */
-  quote?(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]>;
+  /** Optional live bid/ask per market×size for the Execution tab. Every chain
+   *  read must use `blockNumber`: one published matrix represents exactly one
+   *  Monad block rather than a mixture of adjacent `latest` states. */
+  quote?(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]>;
   /** the contract logs the core should fetch each cycle (read after `discover`).
    *  If discovery is required to enumerate fill/state sources and is not ready,
    *  throw here so the core holds the cursor instead of tailing an incomplete

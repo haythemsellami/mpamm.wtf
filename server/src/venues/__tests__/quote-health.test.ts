@@ -67,7 +67,7 @@ describe('createQuoteOutageReporter', () => {
     const { notes, ctx } = stub();
     const report = createQuoteOutageReporter('Metric');
 
-    // the 500ms quote loop must not turn one event into a stream of notes.
+    // Block-triggered quoting must not turn one event into a stream of notes.
     expect(report(ctx, [failed(PAUSED_ERROR)])).toBe(true);
     expect(report(ctx, [failed(PAUSED_ERROR)])).toBe(true);
     expect(notes).toHaveLength(1);

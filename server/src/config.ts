@@ -30,7 +30,7 @@ export const config = {
   // ── RPC pools ───────────────────────────────────────────────────────────────
   // TWO pools, because no single Monad endpoint is good at both jobs.
   //
-  //   HOT     quote loop + fills tail. The ONLY thing that matters is distance
+  //   HOT     block-triggered quotes + fills tail. The ONLY thing that matters is distance
   //           to the tip: a node seven blocks behind quotes 2.3s-old prices, and
   //           no amount of local tuning recovers that.
   //   ARCHIVE volume backfill, markout onboarding, gas passes, blockAtOrAfter.
@@ -51,6 +51,10 @@ export const config = {
   // an archive backup does not degrade onto the archive — every deep cursor
   // holds forever while the endpoint that could serve it sits idle.
   rpcHttp: env.RPC_HTTP_URL ?? 'https://rpc.monad.xyz',
+  /** Optional hot-node WebSocket. When configured, newHeads drives quote
+   *  evaluation immediately; the HTTP head poll remains active as a watchdog
+   *  and as the fallback while the subscription reconnects. */
+  rpcWs: env.RPC_WS_URL ?? '',
   /** Ordered failover RPCs behind the hot primary (comma-separated). Default:
    *  the public RPC, so every deployment survives a provider outage with zero
    *  config. Set to "" to opt out (single-endpoint behavior). RPC_BACKUP_URLS
@@ -97,9 +101,14 @@ export const config = {
   takerBps: num('TAKER_BPS', 4.5),
   /** Binance taker fee (bps) for the BTC/ETH benchmark — default VIP9 (2.25 bps). */
   binanceTakerBps: num('BINANCE_TAKER_BPS', 2.25),
+  /** Simulator cadence. Live quote evaluation is driven by observed blocks. */
   quoteIntervalMs: num('QUOTE_INTERVAL_MS', 500),
-  /** fills-tail loop cadence (ms) — independent of the quote loop, so log
-   *  tailing never stretches the quote cadence (and vice versa). */
+  /** HTTP new-head watchdog/fallback cadence. This is deliberately well below
+   *  Monad's ~300ms block interval so phase drift cannot systematically hide a
+   *  block when RPC_WS_URL is absent or unavailable. */
+  headPollMs: num('HEAD_POLL_MS', 75),
+  /** Fills-tail loop cadence (ms). It is independent of block-triggered quote
+   *  evaluation, so log tailing never stretches quote freshness. */
   tailIntervalMs: num('TAIL_INTERVAL_MS', 500),
 
   sizesUsd: [...SIZES_USD],

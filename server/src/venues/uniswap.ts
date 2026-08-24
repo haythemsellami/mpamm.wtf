@@ -139,7 +139,7 @@ export function createUniswapAdapter(): VenueAdapter {
       ctx.note('venue.discovery', `Uniswap v4: ${markets.length} baseline pool(s) (deepest hookless tier per pair)`);
     },
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
       if (!markets.length) return [];
       type Leg = { m: UniMarket; size: number; side: 'buy' | 'sell'; inHuman: number };
       const legs: Leg[] = [];
@@ -160,7 +160,7 @@ export function createUniswapAdapter(): VenueAdapter {
       }
       if (!calls.length) return [];
       // quoter sims are gas-heavy — keep each aggregate comfortably under call caps
-      const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true, batchSize: 4096 });
+      const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true, batchSize: 4096, blockNumber });
       if (reportOutage(ctx, qRes)) return [];
 
       const rowByKey = new Map<string, QuoteRow>();

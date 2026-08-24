@@ -276,7 +276,7 @@ describe('Capricorn quote aggregation across pools on one market', () => {
     // a second MON/USDC pool arrives through the factory mid-run
     await adapter.decode(ctx, { poolCreated: [{ args: { pool: NEW_USDC } }], swap: [] }, () => 0, new Set());
 
-    const rows = await adapter.quote!(ctx, [100]);
+    const rows = await adapter.quote!(ctx, [100], 123n);
     const row = rows.find((r) => r.market === 'MON/USDC')!;
     expect(row).toBeDefined();
     // cheapest ask wins (the NEW pool), richest bid wins (the SEED pool)
@@ -295,14 +295,14 @@ describe('Capricorn quote aggregation across pools on one market', () => {
     const ctxA = quoteStubCtx();
     await a.discover(ctxA);
     await a.decode(ctxA, { poolCreated: [{ args: { pool: NEW_USDC } }], swap: [] }, () => 0, new Set());
-    const first = (await a.quote!(ctxA, [100])).find((r) => r.market === 'MON/USDC')!;
+    const first = (await a.quote!(ctxA, [100], 123n)).find((r) => r.market === 'MON/USDC')!;
 
     // same pools, reversed discovery order (the new pool admitted before the seed's refresh)
     const b = createCapricornAdapter();
     const ctxB = quoteStubCtx();
     await b.decode(ctxB, { poolCreated: [{ args: { pool: NEW_USDC } }], swap: [] }, () => 0, new Set());
     await b.discover(ctxB);
-    const second = (await b.quote!(ctxB, [100])).find((r) => r.market === 'MON/USDC')!;
+    const second = (await b.quote!(ctxB, [100], 123n)).find((r) => r.market === 'MON/USDC')!;
 
     expect(second.askPx).toBeCloseTo(first.askPx, 12);
     expect(second.bidPx).toBeCloseTo(first.bidPx, 12);

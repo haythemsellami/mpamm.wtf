@@ -315,7 +315,7 @@ export function createCapricornAdapter(): VenueAdapter {
 
     discover: refresh,
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
       if (!quotable.length) return [];
       type Leg = { pool: CapPool; size: number; side: Side; inRaw: bigint; mid: number };
       const legs: Leg[] = [];
@@ -338,7 +338,7 @@ export function createCapricornAdapter(): VenueAdapter {
       }
       if (!calls.length) return [];
 
-      const res = await ctx.client.multicall({ contracts: calls, allowFailure: true });
+      const res = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
       if (reportOutage(ctx, res)) return [];
 
       const rowByKey = new Map<string, QuoteRow>();

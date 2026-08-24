@@ -12,7 +12,8 @@ export type { Tab } from './lib/tab-route';
 const initialTheme = (): Theme => {
   try { return localStorage.getItem('pamm-theme') === 'dark' ? 'dark' : 'light'; } catch { return 'light'; }
 };
-const N = 120; // canvas rolling window (≈60s @ 500ms)
+const QUOTE_WINDOW_MS = 60_000;
+const QUOTE_SAMPLE_MAX = 400;
 
 const initialTab = (): Tab => tabFromPath(window.location.pathname) ?? 'exec';
 
@@ -142,6 +143,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // the venue ids the buffers are keyed by — read inside the (stable) stream
   // callback so we never close over a stale registry.
   const idsRef = useRef<string[]>([]);
+  const cadenceRef = useRef(500);
   const selRef = useRef({ pair: ui.pair, size: ui.size });
   selRef.current = { pair: ui.pair, size: ui.size };
   // what the buffers currently CONTAIN ("pair|size"). pushSnapshot re-keys
@@ -151,11 +153,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const seedKeyRef = useRef('');
   const seedFetchRef = useRef(''); // key with a history fetch in flight (dedupe)
   const keyOf = () => `${selRef.current.pair}|${selRef.current.size}`;
+  const sampleLimit = () => Math.min(QUOTE_SAMPLE_MAX, Math.max(2, Math.floor(QUOTE_WINDOW_MS / Math.max(1, cadenceRef.current)) + 1));
 
   const pushSnapshot = (q: QuoteSnapshot) => {
     quotesRef.current = q;
     if (seedKeyRef.current !== keyOf()) reseed(); // sync re-key — mixed buffers impossible
     const { pair, size } = selRef.current;
+    const limit = sampleLimit();
     for (const id of idsRef.current) {
       const r = rowFor(q, id, pair, size);
       if (!r) continue;
@@ -163,8 +167,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       // side, px 0) contributes only its real line — never a 0 that would wreck
       // the canvas price scale, and never a phantom spread into the percentiles.
       const s = (seriesRef.current[id] ??= { bid: [], ask: [] });
-      if (r.bidPx > 0) { s.bid.push(r.bidPx); if (s.bid.length > N) s.bid.shift(); }
-      if (r.askPx > 0) { s.ask.push(r.askPx); if (s.ask.length > N) s.ask.shift(); }
+      if (r.bidPx > 0) { s.bid.push(r.bidPx); if (s.bid.length > limit) s.bid.shift(); }
+      if (r.askPx > 0) { s.ask.push(r.askPx); if (s.ask.length > limit) s.ask.shift(); }
       // only a real, full-size two-sided quote feeds the spread distribution —
       // a partial (size-exhausted, filledFull=false) or one-sided quote is not
       // executable at the requested notional, so it must not skew the stats.
@@ -193,10 +197,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     for (const id of Object.keys(SM)) if (!ids.includes(id)) delete SM[id];
     if (q) {
       const { pair, size } = selRef.current;
+      const limit = sampleLimit();
       for (const id of ids) {
         const r = rowFor(q, id, pair, size);
         if (!r) continue;
-        for (let i = 0; i < N; i++) {
+        for (let i = 0; i < limit; i++) {
           // flat pre-fill fallback (no jitter) — holds the scale correct until the
           // real history lands; real streaming quotes step it (no smoothing).
           if (r.bidPx > 0) S[id].bid.push(r.bidPx);
@@ -219,13 +224,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       if (seedKeyRef.current !== key || !hist.length) return;
       const ids = new Set(idsRef.current);
       const S = seriesRef.current, SM = samplesRef.current;
+      const limit = sampleLimit();
       for (const id of idsRef.current) { const s = (S[id] ??= { bid: [], ask: [] }); s.bid.length = 0; s.ask.length = 0; (SM[id] ??= []).length = 0; }
       for (const q of hist) {
         for (const r of q.rows) {
           if (!ids.has(r.venueId)) continue;
           const s = (S[r.venueId] ??= { bid: [], ask: [] });
-          if (r.bidPx > 0) { s.bid.push(r.bidPx); if (s.bid.length > N) s.bid.shift(); }
-          if (r.askPx > 0) { s.ask.push(r.askPx); if (s.ask.length > N) s.ask.shift(); }
+          if (r.bidPx > 0) { s.bid.push(r.bidPx); if (s.bid.length > limit) s.bid.shift(); }
+          if (r.askPx > 0) { s.ask.push(r.askPx); if (s.ask.length > limit) s.ask.shift(); }
           if (!r.oneSided && r.filledFull && r.bidPx > 0 && r.askPx > 0) {
             const smp = (SM[r.venueId] ??= []);
             smp.push(r.spreadBps);
@@ -238,8 +244,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       // observed value flat into the unobserved past, real data ends at now.
       for (const id of idsRef.current) {
         const s = S[id];
-        if (s.bid.length && s.bid.length < N) s.bid.unshift(...Array(N - s.bid.length).fill(s.bid[0]));
-        if (s.ask.length && s.ask.length < N) s.ask.unshift(...Array(N - s.ask.length).fill(s.ask[0]));
+        if (s.bid.length && s.bid.length < limit) s.bid.unshift(...Array(limit - s.bid.length).fill(s.bid[0]));
+        if (s.ask.length && s.ask.length < limit) s.ask.unshift(...Array(limit - s.ask.length).fill(s.ask[0]));
       }
       setFrame((f) => f + 1);
     } catch { /* flat pre-fill stays — the stream still steps it live */ }
@@ -289,6 +295,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           fetchFills(1, 5000).catch(() => null),
         ]);
         if (!mounted.v) return;
+        cadenceRef.current = m.state.quoteCadenceMs;
         setState(m.state); setQuotes(m.quotes); setVolume(m.volume);
         snapshotLoaded.v = true;
         adoptVenues(m.state.venues ?? []);
@@ -307,7 +314,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     loadSnapshot();
 
     const dispose = connectStream((msg) => {
-      if (msg.ch === 'state') { setState(msg.data); adoptVenues(msg.data.venues ?? []); }
+      if (msg.ch === 'state') { cadenceRef.current = msg.data.quoteCadenceMs; setState(msg.data); adoptVenues(msg.data.venues ?? []); }
       else if (msg.ch === 'quotes') { setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1); }
       else if (msg.ch === 'volume') { if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data)); }
       else if (msg.ch === 'fill') {

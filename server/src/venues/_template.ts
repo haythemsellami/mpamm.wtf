@@ -63,9 +63,10 @@ export function createTemplateAdapter(): VenueAdapter {
     // (market,size) you can quote. bid/ask are bps vs the PAIR's CEX mid
     // (ctx.pricer.pairMid — already in the pair's own terms: wrap basis + stable
     // cross applied); px is quote-per-base (stable per base). venueId = your id.
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
       const rows: QuoteRow[] = [];
       // const mid = ctx.pricer.pairMid(market); // bps anchor, per market
+      // Every ctx.client read must pass { blockNumber } so the matrix is coherent.
       // for (const market of markets) for (const sizeUsd of sizesUsd) {
       //   const { bidPx, askPx, filledFull } = await readYourQuoter(ctx.client, market, sizeUsd);
       //   rows.push({ venueId: MY_VENUE.id, market, sizeUsd,

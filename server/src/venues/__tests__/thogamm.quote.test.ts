@@ -55,17 +55,17 @@ function stubCtx(notes: { code: string; msg: string }[], state: { live: boolean 
 }
 
 describe('ThogAMM quote block selection', () => {
-  it('quotes from latest state without a preflight head read or historical pin', async () => {
+  it('pins the multicall to the frame block without an adapter-local head read', async () => {
     const reads: { heads: number; args?: any } = { heads: 0 };
     const adapter = createThogammAdapter();
     const ctx = stubCtx([], { live: true }, reads);
     await adapter.discover!(ctx);
     reads.heads = 0;
 
-    expect((await adapter.quote!(ctx, [100])).length).toBeGreaterThan(0);
+    expect((await adapter.quote!(ctx, [100], 123n)).length).toBeGreaterThan(0);
     expect(reads.heads).toBe(0);
     expect(reads.args).toBeDefined();
-    expect(reads.args).not.toHaveProperty('blockNumber');
+    expect(reads.args).toHaveProperty('blockNumber', 123n);
     expect(reads.args).not.toHaveProperty('blockTag');
   });
 });
@@ -79,22 +79,22 @@ describe('ThogAMM quote outage notes', () => {
     await adapter.discover!(ctx);
     notes.length = 0;
 
-    expect(await adapter.quote!(ctx, [100])).toEqual([]);
+    expect(await adapter.quote!(ctx, [100], 123n)).toEqual([]);
     expect(notes).toHaveLength(1);
     expect(notes[0].code).toBe('venue.quote.unavailable');
     expect(notes[0].msg).toContain('maker: paused');
     // the note must distinguish the two causes it could be — that is its job.
     expect(notes[0].msg).toMatch(/venue disabled.*ABI drifted/);
 
-    // the quote loop runs every 500ms: one event, one note.
-    await adapter.quote!(ctx, [100]);
-    await adapter.quote!(ctx, [100]);
+    // Repeated block frames for one outage remain one event and one note.
+    await adapter.quote!(ctx, [100], 123n);
+    await adapter.quote!(ctx, [100], 123n);
     expect(notes).toHaveLength(1);
 
     // recovery is ANNOUNCED — an adapter cannot retract, so silence here would
     // leave a stale warning standing (the reference-starvation lesson, 6c3cf5b).
     state.live = true;
-    const rows = await adapter.quote!(ctx, [100]);
+    const rows = await adapter.quote!(ctx, [100], 123n);
     expect(rows.length).toBeGreaterThan(0);
     expect(notes).toHaveLength(2);
     expect(notes[1].code).toBe('venue.quote.recovered');
@@ -102,7 +102,7 @@ describe('ThogAMM quote outage notes', () => {
 
     // and a fresh outage is on the record again, not swallowed by the old one.
     state.live = false;
-    await adapter.quote!(ctx, [100]);
+    await adapter.quote!(ctx, [100], 123n);
     expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered', 'venue.quote.unavailable']);
   });
 });

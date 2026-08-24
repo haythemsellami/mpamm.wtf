@@ -244,6 +244,7 @@ function parseSubgraphBook(r: CloberSubgraphBookRow): { id: string; book: Clober
 /** Quote Clober for each market × size via BookViewer.getExpectedOutput. */
 export async function quoteClober(
   client: PublicClient, markets: CloberMarket[], sizesUsd: readonly number[], pricer: UsdPricer,
+  blockNumber: bigint,
 ): Promise<QuoteRow[]> {
   if (!markets.length) return [];
   type Leg = { market: string; size: number; side: Side; book: CloberBook; inDec: number; outDec: number; reqBase: bigint; basePx: number };
@@ -273,7 +274,7 @@ export async function quoteClober(
     functionName: 'getExpectedOutput' as const,
     args: [{ id: l.book.bookId, limitPrice: CLOBER_MIN_PRICE, baseAmount: l.reqBase, minQuoteAmount: 0n, hookData: '0x' as `0x${string}` }] as const,
   }));
-  const res = await client.multicall({ contracts, allowFailure: true });
+  const res = await client.multicall({ contracts, allowFailure: true, blockNumber });
 
   const rowByKey = new Map<string, QuoteRow>();
   const fullByKey = new Map<string, { bid: boolean; ask: boolean }>();
@@ -493,8 +494,8 @@ export function createCloberVaultAdapter(): VenueAdapter {
         ctx.note('venue.discovery.degraded', 'Clober: authoritative discovery unavailable; holding Take ranges until rediscovery succeeds');
       }
     },
-    quote(ctx, sizesUsd) {
-      return quoteClober(ctx.client, markets, sizesUsd, ctx.pricer);
+    quote(ctx, sizesUsd, blockNumber) {
+      return quoteClober(ctx.client, markets, sizesUsd, ctx.pricer, blockNumber);
     },
     // QUOTE_UPDATE_BURN: the vault's quotes live on the books, and every
     // repricing is one keeper tx through the operator contract that emits

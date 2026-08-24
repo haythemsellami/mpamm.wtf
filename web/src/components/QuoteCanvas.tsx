@@ -3,7 +3,8 @@ import { type VenueMeta } from '@shared';
 import { useDashboard } from '../store';
 import { hexA, venueColor, CH } from '../theme';
 
-const N = 120;
+const QUOTE_WINDOW_MS = 60_000;
+const QUOTE_SAMPLE_MAX = 400;
 
 /**
  * Streaming bid/ask QUOTE chart — a STEP (staircase) chart, because quotes are
@@ -75,7 +76,9 @@ export function QuoteCanvas() {
     // for exactly the width its own labels take.
     const padL = Math.max(58, Math.ceil(Math.max(...labels.map((l) => ctx.measureText(l).width))) + 12);
 
-    const X = (i: number) => padL + (i / (N - 1)) * (w - padL - padR);
+    const cadenceMs = d.state?.quoteCadenceMs ?? 500;
+    const sampleCount = Math.min(QUOTE_SAMPLE_MAX, Math.max(2, Math.floor(QUOTE_WINDOW_MS / Math.max(1, cadenceMs)) + 1));
+    const X = (i: number) => padL + (i / (sampleCount - 1)) * (w - padL - padR);
     const Y = (p: number) => padT + (1 - (p - mn) / (mx - mn)) * (h - padT - padB);
 
     ctx.lineWidth = 1;
@@ -86,12 +89,12 @@ export function QuoteCanvas() {
       ctx.fillStyle = ch.label; ctx.textAlign = 'right'; ctx.fillText(labels[g], padL - 6, y + 3);
     }
     ctx.textAlign = 'center';
-    // time axis spans (N-1) samples at the service's real quote cadence (audit I6).
-    const cadenceMs = d.state?.quoteCadenceMs ?? 500;
-    const spanSec = ((N - 1) * cadenceMs) / 1000;
+    // time axis spans the configured 60-second quote window at the source's
+    // actual cadence (per-block live, 500ms in the simulator).
+    const spanSec = ((sampleCount - 1) * cadenceMs) / 1000;
     const TICKS = 6;
     for (let k = 0; k <= TICKS; k++) {
-      const i = (k / TICKS) * (N - 1), x = X(i);
+      const i = (k / TICKS) * (sampleCount - 1), x = X(i);
       const secAgo = Math.round((1 - k / TICKS) * spanSec);
       ctx.strokeStyle = ch.grid2;
       ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();

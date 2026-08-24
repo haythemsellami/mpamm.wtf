@@ -34,9 +34,10 @@ export interface DataSource {
   off(ev: 'message', cb: (m: StreamMessage) => void): this;
 }
 
-/** Quote-history ring length — matches the frontend chart window (N=120 samples
- *  ≈ 60s at the 500ms poll cadence). ~40 rows/snapshot × 120 ≈ 5k rows in memory. */
-const QUOTE_HISTORY_N = 120;
+/** Quote history is retained by wall time, not sample count: live quotes now
+ *  arrive per block (~300ms) while the simulator still ticks at 500ms. */
+const QUOTE_HISTORY_MS = 60_000;
+const QUOTE_HISTORY_MAX = 400; // safety cap if timestamps regress or cadence changes
 
 export abstract class BaseSource extends EventEmitter implements DataSource {
   abstract readonly mode: DataSourceMode;
@@ -98,7 +99,9 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
       // live/sim both replace the matrix wholesale each poll (never mutate a
       // broadcast one), so retaining by reference is safe.
       this.quoteHist.push(m.data);
-      if (this.quoteHist.length > QUOTE_HISTORY_N) this.quoteHist.shift();
+      const cutoff = m.data.ts - QUOTE_HISTORY_MS;
+      while (this.quoteHist.length > 1 && this.quoteHist[0].ts < cutoff) this.quoteHist.shift();
+      while (this.quoteHist.length > QUOTE_HISTORY_MAX) this.quoteHist.shift();
     }
     this.emit('message', m);
   }

@@ -65,6 +65,7 @@ async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
     validateRegistry: vi.fn(),
   }));
   vi.doMock('../chain/rpc.js', () => ({
+    monad: { blockTime: 300 },
     publicClient: { getBlockNumber: vi.fn(async () => 100n) },
     archiveClient: {},
     getLogsChunked: vi.fn(),
@@ -79,26 +80,35 @@ async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
     archiveRpcGeneration: () => 0,
     hasDedicatedArchive: true,
   }));
+  const headWatcher = { start: vi.fn(), stop: vi.fn() };
+  vi.doMock('../chain/heads.js', () => ({
+    HotHeadWatcher: class {
+      start(...args: unknown[]) { return headWatcher.start(...args); }
+      stop(...args: unknown[]) { return headWatcher.stop(...args); }
+    },
+  }));
 
   const { LiveDataSource } = await import('../datasource/live.js');
   const source = new LiveDataSource() as any;
   source.initHistory = vi.fn(async () => {});
+  source.bootHead = 100n;
   source.poll = vi.fn(async () => {});
-  source.scheduleLoop = vi.fn();
+  source.scheduleTail = vi.fn();
   source.backgroundHistory = vi.fn(async () => {});
   source.gas = { start: vi.fn(), stop: vi.fn() };
-  return { source, archiveProbe, adapter };
+  return { source, archiveProbe, adapter, headWatcher };
 }
 
 describe('live startup archive gate', () => {
   it('warms hot loops while archive verification is still pending, then starts deep workers', async () => {
-    const { source, archiveProbe } = await setup();
+    const { source, archiveProbe, headWatcher } = await setup();
     const started = source.start();
 
     await vi.waitFor(() => {
       expect(source.poll).toHaveBeenCalledOnce();
-      expect(source.scheduleLoop).toHaveBeenCalledWith('quote');
-      expect(source.scheduleLoop).toHaveBeenCalledWith('tail');
+      expect(source.poll).toHaveBeenCalledWith(100n);
+      expect(headWatcher.start).toHaveBeenCalledOnce();
+      expect(source.scheduleTail).toHaveBeenCalledOnce();
     });
     expect(source.backgroundHistory).not.toHaveBeenCalled();
     expect(source.gas.start).not.toHaveBeenCalled();
@@ -111,12 +121,12 @@ describe('live startup archive gate', () => {
   });
 
   it('never starts deep workers when the archive primary is on the wrong chain', async () => {
-    const { source, archiveProbe } = await setup();
+    const { source, archiveProbe, headWatcher } = await setup();
     const outcome = source.start().then((): Error | undefined => undefined, (error: unknown) => error as Error);
 
     await vi.waitFor(() => {
-      expect(source.scheduleLoop).toHaveBeenCalledWith('quote');
-      expect(source.scheduleLoop).toHaveBeenCalledWith('tail');
+      expect(headWatcher.start).toHaveBeenCalledOnce();
+      expect(source.scheduleTail).toHaveBeenCalledOnce();
     });
     archiveProbe.resolve({ ok: false, block: 0, wrongChain: true, reason: 'archive primary is on the wrong chain' });
     const error = await outcome;
@@ -146,6 +156,28 @@ describe('live startup archive gate', () => {
     source.backgroundHistory.mockClear();
     await source.rediscover();
     expect(source.backgroundHistory).not.toHaveBeenCalled();
+    source.stop();
+  });
+
+  it('quotes observed heads at their explicit block and coalesces overload to the newest head', async () => {
+    const { source, archiveProbe, headWatcher } = await setup();
+    const started = source.start();
+    archiveProbe.resolve({ ok: true, block: 100 });
+    await started;
+
+    const first = deferred<void>();
+    source.poll.mockClear();
+    source.poll.mockImplementationOnce(() => first.promise).mockResolvedValue(undefined);
+    const callbacks = headWatcher.start.mock.calls[0][0];
+
+    callbacks.onBlock(101n, 'ws');
+    await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(101n));
+    callbacks.onBlock(102n, 'ws');
+    callbacks.onBlock(103n, 'ws');
+    first.resolve();
+
+    await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(103n));
+    expect(source.poll.mock.calls.map((args: unknown[]) => args[0])).toEqual([101n, 103n]);
     source.stop();
   });
 });
