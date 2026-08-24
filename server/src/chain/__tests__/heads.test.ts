@@ -87,6 +87,32 @@ describe('HotHeadWatcher', () => {
     watcher.stop();
   });
 
+  it('ignores buffered heads from a socket after it has been detached', async () => {
+    vi.useFakeTimers();
+    const socket = new FakeSocket();
+    const getBlockNumber = vi.fn().mockResolvedValueOnce(100n).mockResolvedValue(101n);
+    const seen: Array<{ block: bigint; source: string }> = [];
+    const watcher = new HotHeadWatcher(
+      { getBlockNumber } as any,
+      { pollMs: 75, wsUrl: 'wss://example.invalid/ws', openSocket: () => socket as any },
+    );
+
+    watcher.start({ onBlock: (block, source) => seen.push({ block, source }) });
+    await vi.advanceTimersByTimeAsync(0);
+    socket.emit('open');
+    socket.emit('message', JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x8f' }));
+    socket.emit('message', JSON.stringify({ jsonrpc: '2.0', id: 2, result: '0xsub' }));
+    socket.emit('error', new Error('connection lost'));
+
+    // A detached connection can still deliver data already queued by the
+    // socket implementation. It must not advance the monotonic head cursor.
+    socket.emit('message', JSON.stringify({ method: 'eth_subscription', params: { result: { number: '0x989680' } } }));
+    await vi.advanceTimersByTimeAsync(75);
+
+    expect(seen).toEqual([{ block: 100n, source: 'http' }, { block: 101n, source: 'http' }]);
+    watcher.stop();
+  });
+
   it('rejects a WebSocket from the wrong chain before it can publish a head', async () => {
     vi.useFakeTimers();
     const socket = new FakeSocket();
