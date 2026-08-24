@@ -22,9 +22,10 @@ import type { NoteCode } from '@shared';
  * reverts, "block range too large" (the adaptive chunkers probe ranges
  * constantly), rate-limit backoffs — proves the endpoint is ALIVE and must
  * never cause a switch. Mixed providers are safe by construction: nearly every
- * read is pinned to an explicit block number and tails run at head−5, so any
- * honest node returns identical data; a lagging backup surfaces as a retry and
- * the fail-closed cursors already absorb that.
+ * HOT reads are pinned to explicit blocks and tails run at head−5, so an honest
+ * backup can keep them current. DEEP callers impose a stricter contract with
+ * guardRpcRead below: a failover during any cursor-bearing read discards the
+ * result, even when the backup returned successfully.
  *
  * Event messages are label-only ("primary", "backup-1") — they flow into the
  * public state.notes, so endpoint URLs (which embed RPC keys) must never
@@ -87,22 +88,47 @@ export function isTransportFailure(e: unknown): boolean {
   return false;
 }
 
+/** The pool stopped being fully usable while a request was in flight. This is
+ *  deliberately an availability error even when the underlying read returned a
+ *  value or an answer-level archive error: accepting either after failover can
+ *  mix providers inside one cursor transaction. */
+export class RpcReadUnavailableError extends Error {
+  constructor(readonly cause?: unknown) {
+    super('RPC pool changed or became unavailable while a read was in flight');
+    this.name = 'RpcReadUnavailableError';
+  }
+}
+
 /**
  * "We could not get an answer", as opposed to "the node answered that it cannot
- * serve this range": transport failures (unreachable) PLUS HTTP 429 (alive, but
- * throttling us).
+ * serve this range": transport failures (unreachable), HTTP 429 (alive, but
+ * throttled), or a read whose pool failed over before it settled.
  *
- * Deliberately a different predicate from isTransportFailure, and the 429 is
- * exactly why. For the BREAKER a 429 proves the endpoint is alive and must not
- * trip a switch (above). For a deep CRAWL it is just as uninformative as a dead
- * socket — it says nothing about whether the requested blocks exist. A crawl
- * that reads it as a permanent archive hole skips readable history and marks the
- * day done, which is the one outcome this indexer refuses to produce. Use this
- * one wherever the decision is "hold the cursor or consume the range".
+ * Deliberately a different predicate from isTransportFailure. For the BREAKER a
+ * 429 proves the endpoint is alive and must not trip a switch. For a deep CRAWL
+ * any of these failures says nothing about whether the requested blocks exist;
+ * treating one as a permanent archive hole would skip readable history.
  */
 export function isAvailabilityFailure(e: unknown): boolean {
+  if (e instanceof RpcReadUnavailableError) return true;
   if (isTransportFailure(e)) return true;
   return e instanceof HttpRequestError && e.status === 429;
+}
+
+/** Accept a read only if its pool is fully available both before and after the
+ *  await. Breakers retry transparently, so error classification alone cannot
+ *  reveal that a request moved from the primary to a backup mid-flight. */
+export async function guardRpcRead<T>(read: () => Promise<T>, unavailable: () => boolean): Promise<T> {
+  if (unavailable()) throw new RpcReadUnavailableError();
+  try {
+    const value = await read();
+    if (unavailable()) throw new RpcReadUnavailableError();
+    return value;
+  } catch (e) {
+    if (e instanceof RpcReadUnavailableError) throw e;
+    if (unavailable()) throw new RpcReadUnavailableError(e);
+    throw e;
+  }
 }
 
 /** Wait for every concurrent archive read, then prefer any availability

@@ -4,7 +4,7 @@ import {
   type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode,
 } from '@shared';
-import { allPreferAvailability, isAvailabilityFailure } from '../chain/failover.js';
+import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from '../chain/failover.js';
 import { computeLeaderboard } from '../analytics.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
@@ -24,12 +24,32 @@ import type { AdapterContext, LogBundle, LogSource, VenueAdapter } from '../venu
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Wait until the archive can serve the fixed hot-head handoff captured at
- *  boot. An archive chosen for retention may trail the hot node by a few blocks,
- *  but it will pass that OLD head shortly as the chain advances. Waiting keeps
- *  one exact ownership boundary: deep scans own <= bootHead, the live tail owns
- *  > bootHead. Clamping to the archive's lagging head creates an unowned gap at
- *  UTC rollover, when some of those blocks still belong to yesterday. */
+const ARCHIVE_RETRY_BASE_MS = 15_000;
+const ARCHIVE_RETRY_MAX_MS = 120_000;
+
+/** Cursor-preserving availability retries use a real outage cadence, not the
+ *  normal crawl pace. A sustained 429 otherwise turns a background repair into
+ *  a tight loop that prolongs the throttle and starves later venues. */
+export function archiveRetryDelayMs(attempt: number): number {
+  const exponent = Math.max(0, Math.min(3, Math.floor(attempt) - 1));
+  return Math.min(ARCHIVE_RETRY_MAX_MS, ARCHIVE_RETRY_BASE_MS * 2 ** exponent);
+}
+
+/** A history run may share one UTC anchor only while that day is current. */
+export function historyRunRolled(runDay: string, nowMs: number = Date.now()): boolean {
+  return utcDay(nowMs) !== runDay;
+}
+
+class HistoryDayRolledError extends Error {
+  constructor(readonly runDay: string) {
+    super(`deep history crossed UTC midnight after starting on ${runDay}`);
+    this.name = 'HistoryDayRolledError';
+  }
+}
+
+/** Wait until the archive can serve an exact hot-head handoff. An archive
+ *  chosen for retention may trail the hot node by a few blocks, but it will
+ *  pass that fixed target shortly as the chain advances. */
 export async function waitForArchiveBoundary(
   target: bigint,
   getHead: () => Promise<bigint>,
@@ -37,21 +57,23 @@ export async function waitForArchiveBoundary(
   pause: (ms: number) => Promise<void> = sleep,
 ): Promise<boolean> {
   let waited = false;
+  let unavailableAttempts = 0;
   while (target > 0n) {
     if (isUnavailable()) {
       waited = true;
-      await pause(15_000);
+      await pause(archiveRetryDelayMs(++unavailableAttempts));
       continue;
     }
     try {
-      if (await getHead() >= target) return waited;
+      if (await guardRpcRead(getHead, isUnavailable) >= target) return waited;
+      unavailableAttempts = 0;
     } catch (e) {
       // 429 does not trip the breaker (the endpoint is alive), but retrying it
       // every second amplifies the throttle. Preserve the boundary and use the
       // same quiet backoff as a breaker-visible outage.
       if (isAvailabilityFailure(e)) {
         waited = true;
-        await pause(15_000);
+        await pause(archiveRetryDelayMs(++unavailableAttempts));
         continue;
       }
     }
@@ -567,6 +589,10 @@ function archiveUnavailable(): boolean {
   return s.degraded || s.down;
 }
 
+/** One deep read is valid only when the archive pool stays primary/healthy for
+ *  its entire lifetime. The breaker can fail over and retry inside the await. */
+const archiveRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, archiveUnavailable);
+
 async function holdWhileDegraded(): Promise<boolean> {
   const wasUnavailable = archiveUnavailable();
   while (archiveUnavailable()) await sleep(15_000);
@@ -635,13 +661,10 @@ export class LiveDataSource extends BaseSource {
    *  base, because MON/USDC and MON/USDT0 mark against different mids. */
   private midHist = new Map<string, { t: number; mid: number }[]>();
   private lastBlock = 0n;
-  /** chain head captured at boot — the upper bound for on-chain backfill (the
-   *  live tail owns every block after it, so the two never overlap). */
+  /** Chain head captured at boot: live gap-fill handoff and reset validation. */
   private bootHead = 0n;
-  /** Fixed handoff for DEEP crawls. It remains the HOT head captured at boot;
-   *  backgroundHistory waits until the archive reaches it before resolving or
-   *  scanning anything. Deep owns <= this block and the live tail owns > it, so
-   *  neither lag nor a UTC rollover can leave an unvisited interval. */
+  /** Latest healthy HOT-primary head handed to the DEEP crawls. A run never
+   *  resolves its closed-day boundary until the archive has reached this block. */
   private deepEnd = 0n;
   /** process start — grace period before "reference feed has no mid" notes. */
   private bootMs = Date.now();
@@ -756,38 +779,78 @@ export class LiveDataSource extends BaseSource {
   private async backgroundHistory(): Promise<void> {
     if (this.historyRunning) return;
     this.historyRunning = true;
+    let rerun = false;
     try {
-      // BEFORE both stages, and NOT behind either individual switch: whichever
-      // scan is enabled must see its reset before it starts.
-      if (hasDedicatedArchive) {
-        const waited = await waitForArchiveBoundary(
-          this.deepEnd,
-          () => archiveClient.getBlockNumber(),
-          archiveUnavailable,
-        );
-        if (waited) {
-          this.noteOnce('backfill.held', `deep history held until the archive reached boot handoff block ${this.deepEnd}`);
+      // Pin a healthy HOT-primary head, then wait for the archive to reach that
+      // exact block. If either wait crosses midnight, repeat with a fresh head;
+      // blockAtOrAfter must never search for today's boundary below today's
+      // first block and silently return a stale upper bound.
+      let nowMs = 0;
+      let runDay = '';
+      for (;;) {
+        nowMs = Date.now();
+        runDay = utcDay(nowMs);
+        const hotUnavailable = () => {
+          const status = rpcStatus();
+          return status.degraded || status.down;
+        };
+        const head = await guardRpcRead(() => publicClient.getBlockNumber(), hotUnavailable);
+        if (head > this.deepEnd) this.deepEnd = head;
+        if (hasDedicatedArchive) {
+          const waited = await waitForArchiveBoundary(
+            this.deepEnd,
+            () => archiveClient.getBlockNumber(),
+            archiveUnavailable,
+          );
+          if (waited) {
+            this.noteOnce('backfill.held', `deep history held until the archive reached hot handoff block ${this.deepEnd}`);
+          }
+        }
+        if (!historyRunRolled(runDay)) break;
+      }
+      // Scan only FULLY closed days. If this run crosses midnight, the stage
+      // stays pending and restarts against a fresh hot-head bound so the day
+      // that just closed is replayed in full (including the post-boot suffix).
+      const firstCurrentBlock = await blockAtOrAfter(
+        Math.floor(Date.parse(`${runDay}T00:00:00Z`) / 1000),
+        this.deepEnd,
+      );
+      const closedEnd = firstCurrentBlock > 0n ? firstCurrentBlock - 1n : 0n;
+      // Gap-fill and deep replay can overlap closed blocks after a restart. Let
+      // the tail finish first; the deep SET then becomes the final exact value
+      // instead of a later tail increment double-counting the overlap.
+      await this.waitForTailBoundary(closedEnd);
+      await this.applyBackfillReset(nowMs);
+      if (historyRunRolled(runDay)) throw new HistoryDayRolledError(runDay);
+      if (config.markoutBackfill) {
+        try { await this.markoutOnboarding(nowMs, closedEnd); }
+        catch (e) {
+          if (e instanceof HistoryDayRolledError) throw e;
+          this.noteOnce('markout.paused', `markout onboarding stopped: ${(e as Error).message}; retried automatically`);
         }
       }
-      // ONE clock for the run, captured AFTER the archive wait: recovery can
-      // cross UTC midnight. The reset's delete boundary and both scans must
-      // agree on the day that is current when work actually begins.
-      const nowMs = Date.now();
-      await this.applyBackfillReset(nowMs);
-      if (config.markoutBackfill) {
-        try { await this.markoutOnboarding(nowMs); }
-        catch (e) { this.noteOnce('markout.paused', `markout onboarding stopped: ${(e as Error).message}; retried automatically`); }
-      }
-      if (config.backfillEnabled) await this.backfillOnchain(nowMs);
+      if (config.backfillEnabled) await this.backfillOnchain(nowMs, closedEnd);
     } catch (e) {
-      // This chain is started with `void`, so anything escaping here is an
-      // unhandled rejection that takes the whole stage down silently. The
-      // rediscovery timer re-invokes it while seeds are pending, so saying so
-      // and standing down IS the retry.
-      this.noteOnce('backfill.paused', `history stage stopped: ${(e as Error).message}; retried automatically`);
+      if (e instanceof HistoryDayRolledError) {
+        this.noteOnce('backfill.held', `${e.message} — extending the closed-day boundary and resuming`);
+        rerun = true;
+      } else {
+        // This chain is started with `void`, so anything escaping here is an
+        // unhandled rejection that takes the whole stage down silently. The
+        // rediscovery timer re-invokes it while seeds are pending, so saying so
+        // and standing down IS the retry.
+        this.noteOnce('backfill.paused', `history stage stopped: ${(e as Error).message}; retried automatically`);
+      }
     } finally {
       this.historyRunning = false;
+      if (rerun && !this.loopsStopped) setTimeout(() => { void this.backgroundHistory(); }, 0);
     }
+  }
+
+  /** Deep SETs must land after the live gap-fill has crossed their bound. */
+  private async waitForTailBoundary(target: bigint): Promise<void> {
+    while (!this.loopsStopped && this.lastBlock < target) await sleep(1_000);
+    if (this.loopsStopped) throw new Error('source stopped while history waited for the live tail');
   }
 
   /** true while any fill-landing venue still awaits a one-time history seed. */
@@ -945,10 +1008,9 @@ export class LiveDataSource extends BaseSource {
     const head = await publicClient.getBlockNumber();
     this.block = Number(head);
     this.bootHead = head; // upper bound for the live gap-fill (tail owns > head)
-    // One exact handoff: deep scans wait until the archive can serve this OLD
-    // head, then own everything through it; the live tail owns everything after.
-    // Do not clamp to the archive's current head — around UTC midnight that gap
-    // can contain closed-day fills which neither worker would revisit.
+    // Initial deep handoff. Each background run refreshes this from the healthy
+    // hot primary, then waits for both the archive and live tail before applying
+    // an authoritative SET to any newly closed day.
     this.deepEnd = head;
     const lpb = this.store.getMeta('lastProcessedBlock');
     // gap-fill ANY bounded gap — including across UTC midnight: decoded fills
@@ -1123,7 +1185,7 @@ export class LiveDataSource extends BaseSource {
       let from: { block: bigint; day: string } | undefined;
       if (t.from === 'block') {
         try {
-          const b = await archiveClient.getBlock({ blockNumber: t.block });
+          const b = await archiveRead(() => archiveClient.getBlock({ blockNumber: t.block }));
           from = resetStartFromBlock(t.block, b.timestamp);
         } catch (e) {
           // no settle(): a resolve that failed on the RPC may well succeed on
@@ -1135,7 +1197,7 @@ export class LiveDataSource extends BaseSource {
       if (t.from === 'day') {
         try {
           const block = await blockAtOrAfter(Math.floor(Date.parse(`${t.day}T00:00:00Z`) / 1000), this.bootHead);
-          const b = await archiveClient.getBlock({ blockNumber: block });
+          const b = await archiveRead(() => archiveClient.getBlock({ blockNumber: block }));
           from = resetStartFromBlock(block, b.timestamp);
         }
         catch (e) {
@@ -1187,7 +1249,7 @@ export class LiveDataSource extends BaseSource {
    * paced under the RPC's limits, resumable across restarts, and self-healing
    * (retried each boot and on the rediscovery tick until `backfill_done_<venue>` is set).
    */
-  private async backfillOnchain(nowMs: number): Promise<void> {
+  private async backfillOnchain(nowMs: number, end: bigint): Promise<void> {
     for (const a of ADAPTERS) {
       const sinceUtc = a.backfillFromUtc;
       const vid = a.venues()[0]?.id ?? '';
@@ -1199,15 +1261,18 @@ export class LiveDataSource extends BaseSource {
       // silently drop the venue's lifetime history (issue: seed vs quarantine).
       if (seed.action === 'skip') { this.store.setMeta(`backfill_done_${vid}`, '1'); continue; }
       if (seed.action === 'defer') { this.noteOnce('backfill.deferred', `${name} backfill deferred — ${seed.reason}`, vid); continue; }
-      try { await this.backfillAdapter(a, vid, name, sinceUtc, seed.fills, nowMs); }
-      catch (e) { this.noteOnce('backfill.paused', `${name} backfill paused (${(e as Error).message}); retried automatically`, vid); }
+      try { await this.backfillAdapter(a, vid, name, sinceUtc, seed.fills, nowMs, end); }
+      catch (e) {
+        if (e instanceof HistoryDayRolledError) throw e;
+        this.noteOnce('backfill.paused', `${name} backfill paused (${(e as Error).message}); retried automatically`, vid);
+      }
     }
   }
 
-  private async backfillAdapter(a: VenueAdapter, vid: string, name: string, sinceUtc: string, sources: LogSource[], nowMs: number): Promise<void> {
-    const end = this.deepEnd;
+  private async backfillAdapter(a: VenueAdapter, vid: string, name: string, sinceUtc: string, sources: LogSource[], nowMs: number, end: bigint): Promise<void> {
     if (end <= 0n) return;
     await holdWhileDegraded();
+    const today = utcDay(nowMs);
     const startSec = Math.floor(Date.parse(`${sinceUtc}T00:00:00Z`) / 1000);
     if (!Number.isFinite(startSec)) { this.noteOnce('backfill.config.invalid', `${name} backfill: invalid backfillFromUtc '${sinceUtc}'`, vid); return; }
 
@@ -1219,7 +1284,7 @@ export class LiveDataSource extends BaseSource {
       const cb = BigInt(cur);
       if (cb > from && cb <= end + 1n) {
         try {
-          const b = await archiveClient.getBlock({ blockNumber: cb > end ? end : cb });
+          const b = await archiveRead(() => archiveClient.getBlock({ blockNumber: cb > end ? end : cb }));
           const daySec = Math.floor(Date.parse(`${utcDay(Number(b.timestamp) * 1000)}T00:00:00Z`) / 1000);
           from = await blockAtOrAfter(daySec, end);
         } catch (e) {
@@ -1231,18 +1296,20 @@ export class LiveDataSource extends BaseSource {
         }
       }
     }
-    if (from > end) { this.store.setMeta(`backfill_done_${vid}`, '1'); return; }
+    if (from > end) {
+      if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
+      this.store.setMeta(`backfill_done_${vid}`, '1');
+      return;
+    }
 
-    // The reset and both scans share one closed-day boundary. If this replay
-    // begins before midnight and reaches this stage after it, consulting the
-    // live clock would scan the newly closed day even though the reset kept it;
-    // a zero-fill result would then leave its stale row untouched.
-    const today = utcDay(nowMs);
+    // `end` is the last block before `today`; a rollover expires the run before
+    // its done marker, then the next run extends the bound and revisits the day.
     const acc = new Map<string, { usd: number; swaps: number }>(); // closed utcDay -> totals
     let chunk = BigInt(config.backfillChunk);
     const floor = BigInt(config.getLogsMinChunk);
     let cursor = from;
     let sinceMerge = 0;
+    let availabilityAttempts = 0;
     // RPC archive holes: some providers permanently fail getLogs for specific
     // historical ranges ("error getting block header from triedb and archive").
     // Retrying across boots can never fix those — the backfill would stall at the
@@ -1268,9 +1335,10 @@ export class LiveDataSource extends BaseSource {
     /** one getLogs across every fill source over [cursor, t]; throws on failure.
      *  ARCHIVE pool — this replays from the venue's deploy day. */
     const fetchRange = (t: bigint) => allPreferAvailability(sources.map((s) =>
-      archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
+      archiveRead(() => archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>)));
 
     while (cursor <= end) {
+      if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
       if (await holdWhileDegraded()) this.noteOnce('backfill.held', `${name} backfill held while archive RPC was unavailable — resumed on primary`, vid);
       // ── in-hole mode: probe a floor-sized slice at the cursor. Readable → the
       // hole is over (fall through and INGEST that probe normally). Unreadable →
@@ -1298,8 +1366,8 @@ export class LiveDataSource extends BaseSource {
             holeRun++;
             skipStride = skipStride * 2n > MAX_STRIDE ? MAX_STRIDE : skipStride * 2n;
             cursor = strideTo + 1n;
+            await sleep(config.backfillPaceMs);
           }
-          await sleep(config.backfillPaceMs);
         }
       } else {
         // ── normal mode: shrink the span on a range error, back off on a
@@ -1327,7 +1395,7 @@ export class LiveDataSource extends BaseSource {
           }
         }
       }
-      if (availabilityFailed) { await sleep(config.backfillPaceMs * 25); continue; }
+      if (availabilityFailed) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
       if (batches === null) continue; // shrank or entered hole mode — loop from the adjusted cursor
 
       const all = batches.flat();
@@ -1342,7 +1410,7 @@ export class LiveDataSource extends BaseSource {
         let timestampUnavailable = false;
         for (const bn of new Set<bigint>(all.map((l) => l.blockNumber as bigint))) {
           for (let i = 0; i < 3 && !Number.isFinite(anchorMs); i++) {
-            try { anchorMs = Number((await archiveClient.getBlock({ blockNumber: bn })).timestamp) * 1000; }
+            try { anchorMs = Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: bn }))).timestamp) * 1000; }
             catch (e) {
               if (isAvailabilityFailure(e)) { timestampUnavailable = true; break; }
               await sleep(config.backfillPaceMs * 5 * (i + 1));
@@ -1352,7 +1420,7 @@ export class LiveDataSource extends BaseSource {
         }
         // getLogs succeeded, but without a timestamp the whole chunk is unknown.
         // Hold it intact on an outage/429; the next pass re-fetches idempotently.
-        if (timestampUnavailable) { await sleep(config.backfillPaceMs * 25); continue; }
+        if (timestampUnavailable) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
         if (Number.isFinite(anchorMs)) {
           const tsOf = () => anchorMs; // chunk-level ts — daily bucketing only
           const bundle: LogBundle = {};
@@ -1369,6 +1437,7 @@ export class LiveDataSource extends BaseSource {
         }
       }
 
+      availabilityAttempts = 0;
       cursor = to + 1n;
       if (++sinceMerge >= config.backfillMergeEvery || cursor > end) {
         this.mergeBackfill(vid, acc);
@@ -1381,12 +1450,13 @@ export class LiveDataSource extends BaseSource {
 
     this.mergeBackfill(vid, acc);
     this.store.setMeta(`backfill_cursor_${vid}`, String(end + 1n));
+    this.store.upsertMany(this.days);
+    if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
     // done even when ranges were skipped — re-running every boot can't fix an RPC
     // archive hole. To re-attempt after the provider repairs it: delete the
     // 'backfill_done_<venue>' + 'backfill_cursor_<venue>' meta rows (the SET-per-day
     // merge makes a full re-run idempotent).
     this.store.setMeta(`backfill_done_${vid}`, '1');
-    this.store.upsertMany(this.days);
     this.note('backfill.done', `${name}: backfill complete — ${acc.size} day(s) seeded` +
       (skipped > 0n ? ` (${skipped} block(s) unreadable on the RPC archive and skipped — those windows may undercount)` : ''), vid);
     this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) }); // nudge connected clients
@@ -1416,10 +1486,10 @@ export class LiveDataSource extends BaseSource {
    * later boots so days deferred on an unpublished archive (the current month's
    * Bybit dump) self-heal once it publishes.
    */
-  private async markoutOnboarding(nowMs: number): Promise<void> {
+  private async markoutOnboarding(nowMs: number, end: bigint): Promise<void> {
     if (this.remarkRunning) return;
     this.remarkRunning = true;
-    try { await this.markoutOnboardingInner(nowMs); }
+    try { await this.markoutOnboardingInner(nowMs, end); }
     finally { this.remarkRunning = false; }
   }
 
@@ -1443,7 +1513,7 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
-  private async markoutOnboardingInner(nowMs: number): Promise<void> {
+  private async markoutOnboardingInner(nowMs: number, end: bigint): Promise<void> {
     for (const a of ADAPTERS) {
       const vid = a.venues()[0]?.id ?? '';
       const name = a.venues()[0]?.name ?? vid;
@@ -1455,9 +1525,10 @@ export class LiveDataSource extends BaseSource {
       if (seed.action === 'skip') { this.store.setMeta(`mkfill_done_${vid}`, '1'); continue; }
       if (seed.action === 'defer') { this.noteOnce('markout.deferred', `${name} markout onboarding deferred — ${seed.reason}`, vid); continue; }
       try {
-        if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') await this.backfillRecentFills(a, vid, name, seed.all, nowMs);
+        if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') await this.backfillRecentFills(a, vid, name, seed.all, nowMs, end);
         await this.remarkVenue(vid, name);
       } catch (e) {
+        if (e instanceof HistoryDayRolledError) throw e;
         this.noteOnce('markout.paused', `${name} markout onboarding paused (${(e as Error).message}); retried automatically`, vid);
       }
     }
@@ -1467,10 +1538,10 @@ export class LiveDataSource extends BaseSource {
    *  timestamps) and persist them. Volume buckets are NOT touched — closed-day
    *  volume is owned by the venue's volume backfill / subgraph seed, and the
    *  deterministic fill ids make this idempotent against both. */
-  private async backfillRecentFills(a: VenueAdapter, vid: string, name: string, sources: LogSource[], nowMs: number): Promise<void> {
-    const end = this.deepEnd;
+  private async backfillRecentFills(a: VenueAdapter, vid: string, name: string, sources: LogSource[], nowMs: number, end: bigint): Promise<void> {
     if (end <= 0n) return;
     await holdWhileDegraded();
+    const today = utcDay(nowMs);
     // Day-ALIGNED window start so every scanned day is complete — a partial
     // oldest day would later reconcile an undercounted swap count onto a day the
     // volume backfill counted fully.
@@ -1484,20 +1555,15 @@ export class LiveDataSource extends BaseSource {
       const cb = BigInt(cur);
       if (cb > from && cb <= end + 1n) from = cb; // resume (fills are id-deduped, no day alignment needed)
     }
-    if (from > end) { this.store.setMeta(`mkfill_done_${vid}`, '1'); return; }
+    if (from > end) {
+      if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
+      this.store.setMeta(`mkfill_done_${vid}`, '1');
+      return;
+    }
 
-    // The RUN's day, not this venue's start day. A reset earlier in the same
-    // run preserved its "today" — the one day it may not delete — and fills are
-    // insert-if-absent (ON CONFLICT DO NOTHING), so a scan working from a LATER
-    // day cannot correct that day's rows, only add to them: the stale fills
-    // survive and reconcileSwapCounts then counts them alongside the fresh
-    // ones. Venue scans run back to back for hours, so whether that happened
-    // depended on how long earlier venues took. Sharing the anchor makes the
-    // preserved day the same day for every stage of the run.
-    // The volume replay uses this same anchor: mergeBackfill only SETS days
-    // that decoded at least one fill, so a newly closed zero-fill day cannot be
-    // allowed into one scan after the reset deliberately preserved it.
-    const today = utcDay(nowMs);
+    // `end` is the last block before `today`. If midnight arrives during the
+    // scan, the done marker stays unset; the next run begins at this run's
+    // `end + 1`, exactly the first block of the newly closed day.
     let chunk = BigInt(config.backfillChunk);
     const floor = BigInt(config.getLogsMinChunk);
     const maxChunk = BigInt(config.backfillChunk);
@@ -1505,6 +1571,7 @@ export class LiveDataSource extends BaseSource {
     let sinceFlush = 0;
     let persisted = 0;
     let tsFails = 0; // consecutive timestamp-resolution failures at the SAME cursor
+    let availabilityAttempts = 0;
     const batch: Fill[] = [];
     // `sinceDay` is the WINDOW anchor, not necessarily where this scan begins: a
     // resumed cursor (or a targeted BACKFILL_RESET) moves `from` forward. Naming
@@ -1515,9 +1582,10 @@ export class LiveDataSource extends BaseSource {
     // ARCHIVE pool — the window reaches back markoutBackfillDays (30d default),
     // far past a pruning fullnode's retention.
     const fetchAll = (t: bigint) => allPreferAvailability(sources.map((s) =>
-      archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
+      archiveRead(() => archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>)));
 
     while (cursor <= end) {
+      if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
       if (await holdWhileDegraded()) this.noteOnce('markout.scan.held', `${name} onboarding scan held while archive RPC was unavailable — resumed on primary`, vid);
       const to = cursor + chunk - 1n > end ? end : cursor + chunk - 1n;
       let batches: any[][] | null = null;
@@ -1541,7 +1609,7 @@ export class LiveDataSource extends BaseSource {
           break;
         }
       }
-      if (availabilityFailed) { await sleep(config.backfillPaceMs * 25); continue; }
+      if (availabilityFailed) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
       if (batches === null) continue; // shrank or skipped — loop from the adjusted cursor
 
       const all = batches.flat();
@@ -1558,7 +1626,7 @@ export class LiveDataSource extends BaseSource {
           await Promise.all(blocks.slice(i, i + POOL).map(async (bn) => {
             for (let r = 0; r < 3; r++) {
               try {
-                blockTs.set(String(bn), Number((await archiveClient.getBlock({ blockNumber: bn })).timestamp) * 1000);
+                blockTs.set(String(bn), Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: bn }))).timestamp) * 1000);
                 return;
               } catch (e) {
                 if (isAvailabilityFailure(e)) { timestampUnavailable = true; return; }
@@ -1569,7 +1637,7 @@ export class LiveDataSource extends BaseSource {
           }));
           await sleep(config.backfillPaceMs);
         }
-        if (timestampUnavailable) { await sleep(config.backfillPaceMs * 25); continue; }
+        if (timestampUnavailable) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
         // bounded retry: a permanently unresolvable block must not loop forever —
         // after 3 attempts skip the chunk (its fills stay un-backfilled, loudly).
         if (tsFailed) {
@@ -1592,6 +1660,7 @@ export class LiveDataSource extends BaseSource {
         for (const f of fills) if (utcDay(f.ts) < today) batch.push(f);
       }
 
+      availabilityAttempts = 0;
       cursor = to + 1n;
       if (++sinceFlush >= config.backfillMergeEvery || cursor > end) {
         persisted += this.store.insertFillsIfAbsent(batch);
@@ -1602,6 +1671,8 @@ export class LiveDataSource extends BaseSource {
       await sleep(config.backfillPaceMs);
     }
 
+    this.store.setMeta(`mkfill_cursor_${vid}`, String(end + 1n));
+    if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
     this.store.setMeta(`mkfill_done_${vid}`, '1');
     this.note('markout.scan.done', `${name}: onboarding fill scan complete — ${persisted} historical fill(s) persisted`, vid);
   }
@@ -1895,7 +1966,15 @@ export class LiveDataSource extends BaseSource {
     // not count any fills from it and do not advance. The exact range is retried.
     if (decodeFailed) return;
 
-    // every required source succeeded → advance the cursor and ingest.
+    fresh.sort((a, b) => a.blockNumber - b.blockNumber);
+    // best-effort label enrichment (UNKNOWN → DIRECT / Router - X). Never
+    // cursor-critical: a lookup failure leaves the adapter's honest UNKNOWN.
+    try { await this.attributor.attribute(fresh); } catch { /* labels only */ }
+    for (const f of fresh) this.ingest(f);
+    // Publish the cursor only after every decoded fill has landed in memory.
+    // backgroundHistory waits on this value before applying authoritative
+    // closed-day SETs; exposing it earlier leaves a race where a late tail
+    // increment double-counts a day the deep replay just replaced.
     this.lastBlock = head;
     // the boot gap is fully decoded once the cursor reaches bootHead: retract the
     // resume note, then announce the tail is current (checkGapFill, family B of #6).
@@ -1903,11 +1982,6 @@ export class LiveDataSource extends BaseSource {
       clear: (m) => this.dropNote('tail.resume', m),
       announce: (m) => this.note('tail.caughtup', m),
     });
-    fresh.sort((a, b) => a.blockNumber - b.blockNumber);
-    // best-effort label enrichment (UNKNOWN → DIRECT / Router - X). Never
-    // cursor-critical: a lookup failure leaves the adapter's honest UNKNOWN.
-    try { await this.attributor.attribute(fresh); } catch { /* labels only */ }
-    for (const f of fresh) this.ingest(f);
   }
 
   /** Block timestamps (ms) for the blocks that carry logs (audit B2). */

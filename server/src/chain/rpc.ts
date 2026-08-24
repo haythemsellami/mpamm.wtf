@@ -1,7 +1,7 @@
 import { createPublicClient, createTransport, defineChain, http, type PublicClient, type Transport } from 'viem';
 import { config } from '../config.js';
 import { ADDR, MONAD_CHAIN_ID } from '@shared';
-import { RpcBreaker, isAvailabilityFailure, type RpcNote, type RpcStatusView, type RpcVerifyResult } from './failover.js';
+import { RpcBreaker, guardRpcRead, isAvailabilityFailure, type RpcNote, type RpcStatusView, type RpcVerifyResult } from './failover.js';
 
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
@@ -138,6 +138,10 @@ export async function blockAtOrAfter(
   hi: bigint,
   getBlock: (blockNumber: bigint) => Promise<{ timestamp: bigint }>
     = (blockNumber) => archiveClient.getBlock({ blockNumber }) as Promise<{ timestamp: bigint }>,
+  unavailable: () => boolean = () => {
+    const status = archiveRpcStatus();
+    return status.degraded || status.down;
+  },
 ): Promise<bigint> {
   let lo = 0n, h = hi, ans = hi;
   // a single failed probe usually IS a pruned block (search higher), but a
@@ -148,7 +152,7 @@ export async function blockAtOrAfter(
   while (lo <= h) {
     const mid = lo + (h - lo) / 2n;
     let ts: number | undefined;
-    try { ts = Number((await getBlock(mid)).timestamp); }
+    try { ts = Number((await guardRpcRead(() => getBlock(mid), unavailable)).timestamp); }
     catch (e) {
       // A timeout/transport outage/429 says nothing about this block. Advancing
       // `lo` on it biases the search late, and callers persist that answer as a

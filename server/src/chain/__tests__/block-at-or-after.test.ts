@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { HttpRequestError } from 'viem';
+import { isAvailabilityFailure } from '../failover.js';
 import { blockAtOrAfter } from '../rpc.js';
 
 describe('blockAtOrAfter availability handling', () => {
@@ -23,5 +24,16 @@ describe('blockAtOrAfter availability handling', () => {
       return { timestamp: bn };
     });
     expect(found).toBe(51n);
+  });
+
+  it.each(['success', 'hole'] as const)('rejects a %s probe completed after failover', async (outcome) => {
+    let unavailable = false;
+    const result = blockAtOrAfter(50, 100n, async (bn) => {
+      unavailable = true;
+      if (outcome === 'hole') throw new Error('block pruned');
+      return { timestamp: bn };
+    }, () => unavailable);
+    const error = await result.then(() => undefined, (e) => e);
+    expect(isAvailabilityFailure(error)).toBe(true);
   });
 });

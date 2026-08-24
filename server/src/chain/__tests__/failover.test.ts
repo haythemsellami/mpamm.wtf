@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { HttpRequestError, TimeoutError } from 'viem';
 import type { NoteCode } from '@shared';
-import { RpcBreaker, allPreferAvailability, isTransportFailure, type BreakerEndpoint } from '../failover.js';
+import { RpcBreaker, allPreferAvailability, guardRpcRead, isAvailabilityFailure, isTransportFailure, type BreakerEndpoint } from '../failover.js';
 
 /**
  * The breaker is pure logic over injected request fns — no network, no viem
@@ -65,6 +65,17 @@ describe('isTransportFailure', () => {
       Promise.reject(new Error('error getting block header from triedb and archive')),
       Promise.reject(throttled),
     ])).rejects.toBe(throttled);
+  });
+
+  it.each(['success', 'hole'] as const)('rejects a %s result when the pool fails over inside the read', async (outcome) => {
+    let unavailable = false;
+    const read = guardRpcRead(async () => {
+      unavailable = true;
+      if (outcome === 'hole') throw new Error('error getting block header from triedb and archive');
+      return 'backup-result';
+    }, () => unavailable);
+    const error = await read.then(() => undefined, (e) => e);
+    expect(isAvailabilityFailure(error)).toBe(true);
   });
 });
 

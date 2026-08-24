@@ -243,4 +243,46 @@ describe('archive availability cursor holds', () => {
     expect(store.gasDays('2099-01-01').some((d) => d.byVenue['held-blocks'])).toBe(true);
     unlinkSync(path);
   });
+
+  it.each(['success', 'hole'] as const)('discards a logs-mode %s completed after transparent failover', async (outcome) => {
+    const { store, path } = freshStore();
+    const vid = `failover-${outcome}`;
+    seed(store, vid, STRAT, START);
+    let degraded = false;
+    let first = true;
+    const client: any = {
+      getBlockNumber: async () => START + 804n,
+      getBlock: async () => ({ timestamp: BigInt(DAY0) }),
+      getTransactionReceipt: async () => ({ gasUsed: 30_000n, effectiveGasPrice: 1_000_000_000n }),
+      request: async ({ method }: { method: string }) => {
+        if (method !== 'eth_getLogs') throw new Error(`unexpected ${method}`);
+        if (first) {
+          first = false;
+          degraded = true;
+          if (outcome === 'hole') throw new Error('error getting block header from triedb and archive');
+        }
+        return [{ transactionHash: '0xabc', blockNumber: `0x${START.toString(16)}` }];
+      },
+    };
+    const adapter = {
+      venues: () => [venueMeta(vid)],
+      discover: async () => {},
+      logSources: () => [],
+      decode: () => [],
+      gasSources: () => [{ mode: 'logs' as const, address: STRAT as `0x${string}`, topic0: TOPIC as `0x${string}` }],
+    } as unknown as VenueAdapter;
+    const tracker = new GasTracker(client, store, [adapter], () => {}, () => degraded, 1);
+
+    await (tracker as any).pass();
+    clearTimeout((tracker as any).timer);
+    expect(store.getMeta(`gas_cursor_${vid}`)).toBe(String(START));
+    expect(store.gasDays('2099-01-01').some((d) => d.byVenue[vid])).toBe(false);
+
+    degraded = false;
+    await (tracker as any).pass();
+    tracker.stop();
+    expect(store.getMeta(`gas_cursor_${vid}`)).toBe(String(START + 800n));
+    expect(store.gasDays('2099-01-01').some((d) => d.byVenue[vid])).toBe(true);
+    unlinkSync(path);
+  });
 });

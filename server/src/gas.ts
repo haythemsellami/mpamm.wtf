@@ -3,7 +3,7 @@ import type { NoteCode } from '@shared';
 import { config } from './config.js';
 import { utcDay } from './util.js';
 import { blockAtOrAfter } from './chain/rpc.js';
-import { allPreferAvailability, isAvailabilityFailure } from './chain/failover.js';
+import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from './chain/failover.js';
 import type { VolumeStore } from './db.js';
 import type { NoteFn } from './notes.js';
 import type { GasSource, VenueAdapter } from './venues/adapter.js';
@@ -135,6 +135,12 @@ export class GasTracker {
   /** venue ids whose values are sampled estimates (blocks mode). */
   approxVenueIds(): string[] { return [...this.approx].sort(); }
 
+  /** The breaker may retry a failed primary request on a backup inside one
+   *  await. No deep result is accepted unless the pool stayed fully healthy. */
+  private rpc<T>(read: () => Promise<T>): Promise<T> {
+    return guardRpcRead(read, this.degraded);
+  }
+
   /** one pass: tail every gas-declaring venue to head, then reschedule. */
   private async pass(): Promise<void> {
     if (this.running || this.stopped) return;
@@ -224,7 +230,7 @@ export class GasTracker {
     }
 
     // finality margin: Monad receipts/logs can mutate for ~2 blocks (~600ms).
-    const head = (await this.client.getBlockNumber()) - 5n;
+    const head = (await this.rpc(() => this.client.getBlockNumber())) - 5n;
     const cursorKey = `gas_cursor_${vid}`;
 
     // VENUE-LIFETIME series, same anchor as the volume backfill: the burn
@@ -262,7 +268,7 @@ export class GasTracker {
         for (const addr of sig.split(',').filter(Boolean)) {
           const cb = await this.creationBlock(addr as `0x${string}`, head);
           if (cb === null) continue; // undeployed → contributes no txs
-          const blk = await this.client.getBlock({ blockNumber: cb });
+          const blk = await this.rpc(() => this.client.getBlock({ blockNumber: cb }));
           days.push(utcDay(Number(blk.timestamp) * 1000));
         }
         const day = bootstrapRebuildDay(days, anchor);
@@ -280,7 +286,7 @@ export class GasTracker {
           const covered = single && window.length > 0
             && hasCoverageEvidence(window, this.store.gasNonzeroDays(vid, window[0], window[window.length - 1]));
           if (!covered) {
-            const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
+            const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
             this.store.resetGasFrom(vid, day);
             this.store.setMeta(cursorKey, String(startBlock));
             this.note('gas.series.reset', `${name}: verifying quote-update coverage — rebuilding from ${day}`, vid);
@@ -304,7 +310,7 @@ export class GasTracker {
     if (cur) {
       cursor = BigInt(cur);
     } else {
-      cursor = await blockAtOrAfter(Math.floor(Date.parse(`${sinceDay}T00:00:00Z`) / 1000), head);
+      cursor = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${sinceDay}T00:00:00Z`) / 1000), head));
       this.store.setMeta(fromKey, sinceDay);
       this.noteOnce('gas.scan.start', `${name}: quote-update gas scan from ${sinceDay} — blocks ${cursor}→${head}`, vid);
     }
@@ -341,10 +347,10 @@ export class GasTracker {
           if (earliest === null || cb < earliest) earliest = cb;
         }
         if (earliest !== null) {
-          const blk = await this.client.getBlock({ blockNumber: earliest });
+          const blk = await this.rpc(() => this.client.getBlock({ blockNumber: earliest }));
           const day = utcDay(Number(blk.timestamp) * 1000);
           if (day > sinceDay) {
-            const startBlock = await blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head);
+            const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
             this.store.resetGasFrom(vid, day);
             this.store.setMeta(cursorKey, String(startBlock));
             this.note('gas.series.reset', `${name}: quote-update destination added — rebuilding from ${day} (earlier history unaffected)`, vid);
@@ -364,7 +370,7 @@ export class GasTracker {
    *  code yet" would push the boundary later and silently lose burn days —
    *  the caller's fallback (full rebuild) is the safe shape. */
   private async creationBlock(addr: `0x${string}`, head: bigint): Promise<bigint | null> {
-    const has = async (bn: bigint) => ((await this.client.getCode({ address: addr, blockNumber: bn })) ?? '0x') !== '0x';
+    const has = async (bn: bigint) => ((await this.rpc(() => this.client.getCode({ address: addr, blockNumber: bn }))) ?? '0x') !== '0x';
     if (!(await has(head))) return null;
     let lo = 0n, hi = head; // invariant: !has(lo) … has(hi)
     if (await has(lo)) return lo;
@@ -396,12 +402,12 @@ export class GasTracker {
         if (s.mode !== 'logs') return Promise.resolve([] as any[]);
         if (s.topic0) {
           // unverified destination — only the event's topic hash is known.
-          return this.client.request({
+          return this.rpc(() => this.client.request({
             method: 'eth_getLogs',
             params: [{ address: s.address, topics: [s.topic0], fromBlock: `0x${from.toString(16)}`, toBlock: `0x${to.toString(16)}` }],
-          }) as Promise<any[]>;
+          } as any) as Promise<any[]>);
         }
-        return this.client.getLogs({ address: s.address as any, fromBlock: from, toBlock: to, events: s.events as any } as any) as Promise<any[]>;
+        return this.rpc(() => this.client.getLogs({ address: s.address as any, fromBlock: from, toBlock: to, events: s.events as any } as any) as Promise<any[]>);
       }));
       return batches.flat();
     };
@@ -452,7 +458,7 @@ export class GasTracker {
         let anchorUnavailable = false;
         for (const bn of new Set(txBlocks.values())) {
           for (let i = 0; i < 3 && !Number.isFinite(anchorMs); i++) {
-            try { anchorMs = Number((await this.client.getBlock({ blockNumber: bn })).timestamp) * 1000; }
+            try { anchorMs = Number((await this.rpc(() => this.client.getBlock({ blockNumber: bn }))).timestamp) * 1000; }
             catch (e) {
               if (isAvailabilityFailure(e)) { anchorUnavailable = true; break; }
               await sleep(config.backfillPaceMs * 5 * (i + 1));
@@ -479,7 +485,7 @@ export class GasTracker {
             await Promise.all(sample.slice(i, i + POOL).map(async (h) => {
               for (let r = 0; r < 3; r++) {
                 try {
-                  const rc = await this.client.getTransactionReceipt({ hash: h as `0x${string}` });
+                  const rc = await this.rpc(() => this.client.getTransactionReceipt({ hash: h as `0x${string}` }));
                   sampledMon += Number(rc.gasUsed * rc.effectiveGasPrice) / 1e18;
                   sampledN++;
                   return;
@@ -539,8 +545,8 @@ export class GasTracker {
       for (let r = 0; r < 3 && !ok; r++) {
         try {
           const [receipts, block] = await allPreferAvailability<any>([
-            this.client.request({ method: 'eth_getBlockReceipts', params: [`0x${cursor.toString(16)}`] }) as Promise<any>,
-            this.client.getBlock({ blockNumber: cursor }) as Promise<any>,
+            this.rpc(() => this.client.request({ method: 'eth_getBlockReceipts', params: [`0x${cursor.toString(16)}`] }) as Promise<any>),
+            this.rpc(() => this.client.getBlock({ blockNumber: cursor }) as Promise<any>),
           ]);
           // includes reverted txs on purpose — Monad charges their full limit too.
           const mine = ((receipts ?? []) as any[]).filter((rc: any) => targets.has(String(rc.to ?? '').toLowerCase()));
