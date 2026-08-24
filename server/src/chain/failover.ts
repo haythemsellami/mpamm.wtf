@@ -71,12 +71,18 @@ export interface RpcStatusView {
   degradedSinceTs?: number;
 }
 
-/** Transport-level failure = the endpoint itself is unhealthy. 429 is excluded
- *  on purpose: throttled-but-alive must back off (viem's inner retry does),
- *  not bounce the whole indexer between endpoints under load. */
+/** Transport-level failure = the endpoint itself is unhealthy. Healthy 4xx
+ *  responses are excluded on purpose: throttling/range caps must back off or
+ *  shrink, not bounce the whole indexer between endpoints under load. */
 export function isTransportFailure(e: unknown): boolean {
   if (e instanceof TimeoutError) return true;
-  if (e instanceof HttpRequestError) return e.status !== 429;
+  if (e instanceof HttpRequestError) {
+    // A 4xx response proves the endpoint is serving. In particular, 413 is the
+    // public RPC's getLogs range-cap signal: classifying it as transport failure
+    // prevents adaptive chunkers from shrinking and can fail over a healthy
+    // endpoint. 408 is the one 4xx that is transport-shaped.
+    return e.status === undefined || e.status === 408 || e.status >= 500;
+  }
   return false;
 }
 
@@ -102,8 +108,18 @@ const FAILURE_THRESHOLD = 3;   // consecutive transport failures before advancin
 const PROBE_INTERVAL_MS = 60_000; // primary re-check cadence while degraded
 const RECOVERY_PROBES = 2;     // consecutive healthy probes to snap back
 
+type EndpointHealth = 'unknown' | 'valid' | 'wrong-chain';
+
+class WrongChainEndpointError extends Error {}
+
 export class RpcBreaker {
   private endpoints: BreakerEndpoint[] = [];
+  /** An endpoint unreachable at boot is retained, but it must not serve a real
+   *  request until its chain id has been checked. Otherwise a wrong-chain node
+   *  that recovers later can return successful empty logs and advance a deep
+   *  cursor as if Monad had no activity in that range. */
+  private endpointHealth: EndpointHealth[] = [];
+  private expectedChainId: number | undefined;
   private active = 0;
   private failures = 0;
   /** endpoints advanced-through without a single success — >= endpoint count
@@ -132,6 +148,7 @@ export class RpcBreaker {
   attach(endpoints: BreakerEndpoint[]): void {
     if (!endpoints.length) throw new Error('RpcBreaker: no endpoints');
     this.endpoints = endpoints;
+    this.endpointHealth = endpoints.map(() => 'unknown');
   }
 
   /** Replace the event sink (single listener — the live source's noteOnce). */
@@ -156,6 +173,7 @@ export class RpcBreaker {
     for (;;) {
       const idx = this.active;
       try {
+        await this.ensureChain(idx);
         const res = await this.endpoints[idx].request(args);
         // any success proves the active endpoint serves — clear streak state.
         if (idx === this.active) this.failures = 0;
@@ -166,6 +184,11 @@ export class RpcBreaker {
         }
         return res;
       } catch (e) {
+        if (e instanceof WrongChainEndpointError) {
+          if (idx === this.active) this.advance();
+          if (this.active === idx || ++hops >= this.endpoints.length) throw e;
+          continue;
+        }
         if (!isTransportFailure(e)) throw e;
         // Concurrent failures from one bad batch all land here with the same
         // idx — only the streak on the STILL-active endpoint counts, so a
@@ -187,33 +210,31 @@ export class RpcBreaker {
    *  and if that's the primary, we pre-position onto the first healthy backup
    *  so boot doesn't burn the failure threshold on a known-dead node. */
   async verify(expectChainId: number): Promise<RpcVerifyResult> {
+    this.expectedChainId = expectChainId;
     const health: (boolean | undefined)[] = []; // true=healthy, false=wrong chain, undefined=unreachable
     let block = 0;
-    for (const ep of this.endpoints) {
-      try {
-        const [id, bn] = await Promise.all([
-          ep.request({ method: 'eth_chainId' }),
-          ep.request({ method: 'eth_blockNumber' }),
-        ]);
-        const chainId = Number(BigInt(String(id)));
-        if (chainId !== expectChainId) {
-          health.push(false);
-          this.onEvent({ code: 'rpc.endpoint.dropped', msg: `${this.pool} ${ep.label} dropped at boot: chainId ${chainId} != ${expectChainId}` });
-        } else {
-          health.push(true);
-          block = Math.max(block, Number(BigInt(String(bn))));
-        }
-      } catch {
-        health.push(undefined);
-      }
+    for (let i = 0; i < this.endpoints.length; i++) {
+      const inspected = await this.inspectEndpoint(i, 'at boot');
+      health.push(inspected.health);
+      if (inspected.health === true) block = Math.max(block, inspected.block);
     }
     if (health[0] === false) return { ok: false, block: 0, wrongChain: true, reason: `${this.pool} primary is on the wrong chain (chainId != ${expectChainId})` };
     // drop wrong-chain backups (walk backwards so indices stay valid).
     for (let i = this.endpoints.length - 1; i >= 1; i--) {
-      if (health[i] === false) { this.endpoints.splice(i, 1); health.splice(i, 1); }
+      if (health[i] === false) {
+        this.endpoints.splice(i, 1);
+        this.endpointHealth.splice(i, 1);
+        health.splice(i, 1);
+      }
     }
     const firstHealthy = health.findIndex((h) => h === true);
     if (firstHealthy === -1) {
+      // Archive verification is deliberately non-fatal for an outage. Publish
+      // the real state and start recovery ourselves: paused consumers generate
+      // no traffic that could otherwise move the breaker forward.
+      this.allDown = true;
+      this.advancesSinceSuccess = this.endpoints.length;
+      this.startProbe();
       return { ok: false, block: 0, reason: `no reachable ${this.pool} endpoint (${this.endpoints.length} tried)` };
     }
     if (firstHealthy > 0) {
@@ -235,23 +256,33 @@ export class RpcBreaker {
     if (this.active === 0 && !this.allDown) return;
     this.probeInFlight = true;
     try {
-      await this.endpoints[0].request({ method: 'eth_blockNumber' });
       if (this.allDown) {
-        this.allDown = false;
-        this.advancesSinceSuccess = 0;
-        this.onEvent({ code: 'rpc.recovered', msg: `${this.pool} serving again (on ${this.endpoints[0].label})` });
+        // A full rotation may recover on ANY endpoint. Probing only the primary
+        // deadlocks a paused archive crawl when a backup comes back first.
+        for (let i = 0; i < this.endpoints.length; i++) {
+          const inspected = await this.inspectEndpoint(i, 'after recovery');
+          if (inspected.health !== true) continue;
+          this.active = i;
+          this.failures = 0;
+          this.allDown = false;
+          this.advancesSinceSuccess = 0;
+          this.degradedSinceTs = i === 0 ? undefined : (this.degradedSinceTs ?? Date.now());
+          this.onEvent({ code: 'rpc.recovered', msg: `${this.pool} serving again (on ${this.endpoints[i].label})` });
+          if (i === 0 || this.endpointHealth[0] === 'wrong-chain') this.stop();
+          return;
+        }
+        return;
       }
-      // Snapping BACK to the primary only means something while we are on a
-      // backup; after a wrap we are already on index 0 and clearing `allDown`
-      // is the whole recovery.
-      if (this.active !== 0) {
+      // A primary that was unreachable at boot is still untrusted. Chain-id
+      // validation is part of every recovery probe, not just boot verification.
+      const inspected = await this.inspectEndpoint(0, 'after recovery');
+      if (inspected.health === true) {
         this.healthyProbes += 1;
         if (this.healthyProbes >= RECOVERY_PROBES) this.backOnPrimary();
       } else {
-        this.stop();
+        this.healthyProbes = 0;
+        if (inspected.health === false) this.stop(); // wrong-chain cannot heal in place
       }
-    } catch {
-      this.healthyProbes = 0;
     } finally {
       this.probeInFlight = false;
     }
@@ -264,9 +295,13 @@ export class RpcBreaker {
 
   private advance(): void {
     const from = this.endpoints[this.active].label;
-    this.active = (this.active + 1) % this.endpoints.length;
+    let steps = 0;
+    do {
+      this.active = (this.active + 1) % this.endpoints.length;
+      steps += 1;
+    } while (steps < this.endpoints.length && this.endpointHealth[this.active] === 'wrong-chain');
     this.failures = 0;
-    this.advancesSinceSuccess += 1;
+    this.advancesSinceSuccess += steps;
     if (this.advancesSinceSuccess >= this.endpoints.length && !this.allDown) {
       this.allDown = true;
       this.onEvent({
@@ -316,5 +351,49 @@ export class RpcBreaker {
     this.probeTimer = setInterval(() => { void this.probeNow(); }, this.probeIntervalMs);
     // never hold the process open for a health probe (tests, shutdown).
     this.probeTimer.unref?.();
+  }
+
+  /** Verify an endpoint before it serves traffic after being unreachable at
+   *  boot. This runs through the raw endpoint, not the breaker, so a wrong-chain
+   *  answer can never satisfy the caller's original request. */
+  private async ensureChain(idx: number): Promise<void> {
+    if (this.expectedChainId === undefined || this.endpointHealth[idx] === 'valid') return;
+    if (this.endpointHealth[idx] === 'wrong-chain') throw new WrongChainEndpointError(`${this.endpoints[idx].label} is on the wrong chain`);
+    const id = await this.endpoints[idx].request({ method: 'eth_chainId' });
+    const chainId = Number(BigInt(String(id)));
+    if (chainId !== this.expectedChainId) {
+      this.markWrongChain(idx, chainId, 'after recovery');
+      throw new WrongChainEndpointError(`${this.endpoints[idx].label} chainId ${chainId} != ${this.expectedChainId}`);
+    }
+    this.endpointHealth[idx] = 'valid';
+  }
+
+  /** Inspect chain identity first, then reachability/head. Sequential ordering
+   *  is deliberate: if chainId answers wrong while blockNumber times out, the
+   *  endpoint is still a known misconfiguration rather than an unknown outage. */
+  private async inspectEndpoint(idx: number, when: string): Promise<{ health: boolean | undefined; block: number }> {
+    if (this.endpointHealth[idx] === 'wrong-chain') return { health: false, block: 0 };
+    try {
+      const id = await this.endpoints[idx].request({ method: 'eth_chainId' });
+      const chainId = Number(BigInt(String(id)));
+      if (this.expectedChainId !== undefined && chainId !== this.expectedChainId) {
+        this.markWrongChain(idx, chainId, when);
+        return { health: false, block: 0 };
+      }
+      const bn = await this.endpoints[idx].request({ method: 'eth_blockNumber' });
+      this.endpointHealth[idx] = 'valid';
+      return { health: true, block: Number(BigInt(String(bn))) };
+    } catch {
+      return { health: undefined, block: 0 };
+    }
+  }
+
+  private markWrongChain(idx: number, chainId: number, when: string): void {
+    if (this.endpointHealth[idx] === 'wrong-chain') return;
+    this.endpointHealth[idx] = 'wrong-chain';
+    this.onEvent({
+      code: 'rpc.endpoint.dropped',
+      msg: `${this.pool} ${this.endpoints[idx].label} dropped ${when}: chainId ${chainId} != ${this.expectedChainId}`,
+    });
   }
 }

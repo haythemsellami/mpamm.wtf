@@ -1,7 +1,7 @@
 import { createPublicClient, createTransport, defineChain, http, type PublicClient, type Transport } from 'viem';
 import { config } from '../config.js';
 import { ADDR, MONAD_CHAIN_ID } from '@shared';
-import { RpcBreaker, type RpcNote, type RpcStatusView, type RpcVerifyResult } from './failover.js';
+import { RpcBreaker, isAvailabilityFailure, type RpcNote, type RpcStatusView, type RpcVerifyResult } from './failover.js';
 
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
@@ -133,7 +133,12 @@ export async function probeArchiveChain(): Promise<RpcVerifyResult> {
  *  Rides the ARCHIVE pool: the search probes mid-points across the whole chain
  *  (the first probe is ~block hi/2), so on a pruning fullnode nearly every early
  *  probe 404s, the failure budget below is spent in seconds, and it throws. */
-export async function blockAtOrAfter(targetSec: number, hi: bigint): Promise<bigint> {
+export async function blockAtOrAfter(
+  targetSec: number,
+  hi: bigint,
+  getBlock: (blockNumber: bigint) => Promise<{ timestamp: bigint }>
+    = (blockNumber) => archiveClient.getBlock({ blockNumber }) as Promise<{ timestamp: bigint }>,
+): Promise<bigint> {
   let lo = 0n, h = hi, ans = hi;
   // a single failed probe usually IS a pruned block (search higher), but a
   // string of failures is an RPC brownout — converging to `hi` then would hand
@@ -143,8 +148,13 @@ export async function blockAtOrAfter(targetSec: number, hi: bigint): Promise<big
   while (lo <= h) {
     const mid = lo + (h - lo) / 2n;
     let ts: number | undefined;
-    try { ts = Number((await archiveClient.getBlock({ blockNumber: mid })).timestamp); }
-    catch {
+    try { ts = Number((await getBlock(mid)).timestamp); }
+    catch (e) {
+      // A timeout/transport outage/429 says nothing about this block. Advancing
+      // `lo` on it biases the search late, and callers persist that answer as a
+      // permanent backfill/reset boundary. Only an answer-level missing/pruned
+      // block may move the lower bound; availability failures hold the caller.
+      if (isAvailabilityFailure(e)) throw e;
       if (++failures > 8) throw new Error(`blockAtOrAfter: ${failures} probe failures — RPC unhealthy, not converging to head`);
       lo = mid + 1n; continue;
     }

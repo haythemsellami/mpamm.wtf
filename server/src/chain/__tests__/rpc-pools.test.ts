@@ -161,6 +161,29 @@ describe('exhausted pool recovery (PR #85 review)', () => {
     expect(codes).toContain('rpc.recovered');
   });
 
+  it('recovers an exhausted pool on a backup while the primary stays down', async () => {
+    const primary = { dead: true };
+    const backup = { dead: true };
+    const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    breaker.attach([flaky('primary', primary), flaky('backup-1', backup)]);
+    expect(await driveToWrap(breaker)).toBe(true);
+
+    backup.dead = false;
+    await breaker.probeNow();
+    breaker.stop();
+    expect(breaker.status()).toMatchObject({ active: 'backup-1', down: false, degraded: true });
+  });
+
+  it('reports down and self-probes when every endpoint is unreachable at boot', async () => {
+    const state = { dead: true };
+    const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    breaker.attach([flaky('primary', state), flaky('backup-1', state)]);
+    const result = await breaker.verify(143);
+    breaker.stop();
+    expect(result.ok).toBe(false);
+    expect(breaker.status()).toMatchObject({ down: true, degraded: false });
+  });
+
   it('flags a wrong-chain primary distinctly from an unreachable one', async () => {
     // The archive probe is non-fatal for an outage but MUST fail closed here:
     // a wrong-chain node answers successfully, so failover can never route away.
@@ -178,6 +201,61 @@ describe('exhausted pool recovery (PR #85 review)', () => {
     b2.stop();
     expect(down.ok).toBe(true);            // pre-positions onto the healthy backup
     expect(down.wrongChain).toBeUndefined(); // and is NOT a misconfiguration
+  });
+
+  it('never promotes a wrong-chain primary that was unreachable at boot', async () => {
+    let primaryState: 'down' | 'wrong' = 'down';
+    const primary: BreakerEndpoint = {
+      label: 'archive',
+      request: async (a) => {
+        if (primaryState === 'down') throw new Error('offline');
+        return a.method === 'eth_chainId' ? '0x1' : '0x100';
+      },
+    };
+    const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    breaker.attach([primary, ok('archive-backup-1')]);
+    expect((await breaker.verify(143)).ok).toBe(true);
+    expect(breaker.status().active).toBe('archive-backup-1');
+
+    primaryState = 'wrong';
+    await breaker.probeNow();
+    const servedChain = await breaker.request({ method: 'eth_chainId' });
+    breaker.stop();
+    expect(servedChain).toBe('0x8f');
+    expect(breaker.status()).toMatchObject({ active: 'archive-backup-1', degraded: true });
+  });
+
+  it('never serves a wrong-chain backup that was unreachable at boot', async () => {
+    let primaryDown = false;
+    let backupState: 'down' | 'wrong' = 'down';
+    const backupMethods: string[] = [];
+    const primary: BreakerEndpoint = {
+      label: 'archive',
+      request: async (a) => {
+        if (primaryDown) throw new HttpRequestError({ url: 'http://x', status: 502 });
+        return a.method === 'eth_chainId' ? '0x8f' : '0x100';
+      },
+    };
+    const backup: BreakerEndpoint = {
+      label: 'archive-backup-1',
+      request: async (a) => {
+        backupMethods.push(a.method);
+        if (backupState === 'down') throw new Error('offline');
+        return a.method === 'eth_chainId' ? '0x1' : '0x100';
+      },
+    };
+    const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    breaker.attach([primary, backup]);
+    expect((await breaker.verify(143)).ok).toBe(true);
+
+    primaryDown = true;
+    backupState = 'wrong';
+    for (let i = 0; i < 3; i++) {
+      await breaker.request({ method: 'eth_getLogs' }).catch(() => undefined);
+    }
+    breaker.stop();
+    expect(breaker.status()).toMatchObject({ active: 'archive', down: true });
+    expect(backupMethods).not.toContain('eth_getLogs');
   });
 });
 
@@ -200,6 +278,12 @@ describe('availability vs unreadability (PR #85 review)', () => {
     // range — crawls may consume it, which is what hole-skipping is for.
     expect(isAvailabilityFailure(new Error('error getting block header from triedb and archive'))).toBe(false);
     expect(isAvailabilityFailure(new Error('execution reverted'))).toBe(false);
+  });
+
+  it('lets adaptive chunkers handle HTTP 413 without failing over or holding', () => {
+    const rangeTooLarge = new HttpRequestError({ url: 'http://x', status: 413 });
+    expect(isTransportFailure(rangeTooLarge)).toBe(false);
+    expect(isAvailabilityFailure(rangeTooLarge)).toBe(false);
   });
 });
 
