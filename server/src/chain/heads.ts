@@ -107,6 +107,7 @@ export class HotHeadWatcher {
       if (this.stopped || settled || this.socket !== socket) return;
       let msg: any;
       try { msg = JSON.parse(String(raw)); } catch { return; }
+      if (msg?.id === 1) {
         let chainId: bigint;
         try { chainId = BigInt(msg.result); } catch { try { socket.close(); } catch { /* already closed */ } return; }
         if (chainId !== BigInt(MONAD_CHAIN_ID)) { try { socket.close(); } catch { /* already closed */ } return; }
