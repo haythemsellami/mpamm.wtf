@@ -271,7 +271,7 @@ describe('an unquotable pool still trades (issue #61)', () => {
     const a = createMetricAdapter();
     const ctx = stub([], { priceFails: true });
     await a.discover(ctx);
-    expect(await a.quote!(ctx, [100])).toEqual([]);
+    expect(await a.quote!(ctx, [100], 123n)).toEqual([]);
   });
 
   it('DECODES a swap from a pool that never passed liveness', async () => {

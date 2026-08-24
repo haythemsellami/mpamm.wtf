@@ -345,13 +345,14 @@ export function createMetricAdapter(): VenueAdapter {
 
     discover: refresh,
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
       if (!pools.length) return [];
 
       // 1) each pool's oracle bid/ask (needed as quoteSwap args).
       const ppRes = await ctx.client.multicall({
         contracts: pools.map((p) => ({ address: p.priceProvider, abi: priceProviderAbi, functionName: 'getBidAndAskPrice' as const })),
         allowFailure: true,
+        blockNumber,
       });
 
       // 2) quoteSwap for each pool × size × side (eth_call — no state change).
@@ -379,7 +380,7 @@ export function createMetricAdapter(): VenueAdapter {
         }
       });
       if (!calls.length) return [];
-      const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true });
+      const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
       if (reportOutage(ctx, qRes)) return [];
 
       const rowByKey = new Map<string, QuoteRow>();

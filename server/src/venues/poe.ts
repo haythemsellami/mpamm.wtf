@@ -142,7 +142,7 @@ export function createPoeAdapter(): VenueAdapter {
       ctx.note('venue.discovery', `POE: ${byMarket.size} base/stable pool(s)`);
     },
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
       const pools = [...byMarket.values()];
       if (!pools.length) return [];
 
@@ -168,7 +168,7 @@ export function createPoeAdapter(): VenueAdapter {
         }
       }
       if (!calls.length) return [];
-      const res = await ctx.client.multicall({ contracts: calls, allowFailure: true });
+      const res = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
       if (reportOutage(ctx, res)) return [];
 
       const rowByKey = new Map<string, QuoteRow>();

@@ -474,15 +474,9 @@ export function createLunarbaseAdapter(): VenueAdapter {
       ctx.note('venue.discovery', `Lunarbase: ${staged.length}/${LUNARBASE_POOLS.length} validated production pool(s), whitelist fee mode`);
     },
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
       if (!discovered || !byMarket.size) return [];
-      let head: bigint;
-      try {
-        head = await ctx.client.getBlockNumber();
-      } catch (error) {
-        noteOnce(ctx, 'head', 'venue.quote.unavailable', `Lunarbase quote unavailable: ${error instanceof Error ? error.message : String(error)}`);
-        return [];
-      }
+      const head = blockNumber;
 
       // ROUND-TRIP FLATTENING: the quoter legs depend only on static pool
       // config + the pinned head — not on the snapshot's VALUES — so they fire

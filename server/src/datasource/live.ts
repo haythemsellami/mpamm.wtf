@@ -11,9 +11,10 @@ import { pairMidSeries } from '../history/cex.js';
 import { GasTracker } from '../gas.js';
 import { config } from '../config.js';
 import {
-  publicClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
+  monad, publicClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
   onRpcEvent, onArchiveRpcEvent, rpcStatus, rpcGeneration, archiveRpcStatus, archiveRpcGeneration, hasDedicatedArchive,
 } from '../chain/rpc.js';
+import { HotHeadWatcher } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, type ResetDeletes } from '../db.js';
 import { NoteBuffer } from '../notes.js';
@@ -27,6 +28,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const ARCHIVE_RETRY_BASE_MS = 15_000;
 const ARCHIVE_RETRY_MAX_MS = 120_000;
 const ARCHIVE_BOUNDARY_NOTE_MS = 30_000;
+const WS_HEAD_FALLBACK_MSG = 'quote-head WebSocket unavailable — HTTP head polling is active';
 
 /** Cursor-preserving availability retries use a real outage cadence, not the
  *  normal crawl pace. A sustained 429 otherwise turns a background repair into
@@ -161,10 +163,9 @@ export function checkReferenceStarvation(
   }
 }
 
-/** Consecutive empty quote cycles before a venue is called dark. At the 500ms
- *  quote cadence that is ~10s: long enough that one RPC blip inside a venue's
- *  own multicall is not an outage, short enough to catch the real thing. */
-export const QUOTE_DARK_CYCLES = 20;
+/** Consecutive empty block frames before a venue is called dark. Keep the
+ *  threshold at ~10s after moving live quotes from 500ms ticks to Monad blocks. */
+export const QUOTE_DARK_CYCLES = 34;
 
 /**
  * A venue that has stopped quoting — the CORE's backstop.
@@ -717,8 +718,14 @@ export class LiveDataSource extends BaseSource {
   private deepEnd = 0n;
   /** process start — grace period before "reference feed has no mid" notes. */
   private bootMs = Date.now();
-  private quoteTimer?: ReturnType<typeof setTimeout>;
   private tailTimer?: ReturnType<typeof setTimeout>;
+  private quoteRetryTimer?: ReturnType<typeof setTimeout>;
+  /** newHeads + HTTP-watchdog feed. Both paths are deduped before they reach the
+   *  latest-only quote runner below. */
+  private headWatcher = new HotHeadWatcher(publicClient, { wsUrl: config.rpcWs, pollMs: config.headPollMs });
+  private quotedBlock = 0n;
+  private pendingQuoteBlock?: bigint;
+  private quoteRunning = false;
   private loopsStopped = false;
   private persistTimer?: ReturnType<typeof setInterval>;
   private rediscoverTimer?: ReturnType<typeof setInterval>;
@@ -784,15 +791,22 @@ export class LiveDataSource extends BaseSource {
 
     await this.initHistory();
 
-    await this.poll().catch(() => undefined);
-    // Quotes and the fills tail run as INDEPENDENT self-scheduling loops: the
-    // old shared setInterval skipped overlapping fires, so one slow phase
-    // quantized the whole cadence to interval multiples (a 600ms tick became a
-    // 1s cadence) and log tailing stretched quote freshness. Chaining runs the
-    // next pass as soon as the previous finishes (floored at the interval), so
-    // cadence = max(interval, duration) — never rounded up.
-    this.scheduleLoop('quote');
-    this.scheduleLoop('tail');
+    // The boot head was captured by initHistory. Quote that exact state once,
+    // then let newHeads drive every later matrix. If boot quoting fails, the
+    // watcher's immediate HTTP observation retries it (or a newer head).
+    try { await this.poll(this.bootHead); this.quotedBlock = this.bootHead; }
+    catch { /* the head watcher retries without advancing quotedBlock */ }
+    this.headWatcher.start({
+      onBlock: (blockNumber) => this.queueQuoteBlock(blockNumber),
+      onWsFallback: () => this.noteOnce('quote.head.fallback', WS_HEAD_FALLBACK_MSG),
+      onWsRecovered: () => {
+        this.dropNote('quote.head.fallback', WS_HEAD_FALLBACK_MSG);
+        this.note('quote.head.recovered', 'quote-head WebSocket recovered — newHeads is driving quotes again');
+      },
+    });
+    // Fill ingest is intentionally still timer-driven and independent. Its
+    // finality-margin range reads never decide which block a quote represents.
+    this.scheduleTail();
     this.persistTimer = setInterval(() => this.persist(), config.persistMs);
     this.rediscoverTimer = setInterval(() => { void this.rediscover(); }, config.rediscoverMs);
 
@@ -947,8 +961,9 @@ export class LiveDataSource extends BaseSource {
 
   stop(): void {
     this.loopsStopped = true;
-    if (this.quoteTimer) clearTimeout(this.quoteTimer);
+    this.headWatcher.stop();
     if (this.tailTimer) clearTimeout(this.tailTimer);
+    if (this.quoteRetryTimer) clearTimeout(this.quoteRetryTimer);
     if (this.persistTimer) clearInterval(this.persistTimer);
     if (this.rediscoverTimer) clearInterval(this.rediscoverTimer);
     if (this.remarkTimer) clearInterval(this.remarkTimer);
@@ -981,7 +996,7 @@ export class LiveDataSource extends BaseSource {
     return {
       chainId: 143, block: this.block, monUsd: REFERENCES.assetUsd('MON'), monChangePct: REFERENCES.changePctFor('MON'),
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
-      quoteCadenceMs: config.quoteIntervalMs, source: 'live', venues: venueMeta(), notes: this.notes.list(),
+      quoteCadenceMs: monad.blockTime ?? 300, source: 'live', venues: venueMeta(), notes: this.notes.list(),
       rpc: rpcStatus(),
       // Only when the pools actually differ: with no dedicated archive this
       // would be a copy of `rpc`, and a duplicated chip reads as a second
@@ -1880,27 +1895,70 @@ export class LiveDataSource extends BaseSource {
     return this.store.fillsSince(sinceMs, Math.min(Math.floor(rawLimit), 50_000));
   }
 
-  // ── poll loop ───────────────────────────────────────────────────────────────
-  /** one self-scheduling pass of either loop; a pass can never overlap itself
-   *  (the next run is only armed after the previous completes). */
-  private scheduleLoop(kind: 'quote' | 'tail', delay?: number): void {
+  // ── live quote + fill-tail loops ────────────────────────────────────────────
+  /** Timer-driven fill ingest. Quotes are driven separately by HotHeadWatcher. */
+  private scheduleTail(delay?: number): void {
     if (this.loopsStopped) return;
-    const interval = kind === 'quote' ? config.quoteIntervalMs : config.tailIntervalMs;
+    const interval = config.tailIntervalMs;
     const timer = setTimeout(async () => {
       const t0 = Date.now();
-      if (kind === 'quote') {
-        try { await this.poll(); } catch { /* keep ticking */ }
-        this.ageMarkouts();
-      } else {
-        try { await this.tailFills(); } catch (e) { this.noteOnce('tail.failed', `tail failed — holding cursor, retrying: ${(e as Error).message}`); }
-        this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) });
-      }
-      this.scheduleLoop(kind, Math.max(0, interval - (Date.now() - t0)));
+      try { await this.tailFills(); } catch (e) { this.noteOnce('tail.failed', `tail failed — holding cursor, retrying: ${(e as Error).message}`); }
+      this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) });
+      this.scheduleTail(Math.max(0, interval - (Date.now() - t0)));
     }, delay ?? interval);
-    if (kind === 'quote') this.quoteTimer = timer; else this.tailTimer = timer;
+    this.tailTimer = timer;
   }
 
-  private async poll(): Promise<void> {
+  /**
+   * Keep the dashboard at the live head without overlapping adapter state.
+   * While one block is evaluating, later heads coalesce to the newest one: a
+   * real-time quote page must not build an unbounded queue of stale matrices.
+   * Every matrix that is emitted is nevertheless complete at one explicit
+   * block; overload becomes an observable block-number gap, never mixed state.
+   */
+  private queueQuoteBlock(blockNumber: bigint): void {
+    if (this.loopsStopped || blockNumber <= this.quotedBlock) return;
+    if (this.pendingQuoteBlock === undefined || blockNumber > this.pendingQuoteBlock) this.pendingQuoteBlock = blockNumber;
+    void this.drainQuoteBlocks();
+  }
+
+  private async drainQuoteBlocks(): Promise<void> {
+    if (this.quoteRunning || this.loopsStopped) return;
+    this.quoteRunning = true;
+    let retry = false;
+    try {
+      while (!this.loopsStopped && this.pendingQuoteBlock !== undefined) {
+        const blockNumber = this.pendingQuoteBlock;
+        this.pendingQuoteBlock = undefined;
+        if (blockNumber <= this.quotedBlock) continue;
+        try {
+          await this.poll(blockNumber);
+          this.quotedBlock = blockNumber;
+          this.ageMarkouts();
+        } catch {
+          // Retry this exact block unless a newer observed head has already
+          // replaced it. The retry is delayed so a sick RPC cannot hot-loop.
+          if (this.pendingQuoteBlock === undefined || blockNumber > this.pendingQuoteBlock) this.pendingQuoteBlock = blockNumber;
+          retry = true;
+          break;
+        }
+      }
+    } finally {
+      this.quoteRunning = false;
+    }
+    if (this.loopsStopped || this.pendingQuoteBlock === undefined) return;
+    if (retry) {
+      if (this.quoteRetryTimer) clearTimeout(this.quoteRetryTimer);
+      this.quoteRetryTimer = setTimeout(() => {
+        this.quoteRetryTimer = undefined;
+        void this.drainQuoteBlocks();
+      }, Math.max(25, config.headPollMs));
+    } else {
+      queueMicrotask(() => { void this.drainQuoteBlocks(); });
+    }
+  }
+
+  private async poll(blockNumber: bigint): Promise<void> {
     const now = Date.now();
     const monUsd = REFERENCES.assetUsd('MON');
     // Surface a starving reference feed LOUDLY (state.notes): with no base mid
@@ -1926,15 +1984,11 @@ export class LiveDataSource extends BaseSource {
       this.midHist.set(pair.symbol, h);
     }
 
-    // head rides the SAME batched round as the adapters' first reads — a
-    // dedicated await here paid one extra network round-trip per tick.
-    const [head, venueRowsNested] = await Promise.all([
-      publicClient.getBlockNumber(),
-      Promise.all(ADAPTERS.map(async (a) => {
+    const venueRowsNested = await Promise.all(ADAPTERS.map(async (a) => {
         if (!a.quote) return [] as QuoteRow[];
         // a THROWN quote is a degradation like any other — swallowing it left
         // the venue's disappearance with no explanation anywhere.
-        const rows = await a.quote(this.ctxFor(a), config.sizesUsd).catch((e) => {
+        const rows = await a.quote(this.ctxFor(a), config.sizesUsd, blockNumber).catch((e) => {
           // a rejection is not necessarily an Error — a bare string or an
           // Error with an empty message would otherwise note "quote failed:
           // undefined", which is worse than useless to whoever reads it.
@@ -1943,9 +1997,8 @@ export class LiveDataSource extends BaseSource {
           return [] as QuoteRow[];
         });
         return this.ownVenues(a, rows, 'quote'); // drop rows for ids the adapter didn't declare
-      })),
-    ]);
-    this.block = Number(head);
+      }));
+    this.block = Number(blockNumber);
     const venueRows = venueRowsNested.flat();
     // A venue that stopped quoting vanishes from the grid silently otherwise
     // (checkQuoteOutage). Skipped during boot warmup — references start cold,

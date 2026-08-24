@@ -73,7 +73,7 @@ interface VenueAdapter {
   discover(ctx): Promise<void>;                           // resolve pools/books; adapter holds its own state
   backfill?(ctx, sinceUtc): Promise<{ days?; fills? }>;   // optional historical seed
   backfillFromUtc?: string;                               // venue first-active day → core replays lifetime history
-  quote?(ctx, sizesUsd): Promise<QuoteRow[]>;             // optional live bid/ask (Execution)
+  quote?(ctx, sizesUsd, blockNumber): Promise<QuoteRow[]>; // optional block-pinned live bid/ask (Execution)
   logSources(): LogSource[];                              // { key, address, events, kind: 'fills'|'state'|'attribution' }
   gasSources?(): GasSource[];                             // where the venue's own quote-update txs live
   decode(ctx, logs, tsOf, failed): Fill[];                // adapter decodes ITS logs → fills
@@ -83,7 +83,7 @@ interface VenueAdapter {
 `AdapterContext` hands over shared infra: `client`, `getLogs` (chunked), `pricer` (incl. `pairMid(market)` — the bps anchor), `config`, `log`. The registry is the one wiring point; `validateRegistry()` fails loud on duplicate/invalid ids. A `ReferenceRegistry` (roles `'reference'`) owns every CEX feed, routed **per base asset** — venue adapters never talk to a CEX.
 
 ### 4.1 Quote poller
-Each adapter's `quote()` collapses its request set into **Multicall3 `eth_call`s** per tick at block cadence, normalized to `QuoteRow[]` (bps vs `pairMid`), then annotated with the pair's CEX realized-vs-taker columns.
+Each adapter's `quote()` collapses its request set into **Multicall3 `eth_call`s** pinned to the explicit block delivered by the hot-head watcher, normalized to `QuoteRow[]` (bps vs `pairMid`), then annotated with the pair's CEX realized-vs-taker columns.
 
 ### 4.2 Fill stream
 Each cycle the core fetches the union of every adapter's `logSources()` over the pending range and hands each adapter its logs to `decode()` → normalized `Fill`s. Fills carry a **deterministic id** (`venue-txHash-logIndex`) so re-tails dedupe; attribution sources (router tags) classify fills but never create them (no double-count).

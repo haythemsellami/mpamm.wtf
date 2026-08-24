@@ -517,6 +517,8 @@ export type NoteLevel = 'info' | 'warn';
 export type NoteCode =
   // RPC failover breaker (server/src/chain/failover.ts) — labels only.
   | 'rpc.failover' | 'rpc.down' | 'rpc.recovered' | 'rpc.endpoint.dropped'
+  // live quote head source (server/src/chain/heads.ts)
+  | 'quote.head.fallback' | 'quote.head.recovered'
   // venue adapters: discovery, market coverage, quoting, decode
   | 'venue.discovery' | 'venue.discovery.degraded' | 'venue.discovery.failed'
   | 'venue.market.unlisted' | 'venue.upgraded' | 'venue.quarantined'
@@ -547,6 +549,7 @@ export type NoteCode =
  *  site that needs a different level needs a different code. */
 export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'rpc.failover': 'warn', 'rpc.down': 'warn', 'rpc.recovered': 'info', 'rpc.endpoint.dropped': 'warn',
+  'quote.head.fallback': 'warn', 'quote.head.recovered': 'info',
   'venue.discovery': 'info', 'venue.discovery.degraded': 'warn', 'venue.discovery.failed': 'warn',
   'venue.market.unlisted': 'warn', 'venue.upgraded': 'warn', 'venue.quarantined': 'warn',
   'venue.quote.unavailable': 'warn', 'venue.quote.recovered': 'info', 'venue.gas.suspect': 'warn',

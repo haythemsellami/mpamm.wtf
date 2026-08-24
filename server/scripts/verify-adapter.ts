@@ -76,7 +76,8 @@ try {
 // quotes
 if (adapter.quote) {
   try {
-    const rows = (await adapter.quote(ctx, config.sizesUsd)).filter((r) => r.venueId === venueId);
+    const quoteBlock = await publicClient.getBlockNumber();
+    const rows = (await adapter.quote(ctx, config.sizesUsd, quoteBlock)).filter((r) => r.venueId === venueId);
     if (!rows.length) warn('quote() returned 0 rows for this venue (no pools/books live, or references cold?)');
     const byMarket = new Map<string, number>();
     for (const r of rows) byMarket.set(r.market, (byMarket.get(r.market) ?? 0) + 1);

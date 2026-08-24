@@ -29,7 +29,7 @@ interface VenueAdapter {
   discover(ctx): Promise<void>;                       // find markets/pools; hold your own state
   backfill?(ctx, sinceUtc): Promise<AdapterBackfill>; // OPTIONAL closed-day seed (subgraph/REST)
   backfillFromUtc?: string;                           // venue deploy day → core replays your logs for lifetime volume
-  quote?(ctx, sizesUsd): Promise<QuoteRow[]>;         // OPTIONAL live bid/ask (Execution tab)
+  quote?(ctx, sizesUsd, blockNumber): Promise<QuoteRow[]>; // OPTIONAL live bid/ask (Execution tab)
   logSources(): LogSource[];                          // contracts/events the core getLogs's for you
   gasSources?(): GasSource[];                         // OPTIONAL: where your own quote-update txs live (QUOTE_UPDATE_BURN)
   decode(ctx, logs, tsOf, failed): Fill[] | Promise<Fill[]>; // your logs → normalized fills
@@ -51,7 +51,7 @@ Everything you need is on `ctx` (`AdapterContext`) — **use it instead of impor
 ## How the core uses you
 
 - **Boot:** `discover()` once; `backfill()` (if present) seeds closed days; the background lifetime replay covers `backfillFromUtc → now` for volume + swap counts; the markout onboarding scans your last ~30 days of fills and marks them against archived CEX prices — you implement nothing for either.
-- **Each tick:** the core fetches every `logSources()` entry over the new range and calls `decode()`; fills are deduped, bucketed into daily volume, and joined to the reference mid for markouts. `quote()` rows feed the Execution comparison.
+- **Each block:** the core passes one explicit `blockNumber` to every `quote()` and publishes the matrix under that same block. Every adapter chain read in `quote()` must pass that block to viem (`multicall` / `readContract` / storage reads); an implicit `latest` read mixes adjacent states into one frame. Separately, the fill tail fetches every `logSources()` entry over the new finalized range and calls `decode()`; fills are deduped, bucketed into daily volume, and joined to the reference mid for markouts.
 - **Frontend:** `venues()` is served in `state.venues`; the UI renders your venue with zero client-side knowledge of it.
 
 ## Correctness rules (the ones that bite)

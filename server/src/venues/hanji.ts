@@ -179,7 +179,7 @@ export function createHanjiAdapter(): VenueAdapter {
       ctx.note('venue.discovery', `Hanji pAMM Vault: ${markets.length} market(s), taker fee ${markets[0]?.feeBps ?? '?'}bps (on-chain config)`);
     },
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[]): Promise<QuoteRow[]> {
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
       if (!markets.length) return [];
       // one multicall for every market's book (proxy → includes vault liquidity).
       const res = await ctx.client.multicall({
@@ -189,6 +189,7 @@ export function createHanjiAdapter(): VenueAdapter {
           args: [m.proxy, BOOK_LEVELS] as const,
         })),
         allowFailure: true,
+        blockNumber,
       });
       if (reportOutage(ctx, res)) return [];
 

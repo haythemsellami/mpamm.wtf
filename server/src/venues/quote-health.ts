@@ -59,7 +59,7 @@ export function quoteOutageReason(results: readonly MulticallOutcome[]): string 
  * Per-adapter outage reporter. Call it with the quote multicall's results;
  * it returns true when the venue is dark (the caller then returns `[]`).
  *
- * Holds the reason currently on the record so the 500ms quote loop notes it
+ * Holds the reason currently on the record so block-triggered quoting notes it
  * once — but a CHANGED reason is a new event and gets its own note. Recovery
  * is ANNOUNCED rather than retracted: an adapter can only append, so a heal
  * that said nothing would leave the warning standing until the served window
