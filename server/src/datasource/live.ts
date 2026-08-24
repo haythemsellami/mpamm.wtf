@@ -1033,10 +1033,14 @@ export class LiveDataSource extends BaseSource {
       // A targeted replay needs BOTH ends of its start: the block the cursors
       // resume at, and the day the volume delete is scoped to (the volume scan
       // day-aligns, so it restores from that day's start).
+      // ARCHIVE pool for both resolves below: a reset start is REFUSED unless it
+      // is in the past, so `t.block` and the block blockAtOrAfter returns are
+      // both arbitrarily deep — on a pruning hot node they would throw, and the
+      // catch's "retried next boot" would mean forever.
       let from: { block: bigint; day: string } | undefined;
       if (t.from === 'block') {
         try {
-          const b = await publicClient.getBlock({ blockNumber: t.block });
+          const b = await archiveClient.getBlock({ blockNumber: t.block });
           from = resetStartFromBlock(t.block, b.timestamp);
         } catch (e) {
           // no settle(): a resolve that failed on the RPC may well succeed on
@@ -1048,7 +1052,7 @@ export class LiveDataSource extends BaseSource {
       if (t.from === 'day') {
         try {
           const block = await blockAtOrAfter(Math.floor(Date.parse(`${t.day}T00:00:00Z`) / 1000), this.bootHead);
-          const b = await publicClient.getBlock({ blockNumber: block });
+          const b = await archiveClient.getBlock({ blockNumber: block });
           from = resetStartFromBlock(block, b.timestamp);
         }
         catch (e) {
