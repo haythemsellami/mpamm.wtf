@@ -2,6 +2,11 @@ import { SIZES_USD, HISTORY_START_UTC } from '@shared';
 
 const env = process.env;
 
+/** comma-separated env list → trimmed, non-empty entries. */
+function list(v: string): string[] {
+  return v.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
 function num(key: string, dflt: number): number {
   const v = env[key];
   if (v === undefined || v === '') return dflt;
@@ -22,12 +27,40 @@ export const config = {
   // run the fully offline deterministic simulator instead.
   source: (env.DATA_SOURCE?.toLowerCase() === 'sim' ? 'sim' : 'live') as SourcePref,
 
+  // ── RPC pools ───────────────────────────────────────────────────────────────
+  // TWO pools, because no single Monad endpoint is good at both jobs.
+  //
+  //   HOT     quote loop + fills tail. The ONLY thing that matters is distance
+  //           to the tip: a node seven blocks behind quotes 2.3s-old prices, and
+  //           no amount of local tuning recovers that.
+  //   ARCHIVE volume backfill, markout onboarding, gas passes, blockAtOrAfter.
+  //           These binary-search from block 0 and replay months-old ranges, so
+  //           lag is irrelevant and RETENTION is everything — and the tip-fresh
+  //           fullnodes prune to ~1.7 days.
+  //
+  // They must be separate pools rather than one ordered list, because failover
+  // cannot bridge them: a pruned block answers with a JSON-RPC error, and
+  // chain/failover.ts deliberately never switches endpoints on those (a revert
+  // or a range-cap probe proves the node is ALIVE). So a fullnode primary with
+  // an archive backup does not degrade onto the archive — every deep cursor
+  // holds forever while the endpoint that could serve it sits idle.
   rpcHttp: env.RPC_HTTP_URL ?? 'https://rpc.monad.xyz',
-  /** Ordered failover RPCs behind the primary (comma-separated). Default: the
-   *  public RPC, so every deployment survives a provider outage with zero
-   *  config. Set RPC_BACKUP_URLS="" to opt out (single-endpoint behavior). */
-  rpcBackups: (env.RPC_BACKUP_URLS ?? 'https://rpc.monad.xyz')
-    .split(',').map((s) => s.trim()).filter(Boolean),
+  /** Ordered failover RPCs behind the hot primary (comma-separated). Default:
+   *  the public RPC, so every deployment survives a provider outage with zero
+   *  config. Set to "" to opt out (single-endpoint behavior). RPC_BACKUP_URLS
+   *  is the pre-split name, still honored so a live deploy keeps its backups
+   *  through the rollout. */
+  rpcBackups: list(env.RPC_HTTP_BACKUP_URLS ?? env.RPC_BACKUP_URLS ?? 'https://rpc.monad.xyz'),
+  /** Deep-history primary. UNSET (the default) means the archive pool IS the hot
+   *  pool — exactly the single-client behavior that predates the split, so an
+   *  unconfigured deployment is unaffected. Set it only when the hot primary
+   *  cannot serve venue-lifetime ranges (i.e. it is a pruning fullnode). */
+  rpcArchive: env.RPC_ARCHIVE_URL ?? '',
+  /** Ordered failover RPCs behind the archive primary. Default: the public RPC,
+   *  which serves headers/logs/receipts back to block 0 (its ~100-block getLogs
+   *  cap is absorbed by getLogsChunked's shrink). Ignored — and rejected at
+   *  boot — when RPC_ARCHIVE_URL is unset. */
+  rpcArchiveBackups: list(env.RPC_ARCHIVE_BACKUP_URLS ?? 'https://rpc.monad.xyz'),
 
   bybitRest: env.BYBIT_REST_URL ?? 'https://api.bybit.com',
   bybitWs: env.BYBIT_WS_URL ?? 'wss://stream.bybit.com/v5/public/spot',
@@ -143,6 +176,17 @@ export const config = {
   /** idle sleep between gas tail passes once caught up to head (ms). */
   gasTailMs: num('GAS_TAIL_MS', 60_000),
 } as const;
+
+// Archive backups without an archive primary are a no-op that LOOKS configured:
+// the deep crawls would keep riding the hot pool while an operator believes they
+// have a fallback. Same fail-loud rule as the chunk config below — a setting
+// that silently does nothing must not boot.
+if (!config.rpcArchive && env.RPC_ARCHIVE_BACKUP_URLS !== undefined) {
+  throw new Error(
+    'RPC_ARCHIVE_BACKUP_URLS is set but RPC_ARCHIVE_URL is not — the archive backups would never be used ' +
+    '(with no archive primary the deep crawls run on the hot pool). Set RPC_ARCHIVE_URL, or unset RPC_ARCHIVE_BACKUP_URLS.',
+  );
+}
 
 // Fail LOUD at boot on a chunk misconfiguration rather than degrading quietly.
 // The three deep crawls start at backfillChunk and shrink toward getLogsMinChunk;

@@ -2,14 +2,20 @@ import { HttpRequestError, TimeoutError } from 'viem';
 import type { NoteCode } from '@shared';
 
 /**
- * RpcBreaker — ordered-endpoint failover for the single shared RPC client.
+ * RpcBreaker — ordered-endpoint failover for one RPC client.
  *
- * The whole indexer (quotes, fills, gas, backfills) rides one viem client, so
+ * Each viem client (hot + archive, chain/rpc.ts) rides its own breaker, so
  * failover happens HERE and nowhere else: K consecutive transport-level
  * failures on the active endpoint advance to the next one (wrapping), and
  * while off the primary a background probe re-checks it every minute — two
  * consecutive healthy probes snap back. Preference is strictly ordered
  * (primary is the paid/better node); this is NOT latency ranking.
+ *
+ * Failover is WITHIN a pool, never across pools — which is exactly why the two
+ * pools exist. A pruned-block reply is a JSON-RPC error, so per the classifier
+ * below it can never move a pruning fullnode's traffic onto an archive backup;
+ * a mixed list would stall every deep cursor instead of degrading. Keep the
+ * pools separate (config.ts: RPC pools).
  *
  * Correctness hinges on the failure classifier: only transport-level errors
  * (5xx / network / timeout) may trip the breaker. A JSON-RPC error response —
@@ -80,9 +86,16 @@ export class RpcBreaker {
   private healthyProbes = 0;
   private onEvent: (n: RpcNote) => void = () => undefined;
   private readonly probeIntervalMs: number;
+  /** Names this pool in every note it raises. Two pools now share this class
+   *  (hot + archive, see chain/rpc.ts), and their transitions land in ONE
+   *  state.notes buffer — without the name, "RPC failover: primary unhealthy"
+   *  is ambiguous between the node that serves quotes and the node that serves
+   *  history, which are different incidents with different urgency. */
+  private readonly pool: string;
 
-  constructor(opts?: { probeIntervalMs?: number }) {
+  constructor(opts?: { probeIntervalMs?: number; pool?: string }) {
     this.probeIntervalMs = opts?.probeIntervalMs ?? PROBE_INTERVAL_MS;
+    this.pool = opts?.pool ?? 'RPC';
   }
 
   /** Bind the instantiated transports. Called once, before any traffic. */
@@ -119,7 +132,7 @@ export class RpcBreaker {
         this.advancesSinceSuccess = 0;
         if (this.allDown) {
           this.allDown = false;
-          this.onEvent({ code: 'rpc.recovered', msg: `RPC serving again (on ${this.endpoints[this.active].label})` });
+          this.onEvent({ code: 'rpc.recovered', msg: `${this.pool} serving again (on ${this.endpoints[this.active].label})` });
         }
         return res;
       } catch (e) {
@@ -155,7 +168,7 @@ export class RpcBreaker {
         const chainId = Number(BigInt(String(id)));
         if (chainId !== expectChainId) {
           health.push(false);
-          this.onEvent({ code: 'rpc.endpoint.dropped', msg: `RPC ${ep.label} dropped at boot: chainId ${chainId} != ${expectChainId}` });
+          this.onEvent({ code: 'rpc.endpoint.dropped', msg: `${this.pool} ${ep.label} dropped at boot: chainId ${chainId} != ${expectChainId}` });
         } else {
           health.push(true);
           block = Math.max(block, Number(BigInt(String(bn))));
@@ -164,19 +177,19 @@ export class RpcBreaker {
         health.push(undefined);
       }
     }
-    if (health[0] === false) return { ok: false, block: 0, reason: `primary is on the wrong chain (chainId != ${expectChainId})` };
+    if (health[0] === false) return { ok: false, block: 0, reason: `${this.pool} primary is on the wrong chain (chainId != ${expectChainId})` };
     // drop wrong-chain backups (walk backwards so indices stay valid).
     for (let i = this.endpoints.length - 1; i >= 1; i--) {
       if (health[i] === false) { this.endpoints.splice(i, 1); health.splice(i, 1); }
     }
     const firstHealthy = health.findIndex((h) => h === true);
     if (firstHealthy === -1) {
-      return { ok: false, block: 0, reason: `no reachable RPC endpoint (${this.endpoints.length} tried)` };
+      return { ok: false, block: 0, reason: `no reachable ${this.pool} endpoint (${this.endpoints.length} tried)` };
     }
     if (firstHealthy > 0) {
       this.active = firstHealthy;
       this.degradedSinceTs = Date.now();
-      this.onEvent({ code: 'rpc.failover', msg: `RPC primary unreachable at boot — starting on ${this.endpoints[firstHealthy].label}` });
+      this.onEvent({ code: 'rpc.failover', msg: `${this.pool} primary unreachable at boot — starting on ${this.endpoints[firstHealthy].label}` });
       this.startProbe();
     }
     return { ok: true, block };
@@ -212,8 +225,8 @@ export class RpcBreaker {
       this.onEvent({
         code: 'rpc.down',
         msg: this.endpoints.length === 1
-          ? 'RPC endpoint unreachable (no backups configured) — chain data frozen until it recovers'
-          : `RPC: all ${this.endpoints.length} endpoints unreachable — chain data frozen until one recovers`,
+          ? `${this.pool} endpoint unreachable (no backups configured) — chain data frozen until it recovers`
+          : `${this.pool}: all ${this.endpoints.length} endpoints unreachable — chain data frozen until one recovers`,
       });
     }
     if (this.active === 0) {
@@ -225,7 +238,7 @@ export class RpcBreaker {
       return;
     }
     if (this.degradedSinceTs === undefined) this.degradedSinceTs = Date.now();
-    this.onEvent({ code: 'rpc.failover', msg: `RPC failover: ${from} unhealthy — switched to ${this.endpoints[this.active].label}` });
+    this.onEvent({ code: 'rpc.failover', msg: `${this.pool} failover: ${from} unhealthy — switched to ${this.endpoints[this.active].label}` });
     this.startProbe();
   }
 
@@ -239,7 +252,7 @@ export class RpcBreaker {
     this.stop();
     if (sinceTs !== undefined) {
       const mins = Math.max(1, Math.round((Date.now() - sinceTs) / 60_000));
-      this.onEvent({ code: 'rpc.recovered', msg: `RPC recovered: back on primary (was on ${wasOn} for ~${mins}m)` });
+      this.onEvent({ code: 'rpc.recovered', msg: `${this.pool} recovered: back on primary (was on ${wasOn} for ~${mins}m)` });
     }
   }
 

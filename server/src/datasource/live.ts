@@ -9,7 +9,10 @@ import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
 import { GasTracker } from '../gas.js';
 import { config } from '../config.js';
-import { publicClient, getLogsChunked, probeChain, blockAtOrAfter, onRpcEvent, rpcStatus } from '../chain/rpc.js';
+import {
+  publicClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
+  onRpcEvent, onArchiveRpcEvent, rpcStatus, archiveRpcStatus, hasDedicatedArchive,
+} from '../chain/rpc.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, type ResetDeletes } from '../db.js';
 import { NoteBuffer } from '../notes.js';
@@ -504,12 +507,15 @@ export function parseBackfillReset(spec: string): BackfillResetTarget[] {
   });
 }
 
-/** Hold a deep history crawl while the RPC runs on a backup: the live tail and
- *  quote ticks keep the backup's rate budget; crawls resume on the primary.
+/** Hold a deep history crawl while the ARCHIVE pool runs on a backup: the crawl
+ *  resumes on the archive primary. Gated on the archive pool, not the hot one,
+ *  because that is the pool these crawls actually ride — holding them on hot-pool
+ *  degradation would pause history for an incident that cannot affect it, and
+ *  (worse) let them hammer a degraded archive backup during one that does.
  *  (Cursors/accumulators simply wait — nothing is lost or restarted.) */
 async function holdWhileDegraded(): Promise<boolean> {
-  const wasDegraded = rpcStatus().degraded;
-  while (rpcStatus().degraded) await sleep(15_000);
+  const wasDegraded = archiveRpcStatus().degraded;
+  while (archiveRpcStatus().degraded) await sleep(15_000);
   return wasDegraded;
 }
 
@@ -532,7 +538,9 @@ export class LiveDataSource extends BaseSource {
   private pricer = new UsdPricer((key) => REFERENCES.assetUsd(key), (market) => REFERENCES.midForPair(market));
   private store = new VolumeStore(config.dbPath);
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
-  private gas = new GasTracker(publicClient, this.store, ADAPTERS, (code, msg, venue) => this.noteOnce(code, msg, venue), () => rpcStatus().degraded);
+  // ARCHIVE pool: the gas tracker resolves `gas_from` through blockAtOrAfter and
+  // crawls receipts from there, so it is a deep-history consumer end to end.
+  private gas = new GasTracker(archiveClient, this.store, ADAPTERS, (code, msg, venue) => this.noteOnce(code, msg, venue), () => archiveRpcStatus().degraded);
   /** fill attribution — UNKNOWN → DIRECT / "Router - X" from tx.to (best-effort;
    *  stays on during failover — per-fill lookups are live-path cheap, unlike crawls). */
   private attributor = new FillAttributor(publicClient, ADAPTERS);
@@ -621,11 +629,20 @@ export class LiveDataSource extends BaseSource {
     // RPC failover events (switch / all-down / recovery) land in state.notes.
     // Subscribed BEFORE the boot probe so a degraded start is on the record.
     onRpcEvent((e) => this.noteOnce(e.code, e.msg));
+    if (hasDedicatedArchive) onArchiveRpcEvent((e) => this.noteOnce(e.code, e.msg));
     // Fail fast when NO endpoint serves or the primary is on the wrong chain
     // (docs/architecture.md: operations) rather than half-start; a dead primary
     // with a healthy backup boots degraded instead of failing.
     const probe = await probeChain();
     if (!probe.ok) throw new Error(`Monad RPC sanity check failed (${probe.reason}). Set DATA_SOURCE=sim to run offline.`);
+    // The archive pool is NOT fatal to boot. Deep crawls are background work and
+    // every one of them holds its cursor on failure, so a dead archive costs
+    // history that resumes later — while refusing to boot would also take down
+    // live quoting, which needs no history at all. Say so loudly instead.
+    const archiveProbe = await probeArchiveChain();
+    if (!archiveProbe.ok) {
+      this.note('rpc.down', `archive RPC sanity check failed (${archiveProbe.reason}) — deep history (volume backfill, markout onboarding, gas) will hold until it serves; live quotes and fills are unaffected`);
+    }
 
     await REFERENCES.start();
     // discover every venue's markets/pools (adapters hold their own state).
@@ -743,6 +760,10 @@ export class LiveDataSource extends BaseSource {
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
       quoteCadenceMs: config.quoteIntervalMs, source: 'live', venues: venueMeta(), notes: this.notes.list(),
       rpc: rpcStatus(),
+      // Only when the pools actually differ: with no dedicated archive this
+      // would be a copy of `rpc`, and a duplicated chip reads as a second
+      // subsystem that does not exist.
+      ...(hasDedicatedArchive ? { rpcArchive: archiveRpcStatus() } : {}),
     };
   }
   getQuotes(): QuoteSnapshot { return this.quotes; }
@@ -1110,7 +1131,7 @@ export class LiveDataSource extends BaseSource {
       const cb = BigInt(cur);
       if (cb > from && cb <= end + 1n) {
         try {
-          const b = await publicClient.getBlock({ blockNumber: cb > end ? end : cb });
+          const b = await archiveClient.getBlock({ blockNumber: cb > end ? end : cb });
           const daySec = Math.floor(Date.parse(`${utcDay(Number(b.timestamp) * 1000)}T00:00:00Z`) / 1000);
           from = await blockAtOrAfter(daySec, end);
         } catch { /* fall back to the full-range start */ }
@@ -1145,9 +1166,10 @@ export class LiveDataSource extends BaseSource {
     const maxChunk = BigInt(config.backfillChunk);
     this.noteOnce('backfill.start', `${name}: on-chain backfill — blocks ${from}→${end} (venue history since ${sinceUtc})`, vid);
 
-    /** one getLogs across every fill source over [cursor, t]; throws on failure. */
+    /** one getLogs across every fill source over [cursor, t]; throws on failure.
+     *  ARCHIVE pool — this replays from the venue's deploy day. */
     const fetchRange = (t: bigint) => Promise.all(sources.map((s) =>
-      publicClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
+      archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
 
     while (cursor <= end) {
       if (await holdWhileDegraded()) this.noteOnce('backfill.held', `${name} backfill held while on backup RPC — resumed on primary`, vid);
@@ -1206,7 +1228,7 @@ export class LiveDataSource extends BaseSource {
         let anchorMs = NaN;
         for (const bn of new Set<bigint>(all.map((l) => l.blockNumber as bigint))) {
           for (let i = 0; i < 3 && !Number.isFinite(anchorMs); i++) {
-            try { anchorMs = Number((await publicClient.getBlock({ blockNumber: bn })).timestamp) * 1000; }
+            try { anchorMs = Number((await archiveClient.getBlock({ blockNumber: bn })).timestamp) * 1000; }
             catch { await sleep(config.backfillPaceMs * 5 * (i + 1)); }
           }
           if (Number.isFinite(anchorMs)) break;
@@ -1369,8 +1391,10 @@ export class LiveDataSource extends BaseSource {
     // the same mislabel already corrected on backfill.start above.
     this.noteOnce('markout.scan.start', `${name}: onboarding fill scan — blocks ${from}→${end} (window since ${sinceDay})`, vid);
 
+    // ARCHIVE pool — the window reaches back markoutBackfillDays (30d default),
+    // far past a pruning fullnode's retention.
     const fetchAll = (t: bigint) => Promise.all(sources.map((s) =>
-      publicClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
+      archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
 
     while (cursor <= end) {
       if (await holdWhileDegraded()) this.noteOnce('markout.scan.held', `${name} onboarding scan held while on backup RPC — resumed on primary`, vid);
@@ -1406,7 +1430,7 @@ export class LiveDataSource extends BaseSource {
           await Promise.all(blocks.slice(i, i + POOL).map(async (bn) => {
             for (let r = 0; r < 3; r++) {
               try {
-                blockTs.set(String(bn), Number((await publicClient.getBlock({ blockNumber: bn })).timestamp) * 1000);
+                blockTs.set(String(bn), Number((await archiveClient.getBlock({ blockNumber: bn })).timestamp) * 1000);
                 return;
               } catch { await sleep(config.backfillPaceMs * 5 * (r + 1)); }
             }
