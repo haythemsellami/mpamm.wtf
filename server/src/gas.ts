@@ -3,6 +3,7 @@ import type { NoteCode } from '@shared';
 import { config } from './config.js';
 import { utcDay } from './util.js';
 import { blockAtOrAfter } from './chain/rpc.js';
+import { isAvailabilityFailure } from './chain/failover.js';
 import type { VolumeStore } from './db.js';
 import type { NoteFn } from './notes.js';
 import type { GasSource, VenueAdapter } from './venues/adapter.js';
@@ -406,14 +407,25 @@ export class GasTracker {
     };
 
     while (cursor <= head && !this.stopped) {
+      // Re-checked EVERY chunk, not just at pass start: a pool that dies
+      // mid-pass would otherwise burn its retries and skip real ranges.
+      if (this.degraded()) break;
       const to = cursor + chunk - 1n > head ? head : cursor + chunk - 1n;
       let logs: any[] | null = null;
       let tries = 0;
+      let unavailable = false;
       while (logs === null) {
         try {
           logs = await fetchLogs(cursor, to);
           if (chunk < maxChunk) chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n; // recover after shrinks
-        } catch {
+        } catch (e) {
+          // The pool being unreachable or throttling us says NOTHING about this
+          // range. Shrinking on it is meaningless (the node never served the
+          // request) and skipping it loses gas the archive holds perfectly well.
+          // Yield the slice instead: cursor and acc persist in the trailing
+          // commit, and the next pass's degraded() gate parks us until the pool
+          // is back. Only a node that ANSWERS may consume a range.
+          if (isAvailabilityFailure(e)) { unavailable = true; break; }
           if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; break; } // too wide → shrink, retry cursor
           if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; } // transient → back off
           // a range the RPC can't serve is skipped LOUDLY (undercount, never a stall).
@@ -421,6 +433,7 @@ export class GasTracker {
           logs = [];
         }
       }
+      if (unavailable) break; // pool gone — hold the cursor, resume next pass
       if (logs === null) continue; // shrank — retry same cursor with a narrower span
 
       if (logs.length) {
@@ -432,13 +445,22 @@ export class GasTracker {
         }
         // ONE anchor timestamp per chunk (≤ ~5 min span) is enough for DAILY buckets.
         let anchorMs = NaN;
+        // The pool can die BETWEEN the getLogs above and these reads. Holding
+        // then costs one re-fetch; skipping drops the whole chunk's burn, and
+        // nothing revisits it. Nothing has been accumulated yet, so breaking out
+        // here is idempotent — the trailing commit persists the unchanged cursor.
+        let anchorUnavailable = false;
         for (const bn of new Set(txBlocks.values())) {
           for (let i = 0; i < 3 && !Number.isFinite(anchorMs); i++) {
             try { anchorMs = Number((await this.client.getBlock({ blockNumber: bn })).timestamp) * 1000; }
-            catch { await sleep(config.backfillPaceMs * 5 * (i + 1)); }
+            catch (e) {
+              if (isAvailabilityFailure(e)) { anchorUnavailable = true; break; }
+              await sleep(config.backfillPaceMs * 5 * (i + 1));
+            }
           }
-          if (Number.isFinite(anchorMs)) break;
+          if (Number.isFinite(anchorMs) || anchorUnavailable) break;
         }
+        if (anchorUnavailable) break; // hold the cursor — resume this chunk next pass
         if (!Number.isFinite(anchorMs)) {
           this.noteOnce('gas.range.skipped', `${name}: gas scan block timestamps unresolved near ${cursor} — chunk skipped`, vid);
         } else {
@@ -451,6 +473,7 @@ export class GasTracker {
           const sample = hashes.filter((_, i) => i % stride === 0);
           let sampledMon = 0;
           let sampledN = 0;
+          let receiptsUnavailable = false;
           const POOL = 15;
           for (let i = 0; i < sample.length; i += POOL) {
             await Promise.all(sample.slice(i, i + POOL).map(async (h) => {
@@ -460,11 +483,19 @@ export class GasTracker {
                   sampledMon += Number(rc.gasUsed * rc.effectiveGasPrice) / 1e18;
                   sampledN++;
                   return;
-                } catch { await sleep(config.backfillPaceMs * 5 * (r + 1)); }
+                } catch (e) {
+                  if (isAvailabilityFailure(e)) { receiptsUnavailable = true; return; }
+                  await sleep(config.backfillPaceMs * 5 * (r + 1));
+                }
               }
             }));
+            if (receiptsUnavailable) break;
             await sleep(config.backfillPaceMs);
           }
+          // Same rule as the anchor above: an outage mid-sample means the chunk
+          // is UNKNOWN, not zero. Accumulation happens below, so we have added
+          // nothing yet and the chunk is re-scanned intact next pass.
+          if (receiptsUnavailable) break;
           if (sampledN > 0) {
             const day = utcDay(anchorMs);
             const e = acc.get(day) ?? { mon: 0, txs: 0 };
@@ -499,9 +530,12 @@ export class GasTracker {
     let sliced = 0;
 
     while (cursor <= head && !this.stopped) {
+      // Re-checked EVERY segment — see tailLogs.
+      if (this.degraded()) break;
       const segEnd = cursor + stride - 1n > head ? head : cursor + stride - 1n;
       const segLen = Number(segEnd - cursor + 1n);
       let ok = false;
+      let unavailable = false;
       for (let r = 0; r < 3 && !ok; r++) {
         try {
           const [receipts, block] = await Promise.all([
@@ -517,8 +551,15 @@ export class GasTracker {
           e.txs += mine.length * segLen;
           acc.set(day, e);
           ok = true;
-        } catch { await sleep(config.backfillPaceMs * 5 * (r + 1)); }
+        } catch (e) {
+          // Unreachable/throttled → the SEGMENT is unknown, not empty. Skipping
+          // it here scales a missing sample by the whole stride, so an outage
+          // would silently erase a chunk of the series.
+          if (isAvailabilityFailure(e)) { unavailable = true; break; }
+          await sleep(config.backfillPaceMs * 5 * (r + 1));
+        }
       }
+      if (unavailable) break; // pool gone — hold the cursor, resume next pass
       // an unreadable sample block skips its segment (tiny undercount, no stall)
       cursor = segEnd + 1n;
       if (++sinceCommit >= config.backfillMergeEvery || cursor > head) {

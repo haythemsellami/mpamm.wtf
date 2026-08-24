@@ -4,7 +4,7 @@ import {
   type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode,
 } from '@shared';
-import { isTransportFailure } from '../chain/failover.js';
+import { isAvailabilityFailure } from '../chain/failover.js';
 import { computeLeaderboard } from '../analytics.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
@@ -1242,12 +1242,12 @@ export class LiveDataSource extends BaseSource {
           to = probeTo;                      // ingest exactly the probe slice
           holeRun = 0; skipStride = floor;   // hole ended — back to normal scanning
         } catch (e) {
-          // A TRANSPORT failure proves nothing about the archive's CONTENTS —
-          // only that we could not reach it. Skipping on it would leap a
+          // Not getting an ANSWER proves nothing about the archive's CONTENTS —
+          // whether we could not reach it or it throttled us (429). Skipping on it would leap a
           // doubling stride (up to ~18h of blocks per hop) over data that is
           // perfectly readable, and then mark those days done. Hold the cursor
           // and wait for the pool instead; a real hole ANSWERS, with an error.
-          if (isTransportFailure(e)) { await sleep(config.backfillPaceMs * 25); continue; }
+          if (isAvailabilityFailure(e)) { await sleep(config.backfillPaceMs * 25); continue; }
           const strideTo = cursor + skipStride - 1n > end ? end : cursor + skipStride - 1n;
           skipped += strideTo - cursor + 1n;
           holeRun++;
@@ -1265,11 +1265,11 @@ export class LiveDataSource extends BaseSource {
             batches = await fetchRange(to);
             if (chunk < maxChunk) { chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n; } // recover after shrinks
           } catch (e) {
-            // Unreachable ≠ unreadable: a transport failure must never shrink the
-            // span (the node never saw the request) nor age into hole mode. Retry
+            // Unreachable (or throttled) ≠ unreadable: it must never shrink the
+            // span (the node never served the request) nor age into hole mode. Retry
             // the same cursor until the pool answers — holdWhileDegraded above
             // parks the crawl entirely once the breaker notices.
-            if (isTransportFailure(e)) { await sleep(config.backfillPaceMs * 25); continue; }
+            if (isAvailabilityFailure(e)) { await sleep(config.backfillPaceMs * 25); continue; }
             if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; break; } // too wide → shrink, retry cursor
             if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; } // transient → back off
             // permanently unreadable at floor granularity → enter hole mode.
@@ -1473,10 +1473,10 @@ export class LiveDataSource extends BaseSource {
           batches = await fetchAll(to);
           if (chunk < maxChunk) chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n; // recover after shrinks
         } catch (e) {
-          // Unreachable ≠ unreadable — see the volume backfill above. A skip here
+          // Unreachable/throttled ≠ unreadable — see the volume backfill. A skip here
           // permanently omits fills from the 30-day markout window, so a pool
           // outage must hold rather than consume the range.
-          if (isTransportFailure(e)) { await sleep(config.backfillPaceMs * 25); continue; }
+          if (isAvailabilityFailure(e)) { await sleep(config.backfillPaceMs * 25); continue; }
           if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; break; } // too wide → shrink, retry cursor
           if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; } // transient → back off
           // A recent range should never be an archive hole; if the RPC still

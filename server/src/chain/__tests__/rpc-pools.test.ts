@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HttpRequestError } from 'viem';
 import type { NoteCode } from '@shared';
-import { RpcBreaker, type BreakerEndpoint } from '../failover.js';
+import { RpcBreaker, isAvailabilityFailure, isTransportFailure, type BreakerEndpoint } from '../failover.js';
 
 /**
  * The two-pool split (config.ts: RPC pools). What matters here is not that two
@@ -178,6 +178,28 @@ describe('exhausted pool recovery (PR #85 review)', () => {
     b2.stop();
     expect(down.ok).toBe(true);            // pre-positions onto the healthy backup
     expect(down.wrongChain).toBeUndefined(); // and is NOT a misconfiguration
+  });
+});
+
+describe('availability vs unreadability (PR #85 review)', () => {
+  const http429 = () => new HttpRequestError({ url: 'http://x', status: 429 });
+  const http502 = () => new HttpRequestError({ url: 'http://x', status: 502 });
+
+  it('treats a 429 as an availability failure but NOT a breaker trip', () => {
+    // The two predicates must disagree here, and that disagreement is the point:
+    // a throttled endpoint is alive (do not bounce the indexer off it) yet tells
+    // a crawl nothing about whether the requested blocks exist (do not consume
+    // the range). Collapsing them either way reintroduces a real bug.
+    expect(isTransportFailure(http429())).toBe(false);
+    expect(isAvailabilityFailure(http429())).toBe(true);
+  });
+
+  it('still counts unreachable endpoints, and still ignores real RPC errors', () => {
+    expect(isAvailabilityFailure(http502())).toBe(true);
+    // a node that ANSWERS "I cannot serve this range" is evidence about the
+    // range — crawls may consume it, which is what hole-skipping is for.
+    expect(isAvailabilityFailure(new Error('error getting block header from triedb and archive'))).toBe(false);
+    expect(isAvailabilityFailure(new Error('execution reverted'))).toBe(false);
   });
 });
 

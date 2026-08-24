@@ -80,6 +80,24 @@ export function isTransportFailure(e: unknown): boolean {
   return false;
 }
 
+/**
+ * "We could not get an answer", as opposed to "the node answered that it cannot
+ * serve this range": transport failures (unreachable) PLUS HTTP 429 (alive, but
+ * throttling us).
+ *
+ * Deliberately a different predicate from isTransportFailure, and the 429 is
+ * exactly why. For the BREAKER a 429 proves the endpoint is alive and must not
+ * trip a switch (above). For a deep CRAWL it is just as uninformative as a dead
+ * socket — it says nothing about whether the requested blocks exist. A crawl
+ * that reads it as a permanent archive hole skips readable history and marks the
+ * day done, which is the one outcome this indexer refuses to produce. Use this
+ * one wherever the decision is "hold the cursor or consume the range".
+ */
+export function isAvailabilityFailure(e: unknown): boolean {
+  if (isTransportFailure(e)) return true;
+  return e instanceof HttpRequestError && e.status === 429;
+}
+
 const FAILURE_THRESHOLD = 3;   // consecutive transport failures before advancing
 const PROBE_INTERVAL_MS = 60_000; // primary re-check cadence while degraded
 const RECOVERY_PROBES = 2;     // consecutive healthy probes to snap back
