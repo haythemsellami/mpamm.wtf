@@ -3,7 +3,7 @@ import type { NoteCode } from '@shared';
 import { config } from './config.js';
 import { utcDay } from './util.js';
 import { blockAtOrAfter } from './chain/rpc.js';
-import { isAvailabilityFailure } from './chain/failover.js';
+import { allPreferAvailability, isAvailabilityFailure } from './chain/failover.js';
 import type { VolumeStore } from './db.js';
 import type { NoteFn } from './notes.js';
 import type { GasSource, VenueAdapter } from './venues/adapter.js';
@@ -392,7 +392,7 @@ export class GasTracker {
     let sliced = 0;
 
     const fetchLogs = async (from: bigint, to: bigint): Promise<any[]> => {
-      const batches = await Promise.all(sources.map((s) => {
+      const batches = await allPreferAvailability(sources.map((s) => {
         if (s.mode !== 'logs') return Promise.resolve([] as any[]);
         if (s.topic0) {
           // unverified destination — only the event's topic hash is known.
@@ -538,13 +538,13 @@ export class GasTracker {
       let unavailable = false;
       for (let r = 0; r < 3 && !ok; r++) {
         try {
-          const [receipts, block] = await Promise.all([
-            this.client.request({ method: 'eth_getBlockReceipts', params: [`0x${cursor.toString(16)}`] }) as Promise<any[]>,
-            this.client.getBlock({ blockNumber: cursor }),
+          const [receipts, block] = await allPreferAvailability<any>([
+            this.client.request({ method: 'eth_getBlockReceipts', params: [`0x${cursor.toString(16)}`] }) as Promise<any>,
+            this.client.getBlock({ blockNumber: cursor }) as Promise<any>,
           ]);
           // includes reverted txs on purpose — Monad charges their full limit too.
-          const mine = (receipts ?? []).filter((rc) => targets.has(String(rc.to ?? '').toLowerCase()));
-          const mon = mine.reduce((a, rc) => a + Number(BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice)) / 1e18, 0);
+          const mine = ((receipts ?? []) as any[]).filter((rc: any) => targets.has(String(rc.to ?? '').toLowerCase()));
+          const mon = mine.reduce((a: number, rc: any) => a + Number(BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice)) / 1e18, 0);
           const day = utcDay(Number(block.timestamp) * 1000);
           const e = acc.get(day) ?? { mon: 0, txs: 0 };
           e.mon += mon * segLen;

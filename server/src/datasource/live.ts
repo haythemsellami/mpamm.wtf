@@ -4,7 +4,7 @@ import {
   type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode,
 } from '@shared';
-import { isAvailabilityFailure } from '../chain/failover.js';
+import { allPreferAvailability, isAvailabilityFailure } from '../chain/failover.js';
 import { computeLeaderboard } from '../analytics.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
@@ -45,7 +45,16 @@ export async function waitForArchiveBoundary(
     }
     try {
       if (await getHead() >= target) return waited;
-    } catch { /* the breaker/status gate owns recovery; keep the boundary fixed */ }
+    } catch (e) {
+      // 429 does not trip the breaker (the endpoint is alive), but retrying it
+      // every second amplifies the throttle. Preserve the boundary and use the
+      // same quiet backoff as a breaker-visible outage.
+      if (isAvailabilityFailure(e)) {
+        waited = true;
+        await pause(15_000);
+        continue;
+      }
+    }
     waited = true;
     await pause(1_000);
   }
@@ -750,10 +759,6 @@ export class LiveDataSource extends BaseSource {
     try {
       // BEFORE both stages, and NOT behind either individual switch: whichever
       // scan is enabled must see its reset before it starts.
-      // ONE clock for the run. The reset's delete boundary and both scans must
-      // agree on which day the live tail owns; a UTC midnight between separate
-      // clocks otherwise leaves a preserved/stale day inside a replay window.
-      const nowMs = Date.now();
       if (hasDedicatedArchive) {
         const waited = await waitForArchiveBoundary(
           this.deepEnd,
@@ -764,6 +769,10 @@ export class LiveDataSource extends BaseSource {
           this.noteOnce('backfill.held', `deep history held until the archive reached boot handoff block ${this.deepEnd}`);
         }
       }
+      // ONE clock for the run, captured AFTER the archive wait: recovery can
+      // cross UTC midnight. The reset's delete boundary and both scans must
+      // agree on the day that is current when work actually begins.
+      const nowMs = Date.now();
       await this.applyBackfillReset(nowMs);
       if (config.markoutBackfill) {
         try { await this.markoutOnboarding(nowMs); }
@@ -1213,7 +1222,13 @@ export class LiveDataSource extends BaseSource {
           const b = await archiveClient.getBlock({ blockNumber: cb > end ? end : cb });
           const daySec = Math.floor(Date.parse(`${utcDay(Number(b.timestamp) * 1000)}T00:00:00Z`) / 1000);
           from = await blockAtOrAfter(daySec, end);
-        } catch { /* fall back to the full-range start */ }
+        } catch (e) {
+          // The resume block remains valid when the archive is unavailable or
+          // throttled. Hold it instead of turning a brief incident into a full
+          // venue-lifetime replay; only an answer-level missing block may fall
+          // back to the configured history start.
+          if (isAvailabilityFailure(e)) throw e;
+        }
       }
     }
     if (from > end) { this.store.setMeta(`backfill_done_${vid}`, '1'); return; }
@@ -1252,7 +1267,7 @@ export class LiveDataSource extends BaseSource {
 
     /** one getLogs across every fill source over [cursor, t]; throws on failure.
      *  ARCHIVE pool — this replays from the venue's deploy day. */
-    const fetchRange = (t: bigint) => Promise.all(sources.map((s) =>
+    const fetchRange = (t: bigint) => allPreferAvailability(sources.map((s) =>
       archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
 
     while (cursor <= end) {
@@ -1499,7 +1514,7 @@ export class LiveDataSource extends BaseSource {
 
     // ARCHIVE pool — the window reaches back markoutBackfillDays (30d default),
     // far past a pruning fullnode's retention.
-    const fetchAll = (t: bigint) => Promise.all(sources.map((s) =>
+    const fetchAll = (t: bigint) => allPreferAvailability(sources.map((s) =>
       archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>));
 
     while (cursor <= end) {

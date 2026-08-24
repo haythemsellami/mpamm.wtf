@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { HttpRequestError, TimeoutError } from 'viem';
 import type { NoteCode } from '@shared';
-import { RpcBreaker, isTransportFailure, type BreakerEndpoint } from '../failover.js';
+import { RpcBreaker, allPreferAvailability, isTransportFailure, type BreakerEndpoint } from '../failover.js';
 
 /**
  * The breaker is pure logic over injected request fns — no network, no viem
@@ -58,6 +58,14 @@ describe('isTransportFailure', () => {
     expect(isTransportFailure(new Error('execution reverted'))).toBe(false);
     expect(isTransportFailure(new Error('block range too large'))).toBe(false);
   });
+
+  it('prefers a concurrent availability failure over an answer-level hole', async () => {
+    const throttled = http429();
+    await expect(allPreferAvailability([
+      Promise.reject(new Error('error getting block header from triedb and archive')),
+      Promise.reject(throttled),
+    ])).rejects.toBe(throttled);
+  });
 });
 
 describe('RpcBreaker failover', () => {
@@ -90,6 +98,15 @@ describe('RpcBreaker failover', () => {
     expect(endpoints[1].calls.length).toBeGreaterThan(0);
     // URLs must never leak into events.
     expect(events.join(' ')).not.toMatch(/https?:\/\//);
+  });
+
+  it.each([401, 403])('fails over from an HTTP %i primary', async (status) => {
+    const denied = () => new HttpRequestError({ url: 'http://x', status });
+    const { breaker } = track(build([{ mode: denied }, { mode: 'ok' }]));
+    await expect(breaker.request({ method: 'eth_blockNumber' })).rejects.toThrow();
+    await expect(breaker.request({ method: 'eth_blockNumber' })).rejects.toThrow();
+    await expect(breaker.request({ method: 'eth_blockNumber' })).resolves.toBe('0x100');
+    expect(breaker.status()).toMatchObject({ active: 'backup-1', degraded: true });
   });
 
   it('never advances on JSON-RPC-level errors or 429', async () => {

@@ -104,6 +104,15 @@ describe('RPC pool config', () => {
     // they have a fallback.
     await expect(import('../../config.js')).rejects.toThrow(/RPC_ARCHIVE_BACKUP_URLS is set but RPC_ARCHIVE_URL/);
   });
+
+  it('accepts an explicit empty archive-backup opt-out with no archive primary', async () => {
+    vi.stubEnv('RPC_HTTP_URL', HOT);
+    vi.stubEnv('RPC_ARCHIVE_BACKUP_URLS', '');
+    vi.resetModules();
+    const { config } = await import('../../config.js');
+    expect(config.rpcArchive).toBe('');
+    expect(config.rpcArchiveBackups).toEqual([]);
+  });
 });
 
 describe('exhausted pool recovery (PR #85 review)', () => {
@@ -284,6 +293,12 @@ describe('availability vs unreadability (PR #85 review)', () => {
     const rangeTooLarge = new HttpRequestError({ url: 'http://x', status: 413 });
     expect(isTransportFailure(rangeTooLarge)).toBe(false);
     expect(isAvailabilityFailure(rangeTooLarge)).toBe(false);
+  });
+
+  it.each([401, 403])('fails over and holds on unusable HTTP %i endpoints', (status) => {
+    const denied = new HttpRequestError({ url: 'http://x', status });
+    expect(isTransportFailure(denied)).toBe(true);
+    expect(isAvailabilityFailure(denied)).toBe(true);
   });
 });
 

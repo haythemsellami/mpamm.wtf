@@ -74,7 +74,7 @@ export const config = {
    *  itself perfectly healthy. No backup is the honest configuration: the
    *  breaker holds, the cursors hold, and state.notes says the archive is down.
    *  Set this only to an endpoint that meets the FULL archive contract above.
-   *  Ignored — and rejected at boot — when RPC_ARCHIVE_URL is unset. */
+   *  A non-empty list is rejected at boot when RPC_ARCHIVE_URL is unset. */
   rpcArchiveBackups: list(env.RPC_ARCHIVE_BACKUP_URLS ?? ''),
 
   bybitRest: env.BYBIT_REST_URL ?? 'https://api.bybit.com',
@@ -196,10 +196,10 @@ export const config = {
 // the deep crawls would keep riding the hot pool while an operator believes they
 // have a fallback. Same fail-loud rule as the chunk config below — a setting
 // that silently does nothing must not boot.
-if (!config.rpcArchive && env.RPC_ARCHIVE_BACKUP_URLS !== undefined) {
+if (!config.rpcArchive && config.rpcArchiveBackups.length > 0) {
   throw new Error(
     'RPC_ARCHIVE_BACKUP_URLS is set but RPC_ARCHIVE_URL is not — the archive backups would never be used ' +
-    '(with no archive primary the deep crawls run on the hot pool). Set RPC_ARCHIVE_URL, or unset RPC_ARCHIVE_BACKUP_URLS.',
+    '(with no archive primary the deep crawls run on the hot pool). Set RPC_ARCHIVE_URL, or unset/empty RPC_ARCHIVE_BACKUP_URLS.',
   );
 }
 

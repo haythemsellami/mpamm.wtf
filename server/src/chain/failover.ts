@@ -71,17 +71,18 @@ export interface RpcStatusView {
   degradedSinceTs?: number;
 }
 
-/** Transport-level failure = the endpoint itself is unhealthy. Healthy 4xx
+/** Transport-level failure = the endpoint itself is unusable. Healthy 4xx
  *  responses are excluded on purpose: throttling/range caps must back off or
- *  shrink, not bounce the whole indexer between endpoints under load. */
+ *  shrink, not bounce the whole indexer between endpoints under load. Auth and
+ *  ACL failures are the exception — no request can succeed on that endpoint. */
 export function isTransportFailure(e: unknown): boolean {
   if (e instanceof TimeoutError) return true;
   if (e instanceof HttpRequestError) {
     // A 4xx response proves the endpoint is serving. In particular, 413 is the
     // public RPC's getLogs range-cap signal: classifying it as transport failure
     // prevents adaptive chunkers from shrinking and can fail over a healthy
-    // endpoint. 408 is the one 4xx that is transport-shaped.
-    return e.status === undefined || e.status === 408 || e.status >= 500;
+    // endpoint. 401/403 cannot serve any RPC request and 408 is transport-shaped.
+    return e.status === undefined || e.status === 401 || e.status === 403 || e.status === 408 || e.status >= 500;
   }
   return false;
 }
@@ -102,6 +103,19 @@ export function isTransportFailure(e: unknown): boolean {
 export function isAvailabilityFailure(e: unknown): boolean {
   if (isTransportFailure(e)) return true;
   return e instanceof HttpRequestError && e.status === 429;
+}
+
+/** Wait for every concurrent archive read, then prefer any availability
+ *  failure over answer-level errors. Promise.all reports only the first promise
+ *  to reject; if a permanent hole wins that race while a sibling source was
+ *  throttled/unreachable, a crawler can consume a range it never fully read. */
+export async function allPreferAvailability<T>(reads: Iterable<PromiseLike<T>>): Promise<T[]> {
+  const settled = await Promise.allSettled(reads);
+  const unavailable = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected' && isAvailabilityFailure(r.reason));
+  if (unavailable) throw unavailable.reason;
+  const rejected = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+  if (rejected) throw rejected.reason;
+  return settled.map((r) => (r as PromiseFulfilledResult<T>).value);
 }
 
 const FAILURE_THRESHOLD = 3;   // consecutive transport failures before advancing
