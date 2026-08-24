@@ -45,6 +45,13 @@ function build(behaviors: Array<{ mode: 'ok' | (() => Error) }>, labels?: string
   return { breaker, endpoints, events, codes };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 let cleanup: RpcBreaker[] = [];
 afterEach(() => { for (const b of cleanup) b.stop(); cleanup = []; });
 const track = <T extends { breaker: RpcBreaker }>(x: T): T => { cleanup.push(x.breaker); return x; };
@@ -138,6 +145,90 @@ describe('RpcBreaker failover', () => {
     expect(breaker.status().active).toBe('backup-1');
     // late arrivals of the burst are served by the backup, not failed.
     expect(burst.some((r) => r.status === 'fulfilled')).toBe(true);
+  });
+
+  it('rejects a stale backup success after a full rotation back to primary', async () => {
+    let primaryCalls = 0;
+    let primaryRecovered = false;
+    const primaryPending: ReturnType<typeof deferred<unknown>>[] = [];
+    const backupSuccess = deferred<unknown>();
+    const backupFailures: ReturnType<typeof deferred<unknown>>[] = [];
+    let backupCalls = 0;
+
+    const primary: BreakerEndpoint = {
+      label: 'primary',
+      request: () => {
+        primaryCalls += 1;
+        if (primaryRecovered) return Promise.resolve('primary-result');
+        if (primaryCalls <= 2) return Promise.reject(http502());
+        const pending = deferred<unknown>();
+        primaryPending.push(pending);
+        return pending.promise;
+      },
+    };
+    const backup: BreakerEndpoint = {
+      label: 'backup-1',
+      request: () => {
+        backupCalls += 1;
+        if (backupCalls === 1) return backupSuccess.promise;
+        const pending = deferred<unknown>();
+        backupFailures.push(pending);
+        return pending.promise;
+      },
+    };
+    const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    breaker.attach([primary, backup]);
+    const codes: NoteCode[] = [];
+    breaker.subscribe((n) => { codes.push(n.code); });
+    cleanup.push(breaker);
+
+    // Prime the primary's failure streak, then put four reads in flight there.
+    await expect(breaker.request({ method: 'eth_blockNumber' })).rejects.toThrow();
+    await expect(breaker.request({ method: 'eth_blockNumber' })).rejects.toThrow();
+    const unavailable = () => {
+      const status = breaker.status();
+      return status.degraded || status.down;
+    };
+    const reads = Array.from({ length: 4 }, () => guardRpcRead(
+      () => breaker.request({ method: 'eth_blockNumber' }),
+      unavailable,
+      () => breaker.generation(),
+    ));
+    await Promise.resolve(); await Promise.resolve();
+    expect(primaryPending).toHaveLength(4);
+
+    // One primary failure switches the pool. All four requests retry on the
+    // backup; leave its first success delayed while three siblings fail it.
+    primaryPending[0].reject(http502());
+    await Promise.resolve(); await Promise.resolve();
+    for (const pending of primaryPending.slice(1)) pending.reject(http502());
+    await Promise.resolve(); await Promise.resolve();
+    expect(backupFailures).toHaveLength(3);
+    for (const pending of backupFailures) {
+      pending.reject(http502());
+      await Promise.resolve(); await Promise.resolve();
+    }
+    expect(breaker.status()).toMatchObject({ active: 'primary', degraded: false, down: true });
+
+    // The old backup response belongs to a prior serving generation. It must
+    // neither clear the current outage nor escape a cursor-bearing guard.
+    backupSuccess.resolve('stale-backup-result');
+    const settled = await Promise.allSettled(reads);
+    expect(settled.every((r) => r.status === 'rejected' && isAvailabilityFailure(r.reason))).toBe(true);
+    expect(breaker.status()).toMatchObject({ active: 'primary', degraded: false, down: true });
+    expect(codes).not.toContain('rpc.recovered');
+
+    // A current-generation primary success still restores normal service and
+    // ordinary guarded reads remain accepted.
+    primaryRecovered = true;
+    await expect(breaker.request({ method: 'eth_blockNumber' })).resolves.toBe('primary-result');
+    await expect(guardRpcRead(
+      () => breaker.request({ method: 'eth_blockNumber' }),
+      unavailable,
+      () => breaker.generation(),
+    )).resolves.toBe('primary-result');
+    expect(breaker.status().down).toBe(false);
+    expect(codes).toContain('rpc.recovered');
   });
 
   it('marks down when every endpoint fails, clears on any success', async () => {

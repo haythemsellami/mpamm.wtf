@@ -32,6 +32,7 @@ const PUBLIC_RPC = 'https://rpc.monad.xyz';
 interface RpcPool {
   client: PublicClient;
   status: () => RpcStatusView;
+  generation: () => number;
   onEvent: (cb: (n: RpcNote) => void) => void;
   verify: () => Promise<RpcVerifyResult>;
 }
@@ -73,6 +74,7 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
   return {
     client,
     status: () => breaker.status(),
+    generation: () => breaker.generation(),
     onEvent: (cb) => breaker.subscribe(cb),
     verify: () => breaker.verify(MONAD_CHAIN_ID),
   };
@@ -102,12 +104,14 @@ export const archiveClient: PublicClient = archivePool.client;
 /** Failover status for /api/markets (labels only) + event sink for state.notes
  *  (each event carries its own note code — see failover.ts RpcNote). */
 export const rpcStatus = (): RpcStatusView => hotPool.status();
+export const rpcGeneration = (): number => hotPool.generation();
 export const onRpcEvent = (cb: (n: RpcNote) => void): void => hotPool.onEvent(cb);
 
 /** Same, for the deep-history pool. With no dedicated archive these mirror the
  *  hot pool — callers get one consistent answer either way, and the live source
  *  only PUBLISHES the archive status when the pools actually differ. */
 export const archiveRpcStatus = (): RpcStatusView => archivePool.status();
+export const archiveRpcGeneration = (): number => archivePool.generation();
 export const onArchiveRpcEvent = (cb: (n: RpcNote) => void): void => archivePool.onEvent(cb);
 
 /** Boot sanity check — verifies chain id 143 on EVERY endpoint (wrong-chain
@@ -142,6 +146,7 @@ export async function blockAtOrAfter(
     const status = archiveRpcStatus();
     return status.degraded || status.down;
   },
+  generation: () => number = archiveRpcGeneration,
 ): Promise<bigint> {
   let lo = 0n, h = hi, ans = hi;
   // a single failed probe usually IS a pruned block (search higher), but a
@@ -152,7 +157,7 @@ export async function blockAtOrAfter(
   while (lo <= h) {
     const mid = lo + (h - lo) / 2n;
     let ts: number | undefined;
-    try { ts = Number((await guardRpcRead(() => getBlock(mid), unavailable)).timestamp); }
+    try { ts = Number((await guardRpcRead(() => getBlock(mid), unavailable, generation)).timestamp); }
     catch (e) {
       // A timeout/transport outage/429 says nothing about this block. Advancing
       // `lo` on it biases the search late, and callers persist that answer as a

@@ -64,7 +64,9 @@ async function setup(failure: Failure, readDelayMs = 0) {
     onRpcEvent: vi.fn(),
     onArchiveRpcEvent: vi.fn(),
     rpcStatus: primaryStatus,
+    rpcGeneration: () => 0,
     archiveRpcStatus: primaryStatus,
+    archiveRpcGeneration: () => 0,
     hasDedicatedArchive: true,
   }));
 

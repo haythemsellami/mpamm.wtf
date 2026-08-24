@@ -116,6 +116,8 @@ export class GasTracker {
     private degraded: () => boolean = () => false,
     /** per-pass tail budget override (tests); production uses the config knob. */
     private sliceChunks: number = config.gasSliceChunks,
+    /** Monotonic pool generation; detects primary → backup → primary inside one read. */
+    private rpcGeneration: () => number = () => 0,
   ) {
     for (const a of adapters) {
       const vid = a.venues()[0]?.id;
@@ -138,7 +140,7 @@ export class GasTracker {
   /** The breaker may retry a failed primary request on a backup inside one
    *  await. No deep result is accepted unless the pool stayed fully healthy. */
   private rpc<T>(read: () => Promise<T>): Promise<T> {
-    return guardRpcRead(read, this.degraded);
+    return guardRpcRead(read, this.degraded, this.rpcGeneration);
   }
 
   /** one pass: tail every gas-declaring venue to head, then reschedule. */

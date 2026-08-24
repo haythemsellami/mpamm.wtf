@@ -12,7 +12,7 @@ import { GasTracker } from '../gas.js';
 import { config } from '../config.js';
 import {
   publicClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
-  onRpcEvent, onArchiveRpcEvent, rpcStatus, archiveRpcStatus, hasDedicatedArchive,
+  onRpcEvent, onArchiveRpcEvent, rpcStatus, rpcGeneration, archiveRpcStatus, archiveRpcGeneration, hasDedicatedArchive,
 } from '../chain/rpc.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, type ResetDeletes } from '../db.js';
@@ -55,6 +55,7 @@ export async function waitForArchiveBoundary(
   getHead: () => Promise<bigint>,
   isUnavailable: () => boolean = () => false,
   pause: (ms: number) => Promise<void> = sleep,
+  generation: () => number = () => 0,
 ): Promise<boolean> {
   let waited = false;
   let unavailableAttempts = 0;
@@ -65,7 +66,7 @@ export async function waitForArchiveBoundary(
       continue;
     }
     try {
-      if (await guardRpcRead(getHead, isUnavailable) >= target) return waited;
+      if (await guardRpcRead(getHead, isUnavailable, generation) >= target) return waited;
       unavailableAttempts = 0;
     } catch (e) {
       // 429 does not trip the breaker (the endpoint is alive), but retrying it
@@ -591,7 +592,7 @@ function archiveUnavailable(): boolean {
 
 /** One deep read is valid only when the archive pool stays primary/healthy for
  *  its entire lifetime. The breaker can fail over and retry inside the await. */
-const archiveRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, archiveUnavailable);
+const archiveRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, archiveUnavailable, archiveRpcGeneration);
 
 async function holdWhileDegraded(): Promise<boolean> {
   const wasUnavailable = archiveUnavailable();
@@ -620,7 +621,15 @@ export class LiveDataSource extends BaseSource {
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
   // ARCHIVE pool: the gas tracker resolves `gas_from` through blockAtOrAfter and
   // crawls receipts from there, so it is a deep-history consumer end to end.
-  private gas = new GasTracker(archiveClient, this.store, ADAPTERS, (code, msg, venue) => this.noteOnce(code, msg, venue), () => archiveUnavailable());
+  private gas = new GasTracker(
+    archiveClient,
+    this.store,
+    ADAPTERS,
+    (code, msg, venue) => this.noteOnce(code, msg, venue),
+    () => archiveUnavailable(),
+    config.gasSliceChunks,
+    archiveRpcGeneration,
+  );
   /** fill attribution — UNKNOWN → DIRECT / "Router - X" from tx.to (best-effort;
    *  stays on during failover — per-fill lookups are live-path cheap, unlike crawls). */
   private attributor = new FillAttributor(publicClient, ADAPTERS);
@@ -794,13 +803,15 @@ export class LiveDataSource extends BaseSource {
           const status = rpcStatus();
           return status.degraded || status.down;
         };
-        const head = await guardRpcRead(() => publicClient.getBlockNumber(), hotUnavailable);
+        const head = await guardRpcRead(() => publicClient.getBlockNumber(), hotUnavailable, rpcGeneration);
         if (head > this.deepEnd) this.deepEnd = head;
         if (hasDedicatedArchive) {
           const waited = await waitForArchiveBoundary(
             this.deepEnd,
             () => archiveClient.getBlockNumber(),
             archiveUnavailable,
+            sleep,
+            archiveRpcGeneration,
           );
           if (waited) {
             this.noteOnce('backfill.held', `deep history held until the archive reached hot handoff block ${this.deepEnd}`);

@@ -115,18 +115,24 @@ export function isAvailabilityFailure(e: unknown): boolean {
   return e instanceof HttpRequestError && e.status === 429;
 }
 
-/** Accept a read only if its pool is fully available both before and after the
- *  await. Breakers retry transparently, so error classification alone cannot
- *  reveal that a request moved from the primary to a backup mid-flight. */
-export async function guardRpcRead<T>(read: () => Promise<T>, unavailable: () => boolean): Promise<T> {
+/** Accept a read only if its pool is fully available and unchanged both before
+ *  and after the await. Breakers retry transparently, and a pool can rotate
+ *  primary → backup → primary inside one read, so the final boolean state
+ *  alone cannot prove that the result stayed on the primary. */
+export async function guardRpcRead<T>(
+  read: () => Promise<T>,
+  unavailable: () => boolean,
+  generation: () => number = () => 0,
+): Promise<T> {
+  const startedAt = generation();
   if (unavailable()) throw new RpcReadUnavailableError();
   try {
     const value = await read();
-    if (unavailable()) throw new RpcReadUnavailableError();
+    if (unavailable() || generation() !== startedAt) throw new RpcReadUnavailableError();
     return value;
   } catch (e) {
     if (e instanceof RpcReadUnavailableError) throw e;
-    if (unavailable()) throw new RpcReadUnavailableError(e);
+    if (unavailable() || generation() !== startedAt) throw new RpcReadUnavailableError(e);
     throw e;
   }
 }
@@ -161,6 +167,9 @@ export class RpcBreaker {
   private endpointHealth: EndpointHealth[] = [];
   private expectedChainId: number | undefined;
   private active = 0;
+  /** Monotonic identity of the active serving state. Deep reads capture this
+   *  before awaiting so even a primary → backup → primary cycle is visible. */
+  private stateGeneration = 0;
   private failures = 0;
   /** endpoints advanced-through without a single success — >= endpoint count
    *  means a full rotation failed: everything is down. */
@@ -205,6 +214,10 @@ export class RpcBreaker {
     };
   }
 
+  generation(): number {
+    return this.stateGeneration;
+  }
+
   /** One request through the active endpoint; on a threshold-crossing failure
    *  the request transparently retries on the next endpoint(s), at most one
    *  full rotation. Non-transport errors pass through untouched. */
@@ -212,32 +225,38 @@ export class RpcBreaker {
     let hops = 0;
     for (;;) {
       const idx = this.active;
+      const generation = this.stateGeneration;
       try {
         await this.ensureChain(idx);
         const res = await this.endpoints[idx].request(args);
-        // any success proves the active endpoint serves — clear streak state.
-        if (idx === this.active) this.failures = 0;
-        this.advancesSinceSuccess = 0;
-        if (this.allDown) {
-          this.allDown = false;
-          this.onEvent({ code: 'rpc.recovered', msg: `${this.pool} serving again (on ${this.endpoints[this.active].label})` });
+        // A late result from an endpoint serving an older generation is still
+        // usable by non-cursor callers, but it proves nothing about the active
+        // endpoint and must not clear its failure/outage state.
+        if (idx === this.active && generation === this.stateGeneration) {
+          this.failures = 0;
+          this.advancesSinceSuccess = 0;
+          if (this.allDown) {
+            this.allDown = false;
+            this.stateGeneration += 1;
+            this.onEvent({ code: 'rpc.recovered', msg: `${this.pool} serving again (on ${this.endpoints[this.active].label})` });
+          }
         }
         return res;
       } catch (e) {
         if (e instanceof WrongChainEndpointError) {
-          if (idx === this.active) this.advance();
-          if (this.active === idx || ++hops >= this.endpoints.length) throw e;
+          if (idx === this.active && generation === this.stateGeneration) this.advance();
+          if ((this.active === idx && generation === this.stateGeneration) || ++hops >= this.endpoints.length) throw e;
           continue;
         }
         if (!isTransportFailure(e)) throw e;
         // Concurrent failures from one bad batch all land here with the same
         // idx — only the streak on the STILL-active endpoint counts, so a
         // burst advances once, not once per in-flight request.
-        if (idx === this.active) {
+        if (idx === this.active && generation === this.stateGeneration) {
           this.failures += 1;
           if (this.failures >= FAILURE_THRESHOLD) this.advance();
         }
-        if (this.active === idx || ++hops >= this.endpoints.length) throw e;
+        if ((this.active === idx && generation === this.stateGeneration) || ++hops >= this.endpoints.length) throw e;
         // another endpoint is active now (we advanced, or a sibling did) — retry there.
       }
     }
@@ -272,6 +291,7 @@ export class RpcBreaker {
       // Archive verification is deliberately non-fatal for an outage. Publish
       // the real state and start recovery ourselves: paused consumers generate
       // no traffic that could otherwise move the breaker forward.
+      if (!this.allDown) this.stateGeneration += 1;
       this.allDown = true;
       this.advancesSinceSuccess = this.endpoints.length;
       this.startProbe();
@@ -279,6 +299,7 @@ export class RpcBreaker {
     }
     if (firstHealthy > 0) {
       this.active = firstHealthy;
+      this.stateGeneration += 1;
       this.degradedSinceTs = Date.now();
       this.onEvent({ code: 'rpc.failover', msg: `${this.pool} primary unreachable at boot — starting on ${this.endpoints[firstHealthy].label}` });
       this.startProbe();
@@ -307,6 +328,7 @@ export class RpcBreaker {
           this.allDown = false;
           this.advancesSinceSuccess = 0;
           this.degradedSinceTs = i === 0 ? undefined : (this.degradedSinceTs ?? Date.now());
+          this.stateGeneration += 1;
           this.onEvent({ code: 'rpc.recovered', msg: `${this.pool} serving again (on ${this.endpoints[i].label})` });
           if (i === 0 || this.endpointHealth[0] === 'wrong-chain') this.stop();
           return;
@@ -351,6 +373,7 @@ export class RpcBreaker {
           : `${this.pool}: all ${this.endpoints.length} endpoints unreachable — chain data frozen until one recovers`,
       });
     }
+    this.stateGeneration += 1;
     if (this.active === 0) {
       // cycled through every backup back to the primary — give it a fresh shot
       // silently (nothing recovered; the next SUCCESS announces recovery).
@@ -378,6 +401,7 @@ export class RpcBreaker {
     this.failures = 0;
     this.healthyProbes = 0;
     this.degradedSinceTs = undefined;
+    this.stateGeneration += 1;
     this.stop();
     if (sinceTs !== undefined) {
       const mins = Math.max(1, Math.round((Date.now() - sinceTs) / 60_000));
