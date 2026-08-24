@@ -26,6 +26,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const ARCHIVE_RETRY_BASE_MS = 15_000;
 const ARCHIVE_RETRY_MAX_MS = 120_000;
+const ARCHIVE_BOUNDARY_NOTE_MS = 30_000;
 
 /** Cursor-preserving availability retries use a real outage cadence, not the
  *  normal crawl pace. A sustained 429 otherwise turns a background repair into
@@ -47,18 +48,39 @@ class HistoryDayRolledError extends Error {
   }
 }
 
+export interface ArchiveBoundaryWaitState {
+  head: bigint;
+  target: bigint;
+  lag: bigint;
+  waitedMs: number;
+}
+
+export interface ArchiveBoundaryWaitObserver {
+  graceMs: number;
+  onHeld: (state: ArchiveBoundaryWaitState) => void;
+  onResumed?: (state: ArchiveBoundaryWaitState) => void;
+  /** deterministic clock injection for tests. */
+  now?: () => number;
+}
+
 /** Wait until the archive can serve an exact hot-head handoff. An archive
  *  chosen for retention may trail the hot node by a few blocks, but it will
- *  pass that fixed target shortly as the chain advances. */
+ *  pass that fixed target shortly as the chain advances. The wait remains
+ *  deliberately unbounded and fail-closed; the observer makes a serving but
+ *  persistently lagging archive visible without weakening that invariant. */
 export async function waitForArchiveBoundary(
   target: bigint,
   getHead: () => Promise<bigint>,
   isUnavailable: () => boolean = () => false,
   pause: (ms: number) => Promise<void> = sleep,
   generation: () => number = () => 0,
+  observer?: ArchiveBoundaryWaitObserver,
 ): Promise<boolean> {
   let waited = false;
   let unavailableAttempts = 0;
+  let held = false;
+  const now = observer?.now ?? Date.now;
+  const startedAt = now();
   while (target > 0n) {
     if (isUnavailable()) {
       waited = true;
@@ -66,7 +88,15 @@ export async function waitForArchiveBoundary(
       continue;
     }
     try {
-      if (await guardRpcRead(getHead, isUnavailable, generation) >= target) return waited;
+      const head = await guardRpcRead(getHead, isUnavailable, generation);
+      if (head >= target) {
+        if (held) observer?.onResumed?.({ head, target, lag: 0n, waitedMs: Math.max(0, now() - startedAt) });
+        return waited;
+      }
+      if (!held && observer && now() - startedAt >= observer.graceMs) {
+        held = true;
+        observer.onHeld({ head, target, lag: target - head, waitedMs: Math.max(0, now() - startedAt) });
+      }
       unavailableAttempts = 0;
     } catch (e) {
       // 429 does not trip the breaker (the endpoint is alive), but retrying it
@@ -82,6 +112,16 @@ export async function waitForArchiveBoundary(
     await pause(1_000);
   }
   return waited;
+}
+
+/** Compact, stable telemetry durations: precise enough to size an incident,
+ *  without changing every second and defeating note deduplication. */
+export function approximateDuration(ms: number): string {
+  const value = Math.max(0, ms);
+  if (value < 120_000) return `~${Math.max(1, Math.round(value / 1_000))}s`;
+  if (value < 7_200_000) return `~${Math.round(value / 60_000)}m`;
+  if (value < 172_800_000) return `~${Math.round(value / 3_600_000)}h`;
+  return `~${(value / 86_400_000).toFixed(1)}d`;
 }
 
 /** Reference-feed starvation lifecycle for the base assets.
@@ -810,14 +850,30 @@ export class LiveDataSource extends BaseSource {
         const head = await guardRpcRead(() => publicClient.getBlockNumber(), hotUnavailable, rpcGeneration);
         if (head > this.deepEnd) this.deepEnd = head;
         if (hasDedicatedArchive) {
+          let lagWasAnnounced = false;
+          let heldMsg = '';
           const waited = await waitForArchiveBoundary(
             this.deepEnd,
             () => archiveClient.getBlockNumber(),
             archiveUnavailable,
             sleep,
             archiveRpcGeneration,
+            {
+              graceMs: ARCHIVE_BOUNDARY_NOTE_MS,
+              onHeld: ({ head, target, lag }) => {
+                lagWasAnnounced = true;
+                // Monad's official 300ms block time converts the block deficit
+                // into the chain-time lag an operator can size at a glance.
+                heldMsg = `deep history waiting for archive handoff: archive head ${head}, target ${target} (${lag} blocks / ${approximateDuration(Number(lag) * 300)} behind)`;
+                this.noteOnce('backfill.held', heldMsg);
+              },
+              onResumed: ({ target, waitedMs }) => {
+                this.dropNote('backfill.held', heldMsg);
+                this.note('backfill.held', `deep history resumed: archive reached hot handoff block ${target} after ${approximateDuration(waitedMs)}`);
+              },
+            },
           );
-          if (waited) {
+          if (waited && !lagWasAnnounced) {
             this.noteOnce('backfill.held', `deep history held until the archive reached hot handoff block ${this.deepEnd}`);
           }
         }
