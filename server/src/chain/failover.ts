@@ -48,6 +48,18 @@ export interface BreakerEndpoint {
 }
 
 /** Public shape served on /api/markets (shared MarketState.rpc). */
+/** Outcome of a boot verify. `wrongChain` separates a MISCONFIGURATION (an
+ *  endpoint on another chain answers successfully, so the breaker can never
+ *  fail away from it) from an OUTAGE (unreachable, which recovers on its own).
+ *  Callers that treat an outage as non-fatal must still fail closed on the
+ *  former — persisting another chain's logs is silent corruption, not a gap. */
+export interface RpcVerifyResult {
+  ok: boolean;
+  block: number;
+  reason?: string;
+  wrongChain?: boolean;
+}
+
 export interface RpcStatusView {
   /** label of the endpoint currently serving requests. */
   active: string;
@@ -156,7 +168,7 @@ export class RpcBreaker {
    *  unreachable endpoint is kept — it may be mid-outage (today's incident) —
    *  and if that's the primary, we pre-position onto the first healthy backup
    *  so boot doesn't burn the failure threshold on a known-dead node. */
-  async verify(expectChainId: number): Promise<{ ok: boolean; block: number; reason?: string }> {
+  async verify(expectChainId: number): Promise<RpcVerifyResult> {
     const health: (boolean | undefined)[] = []; // true=healthy, false=wrong chain, undefined=unreachable
     let block = 0;
     for (const ep of this.endpoints) {
@@ -177,7 +189,7 @@ export class RpcBreaker {
         health.push(undefined);
       }
     }
-    if (health[0] === false) return { ok: false, block: 0, reason: `${this.pool} primary is on the wrong chain (chainId != ${expectChainId})` };
+    if (health[0] === false) return { ok: false, block: 0, wrongChain: true, reason: `${this.pool} primary is on the wrong chain (chainId != ${expectChainId})` };
     // drop wrong-chain backups (walk backwards so indices stay valid).
     for (let i = this.endpoints.length - 1; i >= 1; i--) {
       if (health[i] === false) { this.endpoints.splice(i, 1); health.splice(i, 1); }
@@ -197,12 +209,29 @@ export class RpcBreaker {
 
   /** One primary probe round (the timer's body; exposed for tests). */
   async probeNow(): Promise<void> {
-    if (this.active === 0 || this.probeInFlight || !this.endpoints.length) return;
+    if (this.probeInFlight || !this.endpoints.length) return;
+    // Sitting on a healthy primary is the one state with nothing to probe.
+    // `allDown` while active === 0 is NOT that state: it is the post-wrap
+    // state above, where the primary is presumed dead and only a probe can
+    // prove otherwise.
+    if (this.active === 0 && !this.allDown) return;
     this.probeInFlight = true;
     try {
       await this.endpoints[0].request({ method: 'eth_blockNumber' });
-      this.healthyProbes += 1;
-      if (this.healthyProbes >= RECOVERY_PROBES) this.backOnPrimary();
+      if (this.allDown) {
+        this.allDown = false;
+        this.advancesSinceSuccess = 0;
+        this.onEvent({ code: 'rpc.recovered', msg: `${this.pool} serving again (on ${this.endpoints[0].label})` });
+      }
+      // Snapping BACK to the primary only means something while we are on a
+      // backup; after a wrap we are already on index 0 and clearing `allDown`
+      // is the whole recovery.
+      if (this.active !== 0) {
+        this.healthyProbes += 1;
+        if (this.healthyProbes >= RECOVERY_PROBES) this.backOnPrimary();
+      } else {
+        this.stop();
+      }
     } catch {
       this.healthyProbes = 0;
     } finally {
@@ -234,7 +263,14 @@ export class RpcBreaker {
       // silently (nothing recovered; the next SUCCESS announces recovery).
       this.degradedSinceTs = undefined;
       this.healthyProbes = 0;
-      this.stop();
+      // KEEP probing. This used to stop() here, which was safe only because
+      // every consumer retried forever and so generated the traffic that
+      // clears `allDown`. The deep crawls now PAUSE while their pool is down
+      // (they must — see the hole-skip note in live.ts), and a paused consumer
+      // sends nothing, so without a probe of our own an all-down archive pool
+      // could never recover: the crawls wait on `down`, `down` waits on a
+      // request, and nobody makes one.
+      this.startProbe();
       return;
     }
     if (this.degradedSinceTs === undefined) this.degradedSinceTs = Date.now();

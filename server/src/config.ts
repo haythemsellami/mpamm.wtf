@@ -36,7 +36,13 @@ export const config = {
   //   ARCHIVE volume backfill, markout onboarding, gas passes, blockAtOrAfter.
   //           These binary-search from block 0 and replay months-old ranges, so
   //           lag is irrelevant and RETENTION is everything — and the tip-fresh
-  //           fullnodes prune to ~1.7 days.
+  //           fullnodes prune to ~1.6 days.
+  //
+  // The archive contract is logs + headers + receipts at ANY depth, AND
+  // historical code state: GasTracker.creationBlock() bisects eth_getCode from
+  // block 0 to find a destination's deployment (gas.ts). That last one is easy
+  // to miss because nothing else needs historical state — every other
+  // block-pinned read pins the CURRENT head.
   //
   // They must be separate pools rather than one ordered list, because failover
   // cannot bridge them: a pruned block answers with a JSON-RPC error, and
@@ -56,11 +62,20 @@ export const config = {
    *  unconfigured deployment is unaffected. Set it only when the hot primary
    *  cannot serve venue-lifetime ranges (i.e. it is a pruning fullnode). */
   rpcArchive: env.RPC_ARCHIVE_URL ?? '',
-  /** Ordered failover RPCs behind the archive primary. Default: the public RPC,
-   *  which serves headers/logs/receipts back to block 0 (its ~100-block getLogs
-   *  cap is absorbed by getLogsChunked's shrink). Ignored — and rejected at
-   *  boot — when RPC_ARCHIVE_URL is unset. */
-  rpcArchiveBackups: list(env.RPC_ARCHIVE_BACKUP_URLS ?? 'https://rpc.monad.xyz'),
+  /** Ordered failover RPCs behind the archive primary. Default: NONE.
+   *
+   *  The public endpoint is deliberately not the default here, unlike the hot
+   *  pool. It serves headers/logs/receipts to block 0, but REFUSES historical
+   *  code state — `eth_getCode` at an old block answers "Block requested not
+   *  found. Request might be querying historical state" (measured). Failing
+   *  over to it would satisfy every crawl except GasTracker.creationBlock(),
+   *  whose bootstrap path returns WITHOUT storing its fingerprint on a probe
+   *  failure, so that venue's gas would retry forever while the pool reported
+   *  itself perfectly healthy. No backup is the honest configuration: the
+   *  breaker holds, the cursors hold, and state.notes says the archive is down.
+   *  Set this only to an endpoint that meets the FULL archive contract above.
+   *  Ignored — and rejected at boot — when RPC_ARCHIVE_URL is unset. */
+  rpcArchiveBackups: list(env.RPC_ARCHIVE_BACKUP_URLS ?? ''),
 
   bybitRest: env.BYBIT_REST_URL ?? 'https://api.bybit.com',
   bybitWs: env.BYBIT_WS_URL ?? 'wss://stream.bybit.com/v5/public/spot',

@@ -1,7 +1,7 @@
 import { createPublicClient, createTransport, defineChain, http, type PublicClient, type Transport } from 'viem';
 import { config } from '../config.js';
 import { ADDR, MONAD_CHAIN_ID } from '@shared';
-import { RpcBreaker, type RpcNote, type RpcStatusView } from './failover.js';
+import { RpcBreaker, type RpcNote, type RpcStatusView, type RpcVerifyResult } from './failover.js';
 
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
@@ -33,7 +33,7 @@ interface RpcPool {
   client: PublicClient;
   status: () => RpcStatusView;
   onEvent: (cb: (n: RpcNote) => void) => void;
-  verify: () => Promise<{ ok: boolean; block: number; reason?: string }>;
+  verify: () => Promise<RpcVerifyResult>;
 }
 
 /**
@@ -114,7 +114,7 @@ export const onArchiveRpcEvent = (cb: (n: RpcNote) => void): void => archivePool
  *  backups are dropped, wrong-chain primary is fatal) and pre-positions onto
  *  the first healthy endpoint when the primary is mid-outage. Boot proceeds if
  *  ANY endpoint serves (docs/architecture.md: operations). */
-export async function probeChain(): Promise<{ ok: boolean; block: number; reason?: string }> {
+export async function probeChain(): Promise<RpcVerifyResult> {
   return hotPool.verify();
 }
 
@@ -122,7 +122,7 @@ export async function probeChain(): Promise<{ ok: boolean; block: number; reason
  *  work, so a dead archive must degrade to "history stalls, loudly" rather than
  *  take down live quoting — the one job that still works without any history.
  *  A no-op when the pools are shared (probeChain already verified them). */
-export async function probeArchiveChain(): Promise<{ ok: boolean; block: number; reason?: string }> {
+export async function probeArchiveChain(): Promise<RpcVerifyResult> {
   return hasDedicatedArchive ? archivePool.verify() : { ok: true, block: 0 };
 }
 

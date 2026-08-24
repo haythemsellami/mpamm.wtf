@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { HttpRequestError } from 'viem';
+import type { NoteCode } from '@shared';
 import { RpcBreaker, type BreakerEndpoint } from '../failover.js';
 
 /**
@@ -80,6 +82,19 @@ describe('RPC pool config', () => {
     expect(config.rpcBackups).toEqual([]);
   });
 
+  it('ships NO default archive backup — the public endpoint fails the contract', async () => {
+    // rpc.monad.xyz serves headers/logs/receipts to block 0 but refuses
+    // historical eth_getCode, which GasTracker.creationBlock() bisects. Failing
+    // over to it would leave gas bootstrap retrying forever while the pool
+    // reported itself healthy, so the archive pool defaults to no backup.
+    vi.stubEnv('RPC_HTTP_URL', HOT);
+    vi.stubEnv('RPC_ARCHIVE_URL', ARCHIVE);
+    vi.resetModules();
+    const { config } = await import('../../config.js');
+    expect(config.rpcArchiveBackups).toEqual([]);
+    expect(config.rpcBackups).toEqual(['https://rpc.monad.xyz']); // hot pool keeps its default
+  });
+
   it('REFUSES to boot on archive backups with no archive primary', async () => {
     vi.stubEnv('RPC_HTTP_URL', HOT);
     vi.stubEnv('RPC_ARCHIVE_BACKUP_URLS', 'https://archive-backup.example/rpc');
@@ -88,6 +103,81 @@ describe('RPC pool config', () => {
     // the deep crawls would keep riding the hot pool while an operator believes
     // they have a fallback.
     await expect(import('../../config.js')).rejects.toThrow(/RPC_ARCHIVE_BACKUP_URLS is set but RPC_ARCHIVE_URL/);
+  });
+});
+
+describe('exhausted pool recovery (PR #85 review)', () => {
+  const ok = (label: string): BreakerEndpoint => ({
+    label,
+    request: async (a: { method: string }) => (a.method === 'eth_chainId' ? '0x8f' : '0x100'),
+  });
+  const flaky = (label: string, state: { dead: boolean }): BreakerEndpoint => ({
+    label,
+    request: async (a: { method: string }) => {
+      if (state.dead) throw new HttpRequestError({ url: 'http://x', status: 502 });
+      return a.method === 'eth_chainId' ? '0x8f' : '0x100';
+    },
+  });
+
+  /** Drive failing traffic until the breaker reaches the post-wrap state, where
+   *  it has cycled through every endpoint and sits back on index 0. Written as a
+   *  search, not a fixed request count: the exact count depends on the failure
+   *  threshold, and the state is TRANSIENT — the next advance leaves it again. */
+  const driveToWrap = async (breaker: RpcBreaker): Promise<boolean> => {
+    for (let i = 0; i < 40; i++) {
+      await breaker.request({ method: 'eth_blockNumber' }).catch(() => undefined);
+      const st = breaker.status();
+      if (st.down && !st.degraded) return true;
+    }
+    return false;
+  };
+
+  it('reports down WITHOUT degraded once every endpoint is exhausted', async () => {
+    // The state the deep-crawl gate has to know about: the breaker wraps back to
+    // index 0, so `degraded` reads false while nothing is actually serving.
+    // Gating deep crawls on `degraded` alone would run them right through it.
+    const state = { dead: true };
+    const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    breaker.attach([flaky('primary', state), flaky('backup-1', state)]);
+    const reached = await driveToWrap(breaker);
+    breaker.stop();
+    expect(reached).toBe(true);
+  });
+
+  it('recovers from down via its own probe, with no consumer traffic', async () => {
+    // A paused deep crawl sends nothing, so the pool must prove its own recovery
+    // — otherwise the crawl waits on `down` and `down` waits on a request.
+    const state = { dead: true };
+    const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    breaker.attach([flaky('primary', state), flaky('backup-1', state)]);
+    const codes: NoteCode[] = [];
+    breaker.subscribe((n) => codes.push(n.code));
+    expect(await driveToWrap(breaker)).toBe(true);
+
+    state.dead = false;          // endpoint comes back; nobody calls it
+    await breaker.probeNow();    // the timer's body, driven directly
+    breaker.stop();
+    expect(breaker.status()).toMatchObject({ down: false, degraded: false });
+    expect(codes).toContain('rpc.recovered');
+  });
+
+  it('flags a wrong-chain primary distinctly from an unreachable one', async () => {
+    // The archive probe is non-fatal for an outage but MUST fail closed here:
+    // a wrong-chain node answers successfully, so failover can never route away.
+    const wrongChain: BreakerEndpoint = { label: 'archive', request: async () => '0x1' }; // chainId 1
+    const b1 = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    b1.attach([wrongChain, ok('archive-backup-1')]);
+    const wrong = await b1.verify(143);
+    b1.stop();
+    expect(wrong).toMatchObject({ ok: false, wrongChain: true });
+
+    const unreachable: BreakerEndpoint = { label: 'archive', request: async () => { throw new Error('ECONNREFUSED'); } };
+    const b2 = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    b2.attach([unreachable, ok('archive-backup-1')]);
+    const down = await b2.verify(143);
+    b2.stop();
+    expect(down.ok).toBe(true);            // pre-positions onto the healthy backup
+    expect(down.wrongChain).toBeUndefined(); // and is NOT a misconfiguration
   });
 });
 

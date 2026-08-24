@@ -4,6 +4,7 @@ import {
   type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode,
 } from '@shared';
+import { isTransportFailure } from '../chain/failover.js';
 import { computeLeaderboard } from '../analytics.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
@@ -507,16 +508,32 @@ export function parseBackfillReset(spec: string): BackfillResetTarget[] {
   });
 }
 
-/** Hold a deep history crawl while the ARCHIVE pool runs on a backup: the crawl
- *  resumes on the archive primary. Gated on the archive pool, not the hot one,
- *  because that is the pool these crawls actually ride — holding them on hot-pool
- *  degradation would pause history for an incident that cannot affect it, and
- *  (worse) let them hammer a degraded archive backup during one that does.
+/** Hold a deep history crawl while the ARCHIVE pool is not fully healthy: on a
+ *  backup, or with every endpoint down. The crawl resumes on the archive primary.
+ *
+ *  Gated on the archive pool, not the hot one, because that is the pool these
+ *  crawls actually ride — holding them on hot-pool degradation would pause
+ *  history for an incident that cannot affect it, and (worse) let them hammer a
+ *  degraded archive backup during one that does.
+ *
+ *  `down` is checked as well as `degraded`, and the two are NOT the same state:
+ *  when the breaker exhausts every endpoint it wraps back to index 0 and reports
+ *  `down: true, degraded: false`. Running a crawl then is the dangerous case —
+ *  every fetch fails, and the loops below read sustained failure as a permanent
+ *  archive hole and SKIP it (in hole mode, a doubling stride up to a day per
+ *  hop). That is exactly the silent undercount this file refuses to produce.
+ *  Recovery is safe to wait for: the breaker keeps probing while down
+ *  (chain/failover.ts), so it clears without any traffic from us.
  *  (Cursors/accumulators simply wait — nothing is lost or restarted.) */
+function archiveUnavailable(): boolean {
+  const s = archiveRpcStatus();
+  return s.degraded || s.down;
+}
+
 async function holdWhileDegraded(): Promise<boolean> {
-  const wasDegraded = archiveRpcStatus().degraded;
-  while (archiveRpcStatus().degraded) await sleep(15_000);
-  return wasDegraded;
+  const wasUnavailable = archiveUnavailable();
+  while (archiveUnavailable()) await sleep(15_000);
+  return wasUnavailable;
 }
 
 /**
@@ -540,7 +557,7 @@ export class LiveDataSource extends BaseSource {
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
   // ARCHIVE pool: the gas tracker resolves `gas_from` through blockAtOrAfter and
   // crawls receipts from there, so it is a deep-history consumer end to end.
-  private gas = new GasTracker(archiveClient, this.store, ADAPTERS, (code, msg, venue) => this.noteOnce(code, msg, venue), () => archiveRpcStatus().degraded);
+  private gas = new GasTracker(archiveClient, this.store, ADAPTERS, (code, msg, venue) => this.noteOnce(code, msg, venue), () => archiveUnavailable());
   /** fill attribution — UNKNOWN → DIRECT / "Router - X" from tx.to (best-effort;
    *  stays on during failover — per-fill lookups are live-path cheap, unlike crawls). */
   private attributor = new FillAttributor(publicClient, ADAPTERS);
@@ -584,6 +601,16 @@ export class LiveDataSource extends BaseSource {
   /** chain head captured at boot — the upper bound for on-chain backfill (the
    *  live tail owns every block after it, so the two never overlap). */
   private bootHead = 0n;
+  /** Upper bound for the DEEP crawls: min(bootHead, the archive pool's own head).
+   *  bootHead comes from the HOT pool, and a dedicated archive is allowed to lag
+   *  it by design (retention is what it is picked for, not tip freshness). Handing
+   *  the archive a toBlock past its head is a range it cannot serve — and both
+   *  crawls treat their end as COMPLETE, setting backfill_done / mkfill_done once
+   *  the cursor passes it. At a UTC rollover that difference is a just-closed day
+   *  scanned short and then marked finished, with the live tail starting at the
+   *  HOT head and never revisiting it. Clamp instead; the blocks between the two
+   *  heads are today's, which the tail owns anyway. */
+  private deepEnd = 0n;
   /** process start — grace period before "reference feed has no mid" notes. */
   private bootMs = Date.now();
   private quoteTimer?: ReturnType<typeof setTimeout>;
@@ -640,6 +667,15 @@ export class LiveDataSource extends BaseSource {
     // history that resumes later — while refusing to boot would also take down
     // live quoting, which needs no history at all. Say so loudly instead.
     const archiveProbe = await probeArchiveChain();
+    // A WRONG-CHAIN archive primary is fatal, unlike an unreachable one. An
+    // outage is a gap that heals — the cursors hold and resume. Another chain's
+    // node ANSWERS, successfully, so the breaker can never fail away from it
+    // (chain/failover.ts: only transport errors switch endpoints) and the deep
+    // crawls would read its logs and persist them as this chain's history.
+    // Wrong history cannot be unmixed; refuse to boot instead.
+    if (!archiveProbe.ok && archiveProbe.wrongChain) {
+      throw new Error(`Archive RPC sanity check failed (${archiveProbe.reason}). It answers successfully, so failover cannot route around it and deep crawls would persist another chain's history — fix RPC_ARCHIVE_URL.`);
+    }
     if (!archiveProbe.ok) {
       this.note('rpc.down', `archive RPC sanity check failed (${archiveProbe.reason}) — deep history (volume backfill, markout onboarding, gas) will hold until it serves; live quotes and fills are unaffected`);
     }
@@ -866,7 +902,18 @@ export class LiveDataSource extends BaseSource {
     // 3. resume point — same-day gap-fill, else start at tip
     const head = await publicClient.getBlockNumber();
     this.block = Number(head);
-    this.bootHead = head; // upper bound for the background backfill (tail owns > head)
+    this.bootHead = head; // upper bound for the live gap-fill (tail owns > head)
+    // The archive's own head bounds the deep crawls (see deepEnd). An archive
+    // that cannot answer at all leaves deepEnd at the hot head: the crawls then
+    // fail closed on their first fetch and hold, which is the honest outcome —
+    // far better than silently narrowing every venue's history to nothing.
+    this.deepEnd = head;
+    if (hasDedicatedArchive) {
+      try {
+        const archiveHead = await archiveClient.getBlockNumber();
+        if (archiveHead < head) this.deepEnd = archiveHead;
+      } catch { /* unreadable — keep the hot bound; the crawls hold on their own */ }
+    }
     const lpb = this.store.getMeta('lastProcessedBlock');
     // gap-fill ANY bounded gap — including across UTC midnight: decoded fills
     // carry real block timestamps and dayFor() buckets them onto the right
@@ -1122,7 +1169,7 @@ export class LiveDataSource extends BaseSource {
   }
 
   private async backfillAdapter(a: VenueAdapter, vid: string, name: string, sinceUtc: string, sources: LogSource[], nowMs: number): Promise<void> {
-    const end = this.bootHead;
+    const end = this.deepEnd;
     if (end <= 0n) return;
     const startSec = Math.floor(Date.parse(`${sinceUtc}T00:00:00Z`) / 1000);
     if (!Number.isFinite(startSec)) { this.noteOnce('backfill.config.invalid', `${name} backfill: invalid backfillFromUtc '${sinceUtc}'`, vid); return; }
@@ -1194,7 +1241,13 @@ export class LiveDataSource extends BaseSource {
           batches = await fetchRange(probeTo);
           to = probeTo;                      // ingest exactly the probe slice
           holeRun = 0; skipStride = floor;   // hole ended — back to normal scanning
-        } catch {
+        } catch (e) {
+          // A TRANSPORT failure proves nothing about the archive's CONTENTS —
+          // only that we could not reach it. Skipping on it would leap a
+          // doubling stride (up to ~18h of blocks per hop) over data that is
+          // perfectly readable, and then mark those days done. Hold the cursor
+          // and wait for the pool instead; a real hole ANSWERS, with an error.
+          if (isTransportFailure(e)) { await sleep(config.backfillPaceMs * 25); continue; }
           const strideTo = cursor + skipStride - 1n > end ? end : cursor + skipStride - 1n;
           skipped += strideTo - cursor + 1n;
           holeRun++;
@@ -1211,7 +1264,12 @@ export class LiveDataSource extends BaseSource {
           try {
             batches = await fetchRange(to);
             if (chunk < maxChunk) { chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n; } // recover after shrinks
-          } catch {
+          } catch (e) {
+            // Unreachable ≠ unreadable: a transport failure must never shrink the
+            // span (the node never saw the request) nor age into hole mode. Retry
+            // the same cursor until the pool answers — holdWhileDegraded above
+            // parks the crawl entirely once the breaker notices.
+            if (isTransportFailure(e)) { await sleep(config.backfillPaceMs * 25); continue; }
             if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; break; } // too wide → shrink, retry cursor
             if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; } // transient → back off
             // permanently unreadable at floor granularity → enter hole mode.
@@ -1357,7 +1415,7 @@ export class LiveDataSource extends BaseSource {
    *  volume is owned by the venue's volume backfill / subgraph seed, and the
    *  deterministic fill ids make this idempotent against both. */
   private async backfillRecentFills(a: VenueAdapter, vid: string, name: string, sources: LogSource[], nowMs: number): Promise<void> {
-    const end = this.bootHead;
+    const end = this.deepEnd;
     if (end <= 0n) return;
     // Day-ALIGNED window start so every scanned day is complete — a partial
     // oldest day would later reconcile an undercounted swap count onto a day the
@@ -1414,7 +1472,11 @@ export class LiveDataSource extends BaseSource {
         try {
           batches = await fetchAll(to);
           if (chunk < maxChunk) chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n; // recover after shrinks
-        } catch {
+        } catch (e) {
+          // Unreachable ≠ unreadable — see the volume backfill above. A skip here
+          // permanently omits fills from the 30-day markout window, so a pool
+          // outage must hold rather than consume the range.
+          if (isTransportFailure(e)) { await sleep(config.backfillPaceMs * 25); continue; }
           if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; break; } // too wide → shrink, retry cursor
           if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; } // transient → back off
           // A recent range should never be an archive hole; if the RPC still
