@@ -683,6 +683,9 @@ export class LiveDataSource extends BaseSource {
   private persistTimer?: ReturnType<typeof setInterval>;
   private rediscoverTimer?: ReturnType<typeof setInterval>;
   private remarkTimer?: ReturnType<typeof setInterval>;
+  /** Deep workers stay inert until archive verification has installed the
+   *  expected-chain guard. Hot quotes/fills may warm concurrently with it. */
+  private archiveVerified = false;
   /** re-entrancy guard shared by the boot onboarding chain and the retry timer
    *  — two remark walks over the same cursors must never interleave. */
   private remarkRunning = false;
@@ -726,23 +729,11 @@ export class LiveDataSource extends BaseSource {
     // with a healthy backup boots degraded instead of failing.
     const probe = await probeChain();
     if (!probe.ok) throw new Error(`Monad RPC sanity check failed (${probe.reason}). Set DATA_SOURCE=sim to run offline.`);
-    // The archive pool is NOT fatal to boot. Deep crawls are background work and
-    // every one of them holds its cursor on failure, so a dead archive costs
-    // history that resumes later — while refusing to boot would also take down
-    // live quoting, which needs no history at all. Say so loudly instead.
-    const archiveProbe = await probeArchiveChain();
-    // A WRONG-CHAIN archive primary is fatal, unlike an unreachable one. An
-    // outage is a gap that heals — the cursors hold and resume. Another chain's
-    // node ANSWERS, successfully, so the breaker can never fail away from it
-    // (chain/failover.ts: only transport errors switch endpoints) and the deep
-    // crawls would read its logs and persist them as this chain's history.
-    // Wrong history cannot be unmixed; refuse to boot instead.
-    if (!archiveProbe.ok && archiveProbe.wrongChain) {
-      throw new Error(`Archive RPC sanity check failed (${archiveProbe.reason}). It answers successfully, so failover cannot route around it and deep crawls would persist another chain's history — fix RPC_ARCHIVE_URL.`);
-    }
-    if (!archiveProbe.ok) {
-      this.note('rpc.down', `archive RPC sanity check failed (${archiveProbe.reason}) — deep history (volume backfill, markout onboarding, gas) will hold until it serves; live quotes and fills are unaffected`);
-    }
+    // Start archive verification concurrently with hot-path warm-up. A
+    // blackholed archive may spend several transport timeouts per endpoint;
+    // quotes and the fill tail must not remain empty while that happens. Deep
+    // workers are gated below until the probe has proved chain identity.
+    const archiveProbePending = probeArchiveChain();
 
     await REFERENCES.start();
     // discover every venue's markets/pools (adapters hold their own state).
@@ -764,6 +755,19 @@ export class LiveDataSource extends BaseSource {
     this.scheduleLoop('tail');
     this.persistTimer = setInterval(() => this.persist(), config.persistMs);
     this.rediscoverTimer = setInterval(() => { void this.rediscover(); }, config.rediscoverMs);
+
+    // The archive pool is NOT fatal for an outage. Deep crawls hold their
+    // cursors and resume when it serves, while the hot dashboard is already
+    // live above. A wrong-chain primary remains fatal and no deep worker has
+    // been allowed to read or persist through it.
+    const archiveProbe = await archiveProbePending;
+    if (!archiveProbe.ok && archiveProbe.wrongChain) {
+      throw new Error(`Archive RPC sanity check failed (${archiveProbe.reason}). It answers successfully, so failover cannot route around it and deep crawls would persist another chain's history — fix RPC_ARCHIVE_URL.`);
+    }
+    if (!archiveProbe.ok) {
+      this.note('rpc.down', `archive RPC sanity check failed (${archiveProbe.reason}) — deep history (volume backfill, markout onboarding, gas) will hold until it serves; live quotes and fills are unaffected`);
+    }
+    this.archiveVerified = true;
     // seed deep history in the BACKGROUND — never blocks boot or the live tail.
     if (config.backfillEnabled || config.markoutBackfill) void this.backgroundHistory();
     // quote-update gas: its own cursor + loop (first pass covers the shallow
@@ -786,7 +790,7 @@ export class LiveDataSource extends BaseSource {
    *  process, not just next deploy); the guard keeps one chain in flight. */
   private historyRunning = false;
   private async backgroundHistory(): Promise<void> {
-    if (this.historyRunning) return;
+    if (!this.archiveVerified || this.historyRunning) return;
     this.historyRunning = true;
     let rerun = false;
     try {
@@ -903,7 +907,7 @@ export class LiveDataSource extends BaseSource {
     // seeds deferred at boot (pools quarantined / not discovered) retry here —
     // no-op when everything is seeded, and the in-flight guard makes an extra
     // kick free while a multi-hour backfill is still running.
-    if (this.seedsPending()) void this.backgroundHistory();
+    if (this.archiveVerified && this.seedsPending()) void this.backgroundHistory();
   }
 
   getState(): MarketState {
