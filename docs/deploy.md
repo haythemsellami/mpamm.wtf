@@ -6,7 +6,7 @@ The [`Dockerfile`](../Dockerfile) builds the frontend and runs the server servin
 
 ## Render (production — [mpamm.wtf](https://mpamm.wtf))
 
-[`render.yaml`](../render.yaml) is the blueprint: one always-on Docker web service with an `/api/health` health check and a **persistent disk** at `/data` (`DB_PATH=/data/mpamm.db`) so the SQLite history survives deploys.
+[`render.yaml`](../render.yaml) is the blueprint: one Standard Docker web service pinned to **Virginia (US East)**, with an `/api/health` health check and a **persistent disk** at `/data` (`DB_PATH=/data/mpamm.db`) so the SQLite history survives deploys. Keep the service close to the hot RPC: network round-trip time is paid by every block-pinned quote frame. A region change requires a new service and disk, so copy a consistent SQLite snapshot and verify it before moving the custom domain.
 
 - **Deploys are Render-native**: every push to `main` builds the Dockerfile and deploys (health-gated, zero-downtime). [`ci.yml`](../.github/workflows/ci.yml) runs verification (typecheck → tests → frontend build → Docker build) on every push + PR.
 - Key service variable: `RPC_HTTP_URL` — a **trusted Monad node**, and the one that serves block-pinned quote calls. Pick it for **distance to the tip**: some providers serve a head several blocks behind, which puts that much staleness into every quote on the Execution page before any local tuning applies. Check with `eth_blockNumber` against a second node. Quotes use a dedicated zero-wait HTTP batch lane while sharing this pool's endpoint/failover state with heads and fills. Set `RPC_WS_URL` when that same hot provider exposes `eth_subscribe`/`newHeads`; the service automatically keeps fast HTTP head polling active as a watchdog and fallback.
