@@ -1,7 +1,7 @@
 import { createPublicClient, createTransport, defineChain, http, type PublicClient, type Transport } from 'viem';
 import { config } from '../config.js';
 import { ADDR, MONAD_CHAIN_ID } from '@shared';
-import { RpcBreaker, guardRpcRead, isAvailabilityFailure, type RpcNote, type RpcStatusView, type RpcVerifyResult } from './failover.js';
+import { RpcBreaker, guardRpcRead, isAvailabilityFailure, type RpcNote, type RpcRequestFn, type RpcStatusView, type RpcVerifyResult } from './failover.js';
 
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
@@ -27,10 +27,11 @@ export const monad = defineChain({
  *  publicly; URLs embed keys. */
 const PUBLIC_RPC = 'https://rpc.monad.xyz';
 
-/** One ordered endpoint list behind one breaker behind one viem client.
+/** One ordered endpoint list behind one breaker and traffic-isolated clients.
  *  `pool` names the pool in every note it raises (chain/failover.ts). */
 interface RpcPool {
   client: PublicClient;
+  quoteClient: PublicClient;
   status: () => RpcStatusView;
   generation: () => number;
   onEvent: (cb: (n: RpcNote) => void) => void;
@@ -47,23 +48,47 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
   // deduped — with no primary configured the default backup IS the primary.
   const urls = [primary, ...backups.filter((u) => u !== primary)];
   const breaker = new RpcBreaker({ pool });
-  const transport: Transport = ({ chain }) => {
-    breaker.attach(urls.map((url, i) => ({
+  // Attach eagerly: either viem client can be initialized or invoked first,
+  // and both must see the same complete endpoint set from request one.
+  breaker.attach(urls.map((url, i) => {
+    // viem keys its JSON-RPC batch scheduler globally by URL. Fragments are
+    // never sent over HTTP, but make the quote scheduler distinct so heads,
+    // logs and attribution can never join and hold a quote response batch.
+    const quoteUrl = new URL(url);
+    quoteUrl.hash = 'quote';
+    const request = http(url, {
+      batch: { batchSize: 256, wait: 8 },
+      retryCount: 2,
+      timeout: 12_000,
+    })({ chain: monad }).request as RpcRequestFn;
+    const quote = http(quoteUrl.toString(), {
+      // Adapter methods already aggregate their contract reads through
+      // Multicall3. Zero wait still coalesces the adapters scheduled in this
+      // event-loop turn without charging every frame a fixed extra 8ms.
+      batch: { batchSize: 256, wait: 0 },
+      retryCount: 2,
+      timeout: 12_000,
+    })({ chain: monad }).request as RpcRequestFn;
+    return {
       label: `${label(i)}${url === PUBLIC_RPC && i > 0 ? ' (public)' : ''}`,
-      request: http(url, {
-        batch: { batchSize: 256, wait: 8 },
-        retryCount: 2,
-        timeout: 12_000,
-      })({ chain }).request as (args: { method: string; params?: unknown }) => Promise<unknown>,
-    })));
-    return createTransport({
-      key: 'failover',
-      name: 'Failover HTTP',
-      type: 'failover',
-      retryCount: 0,
-      request: (args) => breaker.request(args) as Promise<any>,
-    });
-  };
+      request,
+      lanes: { quote },
+    };
+  }));
+  const transport: Transport = () => createTransport({
+    key: 'failover',
+    name: 'Failover HTTP',
+    type: 'failover',
+    retryCount: 0,
+    request: (args) => breaker.request(args) as Promise<any>,
+  });
+  const quoteTransport: Transport = () => createTransport({
+    key: 'failover-quote',
+    name: 'Failover HTTP (quote lane)',
+    type: 'failover',
+    retryCount: 0,
+    request: (args) => breaker.request(args, 'quote') as Promise<any>,
+  });
   const client = createPublicClient({
     chain: monad,
     // Quote and fill-tail loops need the actual head on every pass. A cached
@@ -71,8 +96,10 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
     cacheTime: 0,
     transport,
   });
+  const quoteClient = createPublicClient({ chain: monad, cacheTime: 0, transport: quoteTransport });
   return {
     client,
+    quoteClient,
     status: () => breaker.status(),
     generation: () => breaker.generation(),
     onEvent: (cb) => breaker.subscribe(cb),
@@ -80,9 +107,8 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
   };
 }
 
-/** HOT pool — quotes + fills tail. JSON-RPC batching is enabled so the quote
- *  poller's per-market reads collapse toward a single round-trip
- *  (docs/architecture.md: quote poller). */
+/** HOT endpoint pool — one failover state, with separate HTTP batch lanes for
+ * block-pinned quotes and auxiliary head/fill/discovery traffic. */
 const hotPool = createPool(config.rpcHttp, config.rpcBackups, 'RPC', (i) => (i === 0 ? 'primary' : `backup-${i}`));
 
 /** True when a DEDICATED deep-history pool is configured. When false the
@@ -99,6 +125,9 @@ const archivePool = hasDedicatedArchive
   : hotPool;
 
 export const publicClient: PublicClient = hotPool.client;
+/** Block-pinned adapter calls share the hot pool's failover state, but use a
+ * zero-wait HTTP batch lane isolated from heads, logs and attribution. */
+export const quoteClient: PublicClient = hotPool.quoteClient;
 export const archiveClient: PublicClient = archivePool.client;
 
 /** Failover status for /api/markets (labels only) + event sink for state.notes

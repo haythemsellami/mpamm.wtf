@@ -13,7 +13,7 @@ import { computeLeaderboard } from '../analytics.js';
 export interface DataSource {
   readonly mode: DataSourceMode;
   start(): Promise<void>;
-  stop(): void;
+  stop(): void | Promise<void>;
   getState(): MarketState;
   getQuotes(): QuoteSnapshot;
   getFills(): Fill[];
@@ -42,7 +42,7 @@ const QUOTE_HISTORY_MAX = 400; // safety cap if timestamps regress or cadence ch
 export abstract class BaseSource extends EventEmitter implements DataSource {
   abstract readonly mode: DataSourceMode;
   abstract start(): Promise<void>;
-  abstract stop(): void;
+  abstract stop(): void | Promise<void>;
   abstract getState(): MarketState;
   abstract getQuotes(): QuoteSnapshot;
   abstract getFills(): Fill[];

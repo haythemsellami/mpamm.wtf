@@ -46,6 +46,9 @@ export type RpcRequestFn = (args: { method: string; params?: unknown }) => Promi
 export interface BreakerEndpoint {
   label: string;
   request: RpcRequestFn;
+  /** Traffic-class transports for this same endpoint. They share active
+   * endpoint selection and health, but not the default HTTP batch queue. */
+  lanes?: Record<string, RpcRequestFn>;
 }
 
 /** Public shape served on /api/markets (shared MarketState.rpc). */
@@ -221,14 +224,15 @@ export class RpcBreaker {
   /** One request through the active endpoint; on a threshold-crossing failure
    *  the request transparently retries on the next endpoint(s), at most one
    *  full rotation. Non-transport errors pass through untouched. */
-  async request(args: { method: string; params?: unknown }): Promise<unknown> {
+  async request(args: { method: string; params?: unknown }, lane = 'default'): Promise<unknown> {
     let hops = 0;
     for (;;) {
       const idx = this.active;
       const generation = this.stateGeneration;
       try {
         await this.ensureChain(idx);
-        const res = await this.endpoints[idx].request(args);
+        const endpoint = this.endpoints[idx];
+        const res = await (endpoint.lanes?.[lane] ?? endpoint.request)(args);
         // A late result from an endpoint serving an older generation is still
         // usable by non-cursor callers, but it proves nothing about the active
         // endpoint and must not clear its failure/outage state.

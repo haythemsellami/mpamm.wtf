@@ -13,12 +13,13 @@ import { pairMidSeries } from '../history/cex.js';
 import { GasTracker } from '../gas.js';
 import { config } from '../config.js';
 import {
-  monad, publicClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
+  monad, publicClient, quoteClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
   onRpcEvent, onArchiveRpcEvent, rpcStatus, rpcGeneration, archiveRpcStatus, archiveRpcGeneration, hasDedicatedArchive,
 } from '../chain/rpc.js';
 import { HotHeadWatcher } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, type ResetDeletes } from '../db.js';
+import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
 import { NoteBuffer } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
@@ -759,7 +760,7 @@ export class LiveDataSource extends BaseSource {
    *  immutable pricer pins every adapter's off-chain bps/sizing inputs to the
    *  same synchronous CEX snapshot captured before the first await. */
   private frameCtxFor(a: VenueAdapter, pricer: UsdPricer): AdapterContext {
-    return { ...this.ctxFor(a), pricer };
+    return { ...this.ctxFor(a), client: quoteClient, pricer };
   }
   /** the adapter's primary venue id — what its notes are stamped with. */
   private vidOf(a: VenueAdapter): string | undefined { return a.venues()[0]?.id; }
@@ -769,6 +770,10 @@ export class LiveDataSource extends BaseSource {
   private fills: Fill[] = [];
   private pending = new Set<Fill>();
   private dirty = new Set<Fill>();
+  /** UTC days whose volume/meta changed since the last atomic live snapshot.
+   * Historical rows are immutable here; rewriting the full table every five
+   * seconds blocks the event loop and delays block-triggered quote frames. */
+  private dirtyDays = new Set<string>();
   /** ids already counted into the volume buckets (kept in sync with the fills
    *  window) — makes ingest idempotent so a re-decode never double-counts. */
   private countedIds = new Set<string>();
@@ -786,6 +791,7 @@ export class LiveDataSource extends BaseSource {
   private bootMs = Date.now();
   private tailTimer?: ReturnType<typeof setTimeout>;
   private quoteRetryTimer?: ReturnType<typeof setTimeout>;
+  private postQuoteImmediate?: ReturnType<typeof setImmediate>;
   /** newHeads + HTTP-watchdog feed. Both paths are deduped before they reach the
    *  latest-only quote runner below. */
   private headWatcher = new HotHeadWatcher(publicClient, { wsUrl: config.rpcWs, pollMs: config.headPollMs });
@@ -800,7 +806,10 @@ export class LiveDataSource extends BaseSource {
   private eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
   private eventLoopLagMs = 0;
   private loopsStopped = false;
+  private stopPromise?: Promise<void>;
   private persistTimer?: ReturnType<typeof setInterval>;
+  private snapshotWriter?: SnapshotWriter;
+  private storeWriter: StoreWriter = directStoreWriter(this.store);
   private rediscoverTimer?: ReturnType<typeof setInterval>;
   private remarkTimer?: ReturnType<typeof setInterval>;
   /** Deep workers stay inert until archive verification has installed the
@@ -864,6 +873,15 @@ export class LiveDataSource extends BaseSource {
     }
 
     await this.initHistory();
+    const resetWant = config.backfillReset.trim();
+    if (resetWant) adoptLegacyResetMarker(this.store, resetWant, parseBackfillReset(resetWant));
+    // The schema/migrations above finish on the main connection first. Every
+    // mutation after this point goes through one worker connection so Render
+    // disk latency cannot pause newHeads or quote response handling.
+    this.snapshotWriter = new SnapshotWriter(config.dbPath);
+    this.storeWriter = this.snapshotWriter;
+    this.gas.setWriter(this.snapshotWriter);
+    this.store.sealWrites();
 
     // The boot head was captured by initHistory. Quote that exact state once,
     // then let newHeads drive every later matrix. If boot quoting fails, the
@@ -895,7 +913,7 @@ export class LiveDataSource extends BaseSource {
     // Fill ingest is intentionally still timer-driven and independent. Its
     // finality-margin range reads never decide which block a quote represents.
     this.scheduleTail();
-    this.persistTimer = setInterval(() => this.persist(), config.persistMs);
+    this.persistTimer = setInterval(() => { void this.persist(); }, config.persistMs);
     this.rediscoverTimer = setInterval(() => { void this.rediscover(); }, config.rediscoverMs);
 
     // The archive pool is NOT fatal for an outage. Deep crawls hold their
@@ -1047,19 +1065,25 @@ export class LiveDataSource extends BaseSource {
       .some((target) => active.has(target.vid) && !resetAlreadyApplied(this.store, target));
   }
 
-  stop(): void {
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
     this.loopsStopped = true;
     this.headWatcher.stop();
     this.eventLoopDelay.disable();
     if (this.tailTimer) clearTimeout(this.tailTimer);
     if (this.quoteRetryTimer) clearTimeout(this.quoteRetryTimer);
+    if (this.postQuoteImmediate) clearImmediate(this.postQuoteImmediate);
     if (this.persistTimer) clearInterval(this.persistTimer);
     if (this.rediscoverTimer) clearInterval(this.rediscoverTimer);
     if (this.remarkTimer) clearInterval(this.remarkTimer);
     this.gas.stop();
-    this.persist();
+    const finalPersist = this.persist(true);
     REFERENCES.stop();
-    this.store.close();
+    this.stopPromise = finalPersist.finally(async () => {
+      try { await this.snapshotWriter?.close(); }
+      finally { this.store.close(); }
+    });
+    return this.stopPromise;
   }
 
   /** QUOTE_UPDATE_BURN series — straight from daily_gas (tiny table). */
@@ -1211,6 +1235,7 @@ export class LiveDataSource extends BaseSource {
     this.today(); // ensure today's partial bucket, rolling any stale "today" closed
     this.reconcileSwapCounts(); // derive per-venue swap counts from retained + backfilled fills
     this.store.upsertMany(this.days);
+    this.dirtyDays.clear();
 
     // 3. resume point — same-day gap-fill, else start at tip
     const head = await publicClient.getBlockNumber();
@@ -1243,29 +1268,41 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
-  private persist(): void {
-    try {
-      // one transaction: volume + cursor + fills together, so a crash can never
-      // leave the volume ahead of the cursor and let a gap-fill re-count (H1).
-      // Each pass also samples every pair's CURRENT reference mid into
-      // mid_history (~PERSIST_MS cadence) — the curve a future markout-model
-      // bump can replay retained fills against instead of nulling them.
-      const now = Date.now();
-      const mids = PAIRS
+  private persist(reportFailure = false): Promise<void> {
+    // Swap the dirty sets synchronously. New fills/day mutations land in fresh
+    // sets while this immutable snapshot waits for the worker ACK; a failure
+    // merges the original objects/keys back so the next tick retries them.
+    const dirtyFills = this.dirty;
+    const dirtyDays = this.dirtyDays;
+    this.dirty = new Set();
+    this.dirtyDays = new Set();
+    const now = Date.now();
+    const snapshot: SnapshotWrite = {
+      days: this.days
+        .filter((d) => dirtyDays.has(d.utcDay))
+        .map((d) => ({ ...d, byVenue: Object.fromEntries(Object.entries(d.byVenue).map(([id, v]) => [id, { ...v }])) })),
+      meta: { lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
+      fills: [...dirtyFills].map((f) => ({ ...f, markoutsBps: [...f.markoutsBps] })),
+      // Each pass samples every pair's CURRENT reference mid into mid_history
+      // (~PERSIST_MS cadence), for future markout-model replay.
+      mids: PAIRS
         .map((p) => ({ ts: now, market: p.symbol, mid: REFERENCES.midForPair(p.symbol) }))
-        .filter((m) => m.mid > 0);
-      this.store.persistSnapshot(
-        this.days,
-        { lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
-        this.dirty.size ? [...this.dirty] : [],
-        mids,
-      );
-      this.dirty.clear();
-    } catch (e) {
-      // retained + retried next tick, but say so — a broken disk otherwise
-      // looks healthy while the cursor silently stops advancing.
-      this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); retrying`);
-    }
+        .filter((m) => m.mid > 0),
+    };
+
+    return this.writeSnapshot(snapshot)
+      .catch((e) => {
+        for (const f of dirtyFills) this.dirty.add(f);
+        for (const day of dirtyDays) this.dirtyDays.add(day);
+        // retained + retried next tick, but say so — a broken disk otherwise
+        // looks healthy while the cursor silently stops advancing.
+        this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); ${reportFailure ? 'shutdown flush not acknowledged' : 'retrying'}`);
+        if (reportFailure) throw e;
+      });
+  }
+
+  private writeSnapshot(snapshot: SnapshotWrite): Promise<void> {
+    return this.storeWriter.persist(snapshot);
   }
 
   /** A fresh zeroed daily bucket (venue slices fill in as fills land). */
@@ -1337,7 +1374,6 @@ export class LiveDataSource extends BaseSource {
     const want = config.backfillReset.trim();
     if (!want) return;
     const targets = parseBackfillReset(want);
-    adoptLegacyResetMarker(this.store, want, targets);
 
     const applied: string[] = [];
     for (const t of targets) {
@@ -1348,11 +1384,13 @@ export class LiveDataSource extends BaseSource {
       // Stamped only once an entry is FINISHED — done, or refused for a reason
       // that will still hold next boot. A transient failure leaves it unstamped
       // so this entry, and only this entry, is retried.
-      const settle = () => markResetApplied(this.store, t);
+      const settle = () => t.vid
+        ? this.storeWriter.setMeta(`backfill_reset_applied_${t.vid}`, t.spec)
+        : Promise.resolve();
 
       if (t.from === 'invalid') {
         this.note('backfill.config.invalid', `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
-        settle();
+        await settle();
         continue;
       }
       // A start that is not in the past is IGNORED by both resume checks
@@ -1362,7 +1400,7 @@ export class LiveDataSource extends BaseSource {
       const refusal = refuseResetStart(t, utcDay(nowMs), this.bootHead);
       if (refusal) {
         this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${refusal}`);
-        settle();
+        await settle();
         continue;
       }
       // An unresolvable id would delete nothing and re-scan nothing while still
@@ -1380,7 +1418,7 @@ export class LiveDataSource extends BaseSource {
         this.note('backfill.config.invalid', missing === 'reference'
           ? `backfill reset: '${t.vid}' is a CEX reference, which has no history to reset — skipped`
           : `backfill reset: no adapter declares venue '${t.vid}' — skipped`);
-        settle();
+        await settle();
         continue;
       }
       // A targeted replay needs BOTH ends of its start: the block the cursors
@@ -1419,7 +1457,7 @@ export class LiveDataSource extends BaseSource {
       const resolvedRefusal = from !== undefined ? refuseResolvedStart(from, utcDay(nowMs), this.bootHead) : null;
       if (resolvedRefusal) {
         this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${resolvedRefusal}`);
-        settle();
+        await settle();
         continue;
       }
       // Delete only what the two scans will actually rebuild. A switched-off
@@ -1432,11 +1470,11 @@ export class LiveDataSource extends BaseSource {
         volumeEnabled: config.backfillEnabled,
         fillsEnabled: config.markoutBackfill,
       });
-      const dropped = resetVenueHistory(this.store, t.vid, { from, deletes });
+      const dropped = await this.storeWriter.resetVenueHistory(t.vid, deletes, from?.block);
       purgeVenueDays(this.days, t.vid, deletes);
       purgeVenueFills({ fills: this.fills, pending: this.pending, dirty: this.dirty, countedIds: this.countedIds }, t.vid, deletes);
       if (dropped.fills) this.lbCache.clear();
-      settle();
+      await settle();
       // Say what was DESTROYED, not just what will be re-scanned: this is a
       // one-shot operation with no undo, and the counts are the only record.
       const scope = from === undefined ? 'lifetime' : `from block ${from.block} (${from.day} onward)`;
@@ -1445,7 +1483,7 @@ export class LiveDataSource extends BaseSource {
     // Legacy breadcrumb, written for ROLLBACK only: older builds read this key
     // and would re-run the whole value without it. Nothing here reads it after
     // adoptLegacyResetMarker has run once.
-    this.store.setMeta('backfill_reset_applied', want);
+    await this.storeWriter.setMeta('backfill_reset_applied', want);
     if (applied.length) this.note('backfill.reset', `backfill reset applied (${want}) — ${applied.join('; ')}`);
   }
 
@@ -1467,7 +1505,7 @@ export class LiveDataSource extends BaseSource {
       // 'skip' (can't land fills by design) is done forever; 'defer' (pools
       // quarantined/undiscovered right now) must NOT be — the done-flag would
       // silently drop the venue's lifetime history (issue: seed vs quarantine).
-      if (seed.action === 'skip') { this.store.setMeta(`backfill_done_${vid}`, '1'); continue; }
+      if (seed.action === 'skip') { await this.storeWriter.setMeta(`backfill_done_${vid}`, '1'); continue; }
       if (seed.action === 'defer') { this.noteOnce('backfill.deferred', `${name} backfill deferred — ${seed.reason}`, vid); continue; }
       try { await this.backfillAdapter(a, vid, name, sinceUtc, seed.fills, nowMs, end); }
       catch (e) {
@@ -1506,13 +1544,17 @@ export class LiveDataSource extends BaseSource {
     }
     if (from > end) {
       if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
-      this.store.setMeta(`backfill_done_${vid}`, '1');
+      await this.storeWriter.setMeta(`backfill_done_${vid}`, '1');
       return;
     }
 
     // `end` is the last block before `today`; a rollover expires the run before
     // its done marker, then the next run extends the bound and revisits the day.
     const acc = new Map<string, { usd: number; swaps: number }>(); // closed utcDay -> totals
+    // Values already committed during THIS run. Periodic checkpoints can then
+    // write only days whose accumulated total changed, rather than replaying
+    // the full in-memory history on the main event loop.
+    const flushed = new Map<string, { usd: number; swaps: number }>();
     let chunk = BigInt(config.backfillChunk);
     const floor = BigInt(config.getLogsMinChunk);
     let cursor = from;
@@ -1648,23 +1690,22 @@ export class LiveDataSource extends BaseSource {
       availabilityAttempts = 0;
       cursor = to + 1n;
       if (++sinceMerge >= config.backfillMergeEvery || cursor > end) {
-        this.mergeBackfill(vid, acc);
-        this.store.setMeta(`backfill_cursor_${vid}`, String(cursor));
-        this.store.upsertMany(this.days);
+        const changed = this.mergeBackfill(vid, acc, flushed);
+        await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(cursor) }, fills: [], mids: [] });
+        for (const d of changed) flushed.set(d.utcDay, { ...acc.get(d.utcDay)! });
         sinceMerge = 0;
       }
       await sleep(config.backfillPaceMs);
     }
 
-    this.mergeBackfill(vid, acc);
-    this.store.setMeta(`backfill_cursor_${vid}`, String(end + 1n));
-    this.store.upsertMany(this.days);
+    const changed = this.mergeBackfill(vid, acc, flushed);
+    await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(end + 1n) }, fills: [], mids: [] });
     if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
     // done even when ranges were skipped — re-running every boot can't fix an RPC
     // archive hole. To re-attempt after the provider repairs it: delete the
     // 'backfill_done_<venue>' + 'backfill_cursor_<venue>' meta rows (the SET-per-day
     // merge makes a full re-run idempotent).
-    this.store.setMeta(`backfill_done_${vid}`, '1');
+    await this.storeWriter.setMeta(`backfill_done_${vid}`, '1');
     this.note('backfill.done', `${name}: backfill complete — ${acc.size} day(s) seeded` +
       (skipped > 0n ? ` (${skipped} block(s) unreadable on the RPC archive and skipped — those windows may undercount)` : ''), vid);
     this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) }); // nudge connected clients
@@ -1673,13 +1714,21 @@ export class LiveDataSource extends BaseSource {
   /** Merge accumulated backfill totals into this.days, SET per (day, venue):
    *  backfill is authoritative for a CLOSED day it fully scanned, and the live
    *  tail only ever writes today+, so a SET can never double-count. */
-  private mergeBackfill(vid: string, acc: Map<string, { usd: number; swaps: number }>): void {
+  private mergeBackfill(
+    vid: string,
+    acc: Map<string, { usd: number; swaps: number }>,
+    flushed: ReadonlyMap<string, { usd: number; swaps: number }> = new Map(),
+  ): DailyVolume[] {
+    const changed: DailyVolume[] = [];
     for (const [day, tot] of acc) {
       let d = this.days.find((x) => x.utcDay === day);
       if (!d) { d = this.emptyDay(day, false); this.days.push(d); }
       d.byVenue[vid] = { usd: tot.usd, swaps: tot.swaps };
+      const prior = flushed.get(day);
+      if (!prior || prior.usd !== tot.usd || prior.swaps !== tot.swaps) changed.push(d);
     }
     this.days.sort((a, b) => (a.utcDay < b.utcDay ? -1 : 1));
+    return changed;
   }
 
   // ── onboarding markout backfill (last ~30d per venue) ────────────────────────
@@ -1730,7 +1779,7 @@ export class LiveDataSource extends BaseSource {
       // these rows are user-visible in the tape/leaderboard, so decode needs its
       // state (e.g. Clober book Opens) and router attribution to label them.
       const seed = seedSources(a);
-      if (seed.action === 'skip') { this.store.setMeta(`mkfill_done_${vid}`, '1'); continue; }
+      if (seed.action === 'skip') { await this.storeWriter.setMeta(`mkfill_done_${vid}`, '1'); continue; }
       if (seed.action === 'defer') { this.noteOnce('markout.deferred', `${name} markout onboarding deferred — ${seed.reason}`, vid); continue; }
       try {
         if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') await this.backfillRecentFills(a, vid, name, seed.all, nowMs, end);
@@ -1765,7 +1814,7 @@ export class LiveDataSource extends BaseSource {
     }
     if (from > end) {
       if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
-      this.store.setMeta(`mkfill_done_${vid}`, '1');
+      await this.storeWriter.setMeta(`mkfill_done_${vid}`, '1');
       return;
     }
 
@@ -1871,17 +1920,17 @@ export class LiveDataSource extends BaseSource {
       availabilityAttempts = 0;
       cursor = to + 1n;
       if (++sinceFlush >= config.backfillMergeEvery || cursor > end) {
-        persisted += this.store.insertFillsIfAbsent(batch);
+        persisted += await this.storeWriter.insertFillsIfAbsent(batch);
         batch.length = 0;
-        this.store.setMeta(`mkfill_cursor_${vid}`, String(cursor));
+        await this.storeWriter.setMeta(`mkfill_cursor_${vid}`, String(cursor));
         sinceFlush = 0;
       }
       await sleep(config.backfillPaceMs);
     }
 
-    this.store.setMeta(`mkfill_cursor_${vid}`, String(end + 1n));
+    await this.storeWriter.setMeta(`mkfill_cursor_${vid}`, String(end + 1n));
     if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
-    this.store.setMeta(`mkfill_done_${vid}`, '1');
+    await this.storeWriter.setMeta(`mkfill_done_${vid}`, '1');
     this.note('markout.scan.done', `${name}: onboarding fill scan complete — ${persisted} historical fill(s) persisted`, vid);
   }
 
@@ -1944,7 +1993,7 @@ export class LiveDataSource extends BaseSource {
           });
           return { id: f.id, markoutsBps: marks };
         });
-        this.store.applyRemarks(updates);
+        await this.storeWriter.applyRemarks(updates);
         // the markouts are on disk now, so the "resumed" line is finally true.
         // checkArchivePending set `resumed` only on the sweep the archive
         // published, so this stays silent on every other sweep.
@@ -1953,7 +2002,7 @@ export class LiveDataSource extends BaseSource {
         // is honest but isn't "computed".
         marked += updates.filter((u) => u.markoutsBps.some((m) => m != null)).length;
       }
-      this.store.setMeta(metaKey, day);
+      await this.storeWriter.setMeta(metaKey, day);
       day = utcDay(dayStart + 86_400_000 + 1);
       await sleep(config.backfillPaceMs);
     }
@@ -2088,6 +2137,19 @@ export class LiveDataSource extends BaseSource {
     if (this.quotes.frame) this.emitMsg({ ch: 'state', data: this.getState() });
   }
 
+  /** Quote delivery is the latency-sensitive result. Markout aging and the
+   * accompanying state fanout run on the next event-loop turn, after a pending
+   * newer frame has already been allowed to enter its RPC wait. */
+  private schedulePostQuoteMaintenance(): void {
+    if (this.postQuoteImmediate || this.loopsStopped) return;
+    this.postQuoteImmediate = setImmediate(() => {
+      this.postQuoteImmediate = undefined;
+      if (this.loopsStopped) return;
+      this.ageMarkouts();
+      this.emitRealtimeState();
+    });
+  }
+
   private async drainQuoteBlocks(): Promise<void> {
     if (this.quoteRunning || this.loopsStopped) return;
     this.quoteRunning = true;
@@ -2102,7 +2164,6 @@ export class LiveDataSource extends BaseSource {
         try {
           await this.poll(blockNumber, trigger);
           this.quotedBlock = blockNumber;
-          this.ageMarkouts();
         } catch {
           // Retry this exact block unless a newer observed head has already
           // replaced it. The retry is delayed so a sick RPC cannot hot-loop.
@@ -2230,8 +2291,8 @@ export class LiveDataSource extends BaseSource {
     this.quotes = { block: this.block, monUsd, ts: emittedAt, rows, frame };
     this.realtimeFrames.push({ block: this.block, emittedAt, coalescedBlocks: trigger.coalescedBlocks });
     this.realtimeFrames = this.realtimeFrames.filter((f) => f.emittedAt >= emittedAt - REALTIME_WINDOW_MS);
-    this.emitMsg({ ch: 'state', data: this.getState() });
     this.emitMsg({ ch: 'quotes', data: this.quotes });
+    this.schedulePostQuoteMaintenance();
   }
 
   // ── fills ───────────────────────────────────────────────────────────────────
@@ -2360,6 +2421,7 @@ export class LiveDataSource extends BaseSource {
     const vd = (d.byVenue[f.venueId] ??= { usd: 0, swaps: 0 });
     vd.usd += f.usd;
     vd.swaps += 1;
+    this.dirtyDays.add(d.utcDay);
     this.emitMsg({ ch: 'fill', data: f });
   }
 
@@ -2447,9 +2509,15 @@ export class LiveDataSource extends BaseSource {
       d = this.emptyDay(day, true);
       this.days.push(d);
       this.days.sort((a, b) => (a.utcDay < b.utcDay ? -1 : 1));
+      this.dirtyDays.add(day);
     }
-    d.partial = true;
-    for (const x of this.days) if (x !== d && x.partial && x.utcDay < day) x.partial = false;
+    if (!d.partial) { d.partial = true; this.dirtyDays.add(d.utcDay); }
+    for (const x of this.days) {
+      if (x !== d && x.partial && x.utcDay < day) {
+        x.partial = false;
+        this.dirtyDays.add(x.utcDay);
+      }
+    }
     return d;
   }
 }

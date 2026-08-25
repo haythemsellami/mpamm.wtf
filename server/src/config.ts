@@ -30,8 +30,9 @@ export const config = {
   // ── RPC pools ───────────────────────────────────────────────────────────────
   // TWO pools, because no single Monad endpoint is good at both jobs.
   //
-  //   HOT     block-triggered quotes + fills tail. The ONLY thing that matters is distance
-  //           to the tip: a node seven blocks behind quotes 2.3s-old prices, and
+  //   HOT     block-triggered quotes + fills tail. Quotes have an isolated HTTP
+  //           batch lane while endpoint/failover state stays shared. The ONLY
+  //           thing that matters is distance to the tip: a node seven blocks behind quotes 2.3s-old prices, and
   //           no amount of local tuning recovers that.
   //   ARCHIVE volume backfill, markout onboarding, gas passes, blockAtOrAfter.
   //           These binary-search from block 0 and replay months-old ranges, so
