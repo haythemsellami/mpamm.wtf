@@ -20,6 +20,11 @@ export function ExecutionTab() {
     borderRadius: 4, padding: '7px 8px', fontSize: 12, fontFamily: 'inherit',
   };
   const pair = d.pair, size = d.size;
+  const realtime = d.state?.realtime;
+  const frameTelemetry = d.quotes?.frame;
+  const slowestAdapters = frameTelemetry
+    ? Object.entries(frameTelemetry.adapterMs).sort((a, b) => b[1] - a[1]).slice(0, 3)
+    : [];
   const allMarkets = d.state?.markets ?? DEFAULT_MARKETS;
   // markets a display venue has EVER quoted this session — STICKY, so a momentary
   // gap in a WS frame (a CEX feed blip) can't hide a market or bounce the pair.
@@ -180,6 +185,22 @@ export function ExecutionTab() {
           Last 60s of quotes for the selected pair at the chosen notional. Spreads are quoted vs the <span style={{ color: C.text3 }}>{refName}</span> reference BBO mid.{' '}
           <span style={{ color: C.text3 }}>{refLabel}</span> walks the live book for the requested size and overlays the configured taker fee ({taker} bps each side) — realized-vs-realized, the only honest comparison for size-sensitive flow.
         </div>
+        {realtime && (
+          <div role="status" title={slowestAdapters.length ? `Slowest adapters: ${slowestAdapters.map(([id, ms]) => `${id} ${ms.toFixed(1)}ms`).join(' · ')}` : undefined}
+            style={{ display: 'flex', flexWrap: 'wrap', gap: '5px 13px', marginTop: 9, fontSize: 9.5, letterSpacing: '.04em', color: C.dim2 }}>
+            <span>HEAD <b style={{ color: C.text }}>{realtime.headBlock.toLocaleString()}</b></span>
+            <span>FRAME <b style={{ color: C.text }}>{realtime.quoteBlock.toLocaleString()}</b></span>
+            <span>LAG <b style={{ color: realtime.lagBlocks > 1 ? C.amber : C.green }}>{realtime.lagBlocks} blk</b></span>
+            <span>COMPUTE <b style={{ color: realtime.frameMs >= 300 ? C.amber : C.text }}>{realtime.frameMs}ms</b></span>
+            <span>HEAD→FRAME <b style={{ color: realtime.headToFrameMs >= 300 ? C.amber : C.text }}>{realtime.headToFrameMs}ms</b></span>
+            <span>LOOP <b style={{ color: realtime.eventLoopLagMs >= 50 ? C.amber : C.text }}>{realtime.eventLoopLagMs.toFixed(1)}ms</b></span>
+            <span>COVERAGE 60s <b style={{ color: realtime.coveragePct60s < 99 ? C.amber : C.green }}>{realtime.coveragePct60s.toFixed(1)}%</b></span>
+            <span>SKIPPED 60s <b style={{ color: realtime.coalescedBlocks60s ? C.amber : C.text }}>{realtime.coalescedBlocks60s}</b></span>
+            <span>SOURCE <b style={{ color: C.text }}>{realtime.headSource.toUpperCase()}</b></span>
+            <span>WS <b style={{ color: realtime.wsStatus === 'connected' ? C.green : realtime.wsStatus === 'disabled' ? C.faint2 : C.amber }}>{realtime.wsStatus.toUpperCase()}</b></span>
+            {!!frameTelemetry?.missingVenues.length && <span>MISSING <b style={{ color: C.amber }}>{frameTelemetry.missingVenues.join(', ')}</b></span>}
+          </div>
+        )}
       </div>
 
       {/* controls */}

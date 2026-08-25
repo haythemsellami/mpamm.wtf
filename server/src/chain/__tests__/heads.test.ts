@@ -37,6 +37,7 @@ describe('HotHeadWatcher', () => {
     const socket = new FakeSocket();
     const seen: Array<{ block: bigint; source: string }> = [];
     const fallback = vi.fn();
+    const connected = vi.fn();
     const watcher = new HotHeadWatcher(
       { getBlockNumber: vi.fn(async () => 100n) } as any,
       { pollMs: 75, wsUrl: 'wss://credential-bearing.example/ws/key', openSocket: () => socket as any },
@@ -44,6 +45,7 @@ describe('HotHeadWatcher', () => {
 
     watcher.start({
       onBlock: (block, source) => seen.push({ block, source }),
+      onWsConnected: connected,
       onWsFallback: fallback,
     });
     await vi.advanceTimersByTimeAsync(0);
@@ -52,6 +54,7 @@ describe('HotHeadWatcher', () => {
     socket.emit('message', JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x8f' }));
     expect(JSON.parse(socket.sent[1])).toMatchObject({ method: 'eth_subscribe', params: ['newHeads'] });
     socket.emit('message', JSON.stringify({ jsonrpc: '2.0', id: 2, result: '0xsub' }));
+    expect(connected).toHaveBeenCalledOnce();
     socket.emit('message', JSON.stringify({ method: 'eth_subscription', params: { result: { number: '0x64' } } }));
     socket.emit('message', JSON.stringify({ method: 'eth_subscription', params: { result: { number: '0x65' } } }));
 
