@@ -485,14 +485,14 @@ export class VolumeStore {
    *  pxApprox rows are excluded here: the shared contract keeps them out of
    *  every markout/leaderboard stat, volume included. ts-ascending so the
    *  aggregation's cumulative-PnL sparklines accumulate in fill order. */
-  lbFillsChunk(sinceMs: number, afterTs: number, afterId: string, limit: number, maxTs?: number): Array<{ id: string; ts: number; venueId: string; category: string; router?: string; pool: string; to: string; usd: number; markoutsBps: (number | null)[] }> {
+  lbFillsChunk(sinceMs: number, afterTs: number, afterId: string, limit: number, maxTs?: number): Array<{ id: string; ts: number; venueId: string; market: string; category: string; router?: string; pool: string; to: string; usd: number; markoutsBps: (number | null)[] }> {
     // KEYSET page (ts, id) so the aggregation streams the window in bounded
     // slices — materializing a full 30d window (10⁵–10⁶ rows) OOM'd the 512MB
     // production box. Horizons extracted in SQL (C-side): a per-row JSON.parse
     // in JS was a measurable slice of the pass. `maxTs` pins a later pass to an
     // earlier pass's snapshot upper bound (live fills keep landing in between).
     const rows = this.db.prepare(`
-      SELECT id, ts, venue_id, category, router, pool, to_label, usd,
+      SELECT id, ts, venue_id, market, category, router, pool, to_label, usd,
              json_extract(markouts_bps, '$[0]') AS m0, json_extract(markouts_bps, '$[1]') AS m1,
              json_extract(markouts_bps, '$[2]') AS m2, json_extract(markouts_bps, '$[3]') AS m3,
              json_extract(markouts_bps, '$[4]') AS m4
@@ -501,7 +501,7 @@ export class VolumeStore {
       ORDER BY ts ASC, id ASC LIMIT ?
     `).all(sinceMs, afterTs, afterTs, afterId, maxTs ?? Number.MAX_SAFE_INTEGER, limit) as Array<Record<string, any>>;
     return rows.map((r) => ({
-      id: r.id, ts: r.ts, venueId: r.venue_id, category: r.category,
+      id: r.id, ts: r.ts, venueId: r.venue_id, market: r.market, category: r.category,
       pool: r.pool, to: r.to_label, usd: r.usd, markoutsBps: [r.m0, r.m1, r.m2, r.m3, r.m4],
     }));
   }

@@ -487,6 +487,11 @@ export type LeaderboardGrouping = (typeof LEADERBOARD_GROUPINGS)[number];
 export interface LeaderboardGroupRow {
   /** group key: venueId (protocol) / pool / to-label / category ('direct' for DIRECT). */
   key: string;
+  /** Pool-group display metadata. Present only when every contributing fill for
+   *  this key belongs to one venue / market; the stable `key` remains the
+   *  aggregation identity so enriching the label never splits history. */
+  venueId?: string;
+  market?: string;
   vol: number;
   swaps: number;
   /** markout-bps percentiles over the group's fills at the row's horizon. */
