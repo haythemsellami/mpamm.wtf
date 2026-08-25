@@ -13,18 +13,23 @@
 # backfills). Leaving RPC_ARCHIVE_URL unset runs both on the hot node, which is
 # correct only when that node keeps full history.
 #
-# REGION: unset means Render's default (Oregon). The region is fixed at service
-# creation and the disk below is region-bound, so changing it later means a NEW
-# service with an EMPTY disk — copy /data/mpamm.db across before cutover, or the
-# service re-runs every venue-lifetime backfill from scratch.
+# REGION: production is pinned to Virginia to keep the quote critical path close
+# to the hot RPC. The region is fixed at service creation and the disk below is
+# region-bound, so changing it later means a NEW service with an EMPTY disk —
+# copy /data/mpamm.db across before cutover, or the service re-runs every
+# venue-lifetime backfill from scratch.
 services:
   - type: web
-    name: mpamm
+    name: mpamm-virginia
     runtime: docker
-    plan: starter            # always-on; the free tier spins down after 15m idle,
-                             # which would kill the WS indexer + poll loop.
+    region: virginia
+    plan: standard           # always-on stateful indexer; production needs the
+                             # CPU/RAM headroom to quote every 300ms block.
+    autoDeployTrigger: commit
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
+    domains:
+      - mpamm.wtf
     envVars:
       - key: DATA_SOURCE
         value: live
@@ -37,6 +42,6 @@ services:
       - key: RPC_ARCHIVE_URL # deep-history node; unset ⇒ reuses RPC_HTTP_URL
         sync: false
     disk:
-      name: mpamm-data       # SQLite history survives deploys/restarts
+      name: mpamm-data-virginia # SQLite history survives deploys/restarts
       mountPath: /data
       sizeGB: 1
