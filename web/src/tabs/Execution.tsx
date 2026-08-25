@@ -186,7 +186,7 @@ export function ExecutionTab() {
           <span style={{ color: C.text3 }}>{refLabel}</span> walks the live book for the requested size and overlays the configured taker fee ({taker} bps each side) — realized-vs-realized, the only honest comparison for size-sensitive flow.
         </div>
         {realtime && (
-          <div role="status" title={slowestAdapters.length ? `Slowest adapters: ${slowestAdapters.map(([id, ms]) => `${id} ${ms.toFixed(1)}ms`).join(' · ')}` : undefined}
+          <div title={slowestAdapters.length ? `Slowest adapters: ${slowestAdapters.map(([id, ms]) => `${id} ${ms.toFixed(1)}ms`).join(' · ')}` : undefined}
             style={{ display: 'flex', flexWrap: 'wrap', gap: '5px 13px', marginTop: 9, fontSize: 9.5, letterSpacing: '.04em', color: C.dim2 }}>
             <span>HEAD <b style={{ color: C.text }}>{realtime.headBlock.toLocaleString()}</b></span>
             <span>FRAME <b style={{ color: C.text }}>{realtime.quoteBlock.toLocaleString()}</b></span>
