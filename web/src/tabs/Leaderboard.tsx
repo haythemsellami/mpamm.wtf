@@ -6,6 +6,7 @@ import { Pills, SideTag, FieldLegend } from '../components/ui';
 import { fmtUsd, fmtInt, fmtPx, pnlFmt, sparkPath, humanAge, shortHex } from '../lib/format';
 import { avgMarkoutBps } from '../lib/markout';
 import { fillLegs } from '../lib/fill-legs';
+import { poolLeaderboardLabel } from '../lib/leaderboard-pool';
 
 const HZ_IDX: Record<string, number> = { 'T+0S': 0, 'T+10S': 2, 'T+30S': 3, 'T+60S': 4 };
 const GROUP_ID: Record<string, LeaderboardGrouping> = {
@@ -76,18 +77,21 @@ export function LeaderboardTab() {
 
   // PROTOCOL_LEADERBOARD rows — top groups by volume at the selected horizon.
   // PROTOCOL groups by the stable Fill.venueId; the row label + color resolve
-  // from the registry (venuesById), so nothing about a venue is hardcoded.
+  // Protocol and pool rows resolve venue presentation from the registry
+  // (venuesById), so nothing about a venue is hardcoded.
   const lbRows = useMemo(() => {
     const rows = current?.groups[GROUP_ID[lbGroup] ?? 'protocol']?.[String(hzIdx)] ?? [];
-    const labelFor = (k: string): string =>
-      lbGroup === 'PROTOCOL' ? (venuesById[k]?.name ?? k)
-        : lbGroup === 'CATEGORY' && k === 'direct' ? '—' : k;
-    const colorFor = (k: string): string =>
-      lbGroup === 'PROTOCOL' ? venueColor(venuesById[k], d.theme)
-        : lbGroup === 'CATEGORY' ? catCol(k === 'direct' ? '—' : k)
-          : C.accent;
+    const labelFor = (r: (typeof rows)[number]): string =>
+      lbGroup === 'PROTOCOL' ? (venuesById[r.key]?.name ?? r.key)
+        : lbGroup === 'POOL' ? poolLeaderboardLabel(r, venuesById)
+          : lbGroup === 'CATEGORY' && r.key === 'direct' ? '—' : r.key;
+    const colorFor = (r: (typeof rows)[number]): string =>
+      lbGroup === 'PROTOCOL' ? venueColor(venuesById[r.key], d.theme)
+        : lbGroup === 'POOL' && r.venueId ? venueColor(venuesById[r.venueId], d.theme)
+          : lbGroup === 'CATEGORY' ? catCol(r.key === 'direct' ? '—' : r.key)
+            : C.accent;
     return rows.map((r) => ({
-      name: labelFor(r.key), color: colorFor(r.key), vol: r.vol, swaps: r.swaps,
+      name: labelFor(r), color: colorFor(r), vol: r.vol, swaps: r.swaps,
       // maker = −taker, which REVERSES the percentile order too: the takers'
       // p95 is the makers' p5.
       p5: -r.p95, p25: -r.p75, p50: -r.p50, p75: -r.p25, p95: -r.p5,

@@ -31,6 +31,7 @@ export interface LbFill {
   id: string;
   ts: number;
   venueId: string;
+  market: string;
   category: string;
   pool: string;
   to: string;
@@ -68,6 +69,7 @@ function topK<T>(cap: number, cmp: (a: T, b: T) => number): { push: (x: T) => vo
 }
 
 interface Tally { vol: number; swaps: number; pnl: number }
+interface PoolMeta { venueIds: Set<string>; markets: Set<string> }
 /** pass-2 accumulator for one TOP group-cell. `mks` is an exact-size typed
  *  array (the count is known from pass 1) — plain number[] growth doubled the
  *  aggregation's footprint on the memory-tight production box. */
@@ -107,6 +109,11 @@ export async function computeLeaderboard(
 
   // ── pass 1: scalars per (grouping, horizon, key) + bounded candidate top-Ks ──
   const tallies: Map<string, Tally>[][] = G.map(() => H.map(() => new Map<string, Tally>()));
+  // Pool keys stay byte-for-byte stable in SQLite. Track presentation metadata
+  // beside each horizon instead of rewriting the key; a contract that serves
+  // multiple markets (e.g. one router/pool) deliberately gets no single-market
+  // label rather than a misleading first-seen one.
+  const poolMeta: Map<string, PoolMeta>[] = H.map(() => new Map<string, PoolMeta>());
   const winners = H.map(() => topK<{ pnl: number; id: string }>(TOP_SWAPS, (a, b) => b.pnl - a.pnl));
   const losers = H.map(() => topK<{ pnl: number; id: string }>(TOP_SWAPS, (a, b) => a.pnl - b.pnl));
   const outs = topK<{ pnl: number; id: string }>(OUTLIERS, (a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
@@ -124,6 +131,13 @@ export async function computeLeaderboard(
         if (pnl > 0) winners[h].push({ pnl, id: f.id });        // strict: pnl 0 is neither
         else if (pnl < 0) losers[h].push({ pnl, id: f.id });
         if (H[h] === 0 && f.ts >= daySince) outs.push({ pnl, id: f.id });
+        let pm = poolMeta[h].get(f.pool);
+        if (!pm) {
+          pm = { venueIds: new Set<string>(), markets: new Set<string>() };
+          poolMeta[h].set(f.pool, pm);
+        }
+        pm.venueIds.add(f.venueId);
+        pm.markets.add(f.market);
         for (let g = 0; g < G.length; g++) {
           const m = tallies[g][h];
           let t = m.get(rowKeys[g]);
@@ -184,8 +198,11 @@ export async function computeLeaderboard(
         const c = cells[g][h].get(key)!;
         if (c.cnt > 0 && c.cnt % c.stride !== 0) c.spark.push(c.cum); // spark always ends at the total
         const sorted = c.mks.subarray(0, c.filled).sort(); // one sort serves all five reads
+        const pm = G[g] === 'pool' ? poolMeta[h].get(key) : undefined;
         return {
           key,
+          ...(pm?.venueIds.size === 1 ? { venueId: pm.venueIds.values().next().value as string } : {}),
+          ...(pm?.markets.size === 1 ? { market: pm.markets.values().next().value as string } : {}),
           vol: t.vol,
           swaps: t.swaps,
           p5: pctOf(sorted, 0.05), p25: pctOf(sorted, 0.25), p50: pctOf(sorted, 0.5),
