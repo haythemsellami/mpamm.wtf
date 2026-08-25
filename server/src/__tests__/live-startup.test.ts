@@ -68,6 +68,7 @@ async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
   vi.doMock('../chain/rpc.js', () => ({
     monad: { blockTime: 300 },
     publicClient: { getBlockNumber: vi.fn(async () => 100n) },
+    quoteClient: {},
     archiveClient: {},
     getLogsChunked: vi.fn(),
     probeChain: vi.fn(async () => ({ ok: true, block: 100 })),
@@ -118,7 +119,7 @@ describe('live startup archive gate', () => {
     await started;
     expect(source.backgroundHistory).toHaveBeenCalledOnce();
     expect(source.gas.start).toHaveBeenCalledOnce();
-    source.stop();
+    await source.stop();
   });
 
   it('never starts deep workers when the archive primary is on the wrong chain', async () => {
@@ -134,7 +135,7 @@ describe('live startup archive gate', () => {
     expect(error?.message).toMatch(/Archive RPC sanity check failed.*wrong chain/i);
     expect(source.backgroundHistory).not.toHaveBeenCalled();
     expect(source.gas.start).not.toHaveBeenCalled();
-    source.stop();
+    await source.stop();
   });
 
   it('retries an unapplied reset even when every venue seed is already done', async () => {
@@ -157,7 +158,7 @@ describe('live startup archive gate', () => {
     source.backgroundHistory.mockClear();
     await source.rediscover();
     expect(source.backgroundHistory).not.toHaveBeenCalled();
-    source.stop();
+    await source.stop();
   });
 
   it('quotes observed heads at their explicit block and coalesces overload to the newest head', async () => {
@@ -179,7 +180,7 @@ describe('live startup archive gate', () => {
 
     await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(103n, expect.objectContaining({ source: 'ws', coalescedBlocks: 1 })));
     expect(source.poll.mock.calls.map((args: unknown[]) => args[0])).toEqual([101n, 103n]);
-    source.stop();
+    await source.stop();
   });
 
   it('counts a failed running frame when a newer pending head supersedes it', async () => {
@@ -199,6 +200,48 @@ describe('live startup archive gate', () => {
     first.reject(new Error('frame failed'));
 
     await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(103n, expect.objectContaining({ coalescedBlocks: 2 })));
-    source.stop();
+    await source.stop();
+  });
+
+  it('persists only volume days changed since the prior snapshot', async () => {
+    const { source } = await setup();
+    const historical = { utcDay: '2026-01-01', partial: false, byVenue: { old: { usd: 1, swaps: 1 } } };
+    const changed = { utcDay: '2026-08-25', partial: true, byVenue: { live: { usd: 2, swaps: 2 } } };
+    source.days = [historical, changed];
+    source.dirtyDays = new Set([changed.utcDay]);
+    const persistSnapshot = vi.spyOn(source.store, 'persistSnapshot').mockImplementation(() => undefined);
+
+    await source.persist();
+
+    expect(persistSnapshot).toHaveBeenCalledWith([changed], expect.any(Object), [], expect.any(Array));
+    expect(source.dirtyDays.size).toBe(0);
+    source.store.close();
+  });
+
+  it('requeues dirty data when an asynchronous snapshot fails', async () => {
+    const { source } = await setup();
+    const changed = { utcDay: '2026-08-25', partial: true, byVenue: { live: { usd: 2, swaps: 2 } } };
+    source.days = [changed];
+    source.dirtyDays = new Set([changed.utcDay]);
+    vi.spyOn(source.store, 'persistSnapshot').mockImplementation(() => { throw new Error('disk unavailable'); });
+
+    await source.persist();
+
+    expect(source.dirtyDays).toEqual(new Set([changed.utcDay]));
+    expect(source.notes.list()).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'store.persist.failed' })]));
+    source.store.close();
+  });
+
+  it('checkpoints only backfill days whose accumulated total changed', async () => {
+    const { source } = await setup();
+    const acc = new Map([['2026-08-20', { usd: 10, swaps: 2 }]]);
+    const flushed = new Map([['2026-08-20', { usd: 10, swaps: 2 }]]);
+    source.days = [];
+
+    expect(source.mergeBackfill('test-venue', acc, flushed)).toEqual([]);
+    acc.set('2026-08-20', { usd: 11, swaps: 3 });
+    expect(source.mergeBackfill('test-venue', acc, flushed).map((d: { utcDay: string }) => d.utcDay))
+      .toEqual(['2026-08-20']);
+    source.store.close();
   });
 });

@@ -87,6 +87,22 @@ describe('isTransportFailure', () => {
 });
 
 describe('RpcBreaker failover', () => {
+  it('routes an isolated lane through the same active endpoint', async () => {
+    const calls: string[] = [];
+    const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 });
+    cleanup.push(breaker);
+    breaker.attach([{
+      label: 'primary',
+      request: async ({ method }) => method === 'eth_chainId' ? '0x8f' : 'default',
+      lanes: { quote: async ({ method }) => { calls.push(method); return 'quote'; } },
+    }]);
+    await breaker.verify(143);
+
+    await expect(breaker.request({ method: 'eth_call' }, 'quote')).resolves.toBe('quote');
+    expect(calls).toEqual(['eth_call']);
+    expect(breaker.status()).toMatchObject({ active: 'primary', degraded: false });
+  });
+
   it('serves from the primary and stays there below the failure threshold', async () => {
     const primary = { mode: http502() ? (() => http502()) : 'ok' } as { mode: 'ok' | (() => Error) };
     primary.mode = () => http502();

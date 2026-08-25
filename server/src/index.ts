@@ -15,14 +15,18 @@ async function main(): Promise<void> {
   // the WS stream + snapshot refetch fill them in. (No connect-refused window.)
   const server = startServer(source);
 
-  const shutdown = () => {
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log('\n[mpamm] shutting down');
-    source.stop();
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 1500);
+    const forceExit = setTimeout(() => process.exit(0), 5000);
+    try { await source.stop(); }
+    catch (error) { console.error(`[mpamm] shutdown flush failed: ${(error as Error).message}`); }
+    finally { server.close(() => { clearTimeout(forceExit); process.exit(0); }); }
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => { void shutdown(); });
+  process.on('SIGTERM', () => { void shutdown(); });
 
   console.log(`[mpamm] warming up ${source.mode} source…`);
   await source.start();

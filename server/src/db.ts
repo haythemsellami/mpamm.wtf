@@ -414,8 +414,8 @@ export class VolumeStore {
 
   // ── fills ─────────────────────────────────────────────────────────────────
   /**
-   * Atomic snapshot write: daily volume + the cursor meta + aged/new fills, all
-   * in ONE transaction. This is the hot persist path — writing them together
+   * Atomic snapshot write: changed daily volume + the cursor meta + aged/new fills, all
+   * in ONE transaction. Production invokes this on the snapshot worker; writing them together
    * means a crash can never leave the volume ahead of the lastProcessedBlock
    * cursor, which a gap-fill on the next boot would otherwise re-count (fills
    * dedupe by their deterministic txHash:logIndex id).

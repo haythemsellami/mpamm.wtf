@@ -30,7 +30,7 @@ services:
         value: live
       - key: NODE_OPTIONS      # cap the JS heap well under the instance limit
         value: --max-old-space-size=320
-      - key: RPC_HTTP_URL    # hot node: quotes + fills tail (Multicall3 + getLogs)
+      - key: RPC_HTTP_URL    # hot node: isolated quote lane + fills/head lane
         sync: false
       - key: RPC_WS_URL      # optional hot-node newHeads subscription; HTTP polling remains the watchdog
         sync: false

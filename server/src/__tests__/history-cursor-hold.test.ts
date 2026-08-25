@@ -56,6 +56,7 @@ async function setup(failure: Failure, readDelayMs = 0) {
   const primaryStatus = () => ({ active: degraded ? 'archive-backup-1' : 'archive', degraded, down: false });
   vi.doMock('../chain/rpc.js', () => ({
     publicClient: {},
+    quoteClient: {},
     archiveClient,
     getLogsChunked: vi.fn(),
     probeChain: vi.fn(),

@@ -33,6 +33,7 @@ describe('RPC pool resolution', () => {
     // identity, not equality: the deep crawls must ride the very same breaker,
     // or an unconfigured deploy would quietly double its endpoint pools.
     expect(rpc.archiveClient).toBe(rpc.publicClient);
+    expect(rpc.quoteClient).not.toBe(rpc.publicClient);
     expect(rpc.archiveRpcStatus()).toEqual(rpc.rpcStatus());
   });
 
