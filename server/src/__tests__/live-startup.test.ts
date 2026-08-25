@@ -7,8 +7,9 @@ import { join } from 'node:path';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => { resolve = res; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 const paths: string[] = [];
@@ -106,7 +107,7 @@ describe('live startup archive gate', () => {
 
     await vi.waitFor(() => {
       expect(source.poll).toHaveBeenCalledOnce();
-      expect(source.poll).toHaveBeenCalledWith(100n);
+      expect(source.poll).toHaveBeenCalledWith(100n, expect.objectContaining({ blockNumber: 100n, source: 'http', coalescedBlocks: 0 }));
       expect(headWatcher.start).toHaveBeenCalledOnce();
       expect(source.scheduleTail).toHaveBeenCalledOnce();
     });
@@ -171,13 +172,33 @@ describe('live startup archive gate', () => {
     const callbacks = headWatcher.start.mock.calls[0][0];
 
     callbacks.onBlock(101n, 'ws');
-    await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(101n));
+    await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(101n, expect.objectContaining({ source: 'ws', coalescedBlocks: 0 })));
     callbacks.onBlock(102n, 'ws');
     callbacks.onBlock(103n, 'ws');
     first.resolve();
 
-    await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(103n));
+    await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(103n, expect.objectContaining({ source: 'ws', coalescedBlocks: 1 })));
     expect(source.poll.mock.calls.map((args: unknown[]) => args[0])).toEqual([101n, 103n]);
+    source.stop();
+  });
+
+  it('counts a failed running frame when a newer pending head supersedes it', async () => {
+    const { source, archiveProbe, headWatcher } = await setup();
+    const started = source.start();
+    archiveProbe.resolve({ ok: true, block: 100 });
+    await started;
+
+    const first = deferred<void>();
+    source.poll.mockClear();
+    source.poll.mockImplementationOnce(() => first.promise).mockResolvedValue(undefined);
+    const callbacks = headWatcher.start.mock.calls[0][0];
+
+    callbacks.onBlock(101n, 'ws');
+    await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(101n, expect.any(Object)));
+    callbacks.onBlock(103n, 'ws');
+    first.reject(new Error('frame failed'));
+
+    await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(103n, expect.objectContaining({ coalescedBlocks: 2 })));
     source.stop();
   });
 });

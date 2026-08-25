@@ -1,11 +1,13 @@
 import WebSocket from 'ws';
 import type { PublicClient } from 'viem';
-import { MONAD_CHAIN_ID } from '@shared';
+import { MONAD_CHAIN_ID, type QuoteHeadSource } from '@shared';
 
-export type HeadSource = 'http' | 'ws';
+export type HeadSource = Exclude<QuoteHeadSource, 'sim'>;
 
 export interface HotHeadCallbacks {
-  onBlock: (blockNumber: bigint, source: HeadSource) => void;
+  onBlock: (blockNumber: bigint, source: HeadSource, observedAt: number) => void;
+  /** The configured subscription passed chain-id verification and subscribed. */
+  onWsConnected?: () => void;
   /** A configured subscription failed; HTTP polling is still serving heads. */
   onWsFallback?: () => void;
   /** A subscription delivered heads again after falling back. */
@@ -72,7 +74,7 @@ export class HotHeadWatcher {
   private publish(blockNumber: bigint, source: HeadSource): void {
     if (this.stopped || blockNumber <= this.last) return;
     this.last = blockNumber;
-    this.callbacks?.onBlock(blockNumber, source);
+    this.callbacks?.onBlock(blockNumber, source, Date.now());
   }
 
   private async poll(): Promise<void> {
@@ -120,6 +122,9 @@ export class HotHeadWatcher {
         if (this.wsReadyTimer) clearTimeout(this.wsReadyTimer);
         this.wsReadyTimer = undefined;
         this.reconnectMs = 1_000;
+        // On a reconnect, "recovered" remains reserved for the first real
+        // head. A subscription ACK alone can still be a silent/half-open feed.
+        if (!this.wsUnavailable) this.callbacks?.onWsConnected?.();
         return;
       }
       const rawNumber = msg?.method === 'eth_subscription' ? msg?.params?.result?.number : undefined;

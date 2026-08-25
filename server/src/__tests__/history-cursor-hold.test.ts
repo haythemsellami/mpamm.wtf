@@ -95,6 +95,7 @@ describe('history cursor holds', () => {
     '%s holds and resumes when getLogs is throttled',
     async (stage) => {
       vi.useFakeTimers();
+      vi.setSystemTime(Date.parse('2026-08-24T12:00:00Z'));
       const { source, adapter, sources, path, recover } = await setup('logs');
       const cursorKey = stage === 'volume' ? `backfill_cursor_${VID}` : `mkfill_cursor_${VID}`;
       const doneKey = stage === 'volume' ? `backfill_done_${VID}` : `mkfill_done_${VID}`;
@@ -123,6 +124,7 @@ describe('history cursor holds', () => {
     '%s holds and resumes when a block timestamp is throttled',
     async (stage) => {
       vi.useFakeTimers();
+      vi.setSystemTime(Date.parse('2026-08-24T12:00:00Z'));
       const { source, adapter, sources, path, recover } = await setup('timestamp');
       const cursorKey = stage === 'volume' ? `backfill_cursor_${VID}` : `mkfill_cursor_${VID}`;
       const doneKey = stage === 'volume' ? `backfill_done_${VID}` : `mkfill_done_${VID}`;
@@ -155,6 +157,7 @@ describe('history cursor holds', () => {
     '%s discards a %s result and resumes on the primary',
     async (stage, failure) => {
       vi.useFakeTimers();
+      vi.setSystemTime(Date.parse('2026-08-24T12:00:00Z'));
       const { source, adapter, sources, path, recover } = await setup(failure);
       const cursorKey = stage === 'volume' ? `backfill_cursor_${VID}` : `mkfill_cursor_${VID}`;
       const doneKey = stage === 'volume' ? `backfill_done_${VID}` : `mkfill_done_${VID}`;

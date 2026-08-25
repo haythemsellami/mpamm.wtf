@@ -319,12 +319,56 @@ export interface QuoteRow {
   ts: number;
 }
 
-/** The full quote matrix for one poll — replaced wholesale each tick. */
+export type QuoteHeadSource = 'http' | 'ws' | 'sim';
+
+/** Lifecycle of one block-pinned quote frame. These are server-clock epoch
+ *  milliseconds so REST history and the live stream use the same timeline. */
+export interface QuoteFrameTelemetry {
+  /** How the server first observed the head that triggered this frame. */
+  headSource: QuoteHeadSource;
+  /** When the triggering head entered the server. */
+  headObservedAt: number;
+  /** Before any reference capture or adapter call. */
+  quoteStartedAt: number;
+  /** After every adapter settled and the immutable matrix was assembled. */
+  quoteCompletedAt: number;
+  /** Immediately before the completed snapshot enters the server stream. */
+  emittedAt: number;
+  /** quoteCompletedAt - quoteStartedAt. */
+  durationMs: number;
+  /** Primary venue id → wall time spent awaiting that adapter's quote(). */
+  adapterMs: Record<string, number>;
+  /** Quote-capable venue/reference ids that emitted no row in this frame. */
+  missingVenues: string[];
+  /** Intermediate block numbers superseded while an older frame was running. */
+  coalescedBlocks: number;
+}
+
+/** Rolling view of whether the quote stream is keeping up with chain heads. */
+export interface RealtimeHealth {
+  headBlock: number;
+  quoteBlock: number;
+  lagBlocks: number;
+  frameMs: number;
+  headToFrameMs: number;
+  /** Largest event-loop delay observed while the latest frame was built. */
+  eventLoopLagMs: number;
+  /** Emitted unique blocks / block-number span over the latest 60 seconds. */
+  coveragePct60s: number;
+  coalescedBlocks60s: number;
+  headSource: QuoteHeadSource;
+  wsStatus: 'disabled' | 'connecting' | 'connected' | 'fallback';
+}
+
+/** The full quote matrix for one block-triggered frame. */
 export interface QuoteSnapshot {
   block: number;
   monUsd: number;
+  /** Frame emission time. Older/synthetic producers may omit `frame`, so this
+   *  remains the canonical chart/history timestamp. */
   ts: number;
   rows: QuoteRow[];
+  frame?: QuoteFrameTelemetry;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -604,6 +648,8 @@ export interface MarketState {
    *  pools). Absent when no dedicated archive is configured (the pools are the
    *  same one) and in sim. */
   rpcArchive?: RpcStatus;
+  /** Block-head/quote freshness. Absent before the first live frame. */
+  realtime?: RealtimeHealth;
 }
 
 // ──────────────────────────────────────────────────────────────────────────

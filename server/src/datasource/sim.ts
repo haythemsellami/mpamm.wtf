@@ -110,9 +110,25 @@ export class SimDataSource extends BaseSource {
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
       quoteCadenceMs: config.quoteIntervalMs, source: 'sim', venues: this.venues,
       notes: this.notes.list(),
+      realtime: {
+        headBlock: this.block, quoteBlock: this.block, lagBlocks: 0, frameMs: 0, headToFrameMs: 0, eventLoopLagMs: 0,
+        coveragePct60s: 100, coalescedBlocks60s: 0, headSource: 'sim', wsStatus: 'disabled',
+      },
     };
   }
-  getQuotes(): QuoteSnapshot { return { block: this.block, monUsd: this.mon, ts: Date.now(), rows: this.buildMatrix() }; }
+  getQuotes(): QuoteSnapshot {
+    const ts = Date.now();
+    return {
+      block: this.block,
+      monUsd: this.mon,
+      ts,
+      rows: this.buildMatrix(),
+      frame: {
+        headSource: 'sim', headObservedAt: ts, quoteStartedAt: ts, quoteCompletedAt: ts, emittedAt: ts,
+        durationMs: 0, adapterMs: {}, missingVenues: [], coalescedBlocks: 0,
+      },
+    };
+  }
   getFills(): Fill[] { return this.fills.map(stripFill); }
   getVolume(): DailyVolume[] { return this.days.map((d) => ({ ...d, byVenue: { ...d.byVenue } })); }
 
@@ -341,7 +357,10 @@ export class SimDataSource extends BaseSource {
 
   private tick(): void {
     this.mutate();
-    this.block += 2;
+    // One synthetic block per synthetic quote frame. The simulator's cadence
+    // is configurable and its coverage telemetry must describe its own stream,
+    // not pretend it skipped every other live-chain block.
+    this.block += 1;
     this.bumpVolume();
     this.spawnFill();
     this.emitMsg({ ch: 'state', data: this.getState() });

@@ -46,7 +46,8 @@ export function startServer(source: DataSource): Server {
   }
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, source: source.mode, block: source.getState().block });
+    const state = source.getState();
+    res.json({ ok: true, source: source.mode, block: state.block, realtime: state.realtime });
   });
 
   app.get('/api/markets', (_req, res) => {

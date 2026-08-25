@@ -48,8 +48,8 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
   abstract getFills(): Fill[];
   abstract getVolume(): DailyVolume[];
 
-  /** Rolling ring of the last QUOTE_HISTORY_N broadcast quote matrices — recorded
-   *  at the emitMsg choke point so live + sim get it identically for free. */
+  /** Rolling wall-time ring of broadcast quote matrices — recorded at the
+   *  emitMsg choke point so live + sim get it identically for free. */
   private quoteHist: QuoteSnapshot[] = [];
 
   /** Default: aggregate the in-memory fill window (sim). Live overrides with a
@@ -89,7 +89,10 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
     const out: QuoteSnapshot[] = [];
     for (const q of this.quoteHist) {
       const rows = q.rows.filter((r) => r.market === market && r.sizeUsd === size);
-      if (rows.length) out.push({ block: q.block, monUsd: q.monUsd, ts: q.ts, rows });
+      // Keep the frame even when every selected row is absent. Its block/time
+      // is the evidence of a real quote cycle, and lets the chart draw a gap
+      // instead of compressing the missing interval out of history.
+      out.push({ ...q, rows });
     }
     return out;
   }

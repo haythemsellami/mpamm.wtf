@@ -2,9 +2,9 @@ import { useEffect, useRef } from 'react';
 import { type VenueMeta } from '@shared';
 import { useDashboard } from '../store';
 import { hexA, venueColor, CH } from '../theme';
+import { continuousQuoteRuns, quoteFrameTime, type QuotePoint } from '../lib/quote-series';
 
 const QUOTE_WINDOW_MS = 60_000;
-const QUOTE_SAMPLE_MAX = 400;
 
 /**
  * Streaming bid/ask QUOTE chart — a STEP (staircase) chart, because quotes are
@@ -51,12 +51,23 @@ export function QuoteCanvas() {
     const active = chips.filter((v) => d.venueToggles[v.id]);
     if (!active.length) return;
 
+    // Keep the window attached to wall time. If the stream stalls, the last
+    // observed quote visibly ages leftward instead of remaining pinned at NOW.
+    const endTs = Math.max(Date.now(), d.quotes ? quoteFrameTime(d.quotes) : 0);
+    const startTs = endTs - QUOTE_WINDOW_MS;
+
     let mn = Infinity, mx = -Infinity;
     for (const v of active) {
       const s = d.series[v.id];
       if (!s) continue;
-      for (const p of s.bid) { if (p < mn) mn = p; if (p > mx) mx = p; }
-      for (const p of s.ask) { if (p < mn) mn = p; if (p > mx) mx = p; }
+      for (const p of s.points) {
+        if (p.ts < startTs) continue;
+        for (const px of [p.bid, p.ask]) {
+          if (px === null) continue;
+          if (px < mn) mn = px;
+          if (px > mx) mx = px;
+        }
+      }
     }
     if (!isFinite(mn) || mn === mx) return;
     const pad = (mx - mn) * 0.12; mn -= pad; mx += pad;
@@ -76,9 +87,7 @@ export function QuoteCanvas() {
     // for exactly the width its own labels take.
     const padL = Math.max(58, Math.ceil(Math.max(...labels.map((l) => ctx.measureText(l).width))) + 12);
 
-    const cadenceMs = d.state?.quoteCadenceMs ?? 500;
-    const sampleCount = Math.min(QUOTE_SAMPLE_MAX, Math.max(2, Math.floor(QUOTE_WINDOW_MS / Math.max(1, cadenceMs)) + 1));
-    const X = (i: number) => padL + (i / (sampleCount - 1)) * (w - padL - padR);
+    const X = (ts: number) => padL + Math.max(0, Math.min(1, (ts - startTs) / QUOTE_WINDOW_MS)) * (w - padL - padR);
     const Y = (p: number) => padT + (1 - (p - mn) / (mx - mn)) * (h - padT - padB);
 
     ctx.lineWidth = 1;
@@ -89,25 +98,33 @@ export function QuoteCanvas() {
       ctx.fillStyle = ch.label; ctx.textAlign = 'right'; ctx.fillText(labels[g], padL - 6, y + 3);
     }
     ctx.textAlign = 'center';
-    // time axis spans the configured 60-second quote window at the source's
-    // actual cadence (per-block live, 500ms in the simulator).
-    const spanSec = ((sampleCount - 1) * cadenceMs) / 1000;
+    // The x-axis is wall time, not "sample index × nominal cadence". A dropped
+    // block therefore occupies real horizontal space instead of being erased.
     const TICKS = 6;
     for (let k = 0; k <= TICKS; k++) {
-      const i = (k / TICKS) * (sampleCount - 1), x = X(i);
-      const secAgo = Math.round((1 - k / TICKS) * spanSec);
+      const ts = startTs + (k / TICKS) * QUOTE_WINDOW_MS, x = X(ts);
+      const secAgo = Math.round((1 - k / TICKS) * QUOTE_WINDOW_MS / 1000);
       ctx.strokeStyle = ch.grid2;
       ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
       ctx.fillStyle = ch.label2; ctx.fillText('-' + secAgo + 's', x, h - 7);
     }
 
-    const stepPath = (arr: number[]) => {
+    const stepPath = (run: readonly QuotePoint[], side: 'bid' | 'ask') => {
       ctx.beginPath();
-      arr.forEach((p, i) => {
-        const x = X(i), y = Y(p);
+      run.forEach((point, i) => {
+        const px = point[side]!;
+        const x = X(point.ts), y = Y(px);
         if (!i) ctx.moveTo(x, y);
-        else { ctx.lineTo(x, Y(arr[i - 1])); ctx.lineTo(x, y); } // hold, then step
+        else { ctx.lineTo(x, Y(run[i - 1][side]!)); ctx.lineTo(x, y); } // hold, then step
       });
+    };
+    const strokeRun = (run: readonly QuotePoint[], side: 'bid' | 'ask') => {
+      if (run.length > 1) stepPath(run, side);
+      else {
+        ctx.beginPath();
+        ctx.arc(X(run[0].ts), Y(run[0][side]!), 1.35, 0, Math.PI * 2);
+      }
+      ctx.stroke();
     };
 
     // FILLS first — widest-spread band underneath so tighter venues stay legible.
@@ -119,17 +136,25 @@ export function QuoteCanvas() {
     for (const v of byW) {
       const s = d.series[v.id];
       if (!s) continue;
-      const n = Math.min(s.ask.length, s.bid.length);
-      if (n < 2) continue; // need both sides for a ribbon (one-sided venues skip)
-      ctx.beginPath();
-      ctx.moveTo(X(0), Y(s.ask[0]));
-      for (let i = 1; i < n; i++) { ctx.lineTo(X(i), Y(s.ask[i - 1])); ctx.lineTo(X(i), Y(s.ask[i])); } // stepped top (ask)
-      ctx.lineTo(X(n - 1), Y(s.bid[n - 1]));
-      for (let i = n - 1; i > 0; i--) { ctx.lineTo(X(i - 1), Y(s.bid[i])); ctx.lineTo(X(i - 1), Y(s.bid[i - 1])); } // stepped bottom (bid)
-      ctx.closePath();
-      // baseline (standard-DEX) venues render as a HEAVIER cost-envelope band —
-      // the design's ribbonB — so the propAMM lines visibly sit inside it.
-      ctx.fillStyle = hexA(venueColor(v, d.theme), v.role === 'baseline' ? ch.ribbonB : ch.ribbon); ctx.fill();
+      for (const run of continuousQuoteRuns(s.points, 'both', startTs)) {
+        if (run.length < 2) continue; // need both sides for a ribbon (one-sided venues skip)
+        ctx.beginPath();
+        ctx.moveTo(X(run[0].ts), Y(run[0].ask!));
+        for (let i = 1; i < run.length; i++) {
+          ctx.lineTo(X(run[i].ts), Y(run[i - 1].ask!));
+          ctx.lineTo(X(run[i].ts), Y(run[i].ask!));
+        }
+        const last = run.length - 1;
+        ctx.lineTo(X(run[last].ts), Y(run[last].bid!));
+        for (let i = last; i > 0; i--) {
+          ctx.lineTo(X(run[i - 1].ts), Y(run[i].bid!));
+          ctx.lineTo(X(run[i - 1].ts), Y(run[i - 1].bid!));
+        }
+        ctx.closePath();
+        // baseline (standard-DEX) venues render as a HEAVIER cost-envelope band —
+        // the design's ribbonB — so the propAMM lines visibly sit inside it.
+        ctx.fillStyle = hexA(venueColor(v, d.theme), v.role === 'baseline' ? ch.ribbonB : ch.ribbon); ctx.fill();
+      }
     }
 
     // STROKES on top — solid stepped ask, dashed stepped bid (each side drawn
@@ -139,8 +164,13 @@ export function QuoteCanvas() {
       if (!s) continue;
       const bench = v.role === 'baseline'; // heavier strokes frame the band (design)
       ctx.strokeStyle = venueColor(v, d.theme);
-      if (s.ask.length >= 2) { ctx.lineWidth = bench ? 1.9 : 1.5; ctx.setLineDash([]); stepPath(s.ask); ctx.stroke(); }
-      if (s.bid.length >= 2) { ctx.lineWidth = bench ? 1.4 : 1.1; ctx.setLineDash([3, 3]); stepPath(s.bid); ctx.stroke(); ctx.setLineDash([]); }
+      ctx.lineWidth = bench ? 1.9 : 1.5;
+      ctx.setLineDash([]);
+      for (const run of continuousQuoteRuns(s.points, 'ask', startTs)) strokeRun(run, 'ask');
+      ctx.lineWidth = bench ? 1.4 : 1.1;
+      ctx.setLineDash([3, 3]);
+      for (const run of continuousQuoteRuns(s.points, 'bid', startTs)) strokeRun(run, 'bid');
+      ctx.setLineDash([]);
     }
   };
 
@@ -153,8 +183,9 @@ export function QuoteCanvas() {
     p();
     const raf = requestAnimationFrame(p);
     const t = setTimeout(p, 80);
+    const clock = setInterval(p, 1_000);
     window.addEventListener('resize', p);
-    return () => { cancelAnimationFrame(raf); clearTimeout(t); window.removeEventListener('resize', p); };
+    return () => { cancelAnimationFrame(raf); clearTimeout(t); clearInterval(clock); window.removeEventListener('resize', p); };
   }, []);
 
   return <canvas ref={ref} data-quote="1" style={{ display: 'block', width: '100%', height: 360 }} />;

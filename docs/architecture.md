@@ -59,6 +59,8 @@ Quotes are **block-triggered** by one monotonic hot-head watcher (`server/src/ch
 
 Every adapter receives that explicit block in `quote(ctx, sizesUsd, blockNumber)` and pins all of its **Multicall3 `eth_call`s** to it (POE `getQuote`, Metric `quoteSwap`, Clober `getExpectedOutput`, Hanji's book-assembly helper, Uniswap `quoteExactInputSingle`). The matrix is published under the same block only after all adapters settle. Rows are normalized to `QuoteRow[]` in **bps vs the pair's reference mid**, then annotated with the CEX realized-vs-taker columns — the CEX book is walked for the **same base size** with the taker fee overlaid: realized-vs-realized at size, the only honest comparison for size-sensitive flow. `filledFull=false` marks an exhausted pool/book (`PARTIAL` tag); `oneSided=true` marks a book with only one executable side. The fills tail remains an independent self-scheduling loop (`TAIL_INTERVAL_MS`, default 500ms), so finalized log ingest cannot stretch quote freshness.
 
+The CEX mids/books used for sizing, bps anchors and benchmark rows are captured synchronously once before the frame's first RPC await, so a moving feed cannot give different adapters different reference moments. Every published snapshot carries head-observed / quote-started / completed / emitted timestamps, head source, per-adapter wall times, missing venues and coalesced blocks. `state.realtime` rolls those frames into head/quote lag, 60-second block coverage, coalescing and event-loop delay; `/api/health` exposes the same view. The Execution chart positions samples by their real emitted timestamps and breaks paths on missing rows/sides or skipped block numbers — gaps remain visible instead of being compressed into a nominal 300ms sample index, and the wall-time window keeps advancing when the stream stalls.
+
 ## Fill stream (tape, volume, markouts)
 
 Each tick the core fetches every adapter's `logSources()` over the pending block range and hands each adapter its logs to `decode()` into normalized `Fill`s. Fills are deduped by deterministic id (`venue-txHash-logIndex`), bucketed into per-venue UTC-day volume, and joined to their **pair's** CEX mid for 0/5/10/30/60s markouts. Because every tracked pair quotes in a USD stable, the stable leg *is* the USD value — exact, no price oracle.
@@ -94,6 +96,7 @@ refPx(pair) = <BASE>USDT px × wrapBasis(base) ÷ usdtCross(quote)
 ```ts
 VenueMeta   { id; name; color{light,dark}; kind:'amm'|'clob'|'vault'|'cex'; role:'venue'|'reference'|'baseline'; sinceUtc? }
 QuoteRow    { venueId; market; sizeUsd; bidBps; askBps; bidPx; askPx; spreadBps; filledFull; oneSided?; feeBps; ts }
+QuoteSnapshot { block; monUsd; ts; rows; frame{ headSource; headObservedAt; quoteStartedAt; quoteCompletedAt; emittedAt; durationMs; adapterMs; missingVenues; coalescedBlocks } }
 Fill        { id; venueId; market; side; category; usd; baseAmount; execPx; pxApprox?; txHash; to; pool; blockNumber; ts; markoutsBps[] }
 DailyVolume { utcDay; partial; byVenue: Record<venueId, { usd; swaps }> }
 GasDay      { utcDay; partial; byVenue: Record<venueId, { mon; txs }> }
@@ -115,7 +118,7 @@ daily_gas(utc_day, venue_id, mon, txs)         -- QUOTE_UPDATE_BURN; additive, a
 REST + WS contract (the frontend renders purely off these):
 
 ```
-GET /api/health                    liveness (mode + block) — deploy health checks hit this
+GET /api/health                    liveness + realtime head/quote health — deploy health checks hit this
 GET /api/venues                    the venue registry (VenueMeta[])
 GET /api/markets                   state snapshot (incl. venues + notes)
 GET /api/quotes                    latest quote matrix
