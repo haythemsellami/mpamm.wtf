@@ -48,40 +48,40 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
   // deduped — with no primary configured the default backup IS the primary.
   const urls = [primary, ...backups.filter((u) => u !== primary)];
   const breaker = new RpcBreaker({ pool });
-  const transport: Transport = ({ chain }) => {
-    breaker.attach(urls.map((url, i) => {
-      // viem keys its JSON-RPC batch scheduler globally by URL. Fragments are
-      // never sent over HTTP, but make the quote scheduler distinct so heads,
-      // logs and attribution can never join and hold a quote response batch.
-      const quoteUrl = new URL(url);
-      quoteUrl.hash = 'quote';
-      const request = http(url, {
-        batch: { batchSize: 256, wait: 8 },
-        retryCount: 2,
-        timeout: 12_000,
-      })({ chain }).request as RpcRequestFn;
-      const quote = http(quoteUrl.toString(), {
-        // Adapter methods already aggregate their contract reads through
-        // Multicall3. Zero wait still coalesces the adapters scheduled in this
-        // event-loop turn without charging every frame a fixed extra 8ms.
-        batch: { batchSize: 256, wait: 0 },
-        retryCount: 2,
-        timeout: 12_000,
-      })({ chain }).request as RpcRequestFn;
-      return {
-        label: `${label(i)}${url === PUBLIC_RPC && i > 0 ? ' (public)' : ''}`,
-        request,
-        lanes: { quote },
-      };
-    }));
-    return createTransport({
-      key: 'failover',
-      name: 'Failover HTTP',
-      type: 'failover',
-      retryCount: 0,
-      request: (args) => breaker.request(args) as Promise<any>,
-    });
-  };
+  // Attach eagerly: either viem client can be initialized or invoked first,
+  // and both must see the same complete endpoint set from request one.
+  breaker.attach(urls.map((url, i) => {
+    // viem keys its JSON-RPC batch scheduler globally by URL. Fragments are
+    // never sent over HTTP, but make the quote scheduler distinct so heads,
+    // logs and attribution can never join and hold a quote response batch.
+    const quoteUrl = new URL(url);
+    quoteUrl.hash = 'quote';
+    const request = http(url, {
+      batch: { batchSize: 256, wait: 8 },
+      retryCount: 2,
+      timeout: 12_000,
+    })({ chain: monad }).request as RpcRequestFn;
+    const quote = http(quoteUrl.toString(), {
+      // Adapter methods already aggregate their contract reads through
+      // Multicall3. Zero wait still coalesces the adapters scheduled in this
+      // event-loop turn without charging every frame a fixed extra 8ms.
+      batch: { batchSize: 256, wait: 0 },
+      retryCount: 2,
+      timeout: 12_000,
+    })({ chain: monad }).request as RpcRequestFn;
+    return {
+      label: `${label(i)}${url === PUBLIC_RPC && i > 0 ? ' (public)' : ''}`,
+      request,
+      lanes: { quote },
+    };
+  }));
+  const transport: Transport = () => createTransport({
+    key: 'failover',
+    name: 'Failover HTTP',
+    type: 'failover',
+    retryCount: 0,
+    request: (args) => breaker.request(args) as Promise<any>,
+  });
   const quoteTransport: Transport = () => createTransport({
     key: 'failover-quote',
     name: 'Failover HTTP (quote lane)',

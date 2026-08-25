@@ -6,6 +6,7 @@ import { blockAtOrAfter } from './chain/rpc.js';
 import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from './chain/failover.js';
 import type { VolumeStore } from './db.js';
 import type { NoteFn } from './notes.js';
+import { directStoreWriter, type StoreWriter } from './persistence.js';
 import type { GasSource, VenueAdapter } from './venues/adapter.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -105,6 +106,7 @@ export class GasTracker {
    *  the ≈ marker survives restarts even before the venue's sources resolve. */
   private approx = new Set<string>();
   private noted = new Set<string>();
+  private writer: StoreWriter;
 
   constructor(
     private client: PublicClient,
@@ -119,11 +121,16 @@ export class GasTracker {
     /** Monotonic pool generation; detects primary → backup → primary inside one read. */
     private rpcGeneration: () => number = () => 0,
   ) {
+    this.writer = directStoreWriter(store);
     for (const a of adapters) {
       const vid = a.venues()[0]?.id;
       if (vid && this.store.getMeta(`gas_approx_${vid}`) === '1') this.approx.add(vid);
     }
   }
+
+  /** Installed after boot migrations finish. Every later gas mutation then
+   * shares the same worker queue as live snapshots and history checkpoints. */
+  setWriter(writer: StoreWriter): void { this.writer = writer; }
 
   start(): void {
     void this.pass();
@@ -164,8 +171,8 @@ export class GasTracker {
       // venues that were fine). Bump again only if sig trust is ever broken
       // the same way.
       if (this.store.getMeta('gas_cov_epoch') !== GAS_COVERAGE_EPOCH) {
-        this.store.deleteMetaPrefix('gas_srcs_');
-        this.store.setMeta('gas_cov_epoch', GAS_COVERAGE_EPOCH);
+        await this.writer.deleteMetaPrefix('gas_srcs_');
+        await this.writer.setMeta('gas_cov_epoch', GAS_COVERAGE_EPOCH);
       }
       // a venue whose adapter no longer declares gasSources must not keep a
       // stale (possibly misattributed) series — wipe rows + cursor once, so
@@ -174,8 +181,8 @@ export class GasTracker {
         const vid = a.venues()[0]?.id ?? '';
         if (!vid || a.gasSources) continue;
         if (this.store.getMeta(`gas_cursor_${vid}`)) {
-          this.store.resetGas(vid);
-          this.store.setMeta(`gas_approx_${vid}`, '');
+          await this.writer.resetGas(vid);
+          await this.writer.setMeta(`gas_approx_${vid}`, '');
           this.approx.delete(vid);
           this.note('gas.series.reset', `${a.venues()[0]?.name ?? vid}: gas series removed — venue no longer declares quote-update sources`, vid);
         }
@@ -228,7 +235,7 @@ export class GasTracker {
     }
     if (mode === 'blocks' && !this.approx.has(vid)) {
       this.approx.add(vid);
-      this.store.setMeta(`gas_approx_${vid}`, '1');
+      await this.writer.setMeta(`gas_approx_${vid}`, '1');
     }
 
     // finality margin: Monad receipts/logs can mutate for ~2 blocks (~600ms).
@@ -289,14 +296,14 @@ export class GasTracker {
             && hasCoverageEvidence(window, this.store.gasNonzeroDays(vid, window[0], window[window.length - 1]));
           if (!covered) {
             const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
-            this.store.resetGasFrom(vid, day);
-            this.store.setMeta(cursorKey, String(startBlock));
+            await this.writer.resetGasFrom(vid, day);
+            await this.writer.setMeta(cursorKey, String(startBlock));
             this.note('gas.series.reset', `${name}: verifying quote-update coverage — rebuilding from ${day}`, vid);
           }
         }
       } catch { return; }
     }
-    this.store.setMeta(sigKey, sig);
+    await this.writer.setMeta(sigKey, sig);
     // one-time migration: rows seeded before gas_from existed came from the
     // old shallow (30d) horizon — wipe them WITH their cursor and re-scan from
     // the venue's start (additive rows + a deeper scan would double-count).
@@ -304,7 +311,7 @@ export class GasTracker {
     // the same wipe-and-rescan deepens its series on the next boot.
     const seededFrom = this.store.getMeta(fromKey);
     if (this.store.getMeta(cursorKey) && (!seededFrom || seededFrom > sinceDay)) {
-      this.store.resetGas(vid);
+      await this.writer.resetGas(vid);
       this.note('gas.series.reset', `${name}: deepening quote-update gas history to ${sinceDay} — re-scanning`, vid);
     }
     const cur = this.store.getMeta(cursorKey);
@@ -313,7 +320,7 @@ export class GasTracker {
       cursor = BigInt(cur);
     } else {
       cursor = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${sinceDay}T00:00:00Z`) / 1000), head));
-      this.store.setMeta(fromKey, sinceDay);
+      await this.writer.setMeta(fromKey, sinceDay);
       this.noteOnce('gas.scan.start', `${name}: quote-update gas scan from ${sinceDay} — blocks ${cursor}→${head}`, vid);
     }
     if (cursor > head) return;
@@ -353,15 +360,15 @@ export class GasTracker {
           const day = utcDay(Number(blk.timestamp) * 1000);
           if (day > sinceDay) {
             const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
-            this.store.resetGasFrom(vid, day);
-            this.store.setMeta(cursorKey, String(startBlock));
+            await this.writer.resetGasFrom(vid, day);
+            await this.writer.setMeta(cursorKey, String(startBlock));
             this.note('gas.series.reset', `${name}: quote-update destination added — rebuilding from ${day} (earlier history unaffected)`, vid);
             return;
           }
         }
       } catch { /* probe/anchor failure — fall through to the full rebuild */ }
     }
-    this.store.resetGas(vid);
+    await this.writer.resetGas(vid);
     this.note('gas.series.reset', `${name}: quote-update destination set changed — re-scanning venue lifetime`, vid);
   }
 
@@ -518,13 +525,13 @@ export class GasTracker {
 
       cursor = to + 1n;
       if (++sinceCommit >= config.backfillMergeEvery || cursor > head) {
-        this.commit(vid, acc, cursorKey, cursor);
+        await this.commit(vid, acc, cursorKey, cursor);
         sinceCommit = 0;
       }
       if (++sliced >= budget) break; // slice spent — trailing commit persists, next pass resumes
       await sleep(config.backfillPaceMs);
     }
-    this.commit(vid, acc, cursorKey, cursor);
+    await this.commit(vid, acc, cursorKey, cursor);
   }
 
   // ── blocks mode: no events — sample block receipts, scale by stride ────────
@@ -571,20 +578,20 @@ export class GasTracker {
       // an unreadable sample block skips its segment (tiny undercount, no stall)
       cursor = segEnd + 1n;
       if (++sinceCommit >= config.backfillMergeEvery || cursor > head) {
-        this.commit(vid, acc, cursorKey, cursor);
+        await this.commit(vid, acc, cursorKey, cursor);
         sinceCommit = 0;
       }
       if (++sliced >= budget) break; // slice spent — trailing commit persists, next pass resumes
       await sleep(config.backfillPaceMs);
     }
-    this.commit(vid, acc, cursorKey, cursor);
+    await this.commit(vid, acc, cursorKey, cursor);
   }
 
-  private commit(vid: string, acc: Map<string, { mon: number; txs: number }>, cursorKey: string, cursor: bigint): void {
+  private async commit(vid: string, acc: Map<string, { mon: number; txs: number }>, cursorKey: string, cursor: bigint): Promise<void> {
     const rows = [...acc.entries()]
       .filter(([, v]) => v.txs > 0 || v.mon > 0)
       .map(([day, v]) => ({ utcDay: day, venueId: vid, mon: v.mon, txs: v.txs }));
-    this.store.applyGas(rows, cursorKey, String(cursor));
+    await this.writer.applyGas(rows, cursorKey, String(cursor));
     acc.clear();
   }
 

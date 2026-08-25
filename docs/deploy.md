@@ -67,5 +67,5 @@ than silently downgraded to a lifetime replay.
 ## Operational notes
 
 - **Memory**: the service is tuned for small instances (`NODE_OPTIONS=--max-old-space-size=320` on a 512MB box); the leaderboard aggregation is paged and the backfills stream. If steady-state OOMs recur, move up an instance size.
-- **Restarts are safe everywhere**: every long job (volume backfill, markout onboarding, gas scan) is cursor-resumable, and ingest commits atomically with its cursor — a kill mid-scan never double-counts. Recurring live snapshots are acknowledged by a SQLite worker only after COMMIT; shutdown waits for the final acknowledgement.
+- **Restarts are safe everywhere**: every long job (volume backfill, markout onboarding, gas scan) is cursor-resumable, and ingest commits atomically with its cursor — a kill mid-scan never double-counts. One SQLite worker owns every post-boot mutation and acknowledges each only after COMMIT; shutdown attempts one final live snapshot and reports a failed acknowledgement before exiting.
 - **Watch `state.notes`** (`/api/markets`, and the same lines in the service log): every degradation — starving reference feed, deferred CEX archive, unreadable RPC ranges — is surfaced there, sanitized of URLs/keys. Filter `level: "warn"` for the ones that want a human, or a `code` prefix (`rpc.`, `backfill.`, `markout.`, `gas.`) for one subsystem.

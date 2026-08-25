@@ -13,13 +13,14 @@ afterEach(() => {
   }
 });
 
-describe('snapshot worker', () => {
-  it('acknowledges only after the atomic snapshot is readable from SQLite', async () => {
+describe('persistence worker', () => {
+  it('owns post-boot writes while acknowledgements are immediately readable on the main connection', async () => {
     const path = join(tmpdir(), `snapshot-worker-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
     paths.push(path);
-    const setup = new VolumeStore(path);
-    setup.close();
+    const read = new VolumeStore(path);
     const writer = new SnapshotWriter(path);
+    read.sealWrites();
+    expect(() => read.setMeta('wrong-lane', '1')).toThrow(/read-only/);
 
     await writer.persist({
       days: [{ utcDay: '2026-08-25', partial: true, byVenue: { test: { usd: 12, swaps: 3 } } }],
@@ -31,9 +32,6 @@ describe('snapshot worker', () => {
       }],
       mids: [{ market: 'MON/USDC', ts: 1_777_000_000_000, mid: 1.21 }],
     });
-    await writer.close();
-
-    const read = new VolumeStore(path);
     expect(read.getMeta('lastProcessedBlock')).toBe('123');
     expect(read.all()).toEqual([
       { utcDay: '2026-08-25', partial: true, byVenue: { test: { usd: 12, swaps: 3 } } },
@@ -41,6 +39,23 @@ describe('snapshot worker', () => {
     expect(read.recentFills(1)).toEqual([expect.objectContaining({
       id: 'test-0xabc-0', router: 'Test Router', markoutsBps: [1, null, null, null, null],
     })]);
+
+    await writer.setMeta('worker-meta', 'ready');
+    await writer.applyRemarks([{ id: 'test-0xabc-0', markoutsBps: [2, 3, null, null, null] }]);
+    await writer.applyGas([{ utcDay: '2026-08-25', venueId: 'test', mon: 0.25, txs: 2 }], 'gas_cursor_test', '456');
+    expect(read.getMeta('worker-meta')).toBe('ready');
+    expect(read.getMeta('gas_cursor_test')).toBe('456');
+    expect(read.recentFills(1)[0]?.markoutsBps).toEqual([2, 3, null, null, null]);
+    expect(read.gasDays('2026-08-25')[0]?.byVenue.test).toEqual({ mon: 0.25, txs: 2 });
+
+    await writer.resetGasFrom('test', '2026-08-25');
+    expect(read.gasDays('2026-08-25')).toEqual([]);
+    expect(await writer.resetVenueHistory('test', {
+      beforeDay: '2026-08-26', volume: {}, fills: { fromBlock: 123n },
+    }, 123n)).toEqual({ volume: 1, fills: 1 });
+    expect(read.recentFills(1)).toEqual([]);
+
+    await writer.close();
     read.close();
   });
 });

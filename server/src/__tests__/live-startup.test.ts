@@ -97,7 +97,7 @@ async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
   source.poll = vi.fn(async () => {});
   source.scheduleTail = vi.fn();
   source.backgroundHistory = vi.fn(async () => {});
-  source.gas = { start: vi.fn(), stop: vi.fn() };
+  source.gas = { start: vi.fn(), stop: vi.fn(), setWriter: vi.fn() };
   return { source, archiveProbe, adapter, headWatcher };
 }
 
@@ -145,8 +145,8 @@ describe('live startup archive gate', () => {
     archiveProbe.resolve({ ok: true, block: 100 });
     await started;
 
-    source.store.setMeta('backfill_done_test-venue', '1');
-    source.store.setMeta('mkfill_done_test-venue', '1');
+    await source.storeWriter.setMeta('backfill_done_test-venue', '1');
+    await source.storeWriter.setMeta('mkfill_done_test-venue', '1');
     source.backgroundHistory.mockClear();
     await source.rediscover();
     expect(adapter.discover).toHaveBeenCalled();
@@ -154,7 +154,7 @@ describe('live startup archive gate', () => {
 
     // Once the per-venue marker records this exact entry, rediscovery becomes
     // a no-op again instead of repeatedly launching history work.
-    source.store.setMeta('backfill_reset_applied_test-venue', reset);
+    await source.storeWriter.setMeta('backfill_reset_applied_test-venue', reset);
     source.backgroundHistory.mockClear();
     await source.rediscover();
     expect(source.backgroundHistory).not.toHaveBeenCalled();
@@ -229,6 +229,7 @@ describe('live startup archive gate', () => {
 
     expect(source.dirtyDays).toEqual(new Set([changed.utcDay]));
     expect(source.notes.list()).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'store.persist.failed' })]));
+    await expect(source.persist(true)).rejects.toThrow('disk unavailable');
     source.store.close();
   });
 

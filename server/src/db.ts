@@ -78,6 +78,7 @@ export interface ResetDeletes {
 
 export class VolumeStore {
   private db: DatabaseSync;
+  private writesSealed = false;
   private dayStmt: Stmt;
   private dayMetaStmt: Stmt;
   private metaStmt: Stmt;
@@ -88,6 +89,10 @@ export class VolumeStore {
   constructor(path = 'data/mpamm.db') {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
+    // Realtime reads stay on the main connection after all post-boot mutations
+    // move to the persistence worker. WAL lets those readers proceed while the
+    // sole writer commits, without adding a main-thread busy wait.
+    this.db.exec('PRAGMA journal_mode = WAL');
 
     // meta first (holds the schema version + the indexer cursor)
     this.db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);`);
@@ -220,16 +225,25 @@ export class VolumeStore {
       f.usd, f.baseAmount, f.execPx, f.pxApprox ? 1 : 0, f.txHash, f.to, f.pool, markouts, f.router ?? null);
   }
 
+  /** Production seals the main connection after the worker starts. It remains
+   * the read connection for APIs/analytics, while any accidental post-boot
+   * mutation fails loudly instead of racing the sole SQLite writer. */
+  sealWrites(): void { this.writesSealed = true; }
+  private assertWritable(): void {
+    if (this.writesSealed) throw new Error('main SQLite connection is read-only after persistence worker startup');
+  }
+
   getMeta(key: string): string | undefined {
     const row = this.db.prepare(`SELECT value FROM meta WHERE key = ?`).get(key) as { value: string } | undefined;
     return row?.value;
   }
-  setMeta(key: string, value: string): void { this.metaStmt.run(key, value); }
+  setMeta(key: string, value: string): void { this.assertWritable(); this.metaStmt.run(key, value); }
 
   /** Remove every meta key starting with `prefix` (gas.ts coverage epoch).
    *  substr comparison, not LIKE — the prefixes contain `_`, which LIKE
    *  treats as a single-char wildcard. */
   deleteMetaPrefix(prefix: string): void {
+    this.assertWritable();
     this.db.prepare(`DELETE FROM meta WHERE substr(key, 1, length(?)) = ?`).run(prefix, prefix);
   }
 
@@ -242,8 +256,8 @@ export class VolumeStore {
     return new Set(rows.map((r) => r.utc_day));
   }
 
-  upsert(d: DailyVolume): void { this.runDay(d); }
-  upsertMany(days: DailyVolume[]): void { for (const d of days) this.runDay(d); }
+  upsert(d: DailyVolume): void { this.assertWritable(); this.runDay(d); }
+  upsertMany(days: DailyVolume[]): void { this.assertWritable(); for (const d of days) this.runDay(d); }
 
   /**
    * Prune rows whose venue_id is no longer in the registry (a venue was removed)
@@ -252,6 +266,7 @@ export class VolumeStore {
    * misconfigured registry can never wipe the whole table.
    */
   reconcileVenues(keepIds: string[]): { volume: number; fills: number } {
+    this.assertWritable();
     if (!keepIds.length) return { volume: 0, fills: 0 };
     const q = keepIds.map(() => '?').join(',');
     const v = this.db.prepare(`DELETE FROM daily_volume WHERE venue_id NOT IN (${q})`).run(...keepIds);
@@ -282,6 +297,7 @@ export class VolumeStore {
    * Gas is never touched: it accrues from its own sources and has resetGas().
    */
   resetVenueHistory(venueId: string, deletes: ResetDeletes, fromBlock?: bigint): { volume: number; fills: number } {
+    this.assertWritable();
     this.db.exec('BEGIN');
     try {
       const beforeMs = Date.parse(`${deletes.beforeDay}T00:00:00Z`);
@@ -340,6 +356,7 @@ export class VolumeStore {
    * rows from the cursor that says they were counted.
    */
   applyGas(rows: Array<{ utcDay: string; venueId: string; mon: number; txs: number }>, cursorKey: string, cursorVal: string): void {
+    this.assertWritable();
     this.db.exec('BEGIN');
     try {
       for (const r of rows) this.gasStmt.run(r.utcDay, r.venueId, r.mon, r.txs);
@@ -355,6 +372,7 @@ export class VolumeStore {
    *  accrual is additive, so deepening a scan without clearing the rows it
    *  already wrote would double-count. Used by the venue-lifetime migration. */
   resetGas(venueId: string): void {
+    this.assertWritable();
     this.db.exec('BEGIN');
     try {
       this.db.prepare(`DELETE FROM daily_gas WHERE venue_id = ?`).run(venueId);
@@ -373,6 +391,7 @@ export class VolumeStore {
    *  re-seeds it at fromDay's first block). `gas_from` is kept: the series
    *  anchor doesn't move. */
   resetGasFrom(venueId: string, fromDay: string): void {
+    this.assertWritable();
     this.db.exec('BEGIN');
     try {
       this.db.prepare(`DELETE FROM daily_gas WHERE venue_id = ? AND utc_day >= ?`).run(venueId, fromDay);
@@ -421,6 +440,7 @@ export class VolumeStore {
    * dedupe by their deterministic txHash:logIndex id).
    */
   persistSnapshot(days: DailyVolume[], meta: Record<string, string>, fills: Fill[], mids: MidPoint[] = []): void {
+    this.assertWritable();
     this.db.exec('BEGIN');
     try {
       for (const d of days) this.runDay(d);
@@ -436,6 +456,7 @@ export class VolumeStore {
 
   /** Insert/refresh fills (markouts mutate as a fill ages) in one transaction. */
   upsertFills(fills: Fill[]): void {
+    this.assertWritable();
     if (!fills.length) return;
     this.db.exec('BEGIN');
     try {
@@ -512,6 +533,7 @@ export class VolumeStore {
    *  scan re-decodes ranges the live tail may have already persisted, and must
    *  never clobber a live-marked fill's markouts. Returns rows actually added. */
   insertFillsIfAbsent(fills: Fill[]): number {
+    this.assertWritable();
     if (!fills.length) return 0;
     const ins = this.db.prepare(`
       INSERT INTO fills (id, ts, block_number, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label, pool, markouts_bps, router)
@@ -538,6 +560,7 @@ export class VolumeStore {
    *  hardcode a category reset their stored claims (unevidenced DIRECT →
    *  UNKNOWN); the caller guards with a meta flag so it runs once. */
   relabelCategory(venueIds: string[], from: string, to: string): number {
+    this.assertWritable();
     if (!venueIds.length) return 0;
     const q = venueIds.map(() => '?').join(',');
     const info = this.db.prepare(`UPDATE fills SET category = ? WHERE category = ? AND venue_id IN (${q})`).run(to, from, ...venueIds);
@@ -547,6 +570,7 @@ export class VolumeStore {
   /** One-time reclassification of retained fills by attributed brand — e.g.
    *  FastLane rows written as ROUTER before the MEV class existed. */
   relabelCategoryByRouter(router: string, from: string, to: string): number {
+    this.assertWritable();
     const info = this.db.prepare(`UPDATE fills SET category = ? WHERE category = ? AND router = ?`).run(to, from, router);
     return Number(info.changes);
   }
@@ -584,6 +608,7 @@ export class VolumeStore {
 
   /** Apply computed historical markouts in one transaction. */
   applyRemarks(rows: Array<{ id: string; markoutsBps: (number | null)[] }>): void {
+    this.assertWritable();
     if (!rows.length) return;
     const upd = this.db.prepare(`UPDATE fills SET markouts_bps = ? WHERE id = ?`);
     this.db.exec('BEGIN');
@@ -598,6 +623,7 @@ export class VolumeStore {
 
   /** Drop fills older than `beforeMs` (retention). Returns rows removed. */
   pruneFills(beforeMs: number): number {
+    this.assertWritable();
     const info = this.db.prepare(`DELETE FROM fills WHERE ts < ?`).run(beforeMs);
     return Number(info.changes);
   }
@@ -605,6 +631,7 @@ export class VolumeStore {
   /** Drop mid-history samples older than `beforeMs` (same retention as fills —
    *  the curve only exists to replay retained fills). Returns rows removed. */
   pruneMids(beforeMs: number): number {
+    this.assertWritable();
     const info = this.db.prepare(`DELETE FROM mid_history WHERE ts < ?`).run(beforeMs);
     return Number(info.changes);
   }
@@ -627,6 +654,7 @@ export class VolumeStore {
    * horizon vs none.
    */
   remarkRetainedFills(): { remarked: number; nulled: number } {
+    this.assertWritable();
     const rows = this.db.prepare(`SELECT id, ts, market, side, exec_px, px_approx FROM fills`).all() as Array<Record<string, any>>;
     const upd = this.db.prepare(`UPDATE fills SET markouts_bps = ? WHERE id = ?`);
     let remarked = 0, nulled = 0;

@@ -19,7 +19,7 @@ import {
 import { HotHeadWatcher } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, type ResetDeletes } from '../db.js';
-import { SnapshotWriter, type SnapshotWrite } from '../persistence.js';
+import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
 import { NoteBuffer } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
@@ -809,7 +809,7 @@ export class LiveDataSource extends BaseSource {
   private stopPromise?: Promise<void>;
   private persistTimer?: ReturnType<typeof setInterval>;
   private snapshotWriter?: SnapshotWriter;
-  private persistChain: Promise<void> = Promise.resolve();
+  private storeWriter: StoreWriter = directStoreWriter(this.store);
   private rediscoverTimer?: ReturnType<typeof setInterval>;
   private remarkTimer?: ReturnType<typeof setInterval>;
   /** Deep workers stay inert until archive verification has installed the
@@ -873,10 +873,15 @@ export class LiveDataSource extends BaseSource {
     }
 
     await this.initHistory();
+    const resetWant = config.backfillReset.trim();
+    if (resetWant) adoptLegacyResetMarker(this.store, resetWant, parseBackfillReset(resetWant));
     // The schema/migrations above finish on the main connection first. Every
-    // recurring snapshot after this point commits on a worker thread so Render
+    // mutation after this point goes through one worker connection so Render
     // disk latency cannot pause newHeads or quote response handling.
     this.snapshotWriter = new SnapshotWriter(config.dbPath);
+    this.storeWriter = this.snapshotWriter;
+    this.gas.setWriter(this.snapshotWriter);
+    this.store.sealWrites();
 
     // The boot head was captured by initHistory. Quote that exact state once,
     // then let newHeads drive every later matrix. If boot quoting fails, the
@@ -1072,7 +1077,7 @@ export class LiveDataSource extends BaseSource {
     if (this.rediscoverTimer) clearInterval(this.rediscoverTimer);
     if (this.remarkTimer) clearInterval(this.remarkTimer);
     this.gas.stop();
-    const finalPersist = this.persist();
+    const finalPersist = this.persist(true);
     REFERENCES.stop();
     this.stopPromise = finalPersist.finally(async () => {
       try { await this.snapshotWriter?.close(); }
@@ -1263,7 +1268,7 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
-  private persist(): Promise<void> {
+  private persist(reportFailure = false): Promise<void> {
     // Swap the dirty sets synchronously. New fills/day mutations land in fresh
     // sets while this immutable snapshot waits for the worker ACK; a failure
     // merges the original objects/keys back so the next tick retries them.
@@ -1285,25 +1290,19 @@ export class LiveDataSource extends BaseSource {
         .filter((m) => m.mid > 0),
     };
 
-    const task = this.persistChain
-      .then(() => this.writeSnapshot(snapshot))
+    return this.writeSnapshot(snapshot)
       .catch((e) => {
         for (const f of dirtyFills) this.dirty.add(f);
         for (const day of dirtyDays) this.dirtyDays.add(day);
         // retained + retried next tick, but say so — a broken disk otherwise
         // looks healthy while the cursor silently stops advancing.
-        this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); retrying`);
+        this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); ${reportFailure ? 'shutdown flush not acknowledged' : 'retrying'}`);
+        if (reportFailure) throw e;
       });
-    this.persistChain = task;
-    return task;
   }
 
   private writeSnapshot(snapshot: SnapshotWrite): Promise<void> {
-    if (this.snapshotWriter) return this.snapshotWriter.persist(snapshot);
-    // Boot/tests before the worker starts retain the exact synchronous store
-    // semantics; production recurring writes always take the branch above.
-    this.store.persistSnapshot(snapshot.days, snapshot.meta, snapshot.fills, snapshot.mids);
-    return Promise.resolve();
+    return this.storeWriter.persist(snapshot);
   }
 
   /** A fresh zeroed daily bucket (venue slices fill in as fills land). */
@@ -1375,7 +1374,6 @@ export class LiveDataSource extends BaseSource {
     const want = config.backfillReset.trim();
     if (!want) return;
     const targets = parseBackfillReset(want);
-    adoptLegacyResetMarker(this.store, want, targets);
 
     const applied: string[] = [];
     for (const t of targets) {
@@ -1386,11 +1384,13 @@ export class LiveDataSource extends BaseSource {
       // Stamped only once an entry is FINISHED — done, or refused for a reason
       // that will still hold next boot. A transient failure leaves it unstamped
       // so this entry, and only this entry, is retried.
-      const settle = () => markResetApplied(this.store, t);
+      const settle = () => t.vid
+        ? this.storeWriter.setMeta(`backfill_reset_applied_${t.vid}`, t.spec)
+        : Promise.resolve();
 
       if (t.from === 'invalid') {
         this.note('backfill.config.invalid', `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
-        settle();
+        await settle();
         continue;
       }
       // A start that is not in the past is IGNORED by both resume checks
@@ -1400,7 +1400,7 @@ export class LiveDataSource extends BaseSource {
       const refusal = refuseResetStart(t, utcDay(nowMs), this.bootHead);
       if (refusal) {
         this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${refusal}`);
-        settle();
+        await settle();
         continue;
       }
       // An unresolvable id would delete nothing and re-scan nothing while still
@@ -1418,7 +1418,7 @@ export class LiveDataSource extends BaseSource {
         this.note('backfill.config.invalid', missing === 'reference'
           ? `backfill reset: '${t.vid}' is a CEX reference, which has no history to reset — skipped`
           : `backfill reset: no adapter declares venue '${t.vid}' — skipped`);
-        settle();
+        await settle();
         continue;
       }
       // A targeted replay needs BOTH ends of its start: the block the cursors
@@ -1457,7 +1457,7 @@ export class LiveDataSource extends BaseSource {
       const resolvedRefusal = from !== undefined ? refuseResolvedStart(from, utcDay(nowMs), this.bootHead) : null;
       if (resolvedRefusal) {
         this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${resolvedRefusal}`);
-        settle();
+        await settle();
         continue;
       }
       // Delete only what the two scans will actually rebuild. A switched-off
@@ -1470,11 +1470,11 @@ export class LiveDataSource extends BaseSource {
         volumeEnabled: config.backfillEnabled,
         fillsEnabled: config.markoutBackfill,
       });
-      const dropped = resetVenueHistory(this.store, t.vid, { from, deletes });
+      const dropped = await this.storeWriter.resetVenueHistory(t.vid, deletes, from?.block);
       purgeVenueDays(this.days, t.vid, deletes);
       purgeVenueFills({ fills: this.fills, pending: this.pending, dirty: this.dirty, countedIds: this.countedIds }, t.vid, deletes);
       if (dropped.fills) this.lbCache.clear();
-      settle();
+      await settle();
       // Say what was DESTROYED, not just what will be re-scanned: this is a
       // one-shot operation with no undo, and the counts are the only record.
       const scope = from === undefined ? 'lifetime' : `from block ${from.block} (${from.day} onward)`;
@@ -1483,7 +1483,7 @@ export class LiveDataSource extends BaseSource {
     // Legacy breadcrumb, written for ROLLBACK only: older builds read this key
     // and would re-run the whole value without it. Nothing here reads it after
     // adoptLegacyResetMarker has run once.
-    this.store.setMeta('backfill_reset_applied', want);
+    await this.storeWriter.setMeta('backfill_reset_applied', want);
     if (applied.length) this.note('backfill.reset', `backfill reset applied (${want}) — ${applied.join('; ')}`);
   }
 
@@ -1505,7 +1505,7 @@ export class LiveDataSource extends BaseSource {
       // 'skip' (can't land fills by design) is done forever; 'defer' (pools
       // quarantined/undiscovered right now) must NOT be — the done-flag would
       // silently drop the venue's lifetime history (issue: seed vs quarantine).
-      if (seed.action === 'skip') { this.store.setMeta(`backfill_done_${vid}`, '1'); continue; }
+      if (seed.action === 'skip') { await this.storeWriter.setMeta(`backfill_done_${vid}`, '1'); continue; }
       if (seed.action === 'defer') { this.noteOnce('backfill.deferred', `${name} backfill deferred — ${seed.reason}`, vid); continue; }
       try { await this.backfillAdapter(a, vid, name, sinceUtc, seed.fills, nowMs, end); }
       catch (e) {
@@ -1544,7 +1544,7 @@ export class LiveDataSource extends BaseSource {
     }
     if (from > end) {
       if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
-      this.store.setMeta(`backfill_done_${vid}`, '1');
+      await this.storeWriter.setMeta(`backfill_done_${vid}`, '1');
       return;
     }
 
@@ -1705,7 +1705,7 @@ export class LiveDataSource extends BaseSource {
     // archive hole. To re-attempt after the provider repairs it: delete the
     // 'backfill_done_<venue>' + 'backfill_cursor_<venue>' meta rows (the SET-per-day
     // merge makes a full re-run idempotent).
-    this.store.setMeta(`backfill_done_${vid}`, '1');
+    await this.storeWriter.setMeta(`backfill_done_${vid}`, '1');
     this.note('backfill.done', `${name}: backfill complete — ${acc.size} day(s) seeded` +
       (skipped > 0n ? ` (${skipped} block(s) unreadable on the RPC archive and skipped — those windows may undercount)` : ''), vid);
     this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) }); // nudge connected clients
@@ -1779,7 +1779,7 @@ export class LiveDataSource extends BaseSource {
       // these rows are user-visible in the tape/leaderboard, so decode needs its
       // state (e.g. Clober book Opens) and router attribution to label them.
       const seed = seedSources(a);
-      if (seed.action === 'skip') { this.store.setMeta(`mkfill_done_${vid}`, '1'); continue; }
+      if (seed.action === 'skip') { await this.storeWriter.setMeta(`mkfill_done_${vid}`, '1'); continue; }
       if (seed.action === 'defer') { this.noteOnce('markout.deferred', `${name} markout onboarding deferred — ${seed.reason}`, vid); continue; }
       try {
         if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') await this.backfillRecentFills(a, vid, name, seed.all, nowMs, end);
@@ -1814,7 +1814,7 @@ export class LiveDataSource extends BaseSource {
     }
     if (from > end) {
       if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
-      this.store.setMeta(`mkfill_done_${vid}`, '1');
+      await this.storeWriter.setMeta(`mkfill_done_${vid}`, '1');
       return;
     }
 
@@ -1920,17 +1920,17 @@ export class LiveDataSource extends BaseSource {
       availabilityAttempts = 0;
       cursor = to + 1n;
       if (++sinceFlush >= config.backfillMergeEvery || cursor > end) {
-        persisted += this.store.insertFillsIfAbsent(batch);
+        persisted += await this.storeWriter.insertFillsIfAbsent(batch);
         batch.length = 0;
-        this.store.setMeta(`mkfill_cursor_${vid}`, String(cursor));
+        await this.storeWriter.setMeta(`mkfill_cursor_${vid}`, String(cursor));
         sinceFlush = 0;
       }
       await sleep(config.backfillPaceMs);
     }
 
-    this.store.setMeta(`mkfill_cursor_${vid}`, String(end + 1n));
+    await this.storeWriter.setMeta(`mkfill_cursor_${vid}`, String(end + 1n));
     if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
-    this.store.setMeta(`mkfill_done_${vid}`, '1');
+    await this.storeWriter.setMeta(`mkfill_done_${vid}`, '1');
     this.note('markout.scan.done', `${name}: onboarding fill scan complete — ${persisted} historical fill(s) persisted`, vid);
   }
 
@@ -1993,7 +1993,7 @@ export class LiveDataSource extends BaseSource {
           });
           return { id: f.id, markoutsBps: marks };
         });
-        this.store.applyRemarks(updates);
+        await this.storeWriter.applyRemarks(updates);
         // the markouts are on disk now, so the "resumed" line is finally true.
         // checkArchivePending set `resumed` only on the sweep the archive
         // published, so this stays silent on every other sweep.
@@ -2002,7 +2002,7 @@ export class LiveDataSource extends BaseSource {
         // is honest but isn't "computed".
         marked += updates.filter((u) => u.markoutsBps.some((m) => m != null)).length;
       }
-      this.store.setMeta(metaKey, day);
+      await this.storeWriter.setMeta(metaKey, day);
       day = utcDay(dayStart + 86_400_000 + 1);
       await sleep(config.backfillPaceMs);
     }
