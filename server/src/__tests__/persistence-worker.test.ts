@@ -9,7 +9,9 @@ const paths: string[] = [];
 
 afterEach(() => {
   for (const path of paths.splice(0)) {
-    try { unlinkSync(path); } catch { /* already removed */ }
+    for (const suffix of ['', '-wal', '-shm']) {
+      try { unlinkSync(`${path}${suffix}`); } catch { /* already removed */ }
+    }
   }
 });
 
@@ -21,6 +23,8 @@ describe('persistence worker', () => {
     const writer = new SnapshotWriter(path);
     read.sealWrites();
     expect(() => read.setMeta('wrong-lane', '1')).toThrow(/read-only/);
+    await expect((writer as any).request({ kind: 'unexpected' }))
+      .rejects.toThrow("unknown persistence mutation 'unexpected'");
 
     await writer.persist({
       days: [{ utcDay: '2026-08-25', partial: true, byVenue: { test: { usd: 12, swaps: 3 } } }],

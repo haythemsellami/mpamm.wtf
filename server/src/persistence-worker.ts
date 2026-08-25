@@ -20,6 +20,10 @@ function apply(mutation: StoreMutation): unknown {
     case 'resetGasFrom': return store.resetGasFrom(mutation.venueId, mutation.fromDay);
     case 'insertFillsIfAbsent': return store.insertFillsIfAbsent(mutation.fills);
     case 'applyRemarks': return store.applyRemarks(mutation.rows);
+    default: {
+      const kind = (mutation as { kind?: unknown }).kind;
+      throw new Error(`unknown persistence mutation '${String(kind)}'`);
+    }
   }
 }
 
