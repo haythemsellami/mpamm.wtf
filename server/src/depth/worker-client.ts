@@ -70,7 +70,7 @@ export class DepthWorkerClient {
       const done = () => resolve();
       child.once('exit', done);
       this.send({ type: 'stop' });
-      const force = setTimeout(() => { if (child.exitCode == null) child.kill('SIGTERM'); }, 2_000);
+      const force = setTimeout(() => { if (child.exitCode == null) child.kill('SIGKILL'); }, 2_000);
       force.unref();
       child.once('exit', () => clearTimeout(force));
     });
@@ -140,7 +140,7 @@ export class DepthWorkerClient {
     this.child = undefined;
     if (child.connected) child.send({ type: 'stop' } satisfies DepthWorkerRequest);
     else child.kill('SIGTERM');
-    const force = setTimeout(() => { if (child.exitCode == null) child.kill('SIGTERM'); }, 2_000);
+    const force = setTimeout(() => { if (child.exitCode == null) child.kill('SIGKILL'); }, 2_000);
     force.unref();
     child.once('exit', () => clearTimeout(force));
   }
