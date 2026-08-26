@@ -25,6 +25,30 @@ export function streamAction(readyState: number, bufferedAmount: number): 'send'
   return bufferedAmount > MAX_BACKLOG_BYTES ? 'cut' : 'send'; // hopeless vs healthy
 }
 
+type SseWriter = {
+  readonly destroyed: boolean;
+  readonly writableLength: number;
+  write(chunk: string): unknown;
+  destroy(): unknown;
+};
+
+/** A disconnect can race the destroyed check. Contain both that write failure
+ *  and slow-client backlog to this response instead of the server process. */
+export function trySseWrite(response: SseWriter, chunk: string): boolean {
+  if (response.destroyed) return false;
+  if (response.writableLength > MAX_BACKLOG_BYTES) {
+    response.destroy();
+    return false;
+  }
+  try {
+    response.write(chunk);
+    return true;
+  } catch {
+    response.destroy();
+    return false;
+  }
+}
+
 /**
  * Thin transport over a DataSource (docs/architecture.md: API + system shape): REST snapshots + a WS
  * stream. The frontend renders purely off these and never touches the chain,
@@ -98,26 +122,27 @@ export function startServer(source: DataSource): Server {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
-    res.write('retry: 1000\n\n');
 
     let closed = false;
-    const write = (chunk: string) => {
-      if (closed || res.destroyed) return;
-      if (res.writableLength > MAX_BACKLOG_BYTES) { res.destroy(); return; }
-      res.write(chunk);
-    };
     let unwatch = () => {};
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
     const cleanup = () => {
       if (closed) return;
       closed = true;
-      clearInterval(heartbeat);
+      if (heartbeat) clearInterval(heartbeat);
       unwatch();
     };
-    const heartbeat = setInterval(() => {
+    const write = (chunk: string) => {
+      if (!closed && !trySseWrite(res, chunk)) cleanup();
+    };
+    res.once('close', cleanup);
+    res.once('error', cleanup);
+    write('retry: 1000\n\n');
+    if (closed) return;
+    heartbeat = setInterval(() => {
       write(': keepalive\n\n');
     }, DEPTH_HEARTBEAT_MS);
     heartbeat.unref();
-    res.once('close', cleanup);
     unwatch = source.watchDepth(market, (publication) => write(`data: ${publication.json}\n\n`));
     if (closed) unwatch();
   });

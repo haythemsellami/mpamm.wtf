@@ -39,10 +39,14 @@ export function buildDepthSnapshot(
   // legend is stable frame to frame instead of reshuffling with the data.
   const byKey = new Map<string, QuoteRow>();
   const venueIds: string[] = [];
+  const seenVenueIds = new Set<string>();
   for (const r of rows) {
     if (r.market !== market) continue;
     if (!byKey.has(`${r.venueId}|${r.sizeUsd}`)) byKey.set(`${r.venueId}|${r.sizeUsd}`, r);
-    if (!venueIds.includes(r.venueId)) venueIds.push(r.venueId);
+    if (!seenVenueIds.has(r.venueId)) {
+      seenVenueIds.add(r.venueId);
+      venueIds.push(r.venueId);
+    }
   }
 
   const ascending = [...sizes].sort((a, b) => a - b);

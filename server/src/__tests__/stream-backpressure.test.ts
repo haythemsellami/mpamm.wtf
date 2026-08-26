@@ -4,9 +4,9 @@
 // half-dead TCP) accumulated every pushed frame in OUR heap — ~330MB/hour at
 // the current tick size. These lock in the policy: healthy clients are never
 // cut, hopeless ones always are.
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
-import { MAX_BACKLOG_BYTES, streamAction } from '../server.js';
+import { MAX_BACKLOG_BYTES, streamAction, trySseWrite } from '../server.js';
 
 const QUOTE_TICK_BYTES = 46_000; // measured on prod: 170 rows ≈ 46KB
 
@@ -38,5 +38,42 @@ describe('streamAction', () => {
     const ticksTolerated = Math.floor(MAX_BACKLOG_BYTES / QUOTE_TICK_BYTES);
     expect(ticksTolerated).toBeGreaterThanOrEqual(15);
     expect(streamAction(WebSocket.OPEN, QUOTE_TICK_BYTES * (ticksTolerated - 1))).toBe('send');
+  });
+});
+
+describe('trySseWrite', () => {
+  const response = (overrides: Record<string, unknown> = {}) => ({
+    destroyed: false,
+    writableLength: 0,
+    write: vi.fn(),
+    destroy: vi.fn(),
+    ...overrides,
+  });
+
+  it('writes to a healthy response', () => {
+    const res = response();
+    expect(trySseWrite(res, 'data: ok\n\n')).toBe(true);
+    expect(res.write).toHaveBeenCalledWith('data: ok\n\n');
+    expect(res.destroy).not.toHaveBeenCalled();
+  });
+
+  it('drops a response that is already destroyed', () => {
+    const res = response({ destroyed: true });
+    expect(trySseWrite(res, 'data: late\n\n')).toBe(false);
+    expect(res.write).not.toHaveBeenCalled();
+    expect(res.destroy).not.toHaveBeenCalled();
+  });
+
+  it('cuts a response whose pending writes exceed the backlog cap', () => {
+    const res = response({ writableLength: MAX_BACKLOG_BYTES + 1 });
+    expect(trySseWrite(res, 'data: slow\n\n')).toBe(false);
+    expect(res.write).not.toHaveBeenCalled();
+    expect(res.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('contains a write that races a client disconnect', () => {
+    const res = response({ write: vi.fn(() => { throw new Error('socket closed'); }) });
+    expect(trySseWrite(res, 'data: race\n\n')).toBe(false);
+    expect(res.destroy).toHaveBeenCalledOnce();
   });
 });
