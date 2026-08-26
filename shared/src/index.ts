@@ -679,6 +679,43 @@ export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'source.sim': 'info',
 };
 
+/**
+ * EVENTS vs CONDITIONS — the split the window has to know about.
+ *
+ * Most codes above are **events**: `rpc.failover`, `venue.upgraded`,
+ * `store.migrated`, `backfill.done`, `tail.caughtup`. They are history, and
+ * retracting them would destroy the incident record.
+ *
+ * A few are **conditions**: they describe a state of the world and are false
+ * the moment it heals. A condition still sitting in the served window after
+ * its recovery is not history, it is a stale claim about right now — the bug
+ * behind 6c3cf5b, #38 and #68/#69, fixed three times at three call sites.
+ *
+ * `RETRACTS` pairs each recovery code with the condition it clears, so
+ * **raising the recovery retracts the condition** (server/src/notes.ts,
+ * `NoteBuffer.push`). The rule lives in the buffer rather than in a checklist
+ * of call sites, because a checklist goes stale the moment new code joins the
+ * family — which is exactly how #69's bug survived #6's follow-up list.
+ *
+ * The map is CURATED, not derived from the `.recovered` suffix: `rpc.recovered`
+ * is deliberately absent, since `rpc.failover` is an event and the window
+ * should keep the record of the incident.
+ *
+ * Adapters still only append. The buffer interprets the pairing; announcing
+ * recovery is what retracts (docs/adapters.md).
+ */
+export const RETRACTS: Partial<Record<NoteCode, NoteCode>> = {
+  'venue.quote.recovered': 'venue.quote.unavailable',
+  'reference.recovered': 'reference.starved',
+  'markout.archive.published': 'markout.archive.pending',
+  'tail.caughtup': 'tail.resume',
+};
+
+/** The codes that are conditions rather than events — every value of
+ *  `RETRACTS`, so the list and the pairing cannot drift apart. */
+export const CONDITION_CODES: ReadonlySet<NoteCode> =
+  new Set(Object.values(RETRACTS) as NoteCode[]);
+
 /** One entry of `MarketState.notes`. */
 export interface StateNote {
   /** epoch ms the note was raised (not when it was served). */

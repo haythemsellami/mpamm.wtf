@@ -14,9 +14,9 @@ const sink = () => {
   return {
     notes,
     io: {
-      warn: (m: string) => { if (!notes.includes(m)) notes.push(m); },
-      clear: (m: string) => { const i = notes.indexOf(m); if (i >= 0) notes.splice(i, 1); },
-      announce: (m: string) => notes.push(m),
+      warn: (_k: string, m: string) => { if (!notes.includes(m)) notes.push(m); },
+      clear: (_k: string, m: string) => { const i = notes.indexOf(m); if (i >= 0) notes.splice(i, 1); },
+      announce: (_k: string, m: string) => notes.push(m),
     },
   };
 };
@@ -47,7 +47,7 @@ describe('checkArchivePending', () => {
   it('clear() receives the exact string warn() emitted (else the stale note survives)', () => {
     const warned: string[] = [], cleared: string[] = [];
     const pending = new Set<string>();
-    const io = { warn: (m: string) => warned.push(m), clear: (m: string) => cleared.push(m), announce: () => {} };
+    const io = { warn: (_k: string, m: string) => warned.push(m), clear: (_k: string, m: string) => cleared.push(m), announce: () => {} };
     checkArchivePending(HANJI, false, pending, io); // unpublished → warn
     checkArchivePending(HANJI, true, pending, io);  // published → clear
     expect(cleared).toEqual(warned);

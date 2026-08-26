@@ -77,7 +77,20 @@ DB_PATH=./data/scratch.db npm run dev
 - Every server script auto-loads a repo-root **`.env`** (`--env-file-if-exists=../.env`, already gitignored) — copy `.env.example` and put `RPC_HTTP_URL` there instead of exporting it per command.
 - The default public RPC works for quotes + live fill tailing but caps `getLogs` ranges — set `RPC_HTTP_URL` to a higher-limit/archive node to exercise the lifetime backfill (`BACKFILL=on`, the default). Monad's docs list providers: https://docs.monad.xyz/tooling-and-infra/rpc-providers.
 - `DATA_SOURCE=sim npm run dev` runs the offline simulator — your venue appears automatically (the sim is registry-driven). Good for UI wiring; **useless for decode correctness** — verify against the real chain.
-- Watch `state.notes` on `/api/markets` (the same lines go to the service log): adapter errors, discovery failures and degradations surface there. Raise your own with `ctx.note(code, msg)`, picking the code that matches the event (`venue.discovery`, `venue.market.unlisted`, `venue.quote.unavailable`, `venue.upgraded`, `venue.quarantined`, ...). The code decides the note's level and is what a consumer filters on, so it belongs at the call site rather than in the wording. An adapter can only append, never retract, so a degradation that heals must be **announced** (`venue.quote.recovered` after `venue.quote.unavailable`) — otherwise the warning stands until the window rolls it off.
+- Watch `state.notes` on `/api/markets` (the same lines go to the service log): adapter errors, discovery failures and degradations surface there. Raise your own with `ctx.note(code, msg)`, picking the code that matches the event (`venue.discovery`, `venue.market.unlisted`, `venue.quote.unavailable`, `venue.upgraded`, `venue.quarantined`, ...). The code decides the note's level and is what a consumer filters on, so it belongs at the call site rather than in the wording. An adapter can only append, never retract, so a degradation that heals must be **announced** — and the announcement is what retracts it.
+
+**Events vs conditions.** Most codes are events: `venue.discovery`, `venue.upgraded`, `venue.market.unlisted` are history, and they stay in the window as the record of what happened. Four codes are conditions — they describe a state of the world and are false once it heals — and each has the recovery that clears it (`@shared`: `RETRACTS`):
+
+| condition | recovery that retracts it |
+|---|---|
+| `venue.quote.unavailable` | `venue.quote.recovered` |
+| `reference.starved` | `reference.recovered` |
+| `markout.archive.pending` | `markout.archive.published` |
+| `tail.resume` | `tail.caughtup` |
+
+Raising the recovery drops the condition's note from the served window, so you keep appending and the buffer does the retracting. Nothing else is retractable: announcing `rpc.recovered` leaves `rpc.failover` standing on purpose, because the incident record is the point.
+
+**When your venue can be degraded in more than one way at once, pass a key**: `ctx.note(code, msg, key)`. The retraction matches `code + venue + key`, so `ctx.note('venue.quote.recovered', 'chain head readable again', 'head')` clears the head outage and leaves a still-true "pool paused" note alone. Without the key both notes are the same condition of the same venue, and healing one erases the other. Use the key you already dedupe on (Lunarbase uses `head`, `snapshot`, `unread:<pool>`, `inactive:<pool>`); omit it when the code can only mean one thing for your venue. The key is internal — it does not appear in the served `/api/markets` note.
 
 **A venue that goes dark must say why.** Returning `[]` from `quote()` is how a venue leaves the grid, and on its own it is indistinguishable from an adapter you have broken — a renamed function, a drifted ABI after a proxy upgrade. The core notices the silence on its own (`checkQuoteOutage` in [`live.ts`](../server/src/datasource/live.ts): no rows for 20 consecutive cycles ⇒ `venue.quote.unavailable`), so you cannot leave a venue unexplained by forgetting. What the core cannot know is the **reason** — `allowFailure` multicalls swallow the per-leg revert that carries it. Dig it out with [`quote-health.ts`](../server/src/venues/quote-health.ts):
 
@@ -88,7 +101,7 @@ const res = await ctx.client.multicall({ contracts: calls, allowFailure: true })
 if (reportOutage(ctx, res)) return [];                            // notes: all N legs failed with "maker: paused"
 ```
 
-The core stands down once your note is on the record, so the venue is explained exactly once. Recovery is **announced**, never retracted — an adapter can only append, so a heal that said nothing would leave the warning standing until the served window rolled it off.
+The core stands down once your note is on the record, so the venue is explained exactly once. Recovery is **announced**, never retracted by you — an adapter can only append, so a heal that says nothing leaves the warning standing until the served window rolls it off. Announce it under the same key you raised it with, and the buffer takes the stale note out.
 
 ## Verifying your adapter (what review checks)
 

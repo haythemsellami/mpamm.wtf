@@ -205,13 +205,14 @@ export function checkReferenceStarvation(
   midOf: (key: string) => number,
   starvedSince: Map<string, number>,
   now: number,
-  io: { warn: (m: string) => void; clear: (m: string) => void; announce: (m: string) => void },
+  io: { warn: (key: string, m: string) => void; clear: (key: string, m: string) => void;
+        announce: (key: string, m: string) => void },
 ): void {
   for (const a of assets) {
     const warning = `${a.cex} feed has no ${a.cexSymbol} mid — ${a.symbol} pairs are hidden (reference/markouts unavailable)`;
     if (midOf(a.key) <= 0) {
       if (!starvedSince.has(a.key)) starvedSince.set(a.key, now);
-      io.warn(warning);
+      io.warn(a.key, warning);
       continue;
     }
     const since = starvedSince.get(a.key);
@@ -219,15 +220,24 @@ export function checkReferenceStarvation(
     starvedSince.delete(a.key);
     // clear() must be handed the EXACT string warn() emitted, or the stale
     // warning survives the recovery — that is the bug this function exists for.
-    io.clear(warning);
+    // The asset key rides along so the recovery's own retraction (@shared:
+    // RETRACTS) hits this asset's note: several feeds can be dark at once, and
+    // one coming back must not erase the others' still-true warnings.
+    io.clear(a.key, warning);
     const mins = Math.max(1, Math.round((now - since) / 60_000));
-    io.announce(`${a.cex} feed recovered: ${a.cexSymbol} mid is back — ${a.symbol} pairs visible again (hidden for ~${mins}m)`);
+    io.announce(a.key, `${a.cex} feed recovered: ${a.cexSymbol} mid is back — ${a.symbol} pairs visible again (hidden for ~${mins}m)`);
   }
 }
 
 /** Consecutive empty block frames before a venue is called dark. Keep the
  *  threshold at ~10s after moving live quotes from 500ms ticks to Monad blocks. */
 export const QUOTE_DARK_CYCLES = 34;
+
+/** The condition key the went-dark backstop raises its own notes under, so its
+ *  recovery retracts ITS warning and never an adapter's (@shared: RETRACTS).
+ *  Adapters key by what they are describing; the core has exactly one thing to
+ *  say per venue, so one constant covers it. */
+export const BACKSTOP_KEY = 'backstop';
 
 /**
  * A venue that has stopped quoting — the CORE's backstop.
@@ -327,18 +337,23 @@ export function checkArchivePending(
   a: { vid: string; name: string; market: string; day: string },
   published: boolean,
   pending: Set<string>,
-  io: { warn: (m: string) => void; clear: (m: string) => void; announce: (m: string) => void },
+  io: { warn: (key: string, m: string) => void; clear: (key: string, m: string) => void;
+        announce: (key: string, m: string) => void },
 ): void {
   const key = `${a.vid}:${a.market}:${a.day}`;
   const warning = `${a.name} ${a.market}: CEX price archive for ${a.day} not published yet — markouts resume later`;
   if (!published) {
     pending.add(key);
-    io.warn(warning);
+    io.warn(key, warning);
     return;
   }
   if (!pending.delete(key)) return; // published all along: nothing to retract
-  io.clear(warning);
-  io.announce(`${a.name} ${a.market}: CEX price archive for ${a.day} published — markouts resumed`);
+  // The per-(market, day) key rides along so the publish announcement's own
+  // retraction (@shared: RETRACTS) hits exactly this deferral: one venue
+  // routinely holds several pending days and markets at once, and one archive
+  // landing must not erase the notes for the ones still missing.
+  io.clear(key, warning);
+  io.announce(key, `${a.name} ${a.market}: CEX price archive for ${a.day} published — markouts resumed`);
 }
 
 /** Gap-fill catch-up lifecycle for the live tail (family B of #6).
@@ -756,7 +771,7 @@ export class LiveDataSource extends BaseSource {
         config,
         // deduped: discovery notes repeat verbatim on every 10-min rediscover
         // and were accumulating unbounded ("Metric: 3 pool(s)" × N).
-        note: (code, msg) => this.noteOnce(code, msg, venue),
+        note: (code, msg, key) => this.noteOnce(code, msg, venue, key),
       };
       this.ctxCache.set(a, ctx);
     }
@@ -1333,9 +1348,9 @@ export class LiveDataSource extends BaseSource {
    * and prints every note as it is raised. `code` classifies the event and
    * `venue` scopes it, both known here at the call site.
    */
-  private note(code: NoteCode, msg: string, venue?: string): void { this.notes.note(code, msg, venue); }
+  private note(code: NoteCode, msg: string, venue?: string, key?: string): void { this.notes.note(code, msg, venue, key); }
   /** raise a note at most once — per-tick drop reasons must not spam state.notes. */
-  private noteOnce(code: NoteCode, msg: string, venue?: string): void { this.notes.noteOnce(code, msg, venue); }
+  private noteOnce(code: NoteCode, msg: string, venue?: string, key?: string): void { this.notes.noteOnce(code, msg, venue, key); }
   /** retract a note that no longer describes reality (a recovered degradation). */
   private dropNote(code: NoteCode, msg: string, venue?: string): void { this.notes.drop(code, msg, venue); }
 
@@ -1993,11 +2008,11 @@ export class LiveDataSource extends BaseSource {
         // noteOnce() emitted. The retraction fires here; the "resumed" announce
         // waits until applyRemarks below has actually written the markouts, so a
         // failed write can never leave a note claiming they resumed (review nit).
-        let resumed: string | undefined;
+        let resumed: { key: string; msg: string } | undefined;
         checkArchivePending({ vid, name, market, day }, series != null, this.archivePending, {
-          warn: (m) => this.noteOnce('markout.archive.pending', m, vid),
-          clear: (m) => this.dropNote('markout.archive.pending', m, vid),
-          announce: (m) => { resumed = m; },
+          warn: (k, m) => this.noteOnce('markout.archive.pending', m, vid, k),
+          clear: (k, m) => this.dropNote('markout.archive.pending', m, vid),
+          announce: (k, m) => { resumed = { key: k, msg: m }; },
         });
         // deferral is a BREAK, not a return: the days already marked this walk
         // must still get their summary note + cache invalidation below.
@@ -2014,7 +2029,7 @@ export class LiveDataSource extends BaseSource {
         // the markouts are on disk now, so the "resumed" line is finally true.
         // checkArchivePending set `resumed` only on the sweep the archive
         // published, so this stays silent on every other sweep.
-        if (resumed) this.note('markout.archive.published', resumed, vid);
+        if (resumed) this.note('markout.archive.published', resumed.msg, vid, resumed.key);
         // count only fills that got ≥1 markout — an all-null result (mid gaps)
         // is honest but isn't "computed".
         marked += updates.filter((u) => u.markoutsBps.some((m) => m != null)).length;
@@ -2227,9 +2242,9 @@ export class LiveDataSource extends BaseSource {
     // covers the normal cold-start warmup.
     if (quoteStartedAt - this.bootMs > 60_000) {
       checkReferenceStarvation(Object.values(ASSETS), (k) => assetPrices.get(k) ?? 0, this.starvedSince, quoteStartedAt, {
-        warn: (m) => this.noteOnce('reference.starved', m),
-        clear: (m) => this.dropNote('reference.starved', m),
-        announce: (m) => this.note('reference.recovered', m),
+        warn: (k, m) => this.noteOnce('reference.starved', m, undefined, k),
+        clear: (k, m) => this.dropNote('reference.starved', m),
+        announce: (k, m) => this.note('reference.recovered', m, undefined, k),
       });
     }
     // record each PAIR's CEX mid history in its own terms (the markout anchors).
@@ -2275,9 +2290,14 @@ export class LiveDataSource extends BaseSource {
       const quoting = ADAPTERS.filter((a) => a.quote).map((a) => a.venues()[0]).filter(Boolean);
       // `quoteStartedAt` is stamped BEFORE the adapters quote, so a
       // note an adapter raises from inside this tick lands on or after `since`.
+      // Keyed BACKSTOP_KEY: the check retracts what the check raised and nothing
+      // else. An adapter owns its venue's outage telemetry both ways, so a
+      // venue-wide "quoting again" must not take out the adapter's own note
+      // (which may still be true for one pool) — @shared: RETRACTS matches
+      // code + venue + key.
       checkQuoteOutage(quoting, (id) => counts.get(id) ?? 0, this.quoteEmptyRuns, this.quoteDark, quoteStartedAt, {
-        warn: (id, m) => this.noteOnce('venue.quote.unavailable', m, id),
-        announce: (id, m) => this.note('venue.quote.recovered', m, id),
+        warn: (id, m) => this.noteOnce('venue.quote.unavailable', m, id, BACKSTOP_KEY),
+        announce: (id, m) => this.note('venue.quote.recovered', m, id, BACKSTOP_KEY),
         clear: (id, m) => this.dropNote('venue.quote.unavailable', m, id),
         explained: (id, since) => this.notes.holds('venue.quote.unavailable', id, since),
       });

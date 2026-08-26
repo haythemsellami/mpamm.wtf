@@ -424,18 +424,23 @@ export function createLunarbaseAdapter(): VenueAdapter {
   const byMarket = new Map<string, LunarbaseCachedPool>();
   const noted = new Set<string>();
   let discovered = false;
+  /** The dedupe key travels WITH the note, not just in this local Set: the
+   *  venue holds several conditions at once (head, snapshot, per-pool unread,
+   *  per-pool inactive), all stamped `venue: 'lunarbase'`, and the key is what
+   *  lets a recovery retract the one that actually cleared (@shared: RETRACTS). */
   const noteOnce = (ctx: AdapterContext, key: string, code: NoteCode, message: string) => {
     if (noted.has(key)) return;
     noted.add(key);
-    ctx.note(code, message);
+    ctx.note(code, message, key);
   };
   /** Clear a raised note AND say so. Dropping the dedupe key alone only re-arms
    *  the warning for next time — the one already served stands until the window
    *  rolls it off, so a healed pool keeps scaring whoever reads state.notes.
-   *  An adapter cannot retract, so recovery has to be announced (6c3cf5b). */
+   *  An adapter cannot retract, so recovery has to be announced (6c3cf5b); the
+   *  buffer turns that announcement into the retraction of this key's note. */
   const recovered = (ctx: AdapterContext, key: string, msg: string) => {
     if (!noted.delete(key)) return; // nothing was ever raised — stay quiet
-    ctx.note('venue.quote.recovered', msg);
+    ctx.note('venue.quote.recovered', msg, key);
   };
   /** Transient read failure: say so, but keep the pool tailed and decodable. */
   const unreadable = (ctx: AdapterContext, config: LunarbasePoolConfig, reason: string) => {

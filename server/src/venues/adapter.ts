@@ -31,8 +31,16 @@ export interface AdapterContext {
    *  what a consumer filters and alerts on, and it also decides the note's
    *  level (@shared: NOTE_LEVEL), so nothing downstream has to read your
    *  wording. The core stamps the timestamp and your venue id, and drops a
-   *  repeat of a note it already holds (discovery re-runs every 10 minutes). */
-  note: (code: NoteCode, msg: string) => void;
+   *  repeat of a note it already holds (discovery re-runs every 10 minutes).
+   *
+   *  `key` names WHICH condition of your venue the note is about, and you need
+   *  it when your venue can be degraded in several ways at once (a pool paused
+   *  while the chain head is unreadable). A recovery note retracts the
+   *  condition raised under the SAME key (@shared: RETRACTS), so announcing
+   *  `venue.quote.recovered` with key `head` clears the head outage and leaves
+   *  the still-true paused-pool note standing. Use the key you already dedupe
+   *  on; omit it when the code can only ever mean one thing for the venue. */
+  note: (code: NoteCode, msg: string, key?: string) => void;
 }
 
 /** A group of on-chain logs the core fetches each cycle for this adapter and

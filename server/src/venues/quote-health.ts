@@ -63,8 +63,16 @@ export function quoteOutageReason(results: readonly MulticallOutcome[]): string 
  * once — but a CHANGED reason is a new event and gets its own note. Recovery
  * is ANNOUNCED rather than retracted: an adapter can only append, so a heal
  * that said nothing would leave the warning standing until the served window
- * rolled it off (the stale scare-warning lesson, 6c3cf5b).
+ * rolled it off (the stale scare-warning lesson, 6c3cf5b). The announcement is
+ * what retracts the outage note (@shared: RETRACTS), matched under this
+ * reporter's own condition key — an adapter can hold OTHER quote conditions at
+ * the same time (Metric's funded-pools-without-an-oracle warning), and a
+ * venue-wide "quoting again" must not take those out.
  */
+
+/** The condition key for the all-legs-failed outage this reporter owns. */
+const ALL_LEGS_KEY = 'quote-health:all-legs';
+
 export function createQuoteOutageReporter(venueName: string): (ctx: AdapterContext, results: readonly MulticallOutcome[]) => boolean {
   let current: string | null = null;
   return (ctx, results) => {
@@ -75,12 +83,12 @@ export function createQuoteOutageReporter(venueName: string): (ctx: AdapterConte
         // "failed", not "reverted": a leg can fail without reverting (transport
         // error, decode failure), and `reason` falls back to a generic string
         // in that case — `reverted "call failed"` would be a lie.
-        ctx.note('venue.quote.unavailable', `${venueName} quotes unavailable — all ${results.length} legs failed with "${reason}" (venue disabled, or the ABI drifted from the contract)`);
+        ctx.note('venue.quote.unavailable', `${venueName} quotes unavailable — all ${results.length} legs failed with "${reason}" (venue disabled, or the ABI drifted from the contract)`, ALL_LEGS_KEY);
       }
       return true;
     }
     if (current) {
-      ctx.note('venue.quote.recovered', `${venueName} quoting again (was "${current}")`);
+      ctx.note('venue.quote.recovered', `${venueName} quoting again (was "${current}")`, ALL_LEGS_KEY);
       current = null;
     }
     return false;
