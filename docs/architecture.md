@@ -61,6 +61,12 @@ Every adapter receives that explicit block in `quote(ctx, sizesUsd, blockNumber)
 
 The CEX mids/books used for sizing, bps anchors and benchmark rows are captured synchronously once before the frame's first RPC await, so a moving feed cannot give different adapters different reference moments. The adapters use a dedicated zero-wait HTTP batch lane: it shares the hot pool's active endpoint and failover state, but heads, fill-tail logs, attribution and discovery cannot join and hold a quote response batch. Every published snapshot carries head-observed / quote-started / completed / emitted timestamps, head source, per-adapter wall times, missing venues and coalesced blocks. `state.realtime` rolls those frames into head/quote lag, 60-second block coverage, coalescing and event-loop delay; `/api/health` exposes the same view. The Execution chart positions samples by their real emitted timestamps and breaks paths on missing rows/sides or skipped block numbers — gaps remain visible instead of being compressed into a nominal 300ms sample index, and the wall-time window keeps advancing when the stream stalls.
 
+### Depth curves (BID_ASK_DEPTH)
+
+The same quote path, over a **log-spaced notional grid** ($100 → $1M, `DEPTH_SAMPLES` = 25) instead of the four SIZE pills: `adapter.quote(ctx, depthGrid, blockNumber)` → `server/src/depth.ts` slices the resulting matrix into one executable-spread curve per venue per market. Because the grid lands exactly on every `SIZES_USD` pill, a curve point at $10k is the *same number* the QUOTE grid and ROLLING_STATS show, not a lookalike. Venue skew survives (the two legs are that venue's two independent walks, never mirrored) and fees stay where the venue puts them (the CEX leg carries its taker fee because `reference.quote()` applies it). A leg ends where the venue stops quoting size — no row, or `filledFull=false` — and nothing is extrapolated past that.
+
+The cost is `DEPTH_SAMPLES / sizesUsd.length` ≈ 6× a frame's quoter work, so this is deliberately **off the block-triggered critical path**: `GET /api/depth?market=` computes on demand (nobody pays for a panel nobody has open), one pass is shared by every caller inside `DEPTH_TTL_MS`, and it runs on the auxiliary RPC lane so it can never queue in front of the block-pinned matrix. A failed pass answers 503 rather than serving a stale curve as current; the client keeps the curve it has and retries on its next quote tick. `DEPTH=off` disables it.
+
 ## Fill stream (tape, volume, markouts)
 
 Each tick the core fetches every adapter's `logSources()` over the pending block range and hands each adapter its logs to `decode()` into normalized `Fill`s. Fills are deduped by deterministic id (`venue-txHash-logIndex`), bucketed into per-venue UTC-day volume, and joined to their **pair's** CEX mid for 0/5/10/30/60s markouts. Because every tracked pair quotes in a USD stable, the stable leg *is* the USD value — exact, no price oracle.
@@ -123,6 +129,7 @@ GET /api/venues                    the venue registry (VenueMeta[])
 GET /api/markets                   state snapshot (incl. venues + notes)
 GET /api/quotes                    latest quote matrix
 GET /api/quotes/history?market=&size=   last ~60s of real ticks (chart seed)
+GET /api/depth?market=             per-venue executable-spread curves, $100 → $1M (BID_ASK_DEPTH)
 GET /api/volume?from=&to=          daily series (DailyVolume.byVenue)
 GET /api/fills?days=&limit=        recent fills (the tape)
 GET /api/leaderboard?days=1|7|30   server-side aggregated leaderboard/markout stats

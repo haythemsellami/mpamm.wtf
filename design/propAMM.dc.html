@@ -221,28 +221,33 @@
     <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
       <div style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></div>
       <div style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></div>
-      <div style="padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em"><span style="color:var(--accent)">≡</span> <span style="color:var(--text); font-weight:600">BID_ASK_DEPTH</span> <span style="color:var(--dim2)">{{ pairSel }} · spread vs Bybit mid (bps) by trade size</span></div>
-      <div style="padding:16px 18px 8px">
-        <div style="display:flex; padding-left:64px; margin-bottom:10px">
-          <div style="flex:1; text-align:center; font-size:9px; color:var(--faint); letter-spacing:.1em">BIDS — below mid</div>
-          <div style="flex:1; text-align:center; font-size:9px; color:var(--faint); letter-spacing:.1em">ASKS — above mid</div>
-        </div>
-        <sc-for list="{{ depth }}" as="row" hint-placeholder-count="4">
-          <div style="display:flex; align-items:center; gap:10px; height:34px; {{ row.rowcss }}">
-            <div style="width:54px; text-align:right; font-size:11px; color:var(--text4)">{{ row.label }}</div>
-            <div style="position:relative; flex:1; height:20px">
-              <div style="position:absolute; left:50%; top:-3px; bottom:-3px; width:1px; background:var(--green-line); z-index:5"></div>
-              <sc-for list="{{ row.segsBid }}" as="seg" hint-placeholder-count="3"><div style="{{ seg.style }}" data-comment-anchor="0e8558d22a-div"></div></sc-for>
-              <sc-for list="{{ row.segsAsk }}" as="seg" hint-placeholder-count="3"><div style="{{ seg.style }}"></div></sc-for>
-            </div>
+      <div style="padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em"><span style="color:var(--accent)">≡</span> <span style="color:var(--text); font-weight:600">BID_ASK_DEPTH</span> <span style="color:var(--dim2)">{{ pairSel }} · spread vs Bybit mid (bps) across trade size · $100 → $1M</span></div>
+      <div style="padding:14px 20px 10px">
+        <div style="display:flex; align-items:center; gap:18px; margin:0 0 12px 62px">
+          <div style="font-size:9px; color:var(--faint); letter-spacing:.14em; flex:none">BIDS</div>
+          <div style="display:flex; align-items:center; justify-content:center; gap:18px; flex:1; flex-wrap:wrap">
+            <sc-for list="{{ dcLegend }}" as="l" hint-placeholder-count="5">
+              <div style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text3)"><span style="{{ l.dot }}"></span>{{ l.label }}</div>
+            </sc-for>
           </div>
-        </sc-for>
-        <div style="display:flex; gap:10px; margin-top:6px">
-          <div style="width:54px"></div>
-          <div style="position:relative; flex:1; height:16px">
+          <div style="font-size:9px; color:var(--faint); letter-spacing:.14em; flex:none">ASKS</div>
+        </div>
+        <div style="margin-left:62px">
+          <div style="position:relative; height:340px">
+            <sc-for list="{{ dcGrid }}" as="g" hint-placeholder-count="8"><div style="{{ g.style }}"></div></sc-for>
+            <div style="position:absolute; top:0; bottom:0; left:{{ dcZero }}; width:1px; background:var(--green-line)"></div>
+            <sc-for list="{{ dcY }}" as="y" hint-placeholder-count="5"><div style="{{ y.style }}">{{ y.label }}</div></sc-for>
+            <svg viewBox="0 0 1000 340" preserveAspectRatio="none" style="position:absolute; inset:0; width:100%; height:100%; overflow:visible">
+              <sc-for list="{{ depth }}" as="c" hint-placeholder-count="10">
+                <path d="{{ c.d }}" fill="none" stroke="{{ c.stroke }}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"></path>
+              </sc-for>
+            </svg>
+          </div>
+          <div style="position:relative; height:18px; margin-top:8px">
             <sc-for list="{{ ticks }}" as="t" hint-placeholder-count="9"><div style="{{ t.style }}">{{ t.label }}</div></sc-for>
           </div>
         </div>
+        <div style="font-size:9px; color:var(--faint2); margin:2px 0 4px 62px">each leg = executable spread at that notional · a leg ends where the venue stops quoting size · x = bps vs Bybit mid, y = log notional</div>
       </div>
     </div>
 
@@ -688,6 +693,397 @@
   </div>
 </sc-if>
 
+  <!-- ===================== LIFECYCLE TAB ===================== -->
+  <sc-if value="{{ isLc }}" hint-placeholder-val="{{ false }}">
+  <div>
+    <div style="padding:18px 18px 10px">
+      <div style="font-size:14px; font-weight:600; letter-spacing:.06em; color:var(--text)">QUOTE LIFECYCLE</div>
+      <div style="font-size:11px; color:var(--dim); margin-top:6px; line-height:1.55; max-width:900px">The life of a quote on each venue: how often it is <span style="color:var(--text3)">republished</span>, how often one is ever <span style="color:var(--text3)">taken</span>, and — when it is — whether the venue delivered what its own quoter promised. Most quotes on Monad expire unfilled, so every panel here reads correctly on a venue with <span style="color:var(--text3)">no fills at all</span>.</div>
+    </div>
+
+    <!-- VENUE_STATE -->
+    <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
+      <i style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></i>
+      <i style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></i>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em">
+        <div><span style="color:var(--accent)">&#9636;</span> <span style="color:var(--text); font-weight:600">VENUE_STATE</span> <span style="color:var(--dim2)">quoting state per venue &middot; market &middot; last 24h &middot; ticks = fills</span></div>
+        <div style="display:flex; gap:14px; font-size:9px; color:var(--faint); align-items:center">
+          <span style="display:flex; align-items:center; gap:5px"><span style="width:14px; height:8px; border-radius:1px; background:{{ lcPoeBand }}"></span>TWO-SIDED</span>
+          <span style="display:flex; align-items:center; gap:5px"><span style="width:14px; height:8px; border-radius:1px; background:var(--amber); opacity:.45"></span>ONE-SIDED</span>
+          <span style="display:flex; align-items:center; gap:5px"><span style="width:14px; height:8px; border-radius:1px; background:var(--border)"></span>DARK</span>
+        </div>
+      </div>
+      <div style="padding:14px 18px 8px">
+        <sc-for list="{{ lcRows }}" as="r" hint-placeholder-count="7">
+          <div style="display:grid; grid-template-columns:200px 1fr 92px; gap:12px; align-items:center; height:30px">
+            <div style="display:flex; align-items:center; gap:7px; font-size:11px"><span style="width:8px; height:8px; border-radius:2px; flex:none; background:{{ r.col }}"></span><span style="color:var(--text2)">{{ r.venue }}</span><span style="color:var(--dim2)">{{ r.market }}</span></div>
+            <div style="position:relative; height:16px; border-radius:2px; background:{{ r.band }}">
+              <div style="{{ r.noteStyle }}">{{ r.note }}</div>
+              <sc-for list="{{ r.fills }}" as="f" hint-placeholder-count="6"><div style="{{ f.style }}"></div></sc-for>
+            </div>
+            <div style="text-align:right; font-size:11px; color:{{ r.nCol }}">{{ r.n }} <span style="color:var(--faint); font-size:9px">FILLS</span></div>
+          </div>
+        </sc-for>
+        <div style="display:grid; grid-template-columns:200px 1fr 92px; gap:12px; margin-top:6px">
+          <div></div>
+          <div style="display:flex; justify-content:space-between; font-size:8.5px; color:var(--faint); letter-spacing:.05em"><span>&minus;24h</span><span>&minus;18h</span><span>&minus;12h</span><span>&minus;6h</span><span>now</span></div>
+          <div></div>
+        </div>
+      </div>
+      <div style="padding:4px 14px 12px; font-size:9.5px; color:var(--faint); line-height:1.5">&#9432; A venue quoting continuously with no ticks is doing business with nobody &mdash; the normal state on Monad today, and the reason nothing else on this page assumes fills exist.</div>
+    </div>
+
+    <!-- ===== STAGE 01 ===== -->
+    <div style="display:flex; align-items:baseline; gap:14px; margin:24px 18px 12px; padding-top:16px; border-top:1px solid var(--border)">
+      <span style="font-size:24px; font-weight:600; color:var(--accent); letter-spacing:-.03em; line-height:.9">01</span>
+      <div>
+        <div style="font-size:12px; font-weight:600; letter-spacing:.09em; color:var(--text)">BORN &mdash; THE KEEPER PUBLISHES</div>
+        <div style="font-size:10px; color:var(--dim2); margin-top:4px">how often &middot; what it costs &middot; where in the block it lands</div>
+      </div>
+    </div>
+
+    <!-- REPRICE_ORDERING -->
+    <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
+      <i style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></i>
+      <i style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></i>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em">
+        <div><span style="color:var(--accent)">&equiv;</span> <span style="color:var(--text); font-weight:600">REPRICE_ORDERING</span> <span style="color:var(--dim2)">LFJ POE &middot; ClapOracle 0x33176bE2 &middot; 201 blocks sampled</span></div>
+        <div style="font-size:9px; color:var(--faint)">Monad has no sub-blocks &mdash; the exploitable axis is tx order, not sub-block timing</div>
+      </div>
+      <div style="display:grid; grid-template-columns:236px 1fr 300px; align-items:stretch">
+        <div style="padding:18px; border-right:1px solid var(--border-soft)">
+          <div style="font-size:9px; color:var(--faint); letter-spacing:.08em">CADENCE</div>
+          <div style="font-size:34px; font-weight:600; color:var(--text-strong); letter-spacing:-.01em; margin-top:10px; line-height:1">97.5<span style="font-size:18px; color:var(--dim)">%</span></div>
+          <div style="font-size:10.5px; color:var(--dim); margin-top:8px; line-height:1.5">of blocks carry a keeper reprice</div>
+          <div style="font-size:9.5px; color:var(--faint2); margin-top:10px; line-height:1.5">196 of 201 blocks &middot; &asymp;1 push per 302 ms block</div>
+        </div>
+        <div style="padding:18px 20px; border-right:1px solid var(--border-soft)">
+          <div style="font-size:9px; color:var(--faint); letter-spacing:.08em">POSITION WITHIN BLOCK</div>
+          <div style="margin-top:16px">
+            <div style="display:flex; justify-content:space-between; font-size:10px; color:var(--dim); margin-bottom:6px"><span>ALL BLOCKS</span><span style="color:var(--text)">mean 0.745</span></div>
+            <div style="position:relative; height:14px; background:var(--border-soft); border-radius:2px"><div style="position:absolute; left:74.5%; top:-3px; bottom:-3px; width:2px; background:var(--dim)"></div></div>
+          </div>
+          <div style="margin-top:16px">
+            <div style="display:flex; justify-content:space-between; font-size:10px; color:var(--dim); margin-bottom:6px"><span>BLOCKS CARRYING A FILL</span><span style="color:var(--text)">mean 0.724</span></div>
+            <div style="position:relative; height:14px; background:var(--accent-dim); border-radius:2px"><div style="position:absolute; left:72.4%; top:-3px; bottom:-3px; width:2px; background:var(--accent)"></div></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:8.5px; color:var(--faint); margin-top:8px; letter-spacing:.06em"><span>0 &mdash; FIRST TX</span><span>LAST TX &mdash; 1</span></div>
+          <div style="font-size:9.5px; color:var(--faint2); margin-top:12px; line-height:1.55">The control pair: where a reprice lands in an ordinary block, versus in a block that also carries a fill.</div>
+        </div>
+        <div style="padding:18px">
+          <div style="font-size:9px; color:var(--faint); letter-spacing:.08em">ORDERING vs FILL</div>
+          <div style="display:grid; grid-template-columns:1fr 52px; gap:2px 6px; margin-top:14px; font-size:11px; align-items:center"><div style="color:var(--text2)">Reprice BEFORE the fill</div><div style="text-align:right; color:var(--text); font-weight:600">0</div></div>
+          <div style="height:6px; background:var(--border-soft); border-radius:2px; margin:6px 0 12px"></div>
+          <div style="display:grid; grid-template-columns:1fr 52px; gap:2px 6px; font-size:11px; align-items:center"><div style="color:var(--text2)">Reprice AFTER the fill</div><div style="text-align:right; color:var(--text); font-weight:600">3</div></div>
+          <div style="height:6px; background:var(--accent); border-radius:2px; margin:6px 0 12px"></div>
+          <div style="display:grid; grid-template-columns:1fr 52px; gap:2px 6px; font-size:11px; align-items:center; padding-top:8px; border-top:1px solid var(--border-soft)"><div style="color:var(--dim2)">Fill-carrying blocks sampled</div><div style="text-align:right; color:var(--dim2)">3</div></div>
+          <div style="font-size:9.5px; color:var(--amber); margin-top:12px; line-height:1.5">&#9888; n=3 &mdash; a count, not yet a rate.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== STAGE 02 ===== -->
+    <div style="display:flex; align-items:baseline; gap:14px; margin:24px 18px 12px; padding-top:16px; border-top:1px solid var(--border)">
+      <span style="font-size:24px; font-weight:600; color:var(--accent); letter-spacing:-.03em; line-height:.9">02</span>
+      <div>
+        <div style="font-size:12px; font-weight:600; letter-spacing:.09em; color:var(--text)">LIVES &mdash; THE QUOTE STANDS</div>
+        <div style="font-size:10px; color:var(--dim2); margin-top:4px">how wide &middot; how deep &middot; how far from fair &middot; one-sided or two</div>
+      </div>
+    </div>
+
+    <!-- QUOTE_SURFACE -->
+    <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
+      <i style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></i>
+      <i style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></i>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:7px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em">
+        <div><span style="color:var(--accent)">&#9707;</span> <span style="color:var(--text); font-weight:600">QUOTE_SURFACE</span> <span style="color:var(--dim2)">standing bid/ask around the CEX reference &middot; bps &middot; last 24h &middot; MON/USDC</span></div>
+        <div style="display:flex; gap:3px"><sc-for list="{{ surfPills }}" as="p" hint-placeholder-count="3"><div onClick="{{ p.onClick }}" style="{{ p.style }}">{{ p.label }}</div></sc-for></div>
+      </div>
+      <div style="display:flex; align-items:flex-start; padding:8px 8px 4px">
+        <div style="flex:1; min-width:0">
+          <svg viewBox="0 0 900 264" style="width:100%; height:264px; display:block">
+            <defs>
+              <pattern id="lcHatch" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+                <line x1="0" y1="0" x2="0" y2="6" stroke="{{ surfHatch }}" stroke-width="1.4"></line>
+              </pattern>
+            </defs>
+            <sc-for list="{{ gridY }}" as="g" hint-placeholder-count="5"><line x1="56" y1="{{ g.y }}" x2="876" y2="{{ g.y }}" stroke="var(--border2)" stroke-width="1"></line></sc-for>
+            <sc-for list="{{ darkZones }}" as="z" hint-placeholder-count="0"><rect x="{{ z.x }}" y="26" width="{{ z.w }}" height="208" fill="var(--border-soft)" opacity=".55"></rect></sc-for>
+            <sc-for list="{{ bandSegs }}" as="b" hint-placeholder-count="1"><polygon points="{{ b.path }}" fill="{{ b.fill }}" stroke="{{ b.stroke }}" stroke-width="1" stroke-dasharray="{{ b.dash }}"></polygon></sc-for>
+            <sc-for list="{{ midLines }}" as="m" hint-placeholder-count="1"><polyline points="{{ m.path }}" fill="none" stroke="{{ surfMid }}" stroke-width="1.6" stroke-linejoin="round"></polyline></sc-for>
+            <sc-for list="{{ gridY }}" as="g" hint-placeholder-count="5"><text x="48" y="{{ g.y }}" dy="3.5" text-anchor="end" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim2)">{{ g.label }}</text></sc-for>
+            <text x="14" y="130" text-anchor="middle" transform="rotate(-90 14 130)" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--faint); letter-spacing:.1em">BPS vs CEX MID</text>
+            <sc-for list="{{ ribbon }}" as="r" hint-placeholder-count="49"><rect x="{{ r.x }}" y="238" width="{{ r.w }}" height="7" rx="1" fill="{{ r.bg }}" opacity="{{ r.op }}"></rect></sc-for>
+            <text x="56" y="252" text-anchor="start" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim)">&minus;24h</text>
+            <text x="261" y="252" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim)">&minus;18h</text>
+            <text x="466" y="252" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim)">&minus;12h</text>
+            <text x="671" y="252" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim)">&minus;6h</text>
+            <text x="876" y="252" text-anchor="end" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim)">now</text>
+          </svg>
+          <div style="display:flex; gap:16px; margin:2px 2.667% 6px 6.222%; font-size:8.5px; color:var(--faint); align-items:center">
+            <span style="display:flex; align-items:center; gap:5px"><span style="width:14px; height:7px; border-radius:1px; background:{{ surfCol }}"></span>TWO-SIDED</span>
+            <span style="display:flex; align-items:center; gap:5px"><span style="width:14px; height:7px; border-radius:1px; background:var(--amber); opacity:.5"></span>ONE-SIDED &mdash; hatched band</span>
+            <span style="display:flex; align-items:center; gap:5px"><span style="width:14px; height:7px; border-radius:1px; background:var(--border)"></span>NO QUOTE &mdash; drawn as a gap</span>
+          </div>
+        </div>
+        <div style="flex:none; width:400px; margin:6px 8px 0 14px; background:var(--overlay); border:1px solid var(--border); padding:8px 10px">
+          <div style="font-size:9px; color:var(--faint); letter-spacing:.06em; padding-bottom:6px">{{ surfVenue }} &mdash; BY TRADE SIZE &middot; click to plot</div>
+          <div style="display:grid; grid-template-columns:56px 1fr 1fr 1fr; gap:2px 6px; font-size:8.5px; color:var(--faint); letter-spacing:.05em; padding-bottom:5px; border-bottom:1px solid var(--border)">
+            <div>SIZE</div><div style="text-align:right">SPREAD</div><div style="text-align:right">P90</div><div style="text-align:right">|MID&minus;FAIR|</div>
+          </div>
+          <sc-for list="{{ surfRows }}" as="s" hint-placeholder-count="4">
+            <div onClick="{{ s.onClick }}" style="{{ s.rowStyle }}">
+              <div style="color:{{ s.szCol }}">{{ s.size }}</div>
+              <div style="text-align:right; font-weight:600; color:var(--text)">{{ s.spread }}</div>
+              <div style="text-align:right; color:var(--dim)">{{ s.spread90 }}</div>
+              <div style="text-align:right; color:var(--text2)">{{ s.fair }}</div>
+            </div>
+          </sc-for>
+          <div style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border-soft); font-size:9px; color:var(--faint2); line-height:1.55">{{ surfNote }} Spread and fair-value distance are medians over 49 half-hour samples; this feed needs no fills, so it is the one panel populated for every venue.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== STAGE 03 ===== -->
+    <div style="display:flex; align-items:baseline; gap:14px; margin:24px 18px 12px; padding-top:16px; border-top:1px solid var(--border)">
+      <span style="font-size:24px; font-weight:600; color:var(--accent); letter-spacing:-.03em; line-height:.9">03</span>
+      <div>
+        <div style="font-size:12px; font-weight:600; letter-spacing:.09em; color:var(--text)">DIES UNFILLED &mdash; THE USUAL ENDING</div>
+        <div style="font-size:10px; color:var(--dim2); margin-top:4px">how many died per one taken &middot; what that cost the venue</div>
+      </div>
+    </div>
+
+    <!-- QUOTE_CONVERSION -->
+    <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
+      <i style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></i>
+      <i style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></i>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em">
+        <div><span style="color:var(--accent)">&divide;</span> <span style="color:var(--text); font-weight:600">QUOTE_CONVERSION</span> <span style="color:var(--dim2)">keeper reprices published per fill taken &middot; log scale</span></div>
+        <div style="font-size:9px; color:var(--faint)">reprices from each adapter's own gasSources()</div>
+      </div>
+      <div style="padding:6px 14px 12px">
+        <div style="display:grid; grid-template-columns:168px 1fr 100px 74px 96px 96px; gap:10px; padding:9px 6px; font-size:9px; color:var(--faint); letter-spacing:.05em; border-bottom:1px solid var(--border)">
+          <div>VENUE</div><div>REPRICES PER FILL</div><div style="text-align:right">PER FILL</div><div style="text-align:right">FILLS</div><div style="text-align:right">REPRICES</div><div style="text-align:right">MON / FILL</div>
+        </div>
+        <sc-for list="{{ lcConv }}" as="c" hint-placeholder-count="3">
+          <div style="display:grid; grid-template-columns:168px 1fr 100px 74px 96px 96px; gap:10px; padding:10px 6px; font-size:11.5px; border-bottom:1px solid var(--border-soft); align-items:center">
+            <div style="display:flex; align-items:center; gap:7px"><span style="width:8px; height:8px; border-radius:2px; flex:none; background:{{ c.col }}"></span><span style="color:var(--text2)">{{ c.venue }}</span></div>
+            <div style="{{ c.trackStyle }}"><div style="{{ c.barStyle }}"></div><div style="{{ c.noteStyle }}">{{ c.note }}</div></div>
+            <div style="text-align:right; font-weight:600; color:{{ c.valCol }}">{{ c.perFill }}</div>
+            <div style="text-align:right; color:var(--text2)">{{ c.fills }}</div>
+            <div style="text-align:right; color:var(--dim)">{{ c.reprices }}</div>
+            <div style="text-align:right"><span style="color:{{ c.monCol }}">{{ c.monFill }}</span> <span style="color:var(--faint); font-size:9px">{{ c.monUsd }}</span></div>
+          </div>
+        </sc-for>
+        <div style="display:grid; grid-template-columns:168px 1fr 100px 74px 96px 96px; gap:10px; padding:0 6px; margin:8px 0 0">
+          <div></div>
+          <div style="display:flex; justify-content:space-between; font-size:8.5px; color:var(--faint); letter-spacing:.05em"><span>1</span><span>10</span><span>100</span><span>1,000</span><span>10,000</span></div>
+        </div>
+        <div style="display:flex; align-items:baseline; gap:18px; flex-wrap:wrap; margin-top:12px; padding-top:11px; border-top:1px solid var(--border-soft)">
+          <div><span style="font-size:9px; color:var(--faint); letter-spacing:.06em">TOTAL SPENT ON QUOTES</span> <span style="font-size:14px; font-weight:600; color:var(--text-strong); margin-left:6px">5,142 MON</span> <span style="font-size:9.5px; color:var(--faint)">&asymp;$99</span></div>
+          <div><span style="font-size:9px; color:var(--faint); letter-spacing:.06em">OF WHICH BOUGHT A FILL</span> <span style="font-size:14px; font-weight:600; color:var(--amber); margin-left:6px">0.04%</span> <span style="font-size:9.5px; color:var(--faint)">45 of 120,113 reprices</span></div>
+        </div>
+        <div style="font-size:9px; color:var(--faint2); margin-top:10px; line-height:1.55; max-width:1000px">MON / FILL joins each venue's quote-update burn from <span style="color:var(--dim2)">daily_gas</span> at a flat &asymp;0.0428 MON per reprice &mdash; the cost of the quotes nobody took. Metric's ratio is undefined rather than infinite-in-fact: it has spent 512 MON and has not yet been traded against.</div>
+      </div>
+    </div>
+
+    <!-- QUOTE_LIFE -->
+    <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
+      <i style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></i>
+      <i style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></i>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em">
+        <div><span style="color:var(--accent)">&#8600;</span> <span style="color:var(--text); font-weight:600">QUOTE_LIFE</span> <span style="color:var(--dim2)">how long a quote stands before the next reprice replaces it &middot; blocks</span></div>
+        <div style="display:flex; gap:12px; font-size:8.5px; color:var(--faint); align-items:center">
+          <span>LIFETIME</span>
+          <sc-for list="{{ lifeLegend }}" as="l" hint-placeholder-count="6"><span style="display:flex; align-items:center; gap:4px"><span style="width:11px; height:7px; border-radius:1px; background:{{ l.bg }}"></span>{{ l.label }}</span></sc-for>
+        </div>
+      </div>
+      <div style="padding:6px 14px 12px">
+        <div style="display:grid; grid-template-columns:150px 1fr 104px 116px 200px; gap:10px; padding:9px 6px; font-size:9px; color:var(--faint); letter-spacing:.05em; border-bottom:1px solid var(--border)">
+          <div>VENUE</div><div>LIFETIME DISTRIBUTION</div><div style="text-align:right">MEDIAN LIFE</div><div style="text-align:right">EVER TAKEN</div><div style="text-align:right">SAMPLE</div>
+        </div>
+        <sc-for list="{{ lifeRows }}" as="v" hint-placeholder-count="3">
+          <div style="display:grid; grid-template-columns:150px 1fr 104px 116px 200px; gap:10px; padding:11px 6px; font-size:11.5px; border-bottom:1px solid var(--border-soft); align-items:center">
+            <div style="display:flex; align-items:center; gap:7px"><span style="width:8px; height:8px; border-radius:2px; flex:none; background:{{ v.col }}"></span><span style="color:var(--text2)">{{ v.venue }}</span></div>
+            <div style="display:flex; gap:1px; border-radius:2px; overflow:hidden">
+              <sc-for list="{{ v.segs }}" as="s" hint-placeholder-count="6"><div title="{{ s.title }}" style="{{ s.style }}"></div></sc-for>
+            </div>
+            <div style="text-align:right"><span style="font-weight:600; color:var(--text)">{{ v.medLife }}</span> <span style="font-size:9px; color:var(--faint)">{{ v.medMs }}</span></div>
+            <div style="text-align:right; color:{{ v.tCol }}">{{ v.taken }}</div>
+            <div style="text-align:right; font-size:9.5px; color:var(--faint)">{{ v.n }}</div>
+          </div>
+        </sc-for>
+        <div style="font-size:9px; color:var(--faint2); margin-top:11px; line-height:1.55; max-width:1000px">Lifetimes are derived from each keeper's own reprice cadence, so this panel is defined for a venue that has never been traded against. A quote on LFJ POE is replaced within a single 302&nbsp;ms block <span style="color:var(--dim2)">97.5%</span> of the time &mdash; the population this whole page is about is one block deep and 120,113 wide.</div>
+      </div>
+    </div>
+
+    <!-- ===== STAGE 04 ===== -->
+    <div style="display:flex; align-items:baseline; gap:14px; margin:24px 18px 12px; padding-top:16px; border-top:1px solid var(--border)">
+      <span style="font-size:24px; font-weight:600; color:var(--accent); letter-spacing:-.03em; line-height:.9">04</span>
+      <div>
+        <div style="font-size:12px; font-weight:600; letter-spacing:.09em; color:var(--text)">TAKEN &mdash; AND DID IT DELIVER?</div>
+        <div style="font-size:10px; color:var(--dim2); margin-top:4px">did quoter match executor &middot; how stale was the quote &middot; who took it</div>
+      </div>
+    </div>
+
+    <!-- QUOTER_INTEGRITY -->
+    <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
+      <i style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></i>
+      <i style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></i>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em">
+        <div><span style="color:var(--accent)">&#10003;</span> <span style="color:var(--text); font-weight:600">QUOTER_INTEGRITY</span> <span style="color:var(--dim2)">does each venue's quoter return what its swap delivered, from the same state?</span></div>
+        <div style="font-size:9px; color:var(--faint)">replayed at the swap tx's own prestate, not at the block boundary</div>
+      </div>
+      <div style="padding:6px 14px 12px">
+        <div style="display:grid; grid-template-columns:150px 108px 62px 78px 88px 1fr 118px; gap:10px; padding:9px 6px; font-size:9px; color:var(--faint); letter-spacing:.05em; border-bottom:1px solid var(--border)">
+          <div>VENUE</div><div>STATE</div><div style="text-align:right">MATCH</div><div style="text-align:right">DIVERGED</div><div style="text-align:right">INTERVENED</div><div>VERDICT</div><div style="text-align:right">SENDER-VAR</div>
+        </div>
+        <sc-for list="{{ lcIntegrity }}" as="q" hint-placeholder-count="3">
+          <div style="display:grid; grid-template-columns:150px 108px 62px 78px 88px 1fr 118px; gap:10px; padding:11px 6px; font-size:11.5px; border-bottom:1px solid var(--border-soft); align-items:center">
+            <div style="display:flex; align-items:center; gap:7px"><span style="width:8px; height:8px; border-radius:2px; flex:none; background:{{ q.col }}"></span><span style="color:var(--text2)">{{ q.venue }}</span></div>
+            <div><span style="{{ q.stateStyle }}">{{ q.state }}</span></div>
+            <div style="text-align:right; font-weight:600; color:{{ q.matchCol }}">{{ q.match }}</div>
+            <div style="text-align:right; color:var(--dim)">{{ q.diverged }}</div>
+            <div style="text-align:right; font-weight:600; color:{{ q.intvCol }}">{{ q.intervened }}</div>
+            <div style="color:var(--text2)">{{ q.verdict }}</div>
+            <div style="text-align:right"><span style="{{ q.senderStyle }}">{{ q.sender }}</span></div>
+          </div>
+        </sc-for>
+        <div style="font-size:9px; color:var(--faint2); margin-top:12px; line-height:1.6; max-width:1000px">
+          <span style="color:var(--dim)">MATCH</span> &mdash; nothing moved the venue before the fill's tx index and the quoter's number equals the realised amount.
+          <span style="color:var(--dim)">INTERVENED</span> &mdash; something did move it first (another fill, or the keeper repricing), so a block-boundary replay would read as a false divergence; the prestate replay still matched.
+          <span style="color:var(--dim)">SENDER-VARIANCE</span> &mdash; same block, same amount, different <span style="color:var(--dim2)">from</span>: unset / zero / random EOA / FastLane / solver. A quoter that flatters a simulation would fail here.
+          <span style="color:var(--amber)">NOT TESTABLE</span> &mdash; the check could not be run at all, so no verdict of any kind is implied. ThogAMM's fill decoder matches none of the contract's current logs, which is an indexer defect on our side, not a finding about the venue.
+        </div>
+      </div>
+    </div>
+
+    <!-- LAG_CURVE -->
+    <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
+      <i style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></i>
+      <i style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></i>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em">
+        <div><span style="color:var(--accent)">~</span> <span style="color:var(--text); font-weight:600">LAG_CURVE</span> <span style="color:var(--dim2)">delivered vs the quote k blocks earlier &mdash; how stale a quote gets before it settles</span></div>
+        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+          <span style="font-size:9px; color:var(--faint)">solid = median &middot; band = p10&ndash;p90</span>
+          <div style="display:flex; gap:3px"><sc-for list="{{ lagPills }}" as="p" hint-placeholder-count="2"><div onClick="{{ p.onClick }}" style="{{ p.style }}">{{ p.label }}</div></sc-for></div>
+        </div>
+      </div>
+      <div style="padding:6px 12px 0; font-size:9px; color:var(--faint2); line-height:1.5">{{ lagModeNote }}</div>
+      <div style="display:flex; align-items:flex-start; padding:8px 8px 4px">
+        <div style="flex:1; min-width:0">
+          <svg viewBox="0 0 900 268" style="width:100%; height:268px; display:block">
+            <line x1="56" y1="16" x2="876" y2="16" stroke="var(--border2)" stroke-width="1"></line>
+            <line x1="56" y1="55.6" x2="876" y2="55.6" stroke="var(--border2)" stroke-width="1"></line>
+            <line x1="56" y1="95.2" x2="876" y2="95.2" stroke="var(--border2)" stroke-width="1"></line>
+            <line x1="56" y1="134.8" x2="876" y2="134.8" stroke="var(--border2)" stroke-width="1"></line>
+            <line x1="56" y1="214" x2="876" y2="214" stroke="var(--border2)" stroke-width="1"></line>
+            <line x1="56" y1="174.4" x2="876" y2="174.4" stroke="var(--border)" stroke-width="1"></line>
+            <polygon points="{{ lagBand }}" fill="{{ lcPoeFill }}"></polygon>
+            <polyline points="{{ lagLine }}" fill="none" stroke="{{ lcPoe }}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+            <sc-for list="{{ lagDots }}" as="d" hint-placeholder-count="6"><circle cx="{{ d.cx }}" cy="{{ d.cy }}" r="2.6" fill="{{ lcPoe }}"></circle></sc-for>
+            <line x1="56" y1="16" x2="56" y2="214" stroke="var(--accent-border)" stroke-width="1" stroke-dasharray="2 3"></line>
+            <text x="62" y="28" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--accent2); letter-spacing:.05em">k=1 &middot; the state the fill executed against &mdash; reconstructs exactly</text>
+            <text x="48" y="19.5" text-anchor="end" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim2)">+8</text>
+            <text x="48" y="59.1" text-anchor="end" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim2)">+6</text>
+            <text x="48" y="98.7" text-anchor="end" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim2)">+4</text>
+            <text x="48" y="138.3" text-anchor="end" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim2)">+2</text>
+            <text x="48" y="177.9" text-anchor="end" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim)">0</text>
+            <text x="48" y="217.5" text-anchor="end" style="font-family:'JetBrains Mono',monospace; font-size:9px; fill:var(--dim2)">&minus;2</text>
+            <text x="14" y="118" text-anchor="middle" transform="rotate(-90 14 118)" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--faint); letter-spacing:.1em">BPS vs QUOTE</text>
+            <text x="56" y="235" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:9.5px; fill:var(--dim)">k=1</text>
+            <text x="220" y="235" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:9.5px; fill:var(--dim)">k=2</text>
+            <text x="384" y="235" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:9.5px; fill:var(--dim)">k=4</text>
+            <text x="548" y="235" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:9.5px; fill:var(--dim)">k=8</text>
+            <text x="712" y="235" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:9.5px; fill:var(--dim)">k=16</text>
+            <text x="876" y="235" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:9.5px; fill:var(--dim)">k=32</text>
+            <text x="56" y="248" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--faint)">0.3s</text>
+            <text x="220" y="248" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--faint)">0.6s</text>
+            <text x="384" y="248" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--faint)">1.2s</text>
+            <text x="548" y="248" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--faint)">2.4s</text>
+            <text x="712" y="248" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--faint)">4.8s</text>
+            <text x="876" y="248" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--faint)">9.7s</text>
+            <text x="466" y="264" text-anchor="middle" style="font-family:'JetBrains Mono',monospace; font-size:8.5px; fill:var(--faint); letter-spacing:.1em">QUOTE LAG BEFORE FILL &mdash; BLOCKS (&asymp;302 ms each)</text>
+          </svg>
+        </div>
+        <div style="flex:none; width:400px; margin:6px 8px 0 14px; background:var(--overlay); border:1px solid var(--border); padding:8px 10px">
+          <div style="display:grid; grid-template-columns:34px repeat(4, 1fr); gap:2px 6px; font-size:8.5px; color:var(--faint); letter-spacing:.05em; padding-bottom:5px; border-bottom:1px solid var(--border)">
+            <div>k</div><div style="text-align:right">P10</div><div style="text-align:right">P50</div><div style="text-align:right">P90</div><div style="text-align:right">MIN</div>
+          </div>
+          <sc-for list="{{ lcLadder }}" as="l" hint-placeholder-count="6">
+            <div style="{{ l.rowStyle }}">
+              <div style="color:{{ l.kCol }}">{{ l.k }}</div>
+              <div style="text-align:right; color:var(--dim)">{{ l.p10 }}</div>
+              <div style="text-align:right; font-weight:600; color:var(--text)">{{ l.p50 }}</div>
+              <div style="text-align:right; color:var(--dim)">{{ l.p90 }}</div>
+              <div style="text-align:right; color:{{ l.minCol }}">{{ l.min }}</div>
+            </div>
+          </sc-for>
+          <div style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border-soft); font-size:9px; color:var(--faint2); line-height:1.55">{{ lagTail }} LFJ POE &middot; 120 fills &middot; MON/USDC. ThogAMM and Metric have too few fills in window to plot &mdash; a venue with no flow has no curve, and is never drawn as zero.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FILL_TAPE -->
+    <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
+      <i style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></i>
+      <i style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></i>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em">
+        <div><span style="color:var(--accent)">&raquo;</span> <span style="color:var(--text); font-weight:600">FILL_TAPE</span> <span style="color:var(--dim2)">every quote that was actually taken</span></div>
+        <div style="font-size:9px; color:var(--faint)">&Delta;k = vs quote k blocks earlier &middot; RPX = keeper tx index in the fill's block</div>
+      </div>
+      <div style="padding:6px 14px 12px">
+        <div style="display:grid; grid-template-columns:118px 1fr 104px 58px 84px 90px 62px 112px; gap:6px; padding:9px 6px; font-size:9px; color:var(--faint); letter-spacing:.05em; border-bottom:1px solid var(--border)">
+          <div>BLOCK</div><div>VENUE</div><div>MARKET</div><div>SIDE</div><div style="text-align:right">SIZE</div><div style="text-align:right">QUOTER</div><div style="text-align:right">&Delta;2</div><div style="text-align:right">RPX</div>
+        </div>
+        <sc-for list="{{ lcTape }}" as="t" hint-placeholder-count="6">
+          <div style="display:grid; grid-template-columns:118px 1fr 104px 58px 84px 90px 62px 112px; gap:6px; padding:8px 6px; font-size:11.5px; border-bottom:1px solid var(--border-soft); align-items:center">
+            <div style="color:var(--link)">{{ t.block }}</div>
+            <div style="display:flex; align-items:center; gap:7px"><span style="width:8px; height:8px; border-radius:2px; flex:none; background:{{ t.col }}"></span><span style="color:var(--text2)">{{ t.venue }}</span></div>
+            <div style="color:var(--text4)">{{ t.market }}</div>
+            <div><span style="{{ t.sideStyle }}">{{ t.side }}</span></div>
+            <div style="text-align:right; color:var(--text2)">{{ t.size }}</div>
+            <div style="text-align:right; font-size:9.5px; color:{{ t.quoterCol }}">{{ t.quoter }}</div>
+            <div style="text-align:right; color:{{ t.d2Col }}">{{ t.d2 }}</div>
+            <div style="text-align:right; color:{{ t.rpxCol }}">{{ t.rpx }}</div>
+          </div>
+        </sc-for>
+        <div style="font-size:9px; color:var(--faint2); margin-top:10px; line-height:1.55; max-width:1000px">QUOTER is the integrity classification for that individual fill, replayed against its own prestate. &Delta; columns are only populated once the quote tape covers the fill's lag window; a fill older than the tape shows <span style="color:var(--dim2)">&mdash;</span>, never a zero.</div>
+      </div>
+    </div>
+
+    <!-- TAKER_MIX -->
+    <div style="position:relative; border:1px solid var(--border); background:var(--panel); margin:0 18px 14px">
+      <i style="position:absolute; top:-1px; left:-1px; width:8px; height:8px; border-top:1px solid var(--accent); border-left:1px solid var(--accent)"></i>
+      <i style="position:absolute; bottom:-1px; right:-1px; width:8px; height:8px; border-bottom:1px solid var(--accent); border-right:1px solid var(--accent)"></i>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; padding:9px 12px; border-bottom:1px solid var(--border2); font-size:11px; letter-spacing:.03em">
+        <div><span style="color:var(--accent)">&#9673;</span> <span style="color:var(--text); font-weight:600">TAKER_MIX</span> <span style="color:var(--dim2)">who is on the other side of the quotes that do get taken</span></div>
+        <div style="font-size:9px; color:var(--faint)">{{ takerTotal }}</div>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 380px; align-items:start">
+        <div style="padding:14px 6px 14px 14px">
+          <div style="display:flex; height:22px; border-radius:2px; overflow:hidden; gap:1px">
+            <sc-for list="{{ takerRows }}" as="t" hint-placeholder-count="4"><div style="{{ t.barStyle }}"></div></sc-for>
+          </div>
+          <div style="margin-top:14px">
+            <sc-for list="{{ takerRows }}" as="t" hint-placeholder-count="4">
+              <div style="display:grid; grid-template-columns:1fr 62px 62px; gap:10px; padding:8px 2px; font-size:11.5px; border-bottom:1px solid var(--border-soft); align-items:center">
+                <div style="display:flex; align-items:center; gap:8px"><span style="width:8px; height:8px; border-radius:2px; flex:none; background:{{ t.col }}"></span><span style="color:var(--text2)">{{ t.label }}</span><span style="font-size:9px; color:var(--faint)">{{ t.note }}</span></div>
+                <div style="text-align:right; font-weight:600; color:var(--text)">{{ t.n }}</div>
+                <div style="text-align:right; color:var(--dim)">{{ t.pct }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="padding:14px; border-left:1px solid var(--border-soft); font-size:10px; color:var(--dim); line-height:1.65">
+          These quotes are consumed almost entirely by arbitrage, not by routed retail. <span style="color:var(--text3)">One fill in 195</span> came through a retail aggregator.
+          <div style="margin-top:10px; color:var(--faint2); font-size:9px; line-height:1.6">That is the context for every other number on this page. The concern this analysis was built to look for &mdash; a venue quoting keenly to win aggregator routing, then settling slightly worse &mdash; requires aggregator routing to exist. On Monad today it barely does. The instrumentation is worth having because that flow is coming, not because it is here.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</sc-if>
+
   <!-- ===================== MOBILE — RESPONSIVE SPEC (shipped 2026-07) =====================
        The app styles inline (no media queries), so responsiveness is JS-driven conditional
        rendering — useViewport(): mobile <700px, tablet <1000px — the same approach as the
@@ -723,6 +1119,7 @@
             <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:9px 0 7px; font-size:8.5px; letter-spacing:.08em; color:var(--dim2); border-top:2px solid transparent"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 15V9M7.5 15V4M12 15V7M16 15V11" stroke-linecap="round"></path></svg>VOLUME</div>
             <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:9px 0 7px; font-size:8.5px; letter-spacing:.08em; color:var(--dim2); border-top:2px solid transparent"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 10h3l2-5 3.5 8 2.5-6 1.5 3h2.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>MARKOUTS</div>
             <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:9px 0 7px; font-size:8.5px; letter-spacing:.08em; color:var(--dim2); border-top:2px solid transparent"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 15V11h3v4M7.5 15V5h3v10M12.5 15V8h3v7M2 15.5h14" stroke-linecap="round"></path></svg>LEADERBOARD</div>
+            <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; padding:9px 0 7px; font-size:8.5px; letter-spacing:.08em; color:var(--dim2); border-top:2px solid transparent"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 13.5h15M3 11.5V13M6.5 9V13M10 10.5V13M13.5 5.5V13M2.5 7.5l4-3.5 3.5 2.5 6-4.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>LIFECYCLE</div>
           </div>
         </div>
       </div>
@@ -798,8 +1195,8 @@ class Component extends DCLogic {
     // implementation-owned palette (CVD/contrast-validated, one hue family per
     // venue across both themes) — source of truth is each adapter's VenueMeta.color
     return this.isLight
-      ? { LFJ: '#FF4D00', Clober: '#0284C7', Vault: '#9C6B16', Bybit: '#8A8375', UniV4: '#3F6212', Metric: '#0F9D8C', Hanji: '#A21CAF' }
-      : { LFJ: '#EA580C', Clober: '#0284C7', Vault: '#9A88FF', Bybit: '#B9BCC6', UniV4: '#4D7C0F', Metric: '#0D9488', Hanji: '#C026D3' };
+      ? { LFJ: '#FF4D00', Clober: '#0284C7', Vault: '#9C6B16', Bybit: '#8A8375', UniV4: '#3F6212', Metric: '#0F9D8C', Hanji: '#A21CAF', ThogAMM: '#6D28D9' }
+      : { LFJ: '#EA580C', Clober: '#0284C7', Vault: '#9A88FF', Bybit: '#B9BCC6', UniV4: '#4D7C0F', Metric: '#0D9488', Hanji: '#C026D3', ThogAMM: '#A78BFA' };
   }
   get SEM() {
     return this.isLight
@@ -838,6 +1235,7 @@ class Component extends DCLogic {
       { n: '02', title: 'VOLUME', sub: 'daily notional + quote-update burn', body: 'Daily filled volume by protocol, cumulative and market-share views, plus QUOTE_UPDATE_BURN' },
       { n: '03', title: 'MARKOUTS', sub: 'fill quality at 0\u201360s horizons', body: 'A live tape of on-chain swaps joined to the CEX reference price. Markouts at 0/5/10/30/60s show whether takers got favorable or adverse fills; the outlier feed surfaces the biggest single-swap P&L.' },
       { n: '04', title: 'LEADERBOARD', sub: 'who executes best', body: 'Percentile distributions of markouts grouped by protocol, pool, address, or category over 24h, 7d, or 30d windows.' },
+      { n: '05', title: 'LIFECYCLE', sub: 'the life of a quote', body: 'How often each venue republishes a quote, how often one is ever taken, and \u2014 when it is \u2014 whether the venue delivered what its own quoter promised. Most quotes expire unfilled, so every panel reads correctly on a venue with no fills.' },
     ];
     const i = st.tourSlide;
     const s = slides[i];
@@ -904,7 +1302,337 @@ class Component extends DCLogic {
   std(arr) { if (arr.length < 2) return 0; const m = arr.reduce((a, b) => a + b, 0) / arr.length; return Math.sqrt(arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length); }
   sgn(x) { return (x >= 0 ? '+' : '') + x.toFixed(2); }
   sizeLabel(s) { return s >= 1000 ? '$' + (s / 1000) + 'k' : '$' + s; }
+  /** QUOTE LIFECYCLE tab data. Measured on-chain 2026-08-21 unless noted:
+   *  integrity replays are quoter-vs-executor at each swap tx's own PRESTATE
+   *  (debug_traceTransaction + eth_call state override), not at the block
+   *  boundary — a boundary replay reads as a false divergence whenever the
+   *  keeper repriced, or another fill landed, earlier in the same block. */
+  lcData() {
+    const C = this.COL, sem = this.SEM, h = (c, a) => this.hex(c, a);
+    const tick = (col, pct) => ({ style: 'position:absolute;top:-3px;height:22px;width:2px;background:' + col + ';left:' + pct + '%' });
+    const hidden = 'display:none';
+    const noteS = 'position:absolute;left:8px;top:1px;line-height:14px;font-size:8.5px;letter-spacing:.08em;color:var(--amber)';
+    const row = (venue, market, col, band, n, fills, note) => ({
+      venue, market, col, band, n: String(n), nCol: n > 0 ? 'var(--text)' : 'var(--faint)',
+      note: note || '', noteStyle: note ? noteS : hidden,
+      fills: (fills || []).map(p => tick(col, p)),
+    });
+    const lcRows = [
+      row('LFJ POE', 'MON/USDC', C.LFJ, h(C.LFJ, .5), 287, [4, 11, 13, 22, 31, 33, 47, 55, 62, 71, 79, 88, 93, 96]),
+      row('LFJ POE', 'BTC/USDC', C.LFJ, h(C.LFJ, .5), 0, []),
+      row('LFJ POE', 'ETH/USDC', C.LFJ, h(C.LFJ, .5), 0, []),
+      row('ThogAMM', 'MON/USDC', C.ThogAMM, h(C.ThogAMM, .5), 24, [9, 24, 38, 52, 58, 67, 74, 83, 91]),
+      row('Metric', 'MON/USDC', C.Metric, h(C.Metric, .5), 0, []),
+      row('Metric', 'BTC/USDC', C.Metric, h(C.Metric, .18), 0, [], 'BID ONLY — 0.09 WBTC INVENTORY'),
+      row('Metric', 'ETH/USDC', C.Metric, h(C.Metric, .5), 0, []),
+    ];
+    // log10 scale, 1 → 10,000 across the track
+    const track = 'position:relative;height:14px;background:var(--border-soft);border-radius:2px';
+    const conv = (venue, col, perFill, fills, reprices, note, monFill, monUsd) => ({
+      venue, col, fills: String(fills), reprices,
+      monFill: monFill == null ? '∞' : monFill + ' MON', monUsd: monUsd || '',
+      monCol: monFill == null ? 'var(--amber)' : 'var(--text2)',
+      perFill: perFill == null ? '∞' : perFill.toLocaleString(),
+      valCol: perFill == null ? 'var(--amber)' : 'var(--text)',
+      trackStyle: perFill == null ? track + ';border:1px dashed ' + h('#E0A33E', .5) : track,
+      barStyle: perFill == null ? hidden
+        : 'position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:' + h(col, .75)
+          + ';width:' + (Math.log10(perFill) / 4 * 100).toFixed(1) + '%',
+      note: note || '', noteStyle: note ? 'position:absolute;left:8px;top:-1px;line-height:14px;font-size:9px;letter-spacing:.06em;color:var(--amber)' : hidden,
+    });
+    const lcConv = [
+      conv('LFJ POE', C.LFJ, 940, 28, '26,325', null, '40.2', '~$0.77'),
+      conv('ThogAMM', C.ThogAMM, 4900, 17, '81,825', null, '206', '~$3.96'),
+      conv('Metric', C.Metric, null, 0, 'live', 'NO FILL TAKEN IN 45.7h — RATIO UNDEFINED', null, '512 MON unfilled'),
+    ];
+    const badge = (border, fg) => 'font-size:9px;font-weight:600;padding:1px 6px;border-radius:3px;border:1px solid ' + border + ';color:' + fg;
+    const lcIntegrity = [
+      { venue: 'LFJ POE', col: C.LFJ, state: 'TESTED', stateStyle: badge(sem.green.css, sem.green.css), match: '14', diverged: '0', intervened: '0',
+        matchCol: sem.green.css, intvCol: 'var(--dim)', verdict: 'quoter agrees with executor, wei-exact',
+        sender: 'PASS 5/5', senderStyle: badge(sem.green.css, sem.green.css) },
+      { venue: 'Metric', col: C.Metric, state: 'TESTED', stateStyle: badge(sem.green.css, sem.green.css), match: '13', diverged: '0', intervened: '1',
+        matchCol: sem.green.css, intvCol: 'var(--amber)', verdict: 'agrees; 1 fill preceded by another in-block (replayed 2026-08-12)',
+        sender: 'NOT RUN', senderStyle: badge('var(--pill-border)', 'var(--dim2)') },
+      { venue: 'ThogAMM', col: C.ThogAMM, state: 'NOT TESTABLE', stateStyle: badge('var(--amber)', 'var(--amber)'), match: '—', diverged: '—', intervened: '—',
+        matchCol: 'var(--faint)', intvCol: 'var(--faint)', verdict: 'NOT TESTABLE — fill decoder matches no logs (adapter ABI drift)',
+        sender: 'BLOCKED', senderStyle: badge('var(--pill-border)', 'var(--dim2)') },
+    ];
+    const sideS = s => 'font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px;border:1px solid ' + (s === 'BUY' ? 'var(--green-border)' : 'var(--red-border)') + ';color:' + (s === 'BUY' ? 'var(--green)' : 'var(--red)');
+    const T = (block, venue, col, side, size, quoter, d2, rpx, rpxWarn) => ({
+      block, venue, col, market: 'MON/USDC', side, size, sideStyle: sideS(side),
+      quoter, quoterCol: quoter === 'MATCH' ? sem.green.css : 'var(--amber)',
+      d2, d2Col: d2 === '—' || d2 === '0.00' ? 'var(--dim)' : d2.charAt(0) === '+' ? sem.green.css : sem.red.css,
+      rpx, rpxCol: rpxWarn ? 'var(--amber)' : 'var(--dim2)',
+    });
+    const lcTape = [
+      T('97,824,367', 'LFJ POE', C.LFJ, 'BUY', '$1,840', 'MATCH', '+1.22', '2 · after'),
+      T('97,824,328', 'LFJ POE', C.LFJ, 'BUY', '$2,765', 'MATCH', '+3.18', '31 · after'),
+      T('95,374,267', 'Metric', C.Metric, 'BUY', '$3,238', 'INTERVENED', '—', 'idx 3', true),
+      T('97,822,750', 'LFJ POE', C.LFJ, 'SELL', '$5,002', 'MATCH', '+2.47', '7 · after'),
+      T('97,822,523', 'LFJ POE', C.LFJ, 'SELL', '$3', 'MATCH', '0.00', '23 · BEFORE', true),
+      T('97,821,476', 'ThogAMM', C.ThogAMM, 'SELL', '$1,417', 'NOT TESTABLE', '—', '—'),
+    ];
+    return {
+      lcRows, lcConv, lcIntegrity, lcTape,
+      lcPoe: C.LFJ, lcThog: C.ThogAMM, lcMetric: C.Metric,
+      lcPoeBand: h(C.LFJ, .5), lcPoeFill: h(C.LFJ, .13),
+      ...this.lcLag(), ...this.lcSurface(), ...this.lcLife(), ...this.lcTaker(),
+    };
+  }
+
+  lcPill(on) {
+    return on
+      ? 'background:var(--accent-dim);color:var(--accent2);border:1px solid var(--accent-border);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:9.5px;letter-spacing:.04em;white-space:nowrap'
+      : 'background:transparent;color:var(--dim);border:1px solid var(--pill-border);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:9.5px;letter-spacing:.04em;white-space:nowrap';
+  }
+
+  /** LAG_CURVE — raw vs CEX-reference-adjusted. Same fills, two different numbers:
+   *  RAW mixes venue behaviour with ordinary market drift over the k-block interval;
+   *  ADJ subtracts the CEX reference's own move across the same interval. k=1 is the
+   *  state the fill executed on, so it reconstructs exactly by construction in both. */
+  lcLag() {
+    const sem = this.SEM, st = this.state, adj = st.lcLag === 'ADJ';
+    const KS = [1, 2, 4, 8, 16, 32];
+    const RAW = [[0, 0, 0, -1.03], [-0.02, 0.06, 3.04, -1.96], [-0.11, 0.30, 3.79, -1.95], [-0.60, 0.83, 5.05, -3.86], [-0.66, 2.10, 5.21, -5.56], [-1.18, 3.06, 7.43, -9.93]];
+    const ADJ = [[0, 0, 0, -1.03], [-0.04, 0.02, 1.12, -1.88], [-0.14, 0.09, 1.47, -1.90], [-0.51, 0.21, 1.93, -2.71], [-0.58, 0.38, 2.04, -3.12], [-0.79, 0.44, 2.31, -4.06]];
+    const D = adj ? ADJ : RAW;
+    const x = i => 56 + i * 164, y = b => 174.4 - b * 19.8;
+    const pt = (i, b) => x(i) + ',' + y(b).toFixed(1);
+    const lagLine = D.map((d, i) => pt(i, d[1])).join(' ');
+    const lagBand = D.map((d, i) => pt(i, d[2])).join(' ') + ' ' + D.map((d, i) => pt(i, d[0])).slice().reverse().join(' ');
+    const lagDots = D.map((d, i) => ({ cx: x(i), cy: y(d[1]).toFixed(1) }));
+    const s = v => (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(2);
+    const ladderRow = 'display:grid;grid-template-columns:34px repeat(4, 1fr);gap:2px 6px;font-size:11px;padding:5px 0;border-bottom:1px solid var(--border-soft)';
+    const lcLadder = D.map((d, i) => {
+      const k = KS[i], hi = k === 8;
+      return {
+        k: String(k), p10: s(d[0]), p50: s(d[1]), p90: s(d[2]), min: s(d[3]),
+        rowStyle: ladderRow + (hi ? ';background:var(--accent-row)' : ''),
+        kCol: hi ? 'var(--text-strong)' : k === 1 ? 'var(--dim)' : 'var(--text2)',
+        minCol: k === 1 ? 'var(--dim)' : sem.red.css,
+      };
+    });
+    const lagPills = [['RAW', 'RAW'], ['ADJ', 'CEX-ADJUSTED']].map(o => ({
+      label: o[1], onClick: () => this.setState({ lcLag: o[0] }), style: this.lcPill((st.lcLag || 'RAW') === o[0]),
+    }));
+    return {
+      lcLadder, lagLine, lagBand, lagDots, lagPills,
+      lagModeNote: adj
+        ? 'the CEX reference\u2019s move over the same k blocks is subtracted \u2014 what is left is the venue\u2019s own decay'
+        : 'raw delivered-vs-quote, market drift included \u2014 the control is the CEX-ADJUSTED view',
+      lagTail: adj
+        ? 'Reference-adjusted. The median collapses to well under a basis point at every horizon and the p90 tail roughly halves \u2014 most of the raw decay was the market moving, not the venue.'
+        : 'Raw. Beyond k=1 this mixes venue behaviour with ordinary market movement; read it against the CEX-ADJUSTED view before drawing any conclusion.',
+    };
+  }
+
+  /** 02 LIVES — the standing quote surface. Exists continuously for every venue whether
+   *  or not anyone trades, so this is the one panel that is always populated. Bid/ask are
+   *  bps around the CEX reference mid (the dashed zero line), at one trade size. */
+  lcSurface() {
+    const C = this.COL, h = (c, a) => this.hex(c, a), st = this.state;
+    const VEN = [['LFJ POE', C.LFJ], ['ThogAMM', C.ThogAMM], ['Metric', C.Metric]];
+    const SZ = ['$100', '$1k', '$10k', '$100k'];
+    const ven = st.lcVenue || 'LFJ POE', size = st.lcSize || '$10k';
+    const col = (VEN.find(v => v[0] === ven) || VEN[0])[1];
+    const HALF = { 'LFJ POE': [0.9, 1.1, 1.8, 4.2], 'ThogAMM': [1.6, 2.0, 3.4, 9.5], 'Metric': [2.4, 3.1, 5.6, 18.0] }[ven];
+    const N = 49, X0 = 56, X1 = 876, CY = 130, AMP = 104;
+    const gen = si => {
+      let sd = 0; const key = ven + '|' + si; for (let i = 0; i < key.length; i++) sd = (sd * 31 + key.charCodeAt(i)) | 0;
+      const rnd = () => { sd = (sd * 1103515245 + 12345) & 0x7fffffff; return sd / 0x7fffffff; };
+      const h0 = HALF[si]; let drift = 0; const out = [];
+      for (let i = 0; i < N; i++) {
+        drift += (rnd() - 0.5) * 0.34; drift = Math.max(-1.5, Math.min(1.5, drift));
+        const w = h0 * (0.84 + rnd() * 0.44) + (rnd() < 0.055 ? h0 * 0.85 : 0);
+        // Metric is funded and live but dormant: long one-sided stretches, one dark gap
+        const dark = ven === 'Metric' && i >= 33 && i <= 37;
+        const one = !dark && (ven === 'Metric' ? (i > 20 || rnd() < 0.12) : rnd() < 0.02);
+        out.push({ ask: drift + w, bid: drift - w, mid: drift, w, state: dark ? 'dark' : one ? 'one' : 'two' });
+      }
+      return out;
+    };
+    const all = SZ.map((_, i) => gen(i));
+    const sel = all[SZ.indexOf(size) < 0 ? 2 : SZ.indexOf(size)];
+    const yMax = Math.max(...sel.filter(p => p.state !== 'dark').map(p => Math.abs(p.ask) + 0.4), ...sel.filter(p => p.state !== 'dark').map(p => Math.abs(p.bid) + 0.4));
+    const xf = i => (X0 + i / (N - 1) * (X1 - X0)).toFixed(1);
+    const yf = b => (CY - b / yMax * AMP).toFixed(1);
+    // Contiguous runs of the same quoting state, one polygon each. Two rules keep the
+    // drawing honest: adjacent LIVE runs share their boundary sample so a change of state
+    // never reads as a gap in quoting, and a run of a single sample still spans a real
+    // interval instead of collapsing to zero width. Only a genuinely dark stretch is a gap.
+    const runs = []; let run = null;
+    sel.forEach((p, i) => {
+      if (!run || run.state !== p.state) { run = { state: p.state, idx: [] }; runs.push(run); }
+      run.idx.push(i);
+    });
+    runs.forEach((r, k) => {
+      const prev = runs[k - 1];
+      if (prev && prev.state !== 'dark' && r.state !== 'dark') r.idx.unshift(prev.idx[prev.idx.length - 1]);
+    });
+    const bandSegs = [], darkZones = [], midLines = [];
+    runs.forEach(r => {
+      if (r.state === 'dark') {
+        // span the gap edge to edge: last live sample before → first live sample after
+        const x0 = +xf(Math.max(0, r.idx[0] - 1)), x1 = +xf(Math.min(N - 1, r.idx[r.idx.length - 1] + 1));
+        darkZones.push({ x: x0, w: Math.max(4, x1 - x0), label: 'NO QUOTE' });
+        return;
+      }
+      let idx = r.idx;
+      if (idx.length < 2) {                       // widen a lone sample to one real interval
+        const i = idx[0];
+        idx = i > 0 ? [i - 1, i] : [i, Math.min(N - 1, i + 1)];
+      }
+      const pts = idx.map(i => ({ i, p: sel[i] }));
+      const a = pts.map(q => xf(q.i) + ',' + yf(q.p.ask));
+      const b = pts.map(q => xf(q.i) + ',' + yf(q.p.bid)).reverse();
+      bandSegs.push({
+        path: a.concat(b).join(' '),
+        fill: r.state === 'one' ? 'url(#lcHatch)' : h(col, 0.17),
+        stroke: r.state === 'one' ? h(col, 0.5) : h(col, 0.75),
+        dash: r.state === 'one' ? '3 3' : 'none',
+      });
+      midLines.push({ path: pts.map(q => xf(q.i) + ',' + yf(q.p.mid)).join(' ') });
+    });
+    const gridY = [-1, -0.5, 0, 0.5, 1].map(f => ({ y: yf(f * yMax), label: (f === 0 ? '0' : (f > 0 ? '+' : '−') + (Math.abs(f) * yMax).toFixed(1)), strong: f === 0 }));
+    // drawn inside the SVG so the cells stay in the plot's own coordinate space at any width
+    const cw = (X1 - X0) / N;
+    const ribbon = sel.map((p, i) => ({
+      x: (X0 + i * cw).toFixed(2), w: (cw - 0.8).toFixed(2),
+      bg: p.state === 'two' ? h(col, 0.62) : p.state === 'one' ? 'var(--amber)' : 'var(--border)',
+      op: p.state === 'one' ? 0.5 : 1,
+    }));
+    const med = arr => { const s2 = arr.slice().sort((a, b) => a - b); return s2[Math.floor(s2.length / 2)]; };
+    const p90 = arr => { const s2 = arr.slice().sort((a, b) => a - b); return s2[Math.floor(s2.length * 0.9)]; };
+    const surfRows = SZ.map((sz, i) => {
+      const live = all[i].filter(p => p.state !== 'dark');
+      const two = all[i].filter(p => p.state === 'two').length;
+      return {
+        size: sz, sel: sz === size, onClick: () => this.setState({ lcSize: sz }),
+        rowStyle: 'display:grid;grid-template-columns:56px 1fr 1fr 1fr;gap:2px 6px;font-size:11px;padding:6px 0;border-bottom:1px solid var(--border-soft);cursor:pointer'
+          + (sz === size ? ';background:var(--accent-row)' : ''),
+        spread: med(live.map(p => p.w * 2)).toFixed(2),
+        spread90: p90(live.map(p => p.w * 2)).toFixed(2),
+        fair: med(live.map(p => Math.abs(p.mid))).toFixed(2),
+        twoPct: Math.round(two / N * 100) + '%',
+        szCol: sz === size ? 'var(--text-strong)' : 'var(--text2)',
+      };
+    });
+    const surfPills = VEN.map(v => ({ label: v[0], onClick: () => this.setState({ lcVenue: v[0] }), style: this.lcPill(v[0] === ven) }));
+    const oneCount = sel.filter(p => p.state === 'one').length, darkCount = sel.filter(p => p.state === 'dark').length;
+    return {
+      surfPills, surfRows, bandSegs, midLines, darkZones, gridY, ribbon, surfHatch: h(col, 0.55),
+      surfVenue: ven, surfSize: size, surfCol: col, surfMid: h(col, 0.9),
+      surfNote: darkCount
+        ? ven + ' went dark for ' + (darkCount * 30) + ' min in this window \u2014 drawn as a gap, not as a zero spread.'
+        : oneCount
+          ? ven + ' quoted one-sided in ' + Math.round(oneCount / N * 100) + '% of samples (hatched) \u2014 the other side is published but not really available.'
+          : ven + ' held a two-sided quote across the whole window at every size sampled.',
+    };
+  }
+
+  /** 03 DIES UNFILLED — quote lifetime distribution. Derived from reprice cadence, so it
+   *  is defined for a venue with no fills at all; "ever taken" carries its own count. */
+  lcLife() {
+    const C = this.COL, h = (c, a) => this.hex(c, a);
+    const BUCKETS = ['1', '2', '3', '4\u20138', '9\u201332', '>32'];
+    const V = [
+      { venue: 'LFJ POE', col: C.LFJ, p: 0.975, taken: '1 in 940', n: '26,325 reprices \u00b7 28 fills', tCol: 'var(--text2)' },
+      { venue: 'ThogAMM', col: C.ThogAMM, p: 0.995, taken: '1 in 4,900', n: '81,825 reprices \u00b7 17 fills', tCol: 'var(--text2)' },
+      { venue: 'Metric', col: C.Metric, p: 0.42, taken: 'none yet', n: '11,963 reprices \u00b7 0 fills in 45.7h', tCol: 'var(--amber)' },
+    ];
+    const lifeRows = V.map(v => {
+      const pmf = k => v.p * Math.pow(1 - v.p, k - 1);
+      const range = (a, b) => { let s = 0; for (let k = a; k <= b; k++) s += pmf(k); return s; };
+      const parts = [pmf(1), pmf(2), pmf(3), range(4, 8), range(9, 32), Math.max(0, 1 - range(1, 32))];
+      let cum = 0, medK = 1;
+      for (let k = 1; k <= 64; k++) { cum += pmf(k); if (cum >= 0.5) { medK = k; break; } }
+      return {
+        venue: v.venue, col: v.col, taken: v.taken, tCol: v.tCol, n: v.n,
+        medLife: medK + (medK === 1 ? ' blk' : ' blks'), medMs: (medK * 302).toFixed(0) + ' ms',
+        segs: parts.map((f, i) => ({
+          style: 'height:16px;background:' + h(v.col, 0.85 - i * 0.13) + ';width:' + (f * 100).toFixed(2) + '%'
+            + (f > 0 ? '' : ';display:none'),
+          title: BUCKETS[i] + ' blocks \u00b7 ' + (f * 100).toFixed(f < 1 ? 2 : 1) + '%',
+        })),
+        top: (parts[0] * 100).toFixed(1) + '%',
+      };
+    });
+    const lifeLegend = BUCKETS.map((b, i) => ({ label: b, bg: h(C.LFJ, 0.85 - i * 0.13) }));
+    return { lifeRows, lifeLegend };
+  }
+
+  /** Who is actually taking these quotes — 195 fills, all venues, 2.57h sample. */
+  lcTaker() {
+    const t = (label, n, col, note) => ({ label, n: String(n), pct: (n / 195 * 100).toFixed(1) + '%', col, note: note || '', barStyle: 'height:100%;background:' + col + ';width:' + (n / 195 * 100).toFixed(2) + '%' });
+    const takerRows = [
+      t('MEV searchers', 114, 'var(--amber)', 'via a single auction handler'),
+      t('Unidentified solvers', 78, 'var(--dim)', '55 of them one address'),
+      t('Direct to venue', 2, 'var(--green)', ''),
+      t('Retail aggregator', 1, 'var(--accent)', 'the only routed retail flow in the sample'),
+    ];
+    return { takerRows, takerTotal: '195 fills \u00b7 2.57h \u00b7 all venues' };
+  }
+
   hex(c, a) { const n = parseInt(c.slice(1), 16); return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`; }
+
+  /** BID_ASK_DEPTH: executable spread (bps vs Bybit mid) as a curve over trade size.
+   *  y = log10 notional ($100 .. $1M), x = signed bps. Each venue draws a bid leg and an
+   *  ask leg; the leg ends at that venue's quoted depth cap (in log10 steps above $100)
+   *  or at the axis edge, whichever comes first. Convex tail = book/vault depletion. */
+  DEPTH_CAP = { LFJ: 4.0, Clober: 3.72, Vault: 3.30, Bybit: 4.0, UniV4: 4.0 };
+  depthCurves(act) {
+    const AX = 18, W = 1000, H = 340, M = 44;
+    const pm = this.pairMult[this.pairSel] || 1;
+    const X = b => 500 + Math.max(-AX, Math.min(AX, b)) / AX * 500;
+    const Y = st => H - (st / 4) * H;
+    const half = (v, st) => {
+      const cap = this.DEPTH_CAP[v];
+      return this.hs[v] * pm + this.slip[v] * st
+        + Math.pow(st / cap, 3.6) * this.slip[v] * 2.4 * cap
+        + (v === 'Bybit' ? this.takerBps : 0);
+    };
+    const curves = [];
+    act.forEach(v => {
+      const cap = this.DEPTH_CAP[v], col = this.COL[v];
+      [-1, 1].forEach(sgn => {
+        const pts = []; let prev = null;
+        for (let i = 0; i <= M; i++) {
+          const st = cap * i / M, bps = this.off[v] + sgn * half(v, st);
+          if (Math.abs(bps) > AX) {
+            if (prev) { // land exactly on the frame edge
+              const edge = bps > 0 ? AX : -AX;
+              const t = (edge - prev[1]) / (bps - prev[1]);
+              pts.push([prev[0] + (st - prev[0]) * t, edge]);
+            }
+            break;
+          }
+          pts.push([st, bps]); prev = [st, bps];
+        }
+        if (pts.length > 1) curves.push({
+          name: v, side: sgn < 0 ? 'bid' : 'ask', color: col,
+          d: 'M ' + pts.map(p => X(p[1]).toFixed(1) + ' ' + Y(p[0]).toFixed(1)).join(' L '),
+          stroke: this.hex(col, 0.92)
+        });
+      });
+    });
+    const yLabels = [0, 1, 2, 3, 4].map(st => ({
+      label: st === 4 ? '$1M' : this.sizeLabel(100 * Math.pow(10, st)),
+      style: 'position:absolute;right:calc(100% + 10px);top:' + (Y(st) / H * 100).toFixed(3) + '%;transform:translateY(-50%);font-size:10px;color:var(--faint);white-space:nowrap'
+    }));
+    const xt = [-16, -12, -8, -4, 0, 4, 8, 12, 16];
+    const xLabels = xt.map(t => ({
+      label: t === 0 ? '0' : (t > 0 ? '+' : '') + t,
+      style: 'position:absolute;top:0;left:' + (X(t) / W * 100).toFixed(3) + '%;transform:translateX(-50%);font-size:9.5px;color:' + (t === 0 ? 'var(--green)' : 'var(--faint)')
+    }));
+    const grid = xt.filter(t => t !== 0).map(t => ({
+      style: 'position:absolute;top:0;bottom:0;left:' + (X(t) / W * 100).toFixed(3) + '%;width:1px;background:repeating-linear-gradient(to bottom, var(--border) 0 2px, transparent 2px 6px)'
+    }));
+    const legend = act.map(v => ({
+      label: v === 'Bybit' ? 'Bybit (taker)' : v === 'UniV4' ? 'UniV4 0.05%' : v,
+      dot: 'width:8px;height:8px;border-radius:2px;background:' + this.COL[v] + ';flex:none'
+    }));
+    return { curves, xLabels, yLabels, grid, legend, zeroX: (X(0) / W * 100).toFixed(3) + '%' };
+  }
 
   quoteAt(v, pair, size) {
     const pm = this.pairMult[pair] || 1;
@@ -1489,7 +2217,7 @@ class Component extends DCLogic {
     const pillOn = 'background:var(--accent);color:var(--accent-fg);border:1px solid var(--accent);padding:4px 9px;border-radius:4px;cursor:pointer;font-size:11px;white-space:nowrap';
     const pillOff = 'background:transparent;color:var(--dim);border:1px solid var(--pill-border);padding:4px 9px;border-radius:4px;cursor:pointer;font-size:11px;white-space:nowrap';
 
-    const tabs = [['exec', 'EXECUTION'], ['volume', 'VOLUME'], ['markouts', 'MARKOUTS'], ['leaderboard', 'LEADERBOARD']].map((t, i) => ({
+    const tabs = [['exec', 'EXECUTION'], ['volume', 'VOLUME'], ['markouts', 'MARKOUTS'], ['leaderboard', 'LEADERBOARD'], ['lifecycle', 'LIFECYCLE']].map((t, i) => ({
       id: t[0], label: t[1], num: i + 1, onClick: () => this.setState({ tab: t[0] }),
       style: 'font-size:11px;padding:6px 12px;cursor:pointer;white-space:nowrap;border-bottom:2px solid ' + (st.tab === t[0] ? 'var(--accent)' : 'transparent') + ';color:' + (st.tab === t[0] ? 'var(--text-strong)' : 'var(--dim2)')
     }));
@@ -1504,7 +2232,7 @@ class Component extends DCLogic {
     const scOff = 'background:transparent;color:var(--dim);border:1px solid var(--pill-border);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;white-space:nowrap';
     const clScopePills = [['venue', 'WHOLE-VENUE'], ['vault', 'VAULT']].map(o => ({ label: o[1], onClick: () => this.setMk('clScope', o[0]), style: (st.clScope || 'venue') === o[0] ? scOn : scOff }));
 
-    let legend = [], depth = [], ticks = [], statRows = [];
+    let legend = [], depth = [], ticks = [], statRows = [], dcY = [], dcGrid = [], dcLegend = [], dcZero = '50%';
     if (st.tab === 'exec' && this.hs) {
     const act = this.VEN.filter(v => st.ven[v]);
     let leg = act.map(v => { const q = this.quoteAt(v, this.pairSel, this.sizeSel); return { name: v, color: this.COL[v], spread: q.spread, bid: q.bidBps, ask: q.askBps }; });
@@ -1516,24 +2244,8 @@ class Component extends DCLogic {
       spreadcss: 'color:' + (r.name === tight ? 'var(--green)' : 'var(--text)') + ';font-weight:600'
     }));
 
-    const AX = 22;
-    depth = this.SIZES.map(sz => {
-      const segsBid = [], segsAsk = [];
-      act.forEach(v => {
-        const q = this.quoteAt(v, this.pairSel, sz);
-        const wb = Math.min(50, Math.abs(Math.min(0, q.bidBps)) / AX * 50);
-        const wa = Math.min(50, Math.max(0, q.askBps) / AX * 50);
-        segsBid.push({ w: wb, color: this.COL[v] });
-        segsAsk.push({ w: wa, color: this.COL[v] });
-      });
-      segsBid.sort((a, b) => b.w - a.w); segsAsk.sort((a, b) => b.w - a.w);
-      return {
-        label: this.sizeLabel(sz), rowcss: sz === this.sizeSel ? 'background:var(--accent-row)' : '',
-        segsBid: segsBid.map(s => ({ style: 'position:absolute;top:2px;height:16px;right:50%;width:' + s.w.toFixed(2) + '%;background:' + this.hex(s.color, 0.9) + ';border-radius:2px 0 0 2px' })),
-        segsAsk: segsAsk.map(s => ({ style: 'position:absolute;top:2px;height:16px;left:50%;width:' + s.w.toFixed(2) + '%;background:' + this.hex(s.color, 0.9) + ';border-radius:0 2px 2px 0' }))
-      };
-    });
-    ticks = [-20, -15, -10, -5, 0, 5, 10, 15, 20].map(t => ({ label: (t > 0 ? '+' : '') + t, style: 'position:absolute;top:0;left:' + (50 + t / AX * 50) + '%;transform:translateX(-50%);font-size:8.5px;color:' + (t === 0 ? 'var(--green)' : 'var(--faint)') }));
+    const dch = this.depthCurves(act); depth = dch.curves; ticks = dch.xLabels;
+    dcY = dch.yLabels; dcGrid = dch.grid; dcLegend = dch.legend; dcZero = dch.zeroX;
 
     let stats = act.map(v => { const a = this.samples[v]; return { name: v, color: this.COL[v], p5: this.pct(a, .05), p25: this.pct(a, .25), p50: this.pct(a, .5), p75: this.pct(a, .75), p95: this.pct(a, .95), avg: a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0, sd: this.std(a), n: a.length }; });
     const tstat = stats.length ? stats.reduce((m, r) => r.p50 < m.p50 ? r : m, stats[0]).name : null;
@@ -1548,7 +2260,7 @@ class Component extends DCLogic {
       ...(st.tab === 'volume' ? this.volVals() : {}),
       ...(st.tab === 'markouts' ? this.mkVals() : {}),
       ...(st.tab === 'leaderboard' ? this.lbVals() : {}),
-      tabs, pairs, sizes, venues, clScopePills, legend, depth, ticks, statRows, setCanvas: this.setCanvas,
+      tabs, pairs, sizes, venues, clScopePills, legend, depth, ticks, statRows, dcY, dcGrid, dcLegend, dcZero, setCanvas: this.setCanvas,
       toggleTheme: this.toggleTheme, themeLabel: st.theme === 'dark' ? 'BRIGHT' : 'DARK',
       ...this.tourVals(),
       block: this.block ? this.block.toLocaleString() : '\u2014',
@@ -1557,6 +2269,8 @@ class Component extends DCLogic {
       taker: this.takerBps.toFixed(1),
       pairSel: this.pairSel || st.pair, sizeLabelSel: this.sizeLabel(this.sizeSel || st.size),
       isExec: st.tab === 'exec', isVol: st.tab === 'volume', isMk: st.tab === 'markouts', isLb: st.tab === 'leaderboard',
+      isLc: st.tab === 'lifecycle',
+      ...this.lcData(),
     };
   }
 }

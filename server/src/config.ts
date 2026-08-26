@@ -1,4 +1,4 @@
-import { SIZES_USD, HISTORY_START_UTC } from '@shared';
+import { DEPTH_SAMPLES, SIZES_USD, HISTORY_START_UTC } from '@shared';
 
 const env = process.env;
 
@@ -113,6 +113,24 @@ export const config = {
   tailIntervalMs: num('TAIL_INTERVAL_MS', 500),
 
   sizesUsd: [...SIZES_USD],
+
+  // ── depth curves (Execution tab: BID_ASK_DEPTH) ────────────────────────────
+  /** The BID_ASK_DEPTH curve is the ordinary adapter quote path run over a
+   *  log-spaced notional grid ($100 → $1M) instead of the four SIZE pills, so
+   *  it costs roughly `DEPTH_SAMPLES / sizesUsd.length` times a quote frame's
+   *  quoter work. That is why it is deliberately NOT block-triggered: it runs
+   *  ON DEMAND (only while somebody has the panel open), one pass is shared by
+   *  every client inside the TTL below, and it uses the auxiliary RPC lane so
+   *  the isolated quote lane keeps its latency. DEPTH=off disables it and the
+   *  panel renders empty. */
+  depthEnabled: (env.DEPTH ?? 'on').toLowerCase() !== 'off',
+  /** Samples across the grid — see @shared DEPTH_SAMPLES for why 25 is the
+   *  value that makes the curve reconcile with the SIZE pills exactly. */
+  depthSamples: num('DEPTH_SAMPLES', DEPTH_SAMPLES),
+  /** How long one depth pass is served to every caller before another runs.
+   *  Roughly a few Monad blocks: fast enough that a reprice visibly moves the
+   *  curves, slow enough that N watching clients cost one pass, not N. */
+  depthTtlMs: num('DEPTH_TTL_MS', 900),
 
   /** getLogs span the tail ATTEMPTS. Measured caps: the devcore4 fleet serves
    *  1000 blocks per call, the public endpoint 413s above ~100. Sized for the

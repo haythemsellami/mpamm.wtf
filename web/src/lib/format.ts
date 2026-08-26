@@ -4,7 +4,10 @@ export function sgn(x: number, dp = 2): string {
   return (x >= 0 ? '+' : '') + x.toFixed(dp);
 }
 
+/** A trade-size label: the SIZE pills ($100 … $100k) and the depth curve's
+ *  y axis, which runs a decade further ($1M reads better than "$1000k"). */
 export function sizeLabel(s: number): string {
+  if (s >= 1e6) return '$' + s / 1e6 + 'M';
   return s >= 1000 ? '$' + s / 1000 + 'k' : '$' + s;
 }
 

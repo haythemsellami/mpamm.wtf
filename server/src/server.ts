@@ -74,6 +74,18 @@ export function startServer(source: DataSource): Server {
     if (!market || size === undefined) return res.status(400).json({ error: 'market and size query params required' });
     res.json(source.quoteHistory(market, size));
   });
+  // BID_ASK_DEPTH: every venue's executable-spread curve for one market over
+  // the log-spaced notional grid. On demand rather than streamed — a pass costs
+  // several times a quote frame (see config: depth curves), so it only runs
+  // while a client is actually watching the panel, and one pass is shared by
+  // all of them. A failed pass is a 503, not a stale body: the client keeps the
+  // curve it already has and retries on its next quote tick.
+  app.get('/api/depth', async (req, res) => {
+    const market = typeof req.query.market === 'string' ? req.query.market : '';
+    if (!market) return res.status(400).json({ error: 'market query param required' });
+    try { res.json(await source.depth(market)); }
+    catch { res.status(503).json({ error: 'depth unavailable' }); }
+  });
   app.get('/api/fills', (req, res) => {
     // ?days=N → last N days (from the persisted store); ?limit caps the count.
     const days = positiveNumberParam(req.query.days);

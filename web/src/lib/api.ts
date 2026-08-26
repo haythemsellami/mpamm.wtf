@@ -1,4 +1,4 @@
-import type { MarketsResponse, StreamMessage, Fill, QuoteSnapshot, LeaderboardResponse, GasResponse } from '@shared';
+import type { MarketsResponse, StreamMessage, DepthSnapshot, Fill, QuoteSnapshot, LeaderboardResponse, GasResponse } from '@shared';
 
 export async function fetchMarkets(): Promise<MarketsResponse> {
   const r = await fetch('/api/markets');
@@ -11,6 +11,16 @@ export async function fetchMarkets(): Promise<MarketsResponse> {
 export async function fetchQuoteHistory(market: string, size: number): Promise<QuoteSnapshot[]> {
   const r = await fetch(`/api/quotes/history?market=${encodeURIComponent(market)}&size=${size}`);
   if (!r.ok) throw new Error(`/api/quotes/history ${r.status}`);
+  return r.json();
+}
+
+/** BID_ASK_DEPTH: per-venue executable-spread curves over the $100 → $1M
+ *  notional grid for one market. Polled on the quote tick rather than streamed
+ *  — the server computes it on demand, so nobody pays for a panel nobody has
+ *  open. */
+export async function fetchDepth(market: string): Promise<DepthSnapshot> {
+  const r = await fetch(`/api/depth?market=${encodeURIComponent(market)}`);
+  if (!r.ok) throw new Error(`/api/depth ${r.status}`);
   return r.json();
 }
 

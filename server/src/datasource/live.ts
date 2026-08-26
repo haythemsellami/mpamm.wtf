@@ -1,8 +1,8 @@
 import { BaseSource } from './index.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import {
-  MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf,
-  type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
+  MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, depthSizes,
+  type DataSourceMode, type DepthSnapshot, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode, type QuoteFrameTelemetry,
   type QuoteHeadSource, type RealtimeHealth,
 } from '@shared';
@@ -11,6 +11,7 @@ import { computeLeaderboard } from '../analytics.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
 import { GasTracker } from '../gas.js';
+import { buildDepthSnapshot } from '../depth.js';
 import { config } from '../config.js';
 import {
   monad, publicClient, quoteClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
@@ -89,6 +90,16 @@ export function captureReferenceFrame(
     assetPrices,
     pairMids,
   };
+}
+
+/** One completed depth pass: the whole grid matrix, plus the pair mids that
+ *  anchored it, kept together so a curve can never be sliced against a mid from
+ *  a different frame. */
+interface DepthFrame {
+  ts: number;
+  block: number;
+  rows: QuoteRow[];
+  pairMids: Map<string, number>;
 }
 
 /** Cursor-preserving availability retries use a real outage cadence, not the
@@ -692,6 +703,11 @@ function archiveUnavailable(): boolean {
   return s.degraded || s.down;
 }
 
+function hotUnavailable(): boolean {
+  const s = rpcStatus();
+  return s.degraded || s.down;
+}
+
 /** One deep read is valid only when the archive pool stays primary/healthy for
  *  its entire lifetime. The breaker can fail over and retry inside the await. */
 const archiveRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, archiveUnavailable, archiveRpcGeneration);
@@ -963,10 +979,6 @@ export class LiveDataSource extends BaseSource {
       for (;;) {
         nowMs = Date.now();
         runDay = utcDay(nowMs);
-        const hotUnavailable = () => {
-          const status = rpcStatus();
-          return status.degraded || status.down;
-        };
         const head = await guardRpcRead(() => publicClient.getBlockNumber(), hotUnavailable, rpcGeneration);
         if (head > this.deepEnd) this.deepEnd = head;
         if (hasDedicatedArchive) {
@@ -2293,6 +2305,67 @@ export class LiveDataSource extends BaseSource {
     this.realtimeFrames = this.realtimeFrames.filter((f) => f.emittedAt >= emittedAt - REALTIME_WINDOW_MS);
     this.emitMsg({ ch: 'quotes', data: this.quotes });
     this.schedulePostQuoteMaintenance();
+  }
+
+  // ── depth curves (Execution tab: BID_ASK_DEPTH) ──────────────────────────────
+  /**
+   * The curve is the ORDINARY quote path over a log-spaced notional grid — the
+   * same adapters, the same block pin, the same bps anchors — so a point at a
+   * SIZE pill is the identical number the QUOTE grid shows. What differs is the
+   * cadence, and deliberately so: ~`DEPTH_SAMPLES / sizesUsd.length` times a
+   * frame's quoter work cannot ride the per-block critical path. Instead it
+   * runs on demand, one pass is shared by every caller inside `depthTtlMs`, and
+   * it uses the AUXILIARY RPC lane (`publicClient` via `ctxFor`) so it can
+   * never queue in front of the block-pinned matrix on the isolated quote lane.
+   */
+  private readonly depthGrid = depthSizes(config.depthSamples);
+  private depthFrameCache?: DepthFrame;
+  private depthInflight?: Promise<DepthFrame>;
+
+  async depth(market: string): Promise<DepthSnapshot> {
+    // `loopsStopped` too: a request landing during shutdown must not open a
+    // fresh multicall storm on a source that is tearing its clients down.
+    if (!config.depthEnabled || this.loopsStopped) {
+      return { market, asOfBlock: this.block, refMid: REFERENCES.midForPair(market), ts: Date.now(), venues: [] };
+    }
+    const frame = await this.depthFrame();
+    return buildDepthSnapshot(frame.rows, market, this.depthGrid, frame.pairMids.get(market) ?? 0, frame.block, frame.ts);
+  }
+
+  /** Fresh cache → serve it. A pass already running → join it. Otherwise start
+   *  one. A failure propagates rather than serving a stale frame as if it were
+   *  current: the caller keeps the curve it already has and retries next tick. */
+  private depthFrame(): Promise<DepthFrame> {
+    const cached = this.depthFrameCache;
+    if (cached && Date.now() - cached.ts < config.depthTtlMs) return Promise.resolve(cached);
+    if (this.depthInflight) return this.depthInflight;
+    const run = this.runDepthPass();
+    this.depthInflight = run;
+    return run.finally(() => { if (this.depthInflight === run) this.depthInflight = undefined; });
+  }
+
+  private async runDepthPass(): Promise<DepthFrame> {
+    const blockNumber = await guardRpcRead(() => publicClient.getBlockNumber(), hotUnavailable, rpcGeneration);
+    // Same synchronous CEX capture the quote frame takes: one immutable sizing
+    // and bps view for every venue on the grid, so a curve is not a mixture of
+    // books that moved while the chain reads were in flight.
+    const { rows: refRows, pricer, pairMids } = captureReferenceFrame(REFERENCES, this.depthGrid);
+    const venueRows = (await Promise.all(ADAPTERS.map(async (a) => {
+      if (!a.quote) return [] as QuoteRow[];
+      // A failed adapter simply has no curve this pass. Its quote health is
+      // already reported EVERY BLOCK by the frame loop (venue.quote.*); a second
+      // reporter for the same fact would fight that one's clear/recover path.
+      const rows = await a.quote(this.depthCtxFor(a, pricer), this.depthGrid, blockNumber).catch(() => [] as QuoteRow[]);
+      return this.ownVenues(a, rows, 'depth quote');
+    }))).flat();
+    const frame: DepthFrame = { ts: Date.now(), block: Number(blockNumber), rows: [...venueRows, ...refRows], pairMids };
+    this.depthFrameCache = frame;
+    return frame;
+  }
+
+  /** Like frameCtxFor, but on the auxiliary lane (see the depth note above). */
+  private depthCtxFor(a: VenueAdapter, pricer: UsdPricer): AdapterContext {
+    return { ...this.ctxFor(a), pricer };
   }
 
   // ── fills ───────────────────────────────────────────────────────────────────

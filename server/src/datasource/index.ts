@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type {
-  DataSourceMode, MarketState, QuoteSnapshot, Fill, DailyVolume, StreamMessage,
+  DataSourceMode, DepthSnapshot, MarketState, QuoteSnapshot, Fill, DailyVolume, StreamMessage,
   LeaderboardResponse, GasResponse,
 } from '@shared';
 import { computeLeaderboard } from '../analytics.js';
@@ -30,6 +30,10 @@ export interface DataSource {
   quoteHistory(market: string, size: number): QuoteSnapshot[];
   /** QUOTE_UPDATE_BURN: per-venue quote-update gas per UTC day (Volume tab). */
   gasSeries(): GasResponse;
+  /** BID_ASK_DEPTH: every venue's executable-spread curve for one market over
+   *  the log-spaced notional grid. On demand (not streamed) — a pass costs
+   *  several times a quote frame, so it only runs while somebody is looking. */
+  depth(market: string): Promise<DepthSnapshot>;
   on(ev: 'message', cb: (m: StreamMessage) => void): this;
   off(ev: 'message', cb: (m: StreamMessage) => void): this;
 }
@@ -72,6 +76,13 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
 
   /** Default: no gas series. Live reads daily_gas; sim synthesizes one. */
   gasSeries(): GasResponse { return { days: [], approx: [] }; }
+
+  /** Default: no curves. Live samples the adapters over the depth grid; sim
+   *  evaluates its own quote model there. An empty `venues` renders as an empty
+   *  panel, which is the honest output for a source that cannot produce one. */
+  async depth(market: string): Promise<DepthSnapshot> {
+    return { market, asOfBlock: this.getQuotes().block, refMid: 0, ts: Date.now(), venues: [] };
+  }
 
   /** Default: filter the in-memory window. Live overrides with a DB query. */
   queryFills(opts: { sinceMs?: number; limit?: number }): Fill[] {
