@@ -143,12 +143,16 @@ export class SimDataSource extends BaseSource {
    *  through the SAME builder live uses, so the panel exercises the real shape
    *  (skewed legs, depth caps, one-sided venues) with no network. Free here:
    *  the sim's quoter is arithmetic, not RPC, so there is nothing to throttle. */
-  async depth(market: string): Promise<DepthSnapshot> {
+  private buildDepth(market: string): DepthSnapshot {
     if (!config.depthEnabled) return { market, asOfBlock: this.block, refMid: 0, ts: Date.now(), venues: [] };
     const sizes = depthSizes(config.depthSamples);
     // the sim's bps are all measured off basePx — the same number quoteAt() uses
     // as the mid, so refMid and the curve can never be anchored differently.
     return buildDepthSnapshot(this.buildMatrix(sizes), market, sizes, this.basePx(market), this.block, Date.now());
+  }
+
+  protected onDepthDemand(market: string, active: boolean): void {
+    if (active) this.publishDepth(this.buildDepth(market));
   }
 
   /** QUOTE_UPDATE_BURN, simulated. Which venues have a series mirrors live
@@ -403,6 +407,9 @@ export class SimDataSource extends BaseSource {
     this.spawnFill();
     this.emitMsg({ ch: 'state', data: this.getState() });
     this.emitMsg({ ch: 'quotes', data: this.getQuotes() });
+    if (config.depthEnabled) {
+      for (const market of this.depthDemandedMarkets()) this.publishDepth(this.buildDepth(market));
+    }
     const last = this.days[this.days.length - 1];
     if (last) this.emitMsg({ ch: 'volume', data: { ...last, byVenue: { ...last.byVenue } } });
   }

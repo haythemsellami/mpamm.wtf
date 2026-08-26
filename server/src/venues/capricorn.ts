@@ -315,13 +315,14 @@ export function createCapricornAdapter(): VenueAdapter {
 
     discover: refresh,
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
-      if (!quotable.length) return [];
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint, markets?: ReadonlySet<string>): Promise<QuoteRow[]> {
+      const selectedPools = quotable.filter((p) => !markets || markets.has(p.market));
+      if (!selectedPools.length) return [];
       type Leg = { pool: CapPool; size: number; side: Side; inRaw: bigint; mid: number };
       const legs: Leg[] = [];
       const calls: { address: `0x${string}`; abi: typeof pammPoolAbi; functionName: 'quoteExactIn'; args: readonly [`0x${string}`, bigint] }[] = [];
 
-      for (const p of quotable) {
+      for (const p of selectedPools) {
         // bps anchor = the pair-terms CEX mid (wrap basis + stable cross), NOT a
         // raw USDT price — venue quotes are in the pair's stable terms.
         const mid = ctx.pricer.pairMid(p.market);

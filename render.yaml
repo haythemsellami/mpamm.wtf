@@ -7,11 +7,12 @@
 # they are NOT committed. DB_PATH=/data/mpamm.db and WEB_DIST are already baked
 # into the Dockerfile's ENV, so they don't need repeating here.
 #
-# RPC_HTTP_URL and RPC_ARCHIVE_URL are two DIFFERENT jobs (docs/deploy.md):
+# RPC_HTTP_URL, RPC_DEPTH_URL and RPC_ARCHIVE_URL are DIFFERENT jobs (docs/deploy.md):
 # the hot node is chosen for distance to the chain tip (it decides quote
-# freshness), the archive node for retention (it serves the venue-lifetime
-# backfills). Leaving RPC_ARCHIVE_URL unset runs both on the hot node, which is
-# correct only when that node keeps full history.
+# freshness), the depth node isolates high-resolution curve capacity, and the
+# archive node is chosen for retention (it serves venue-lifetime backfills).
+# Leaving either secondary URL unset reuses the hot node, which removes the
+# corresponding provider-level isolation.
 #
 # REGION: unset means Render's default (Oregon). The region is fixed at service
 # creation and the disk below is region-bound, so changing it later means a NEW
@@ -33,6 +34,10 @@ services:
       - key: RPC_HTTP_URL    # hot node: isolated quote lane + fills/head lane
         sync: false
       - key: RPC_WS_URL      # optional hot-node newHeads subscription; HTTP polling remains the watchdog
+        sync: false
+      - key: RPC_DEPTH_URL # dedicated high-resolution curve node; keep separate from hot quotes
+        sync: false
+      - key: RPC_DEPTH_WS_URL # optional depth-node newHeads subscription
         sync: false
       - key: RPC_ARCHIVE_URL # deep-history node; unset ⇒ reuses RPC_HTTP_URL
         sync: false

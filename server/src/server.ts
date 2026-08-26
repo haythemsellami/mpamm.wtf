@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { STREAM_PATH, LEADERBOARD_WINDOW_DAYS, type MarketsResponse, type StreamMessage } from '@shared';
+import { MARKETS, STREAM_PATH, LEADERBOARD_WINDOW_DAYS, type MarketsResponse, type StreamMessage } from '@shared';
 import type { DataSource } from './datasource/index.js';
 import { config } from './config.js';
 import { venueMeta } from './venues/registry.js';
@@ -15,6 +15,7 @@ import { venueMeta } from './venues/registry.js';
 export const MAX_BACKLOG_BYTES = 1_000_000;
 /** Ping cadence; one unanswered round (≥ this long) terminates the client. */
 export const HEARTBEAT_MS = 30_000;
+const DEPTH_HEARTBEAT_MS = 15_000;
 
 /** What to do with one stream client on a broadcast. Pure so the backpressure
  *  policy is unit-tested — a wrong 'cut' here would disconnect real users, and
@@ -74,17 +75,51 @@ export function startServer(source: DataSource): Server {
     if (!market || size === undefined) return res.status(400).json({ error: 'market and size query params required' });
     res.json(source.quoteHistory(market, size));
   });
-  // BID_ASK_DEPTH: every venue's executable-spread curve for one market over
-  // the log-spaced notional grid. On demand rather than streamed — a pass costs
-  // several times a quote frame (see config: depth curves), so it only runs
-  // while a client is actually watching the panel, and one pass is shared by
-  // all of them. A failed pass is a 503, not a stale body: the client keeps the
-  // curve it already has and retries on its next quote tick.
-  app.get('/api/depth', async (req, res) => {
-    const market = typeof req.query.market === 'string' ? req.query.market : '';
-    if (!market) return res.status(400).json({ error: 'market query param required' });
-    try { res.json(await source.depth(market)); }
-    catch { res.status(503).json({ error: 'depth unavailable' }); }
+  // Depth computation is owned by an isolated worker. REST is a cache read only;
+  // it can never open RPC work on this event loop.
+  app.get('/api/depth', (req, res) => {
+    const market = depthMarketParam(req.query.market);
+    if (!market) return res.status(400).json({ error: 'market must be registered' });
+    const publication = source.getDepth(market);
+    if (!publication) return res.status(503).json({ error: 'depth warming' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('application/json').send(publication.json);
+  });
+
+  // One-way demand + updates are a natural SSE stream: the first viewer starts
+  // the market in the worker, every other viewer shares it, and only completed
+  // snapshots cross into this process. Pre-serialized payloads keep fanout cheap.
+  app.get('/api/depth/stream', (req, res) => {
+    const market = depthMarketParam(req.query.market);
+    if (!market) return res.status(400).json({ error: 'market must be registered' });
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.write('retry: 1000\n\n');
+
+    let closed = false;
+    const write = (chunk: string) => {
+      if (closed || res.destroyed) return;
+      if (res.writableLength > MAX_BACKLOG_BYTES) { res.destroy(); return; }
+      res.write(chunk);
+    };
+    let unwatch = () => {};
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      unwatch();
+    };
+    const heartbeat = setInterval(() => {
+      write(': keepalive\n\n');
+    }, DEPTH_HEARTBEAT_MS);
+    heartbeat.unref();
+    res.once('close', cleanup);
+    unwatch = source.watchDepth(market, (publication) => write(`data: ${publication.json}\n\n`));
+    if (closed) unwatch();
   });
   app.get('/api/fills', (req, res) => {
     // ?days=N → last N days (from the persisted store); ?limit caps the count.
@@ -210,4 +245,9 @@ function positiveNumberParam(v: unknown): number | undefined {
   if (typeof raw !== 'string' || raw.trim() === '') return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function depthMarketParam(v: unknown): string | undefined {
+  const raw = Array.isArray(v) ? v[0] : v;
+  return typeof raw === 'string' && (MARKETS as readonly string[]).includes(raw) ? raw : undefined;
 }

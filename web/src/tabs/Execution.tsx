@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef } from 'react';
-import { SIZES_USD, TOKENS, pairOf, wrapBasisFor, type VenueMeta, type QuoteRow } from '@shared';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { SIZES_USD, TOKENS, pairOf, wrapBasisFor, type DepthSnapshot, type VenueMeta, type QuoteRow } from '@shared';
 import { useDashboard } from '../store';
+import { connectDepth } from '../lib/api';
 import { useViewport } from '../lib/viewport';
 import { C, hexA, pill, venueColor } from '../theme';
 import { Panel, PanelHead, Field } from '../components/ui';
@@ -9,6 +10,23 @@ import { DepthCurveChart, type DepthVenue } from '../components/DepthCurve';
 import { sgn, sizeLabel, percentile, stdev } from '../lib/format';
 
 const DEFAULT_MARKETS = ['MON/USDC', 'BTC/USDC', 'ETH/USDC'];
+
+/** Depth updates repaint only this small subtree. Keeping them out of the
+ *  dashboard context avoids re-rendering the quote grid, tape and navigation
+ *  for every completed 25-point curve. */
+function LiveDepthCurve({ market, venues, refName }: { market: string; venues: DepthVenue[]; refName: string }) {
+  const [snapshot, setSnapshot] = useState<DepthSnapshot | null>(null);
+  useEffect(() => {
+    setSnapshot(null);
+    return connectDepth(market, (next) => setSnapshot((previous) => {
+      if (next.market !== market) return previous;
+      if (previous && (next.asOfBlock < previous.asOfBlock
+        || (next.asOfBlock === previous.asOfBlock && next.ts <= previous.ts))) return previous;
+      return next;
+    }));
+  }, [market]);
+  return <DepthCurveChart snapshot={snapshot} venues={venues} refName={refName} />;
+}
 
 export function ExecutionTab() {
   const d = useDashboard();
@@ -107,8 +125,8 @@ export function ExecutionTab() {
   // BID_ASK_DEPTH — the active venues, resolved to the id/label/colour the
   // toggle row uses. The chart derives its lines AND its legend from exactly
   // this set, so a toggle adds or removes a venue's two legs and its chip
-  // together. The curve itself is server-side (/api/depth): it needs a quote at
-  // ~25 log-spaced notionals per venue, not the four SIZE pills.
+  // together. The curve itself is server-side (/api/depth/stream): it needs a
+  // quote at ~25 log-spaced notionals per venue, not the four SIZE pills.
   const depthVenues = useMemo<DepthVenue[]>(
     () => active.map((v) => ({ id: v.id, label: displayName(v), color: venueColor(v, d.theme) })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -299,7 +317,7 @@ export function ExecutionTab() {
       {/* BID_ASK_DEPTH */}
       <Panel style={{ margin: '0 18px 14px' }}>
         <PanelHead icon="≡" title="BID_ASK_DEPTH" sub={`${pair} · spread vs ${refName} mid (bps) across trade size · $100 → $1M`} />
-        <DepthCurveChart snapshot={d.depth} venues={depthVenues} refName={refName} />
+        <LiveDepthCurve market={pair} venues={depthVenues} refName={refName} />
       </Panel>
 
       {/* ROLLING_STATS */}

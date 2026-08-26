@@ -14,14 +14,23 @@ export async function fetchQuoteHistory(market: string, size: number): Promise<Q
   return r.json();
 }
 
-/** BID_ASK_DEPTH: per-venue executable-spread curves over the $100 → $1M
- *  notional grid for one market. Polled on the quote tick rather than streamed
- *  — the server computes it on demand, so nobody pays for a panel nobody has
- *  open. */
-export async function fetchDepth(market: string): Promise<DepthSnapshot> {
-  const r = await fetch(`/api/depth?market=${encodeURIComponent(market)}`);
-  if (!r.ok) throw new Error(`/api/depth ${r.status}`);
-  return r.json();
+/** BID_ASK_DEPTH: one demand-driven stream per visible market. EventSource
+ *  reconnects by itself and the server immediately replays its last completed
+ *  curve, so a transient worker/RPC failure leaves the last good curve visible. */
+export function connectDepth(
+  market: string,
+  onSnapshot: (snapshot: DepthSnapshot) => void,
+): () => void {
+  let closed = false;
+  const stream = new EventSource(`/api/depth/stream?market=${encodeURIComponent(market)}`);
+  stream.onmessage = (event) => {
+    if (closed) return;
+    try {
+      const snapshot = JSON.parse(event.data) as DepthSnapshot;
+      if (snapshot.market === market) onSnapshot(snapshot);
+    } catch { /* ignore a malformed event; the next complete curve replaces it */ }
+  };
+  return () => { closed = true; stream.close(); };
 }
 
 /** Recent fills window (persisted) — feeds the live SWAP_TAPE. The leaderboard

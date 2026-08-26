@@ -30,12 +30,21 @@ export interface DataSource {
   quoteHistory(market: string, size: number): QuoteSnapshot[];
   /** QUOTE_UPDATE_BURN: per-venue quote-update gas per UTC day (Volume tab). */
   gasSeries(): GasResponse;
-  /** BID_ASK_DEPTH: every venue's executable-spread curve for one market over
-   *  the log-spaced notional grid. On demand (not streamed) — a pass costs
-   *  several times a quote frame, so it only runs while somebody is looking. */
-  depth(market: string): Promise<DepthSnapshot>;
+  /** Last completed high-resolution depth snapshot, already serialized so an
+   *  arbitrary number of viewers do not repeat JSON work on the main loop. */
+  getDepth(market: string): DepthPublication | undefined;
+  /** Demand-driven updates. The first watcher activates computation; the last
+   *  disposer stops it. Multiple viewers never multiply adapter/RPC work. */
+  watchDepth(market: string, cb: (publication: DepthPublication) => void): () => void;
   on(ev: 'message', cb: (m: StreamMessage) => void): this;
   off(ev: 'message', cb: (m: StreamMessage) => void): this;
+}
+
+export interface DepthPublication {
+  market: string;
+  asOfBlock: number;
+  ts: number;
+  json: string;
 }
 
 /** Quote history is retained by wall time, not sample count: live quotes now
@@ -55,6 +64,8 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
   /** Rolling wall-time ring of broadcast quote matrices — recorded at the
    *  emitMsg choke point so live + sim get it identically for free. */
   private quoteHist: QuoteSnapshot[] = [];
+  private depthLatest = new Map<string, DepthPublication>();
+  private depthWatchers = new Map<string, Set<(publication: DepthPublication) => void>>();
 
   /** Default: aggregate the in-memory fill window (sim). Live overrides with a
    *  keyset-paged SQLite scan + TTL cache. */
@@ -77,12 +88,44 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
   /** Default: no gas series. Live reads daily_gas; sim synthesizes one. */
   gasSeries(): GasResponse { return { days: [], approx: [] }; }
 
-  /** Default: no curves. Live samples the adapters over the depth grid; sim
-   *  evaluates its own quote model there. An empty `venues` renders as an empty
-   *  panel, which is the honest output for a source that cannot produce one. */
-  async depth(market: string): Promise<DepthSnapshot> {
-    return { market, asOfBlock: this.getQuotes().block, refMid: 0, ts: Date.now(), venues: [] };
+  getDepth(market: string): DepthPublication | undefined { return this.depthLatest.get(market); }
+
+  watchDepth(market: string, cb: (publication: DepthPublication) => void): () => void {
+    let watchers = this.depthWatchers.get(market);
+    const first = !watchers?.size;
+    if (!watchers) { watchers = new Set(); this.depthWatchers.set(market, watchers); }
+    watchers.add(cb);
+    const current = this.depthLatest.get(market);
+    if (current) cb(current);
+    if (first) this.onDepthDemand(market, true);
+    let disposed = false;
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      const active = this.depthWatchers.get(market);
+      active?.delete(cb);
+      if (active?.size) return;
+      this.depthWatchers.delete(market);
+      this.onDepthDemand(market, false);
+    };
   }
+
+  /** Source-specific demand hook: live forwards it to the isolated worker; sim
+   *  computes locally because its curve is arithmetic-only. */
+  protected onDepthDemand(_market: string, _active: boolean): void {}
+
+  protected publishDepth(snapshot: DepthSnapshot, json = JSON.stringify(snapshot)): void {
+    this.publishDepthPublication({ market: snapshot.market, asOfBlock: snapshot.asOfBlock, ts: snapshot.ts, json });
+  }
+
+  /** Worker results arrive pre-serialized. Keeping that string intact is what
+   *  makes main-process fanout independent of curve size and viewer count. */
+  protected publishDepthPublication(publication: DepthPublication): void {
+    this.depthLatest.set(publication.market, publication);
+    for (const cb of this.depthWatchers.get(publication.market) ?? []) cb(publication);
+  }
+
+  protected depthDemandedMarkets(): string[] { return [...this.depthWatchers.keys()]; }
 
   /** Default: filter the in-memory window. Live overrides with a DB query. */
   queryFills(opts: { sinceMs?: number; limit?: number }): Fill[] {

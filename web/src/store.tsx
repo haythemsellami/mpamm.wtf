@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { DepthSnapshot, MarketState, QuoteSnapshot, QuoteRow, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse } from '@shared';
+import type { MarketState, QuoteSnapshot, QuoteRow, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse } from '@shared';
 import { pairOf, cexForBase } from '@shared';
-import { fetchMarkets, fetchFills, fetchLeaderboard, fetchGas, fetchQuoteHistory, fetchDepth, connectStream } from './lib/api';
+import { fetchMarkets, fetchFills, fetchLeaderboard, fetchGas, fetchQuoteHistory, connectStream } from './lib/api';
 import { pathForTab, tabFromPath, urlForTab, type Tab } from './lib/tab-route';
 import { appendQuoteSnapshot, type QuoteSeries } from './lib/quote-series';
 import type { Theme } from './theme';
@@ -60,9 +60,6 @@ interface Dashboard extends UiState {
   lbDay: LeaderboardResponse | null;
   /** QUOTE_UPDATE_BURN series — polled while the Volume tab is open. */
   gas: GasResponse | null;
-  /** BID_ASK_DEPTH curves for the SELECTED pair — refreshed on the quote tick
-   *  while the Execution tab is open. Null until the first pass lands. */
-  depth: DepthSnapshot | null;
   frame: number;
   // venue registry (from state.venues) + derived views. Everything venue-related
   // in the UI reads these; nothing about a venue is hardcoded client-side.
@@ -115,7 +112,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [lb, setLb] = useState<LeaderboardResponse | null>(null);
   const [lbDay, setLbDay] = useState<LeaderboardResponse | null>(null);
   const [gas, setGas] = useState<GasResponse | null>(null);
-  const [depth, setDepth] = useState<DepthSnapshot | null>(null);
   const [frame, setFrame] = useState(0);
 
   // The URL is the shareable form of tab state. Canonicalize direct loads,
@@ -337,31 +333,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return () => { on = false; clearInterval(id); };
   }, [ui.tab]);
 
-  // BID_ASK_DEPTH: one in-flight request at a time, kicked on every quote tick
-  // so a reprice visibly moves the curves. The in-flight guard is the throttle
-  // — the poll self-paces to the round trip instead of queueing behind itself —
-  // and the server collapses concurrent callers into one pass anyway.
-  const depthBusy = useRef(false);
-  const depthPair = useRef('');
-  const depthAlive = useRef(true);
-  // re-armed on mount, not just cleared on unmount: StrictMode mounts, unmounts
-  // and remounts, and a latched-false flag would silently discard every response
-  // for the rest of the session.
-  useEffect(() => { depthAlive.current = true; return () => { depthAlive.current = false; }; }, []);
-  useEffect(() => {
-    if (ui.tab !== 'exec' || !ui.pair) return;
-    // A pair switch must blank the panel immediately: another market's depth
-    // rendered under this market's title is worse than an empty frame.
-    if (depthPair.current !== ui.pair) { depthPair.current = ui.pair; setDepth(null); }
-    if (depthBusy.current) return;
-    depthBusy.current = true;
-    const pair = ui.pair;
-    fetchDepth(pair)
-      .then((d) => { if (depthAlive.current && depthPair.current === pair) setDepth(d); })
-      .catch(() => { /* transient (503 while the RPC is degraded) — the next tick retries */ })
-      .finally(() => { depthBusy.current = false; });
-  }, [ui.tab, ui.pair, frame]);
-
   // reseed when the selected pair/size changes
   useEffect(() => { reseed(); setFrame((f) => f + 1); /* eslint-disable-next-line */ }, [ui.pair, ui.size]);
   // reseed when the venue registry changes (ids added/removed) so the buffers are
@@ -388,7 +359,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [venuesById, reference]);
 
   const api = useMemo<Dashboard>(() => ({
-    ...ui, conn, state, quotes, volume, fills, lb, lbDay, gas, depth, frame,
+    ...ui, conn, state, quotes, volume, fills, lb, lbDay, gas, frame,
     venues, displayVenues, baselines, reference, references, referenceFor, venuesById,
     series: seriesRef.current, samples: samplesRef.current,
     set: (k, v) => setUi((s) => ({ ...s, [k]: v })),
@@ -405,7 +376,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setFrame((f) => f + 1);
     },
     resetLb: () => setUi((s) => ({ ...s, lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbWinners: true, lbTop: 25 })),
-  }), [ui, conn, state, quotes, volume, fills, lb, lbDay, gas, depth, frame, venues, displayVenues, baselines, reference, references, referenceFor, venuesById]);
+  }), [ui, conn, state, quotes, volume, fills, lb, lbDay, gas, frame, venues, displayVenues, baselines, reference, references, referenceFor, venuesById]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

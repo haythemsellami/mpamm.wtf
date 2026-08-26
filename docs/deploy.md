@@ -10,6 +10,7 @@ The [`Dockerfile`](../Dockerfile) builds the frontend and runs the server servin
 
 - **Deploys are Render-native**: every push to `main` builds the Dockerfile and deploys (health-gated, zero-downtime). [`ci.yml`](../.github/workflows/ci.yml) runs verification (typecheck → tests → frontend build → Docker build) on every push + PR.
 - Key service variable: `RPC_HTTP_URL` — a **trusted Monad node**, and the one that serves block-pinned quote calls. Pick it for **distance to the tip**: some providers serve a head several blocks behind, which puts that much staleness into every quote on the Execution page before any local tuning applies. Check with `eth_blockNumber` against a second node. Quotes use a dedicated zero-wait HTTP batch lane while sharing this pool's endpoint/failover state with heads and fills. Set `RPC_WS_URL` when that same hot provider exposes `eth_subscribe`/`newHeads`; the service automatically keeps fast HTTP head polling active as a watchdog and fallback.
+- **Set `RPC_DEPTH_URL` to a separate tip-fresh node.** The 25-point Execution curve runs in an isolated child process, so it cannot stall the main event loop; a separate endpoint also prevents it from consuming `RPC_HTTP_URL`'s connection/rate-limit budget. `RPC_DEPTH_WS_URL` is optional. If `RPC_DEPTH_URL` is omitted the worker reuses the hot node and logs a warning: CPU/event-loop isolation remains, provider-capacity isolation does not.
 - **`RPC_ARCHIVE_URL` is the other half.** The tip-freshest nodes are usually pruning fullnodes (a couple of days of history), which cannot serve the venue-lifetime backfills, `blockAtOrAfter`'s search from block 0, or the gas crawl. The archive node must serve logs, headers and receipts at any depth **and** historical `eth_getCode` (the gas tracker bisects it to date a destination's deployment) — verify with `eth_getCode` at an old block before trusting an endpoint. Set it to an archive node and the deep crawls move there while quotes stay on the fast one. Leave it unset and both ride `RPC_HTTP_URL` — the pre-split behavior. Note that failover will **not** cover this for you: a pruned block is a JSON-RPC error, which never trips the breaker, so a pruning primary with an archive *backup* stalls history instead of degrading to it.
 - **RPC failover is on by default for the HOT pool**, whose backups default to the public endpoint (`RPC_HTTP_BACKUP_URLS`). The **archive pool ships with no backup at all** (`RPC_ARCHIVE_BACKUP_URLS` defaults to empty) — the public endpoint cannot serve historical `eth_getCode`, so failing over to it would satisfy every crawl except the gas bootstrap, which would then retry forever while the pool looked healthy. Set it only to an endpoint meeting the full archive contract. Within a pool, a dead primary switches to that pool's backups and the primary is probed every minute, snapping back once it's healthy. The TopBar's amber `RPC` chip is hot-pool-only; inspect `state.rpcArchive` or `state.notes` for archive health. Heavy history crawls pause while the archive pool is on a backup; live quotes/fills keep flowing.
 
@@ -19,6 +20,7 @@ The [`Dockerfile`](../Dockerfile) builds the frontend and runs the server servin
 docker build -t mpamm .
 docker run --rm -p 8787:8787 -v mpamm-data:/data \
   -e RPC_HTTP_URL=https://your-monad-node \
+  -e RPC_DEPTH_URL=https://your-separate-monad-node \
   mpamm
 # open http://localhost:8787
 ```
@@ -32,11 +34,15 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | `RPC_HTTP_URL` | hot Monad node — quotes + fills tail (default: public endpoint). Choose for tip freshness |
 | `RPC_WS_URL` | optional hot-node WebSocket for `newHeads` (default: unset ⇒ HTTP head watcher only) |
 | `RPC_HTTP_BACKUP_URLS` | ordered failover nodes for the hot pool, comma-separated (default: public endpoint; `""` disables failover). `RPC_BACKUP_URLS` is the pre-split name, still honored |
+| `RPC_DEPTH_URL` | dedicated tip-fresh node for high-resolution depth curves (recommended; unset ⇒ reuses `RPC_HTTP_URL`) |
+| `RPC_DEPTH_WS_URL` | optional depth-node WebSocket for `newHeads` (unset ⇒ isolated HTTP watcher) |
+| `RPC_DEPTH_BACKUP_URLS` | ordered failover nodes for depth, comma-separated (default: none) |
 | `RPC_ARCHIVE_URL` | deep-history node — volume backfill, markout onboarding, gas, `blockAtOrAfter` (default: unset ⇒ same node as `RPC_HTTP_URL`). Choose for retention |
 | `RPC_ARCHIVE_BACKUP_URLS` | ordered failover nodes for the archive pool (default: **none** — the public endpoint serves headers/logs/receipts to block 0 but refuses historical `eth_getCode`, which the gas tracker needs). Rejected at boot without `RPC_ARCHIVE_URL` |
 | `GETLOGS_CHUNK` | getLogs span the tail attempts (default 900 — the devcore4 fleet serves 1000/call; the public endpoint caps at ~100) |
 | `GETLOGS_MIN_CHUNK` | narrowest span, and the floor every adaptive crawl shrinks to (default 90 — works on the public endpoint). Keep `<= BACKFILL_CHUNK` |
 | `HEAD_POLL_MS` | HTTP new-head fallback/watchdog cadence (default 75ms) |
+| `DEPTH=off` · `DEPTH_SAMPLES` · `DEPTH_MIN_INTERVAL_MS` | disable depth, set curve resolution (default 25), or cap its per-market start cadence (default 300ms) |
 | `QUOTE_INTERVAL_MS` | simulator quote cadence only (default 500ms); live quotes are block-triggered |
 | `TAIL_INTERVAL_MS` | live fills-tail cadence floor (default 500ms) |
 | `DATA_SOURCE=sim` | offline simulator instead of live |

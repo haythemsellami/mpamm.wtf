@@ -145,6 +145,7 @@ export function DepthCurveChart({ snapshot, venues, refName }: {
 
       <div style={{ fontSize: 9, color: C.faint3, margin: `2px 0 4px ${mobile ? 0 : GUTTER}px`, lineHeight: 1.5 }}>
         each leg = executable spread at that notional · a leg ends where the venue stops quoting size · x = bps vs {refName} mid, y = log notional
+        {snapshot ? ` · sampled block ${snapshot.asOfBlock.toLocaleString()}` : ''}
       </div>
     </div>
   );

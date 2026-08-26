@@ -14,7 +14,6 @@ vi.mock('./lib/api', () => {
     fetchLeaderboard: vi.fn(pending),
     fetchGas: vi.fn(pending),
     fetchQuoteHistory: vi.fn(pending),
-    fetchDepth: vi.fn(pending),
     connectStream: vi.fn(() => () => {}),
   };
 });

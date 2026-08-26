@@ -179,11 +179,12 @@ export function createHanjiAdapter(): VenueAdapter {
       ctx.note('venue.discovery', `Hanji pAMM Vault: ${markets.length} market(s), taker fee ${markets[0]?.feeBps ?? '?'}bps (on-chain config)`);
     },
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
-      if (!markets.length) return [];
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint, requestedMarkets?: ReadonlySet<string>): Promise<QuoteRow[]> {
+      const selectedMarkets = markets.filter((m) => !requestedMarkets || requestedMarkets.has(m.market));
+      if (!selectedMarkets.length) return [];
       // one multicall for every market's book (proxy → includes vault liquidity).
       const res = await ctx.client.multicall({
-        contracts: markets.map((m) => ({
+        contracts: selectedMarkets.map((m) => ({
           address: FAST_QUOTER_HELPER, abi: helperAbi,
           functionName: 'assembleOrderbooksFromOrders' as const,
           args: [m.proxy, BOOK_LEVELS] as const,
@@ -195,8 +196,8 @@ export function createHanjiAdapter(): VenueAdapter {
 
       const rows: QuoteRow[] = [];
       const ts = Date.now();
-      for (let i = 0; i < markets.length; i++) {
-        const m = markets[i];
+      for (let i = 0; i < selectedMarkets.length; i++) {
+        const m = selectedMarkets[i];
         const r = res[i];
         if (r.status !== 'success') continue;
         // bps anchor = the pair-terms CEX mid (wrap basis + quote leg applied).
