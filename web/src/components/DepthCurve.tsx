@@ -47,8 +47,9 @@ export function DepthCurveChart({ snapshot, venues, refName }: {
   const { legs, legend } = useMemo(() => {
     const legs: Leg[] = [];
     const legend: DepthVenue[] = [];
+    const curvesByVenue = new Map(snapshot?.venues.map((curve) => [curve.venueId, curve]) ?? []);
     for (const v of venues) {
-      const curve = snapshot?.venues.find((c) => c.venueId === v.id);
+      const curve = curvesByVenue.get(v.id);
       if (!curve) continue;
       const mine: Leg[] = [];
       for (const side of ['bid', 'ask'] as const) {
