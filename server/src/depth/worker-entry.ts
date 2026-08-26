@@ -173,7 +173,8 @@ async function boot(): Promise<void> {
     onWsFallback: () => {},
     onWsRecovered: () => {},
   });
-  latestHead = await guardRpcRead(() => publicClient.getBlockNumber(), unavailable, rpcGeneration);
+  const initialHead = await guardRpcRead(() => publicClient.getBlockNumber(), unavailable, rpcGeneration);
+  if (initialHead > latestHead) latestHead = initialHead;
   ready = true;
   for (const market of active) pending.add(market);
   send({ type: 'ready' });

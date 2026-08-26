@@ -424,7 +424,7 @@ export interface DepthCurve {
 /** Every active venue's depth curve for one market at one block. */
 export interface DepthSnapshot {
   market: string;
-  /** the Monad block every curve was read at (0 in sim — no chain). */
+  /** the Monad block every curve was read at (a synthetic block in sim). */
   asOfBlock: number;
   /** the pair-terms CEX mid used as the bps denominator for every point. */
   refMid: number;

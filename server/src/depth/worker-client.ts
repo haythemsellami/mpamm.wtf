@@ -16,6 +16,27 @@ function depthNodeOptions(value = process.env.NODE_OPTIONS ?? ''): string {
   return `${withoutHeapCap}${withoutHeapCap ? ' ' : ''}--max-old-space-size=${DEPTH_HEAP_MB}`;
 }
 
+function hasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function sendTo(child: ChildProcess, message: DepthWorkerRequest): boolean {
+  if (!child.connected || hasExited(child)) return false;
+  try {
+    // Supplying a callback contains an IPC-close race that Node would otherwise
+    // surface as an unhandled child-process error.
+    child.send(message, () => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function kill(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (hasExited(child)) return;
+  try { child.kill(signal); } catch { /* an already-reaped process needs no cleanup */ }
+}
+
 /**
  * Main-process boundary for high-resolution depth work.
  *
@@ -50,7 +71,11 @@ export class DepthWorkerClient {
     }
     this.demanded.delete(market);
     this.send({ type: 'unsubscribe', market });
-    if (!this.demanded.size && !this.idleTimer) {
+    if (!this.demanded.size && this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = undefined;
+    }
+    if (!this.demanded.size && this.child && !this.idleTimer) {
       this.idleTimer = setTimeout(() => {
         this.idleTimer = undefined;
         if (!this.demanded.size) this.stopChild();
@@ -62,22 +87,18 @@ export class DepthWorkerClient {
   async stop(): Promise<void> {
     this.stopping = true;
     this.demanded.clear();
-    if (this.idleTimer) clearTimeout(this.idleTimer);
-    if (this.restartTimer) clearTimeout(this.restartTimer);
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = undefined; }
+    if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = undefined; }
     const child = this.child;
     if (!child) return;
-    await new Promise<void>((resolve) => {
-      const done = () => resolve();
-      child.once('exit', done);
-      this.send({ type: 'stop' });
-      const force = setTimeout(() => { if (child.exitCode == null) child.kill('SIGKILL'); }, 2_000);
-      force.unref();
-      child.once('exit', () => clearTimeout(force));
-    });
+    this.child = undefined;
+    this.generation += 1;
+    await this.terminate(child);
   }
 
   private ensureChild(): void {
-    if (this.child || this.stopping) return;
+    if (this.child || this.stopping || !this.demanded.size) return;
+    if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = undefined; }
     const generation = ++this.generation;
     const entry = fileURLToPath(new URL('./worker-entry.ts', import.meta.url));
     const depthRpc = config.rpcDepth || config.rpcHttp;
@@ -85,23 +106,30 @@ export class DepthWorkerClient {
       this.warnedSharedRpc = true;
       this.onStatus('warn', 'depth worker is process-isolated but RPC_DEPTH_URL is unset, so provider capacity is still shared with realtime quotes');
     }
-    const child = fork(entry, [], {
-      cwd: process.cwd(),
-      execArgv: ['--import', 'tsx'],
-      stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-      env: {
-        ...process.env,
-        NODE_OPTIONS: depthNodeOptions(),
-        RPC_HTTP_URL: depthRpc,
-        RPC_WS_URL: config.rpcDepthWs,
-        RPC_HTTP_BACKUP_URLS: config.rpcDepthBackups.join(','),
-        RPC_ARCHIVE_URL: '',
-        RPC_ARCHIVE_BACKUP_URLS: '',
-        BACKFILL: 'off',
-        MARKOUT_BACKFILL: 'off',
-        GAS_METRIC: 'off',
-      },
-    });
+    let child: ChildProcess;
+    try {
+      child = fork(entry, [], {
+        cwd: process.cwd(),
+        execArgv: ['--import', 'tsx'],
+        stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+        env: {
+          ...process.env,
+          NODE_OPTIONS: depthNodeOptions(),
+          RPC_HTTP_URL: depthRpc,
+          RPC_WS_URL: config.rpcDepthWs,
+          RPC_HTTP_BACKUP_URLS: config.rpcDepthBackups.join(','),
+          RPC_ARCHIVE_URL: '',
+          RPC_ARCHIVE_BACKUP_URLS: '',
+          BACKFILL: 'off',
+          MARKOUT_BACKFILL: 'off',
+          GAS_METRIC: 'off',
+        },
+      });
+    } catch (error) {
+      this.onStatus('warn', `depth worker failed to start: ${error instanceof Error ? error.message : String(error)}`);
+      this.scheduleRestart();
+      return;
+    }
     this.child = child;
     child.on('message', (raw) => {
       if (generation !== this.generation) return;
@@ -113,24 +141,57 @@ export class DepthWorkerClient {
       }
     });
     child.once('exit', (code, signal) => {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.child !== child) return;
       this.child = undefined;
       if (this.stopping || !this.demanded.size) return;
       this.onStatus('warn', `depth worker exited (${signal ?? code ?? 'unknown'}); restarting`);
-      this.restartTimer = setTimeout(() => {
-        this.restartTimer = undefined;
-        this.ensureChild();
-      }, RESTART_MS);
-      this.restartTimer.unref();
+      this.scheduleRestart();
     });
-    child.once('error', (error) => {
-      if (this.stopping || generation !== this.generation) return;
+    child.on('error', (error) => {
+      if (this.stopping || generation !== this.generation || this.child !== child) return;
+      this.child = undefined;
+      this.generation += 1;
       this.onStatus('warn', `depth worker failed to start: ${error.message}`);
+      void this.terminate(child).then(() => this.scheduleRestart());
     });
   }
 
   private send(message: DepthWorkerRequest): void {
-    if (this.child?.connected) this.child.send(message);
+    if (this.child) sendTo(this.child, message);
+  }
+
+  private scheduleRestart(): void {
+    if (this.restartTimer || this.stopping || !this.demanded.size) return;
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined;
+      this.ensureChild();
+    }, RESTART_MS);
+    this.restartTimer.unref();
+  }
+
+  /** Give the normal IPC shutdown a grace period, then bound the wait even if
+   *  the process was already reaped or never emits another lifecycle event. */
+  private terminate(child: ChildProcess): Promise<void> {
+    if (hasExited(child)) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let finished = false;
+      let force: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (force) clearTimeout(force);
+        child.off('exit', finish);
+        resolve();
+      };
+      child.once('exit', finish);
+      if (!sendTo(child, { type: 'stop' })) kill(child, 'SIGTERM');
+      if (finished || hasExited(child)) { finish(); return; }
+      force = setTimeout(() => {
+        kill(child, 'SIGKILL');
+        finish();
+      }, 2_000);
+      force.unref();
+    });
   }
 
   private stopChild(): void {
@@ -138,10 +199,6 @@ export class DepthWorkerClient {
     if (!child) return;
     this.generation += 1;
     this.child = undefined;
-    if (child.connected) child.send({ type: 'stop' } satisfies DepthWorkerRequest);
-    else child.kill('SIGTERM');
-    const force = setTimeout(() => { if (child.exitCode == null) child.kill('SIGKILL'); }, 2_000);
-    force.unref();
-    child.once('exit', () => clearTimeout(force));
+    void this.terminate(child);
   }
 }

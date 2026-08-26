@@ -20,11 +20,12 @@ import { DepthWorkerClient } from '../worker-client.js';
 class FakeChild extends EventEmitter {
   connected = true;
   exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
   send = vi.fn();
   kill = vi.fn(() => true);
 }
 
-describe('DepthWorkerClient shutdown', () => {
+describe('DepthWorkerClient lifecycle', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     forkMock.mockReset();
@@ -44,7 +45,7 @@ describe('DepthWorkerClient shutdown', () => {
     client.setDemand('MON/USDC', false);
     await vi.advanceTimersByTimeAsync(30_000);
 
-    expect(child.send).toHaveBeenLastCalledWith({ type: 'stop' });
+    expect(child.send.mock.calls.at(-1)?.[0]).toEqual({ type: 'stop' });
     expect(child.kill).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(2_000);
@@ -63,9 +64,55 @@ describe('DepthWorkerClient shutdown', () => {
 
     expect(child.kill).toHaveBeenCalledOnce();
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
-
-    child.exitCode = 137;
-    child.emit('exit', 137, 'SIGKILL');
     await stopping;
+  });
+
+  it('does not wait for an exit event that already happened', async () => {
+    const child = new FakeChild();
+    child.exitCode = 0;
+    forkMock.mockReturnValue(child as unknown as ChildProcess);
+    const client = new DepthWorkerClient(() => {});
+    client.setDemand('MON/USDC', true);
+
+    await expect(client.stop()).resolves.toBeUndefined();
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it('cancels a pending restart when the last viewer leaves', async () => {
+    const child = new FakeChild();
+    forkMock.mockReturnValue(child as unknown as ChildProcess);
+    const client = new DepthWorkerClient(() => {});
+    client.setDemand('MON/USDC', true);
+
+    child.exitCode = 1;
+    child.emit('exit', 1, null);
+    client.setDemand('MON/USDC', false);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(forkMock).toHaveBeenCalledOnce();
+  });
+
+  it('retries a synchronous fork failure without throwing into the API process', async () => {
+    const child = new FakeChild();
+    forkMock
+      .mockImplementationOnce(() => { throw new Error('EMFILE'); })
+      .mockReturnValue(child as unknown as ChildProcess);
+    const onStatus = vi.fn();
+    const client = new DepthWorkerClient(() => {}, onStatus);
+
+    expect(() => client.setDemand('MON/USDC', true)).not.toThrow();
+    expect(onStatus).toHaveBeenCalledWith('warn', 'depth worker failed to start: EMFILE');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(forkMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('contains an IPC-close race while forwarding demand', () => {
+    const child = new FakeChild();
+    child.send.mockImplementation(() => { throw new Error('IPC channel closed'); });
+    forkMock.mockReturnValue(child as unknown as ChildProcess);
+    const client = new DepthWorkerClient(() => {});
+
+    expect(() => client.setDemand('MON/USDC', true)).not.toThrow();
   });
 });
