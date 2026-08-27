@@ -11,6 +11,7 @@ import { computeLeaderboard } from '../analytics.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
 import { GasTracker } from '../gas.js';
+import { DepthWorkerClient } from '../depth/worker-client.js';
 import { config } from '../config.js';
 import {
   monad, publicClient, quoteClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
@@ -20,7 +21,7 @@ import { HotHeadWatcher } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, type ResetDeletes } from '../db.js';
 import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
-import { NoteBuffer } from '../notes.js';
+import { NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
 import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, allAdapterVenueIds, validateRegistry } from '../venues/registry.js';
@@ -692,6 +693,11 @@ function archiveUnavailable(): boolean {
   return s.degraded || s.down;
 }
 
+function hotUnavailable(): boolean {
+  const s = rpcStatus();
+  return s.degraded || s.down;
+}
+
 /** One deep read is valid only when the archive pool stays primary/healthy for
  *  its entire lifetime. The breaker can fail over and retry inside the await. */
 const archiveRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, archiveUnavailable, archiveRpcGeneration);
@@ -822,6 +828,12 @@ export class LiveDataSource extends BaseSource {
    *  code + level, deduped, and capped without letting one chatty subsystem
    *  evict everything else. */
   private notes = new NoteBuffer();
+  /** High-resolution curves live in another process. Only its pre-serialized
+   *  publications cross this boundary; RPC/ABI/JSON work cannot delay quotes. */
+  private depthWorker = new DepthWorkerClient(
+    (publication) => this.publishDepthPublication(publication),
+    (level, message) => console[level === 'warn' ? 'warn' : 'log'](`[mpamm] depth: ${scrubNote(message)}`),
+  );
   /** base asset key → when its reference mid went dark (checkReferenceStarvation). */
   private starvedSince = new Map<string, number>();
   /** venue+market+day keys with a still-unpublished CEX archive (checkArchivePending,
@@ -963,10 +975,6 @@ export class LiveDataSource extends BaseSource {
       for (;;) {
         nowMs = Date.now();
         runDay = utcDay(nowMs);
-        const hotUnavailable = () => {
-          const status = rpcStatus();
-          return status.degraded || status.down;
-        };
         const head = await guardRpcRead(() => publicClient.getBlockNumber(), hotUnavailable, rpcGeneration);
         if (head > this.deepEnd) this.deepEnd = head;
         if (hasDedicatedArchive) {
@@ -1078,12 +1086,21 @@ export class LiveDataSource extends BaseSource {
     if (this.remarkTimer) clearInterval(this.remarkTimer);
     this.gas.stop();
     const finalPersist = this.persist(true);
+    const depthStop = this.depthWorker.stop();
     REFERENCES.stop();
-    this.stopPromise = finalPersist.finally(async () => {
+    this.stopPromise = Promise.all([finalPersist, depthStop]).then(() => undefined).finally(async () => {
       try { await this.snapshotWriter?.close(); }
       finally { this.store.close(); }
     });
     return this.stopPromise;
+  }
+
+  protected onDepthDemand(market: string, active: boolean): void {
+    if (!config.depthEnabled) {
+      if (active) this.publishDepth({ market, asOfBlock: this.block, refMid: 0, ts: Date.now(), venues: [] });
+      return;
+    }
+    this.depthWorker.setDemand(market, active);
   }
 
   /** QUOTE_UPDATE_BURN series — straight from daily_gas (tiny table). */

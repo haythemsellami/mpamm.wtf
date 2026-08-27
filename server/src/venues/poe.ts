@@ -142,8 +142,8 @@ export function createPoeAdapter(): VenueAdapter {
       ctx.note('venue.discovery', `POE: ${byMarket.size} base/stable pool(s)`);
     },
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
-      const pools = [...byMarket.values()];
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint, markets?: ReadonlySet<string>): Promise<QuoteRow[]> {
+      const pools = [...byMarket.values()].filter((p) => !markets || markets.has(p.market));
       if (!pools.length) return [];
 
       // getQuote(swapXtoY, amountIn) per pool × size × side (view — eth_call).

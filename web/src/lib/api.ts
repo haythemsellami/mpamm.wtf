@@ -1,4 +1,4 @@
-import type { MarketsResponse, StreamMessage, Fill, QuoteSnapshot, LeaderboardResponse, GasResponse } from '@shared';
+import type { MarketsResponse, StreamMessage, DepthSnapshot, Fill, QuoteSnapshot, LeaderboardResponse, GasResponse } from '@shared';
 
 export async function fetchMarkets(): Promise<MarketsResponse> {
   const r = await fetch('/api/markets');
@@ -12,6 +12,25 @@ export async function fetchQuoteHistory(market: string, size: number): Promise<Q
   const r = await fetch(`/api/quotes/history?market=${encodeURIComponent(market)}&size=${size}`);
   if (!r.ok) throw new Error(`/api/quotes/history ${r.status}`);
   return r.json();
+}
+
+/** BID_ASK_DEPTH: one demand-driven stream per visible market. EventSource
+ *  reconnects by itself and the server immediately replays its last completed
+ *  curve, so a transient worker/RPC failure leaves the last good curve visible. */
+export function connectDepth(
+  market: string,
+  onSnapshot: (snapshot: DepthSnapshot) => void,
+): () => void {
+  let closed = false;
+  const stream = new EventSource(`/api/depth/stream?market=${encodeURIComponent(market)}`);
+  stream.onmessage = (event) => {
+    if (closed) return;
+    try {
+      const snapshot = JSON.parse(event.data) as DepthSnapshot;
+      if (snapshot.market === market) onSnapshot(snapshot);
+    } catch { /* ignore a malformed event; the next complete curve replaces it */ }
+  };
+  return () => { closed = true; stream.close(); };
 }
 
 /** Recent fills window (persisted) — feeds the live SWAP_TAPE. The leaderboard

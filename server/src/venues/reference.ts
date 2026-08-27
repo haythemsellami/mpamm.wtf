@@ -122,10 +122,11 @@ export function createReferenceRegistry(): ReferenceRegistry {
       if (!a) return 0;
       return a.cex === 'binance' ? binance.changePct(a.cexSymbol) : bybit.changePct();
     },
-    quote(sizesUsd) {
+    quote(sizesUsd, markets) {
       const rows: QuoteRow[] = [];
       const ts = Date.now();
       for (const pair of PAIRS) {
+        if (markets && !markets.has(pair.symbol)) continue;
         const a = assetOf(pair.base);
         if (!a) continue;
         const usdtMid = baseUsdtMid(pair.base);

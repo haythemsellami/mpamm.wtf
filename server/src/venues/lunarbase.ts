@@ -474,7 +474,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
       ctx.note('venue.discovery', `Lunarbase: ${staged.length}/${LUNARBASE_POOLS.length} validated production pool(s), whitelist fee mode`);
     },
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint, markets?: ReadonlySet<string>): Promise<QuoteRow[]> {
       if (!discovered || !byMarket.size) return [];
       const head = blockNumber;
 
@@ -484,7 +484,8 @@ export function createLunarbaseAdapter(): VenueAdapter {
       // after: a pool that fails validation/pause/staleness simply has its
       // already-fetched legs discarded (identical semantics, one less
       // network round-trip per tick).
-      const gatePools = [...byMarket.values()];
+      const gatePools = [...byMarket.values()].filter((pool) => !markets || markets.has(pool.market));
+      if (!gatePools.length) return [];
       const legsByPool = new Map(gatePools.map((pool) => [pool.pool.toLowerCase(), Promise.all(sizesUsd.map(async (sizeUsd) => {
         const sellIn = toUnits(ctx.pricer.tokenForUsd(pool.baseToken, sizeUsd), pool.baseDec);
         const buyIn = toUnits(sizeUsd, pool.stableDec);

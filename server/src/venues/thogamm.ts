@@ -271,12 +271,13 @@ export function createThogammAdapter(): VenueAdapter {
 
     discover: refresh,
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint, markets?: ReadonlySet<string>): Promise<QuoteRow[]> {
       if (!discovered || !byMarket.size) return [];
       const calls: Array<{ address: typeof THOGAMM_ADDRESS; abi: typeof thogammAbi; functionName: 'makerQuoteExactInput'; args: readonly [`0x${string}`, `0x${string}`, bigint] }> = [];
       const legs: QuoteLeg[] = [];
 
       for (const market of byMarket.values()) {
+        if (markets && !markets.has(market.market)) continue;
         const mid = ctx.pricer.pairMid(market.market);
         const baseUsd = ctx.pricer.usdPerToken(market.baseKey);
         const quoteUsd = ctx.pricer.usdPerToken(market.quoteKey);

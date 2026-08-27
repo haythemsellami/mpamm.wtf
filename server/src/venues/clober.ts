@@ -494,8 +494,9 @@ export function createCloberVaultAdapter(): VenueAdapter {
         ctx.note('venue.discovery.degraded', 'Clober: authoritative discovery unavailable; holding Take ranges until rediscovery succeeds');
       }
     },
-    quote(ctx, sizesUsd, blockNumber) {
-      return quoteClober(ctx.client, markets, sizesUsd, ctx.pricer, blockNumber);
+    quote(ctx, sizesUsd, blockNumber, requestedMarkets) {
+      const selected = requestedMarkets ? markets.filter((m) => requestedMarkets.has(m.market)) : markets;
+      return quoteClober(ctx.client, selected, sizesUsd, ctx.pricer, blockNumber);
     },
     // QUOTE_UPDATE_BURN: the vault's quotes live on the books, and every
     // repricing is one keeper tx through the operator contract that emits

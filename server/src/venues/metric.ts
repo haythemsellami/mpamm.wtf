@@ -345,12 +345,13 @@ export function createMetricAdapter(): VenueAdapter {
 
     discover: refresh,
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
-      if (!pools.length) return [];
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint, markets?: ReadonlySet<string>): Promise<QuoteRow[]> {
+      const selectedPools = pools.filter((p) => !markets || markets.has(p.market));
+      if (!selectedPools.length) return [];
 
       // 1) each pool's oracle bid/ask (needed as quoteSwap args).
       const ppRes = await ctx.client.multicall({
-        contracts: pools.map((p) => ({ address: p.priceProvider, abi: priceProviderAbi, functionName: 'getBidAndAskPrice' as const })),
+        contracts: selectedPools.map((p) => ({ address: p.priceProvider, abi: priceProviderAbi, functionName: 'getBidAndAskPrice' as const })),
         allowFailure: true,
         blockNumber,
       });
@@ -359,7 +360,7 @@ export function createMetricAdapter(): VenueAdapter {
       type Leg = { pool: MetricPool; size: number; side: Side; reqIn: bigint; basePx: number };
       const legs: Leg[] = [];
       const calls: { address: `0x${string}`; abi: typeof metricRouterAbi; functionName: 'quoteSwap'; args: readonly [`0x${string}`, boolean, bigint, bigint, bigint, bigint] }[] = [];
-      pools.forEach((p, i) => {
+      selectedPools.forEach((p, i) => {
         const r = ppRes[i];
         if (r.status !== 'success') return;
         // bps anchor = the pair-terms CEX mid (wrap basis + stable cross applied),

@@ -48,6 +48,8 @@ Every tab renders purely from the venue registry (`state.venues`) — name, colo
 ### 3.1 Execution
 Rolling window (~60s) of live quotes per pair at a chosen notional, expressed as **realized cost in bps vs the pair's CEX reference**. For each pair × side × notional: (1) simulate the on-chain fill via the adapter's `quote()` — venue-fee-inclusive; (2) walk the pair's CEX book for the **same base size**, convert into the pair's terms, overlay the configured taker fee; (3) compare realized-vs-realized — the only honest comparison for size-sensitive flow. `filledFull=false` marks an exhausted pool/book (`PARTIAL`); `oneSided=true` marks a single executable side. An optional **baseline band** (`role: 'baseline'`) overlays a standard DEX's cost envelope — quote-only, default off, never ★. Reference chips default **on** so the benchmark stays visible during venue quote gaps.
 
+**BID_ASK_DEPTH** turns the same quote into a curve: trade size on a log y axis ($100 → $1M), signed spread in bps on the x axis (±18), one line per venue per side, both legs in the venue's own colour. Sampling is the ordinary `quote()` path over a log-spaced grid and streams from `GET /api/depth/stream`, so a point at a SIZE pill uses the same quote math as the grid above it; a leg simply **ends where the venue stops quoting size**, and a leg that leaves ±18bps terminates on the frame edge rather than being clamped into a false vertical run. The server computes only the selected market in a demand-driven child process, independent of the main quote loop.
+
 ### 3.2 Volume
 Stacked daily-notional-by-venue. Each landed swap contributes the USD value of its **stable quote leg**, bucketed by UTC day; today's bucket is partial and ticks up live. Stable quote leg ⇒ **exact USD with no price oracle**, for both history and live. A per-venue summary (window totals, share, swaps) sits beside the chart.
 
@@ -145,6 +147,8 @@ GET /api/venues                    the venue registry (VenueMeta[])
 GET /api/markets                   state snapshot (incl. venues + public degradation notes)
 GET /api/quotes                    latest quote matrix
 GET /api/quotes/history            last ~60s of real ticks (chart seed — never fabricated history)
+GET /api/depth?market=             last completed depth curve (cache-only snapshot)
+GET /api/depth/stream?market=      demand-driven live depth curves (SSE, $100 → $1M)
 GET /api/volume?from=&to=          daily series
 GET /api/fills?days=&limit=        recent fills (the tape)
 GET /api/leaderboard?days=1|7|30   server-side aggregates

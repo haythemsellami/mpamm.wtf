@@ -1,4 +1,4 @@
-import { SIZES_USD, HISTORY_START_UTC } from '@shared';
+import { DEPTH_SAMPLES, SIZES_USD, HISTORY_START_UTC } from '@shared';
 
 const env = process.env;
 
@@ -28,12 +28,16 @@ export const config = {
   source: (env.DATA_SOURCE?.toLowerCase() === 'sim' ? 'sim' : 'live') as SourcePref,
 
   // ── RPC pools ───────────────────────────────────────────────────────────────
-  // TWO pools, because no single Monad endpoint is good at both jobs.
+  // Workload-specific pools, because no single Monad endpoint should carry
+  // latency-critical quotes, high-resolution depth and deep history together.
   //
   //   HOT     block-triggered quotes + fills tail. Quotes have an isolated HTTP
   //           batch lane while endpoint/failover state stays shared. The ONLY
   //           thing that matters is distance to the tip: a node seven blocks behind quotes 2.3s-old prices, and
   //           no amount of local tuning recovers that.
+  //   DEPTH   demanded 25-point curves in a child process. This wants a
+  //           tip-fresh but separately provisioned endpoint so it cannot spend
+  //           HOT's request quota. Unset falls back to HOT for compatibility.
   //   ARCHIVE volume backfill, markout onboarding, gas passes, blockAtOrAfter.
   //           These binary-search from block 0 and replay months-old ranges, so
   //           lag is irrelevant and RETENTION is everything — and the tip-fresh
@@ -62,6 +66,14 @@ export const config = {
    *  is the pre-split name, still honored so a live deploy keeps its backups
    *  through the rollout. */
   rpcBackups: list(env.RPC_HTTP_BACKUP_URLS ?? env.RPC_BACKUP_URLS ?? 'https://rpc.monad.xyz'),
+  /** Dedicated endpoint for the high-resolution depth worker. The worker is a
+   *  separate process either way (so ABI decoding cannot pause the quote event
+   *  loop); setting this to a separately-provisioned endpoint also isolates RPC
+   *  execution capacity and rate limits. Unset falls back to the hot endpoint
+   *  for local/dev compatibility and is called out at boot. */
+  rpcDepth: env.RPC_DEPTH_URL ?? '',
+  rpcDepthWs: env.RPC_DEPTH_WS_URL ?? '',
+  rpcDepthBackups: list(env.RPC_DEPTH_BACKUP_URLS ?? ''),
   /** Deep-history primary. UNSET (the default) means the archive pool IS the hot
    *  pool — exactly the single-client behavior that predates the split, so an
    *  unconfigured deployment is unaffected. Set it only when the hot primary
@@ -113,6 +125,18 @@ export const config = {
   tailIntervalMs: num('TAIL_INTERVAL_MS', 500),
 
   sizesUsd: [...SIZES_USD],
+
+  // ── depth curves (Execution tab: BID_ASK_DEPTH) ────────────────────────────
+  /** The curve runs in an isolated, demand-driven worker process. The main
+   *  realtime service only stores and fans out its already-serialized result;
+   *  it never constructs, encodes or decodes the 25-point RPC workload. */
+  depthEnabled: (env.DEPTH ?? 'on').toLowerCase() !== 'off',
+  /** Samples across the grid — see @shared DEPTH_SAMPLES for why 25 is the
+   *  value that makes the curve reconcile with the SIZE pills exactly. */
+  depthSamples: num('DEPTH_SAMPLES', DEPTH_SAMPLES),
+  /** Fastest start-to-start cadence per demanded market. New heads coalesce to
+   *  the newest block while a pass runs, so slow RPC can never build a queue. */
+  depthMinIntervalMs: num('DEPTH_MIN_INTERVAL_MS', 300),
 
   /** getLogs span the tail ATTEMPTS. Measured caps: the devcore4 fleet serves
    *  1000 blocks per call, the public endpoint 413s above ~100. Sized for the

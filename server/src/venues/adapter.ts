@@ -115,8 +115,18 @@ export interface VenueAdapter {
   backfillFromUtc?: string;
   /** Optional live bid/ask per market×size for the Execution tab. Every chain
    *  read must use `blockNumber`: one published matrix represents exactly one
-   *  Monad block rather than a mixture of adjacent `latest` states. */
-  quote?(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]>;
+   *  Monad block rather than a mixture of adjacent `latest` states.
+   *
+   *  `markets` narrows work before an adapter builds its contract calls. The
+   *  realtime matrix leaves it unset; the isolated depth engine passes one
+   *  requested market so a high-resolution curve never prices the registry's
+   *  entire market universe just to discard all but one pair. */
+  quote?(
+    ctx: AdapterContext,
+    sizesUsd: readonly number[],
+    blockNumber: bigint,
+    markets?: ReadonlySet<string>,
+  ): Promise<QuoteRow[]>;
   /** the contract logs the core should fetch each cycle (read after `discover`).
    *  If discovery is required to enumerate fill/state sources and is not ready,
    *  throw here so the core holds the cursor instead of tailing an incomplete
@@ -168,5 +178,5 @@ export interface ReferenceRegistry {
   /** taker-walk benchmark rows for every tracked pair, each routed to and tagged
    *  with the pair's CEX (venueId = 'bybit' | 'binance'), prices converted into
    *  the pair's quote terms (wrap basis + stable cross). */
-  quote(sizesUsd: readonly number[]): QuoteRow[];
+  quote(sizesUsd: readonly number[], markets?: ReadonlySet<string>): QuoteRow[];
 }

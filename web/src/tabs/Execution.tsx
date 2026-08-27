@@ -1,14 +1,32 @@
-import { useEffect, useMemo, useRef } from 'react';
-import { SIZES_USD, TOKENS, pairOf, wrapBasisFor, type VenueMeta, type QuoteRow } from '@shared';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { SIZES_USD, TOKENS, pairOf, wrapBasisFor, type DepthSnapshot, type VenueMeta, type QuoteRow } from '@shared';
 import { useDashboard } from '../store';
+import { connectDepth } from '../lib/api';
 import { useViewport } from '../lib/viewport';
 import { C, hexA, pill, venueColor } from '../theme';
 import { Panel, PanelHead, Field } from '../components/ui';
 import { QuoteCanvas } from '../components/QuoteCanvas';
+import { DepthCurveChart, type DepthVenue } from '../components/DepthCurve';
 import { sgn, sizeLabel, percentile, stdev } from '../lib/format';
 
-const AX = 22; // bps axis half-range for the depth ladder
 const DEFAULT_MARKETS = ['MON/USDC', 'BTC/USDC', 'ETH/USDC'];
+
+/** Depth updates repaint only this small subtree. Keeping them out of the
+ *  dashboard context avoids re-rendering the quote grid, tape and navigation
+ *  for every completed 25-point curve. */
+function LiveDepthCurve({ market, venues, refName }: { market: string; venues: DepthVenue[]; refName: string }) {
+  const [snapshot, setSnapshot] = useState<DepthSnapshot | null>(null);
+  useEffect(() => {
+    setSnapshot(null);
+    return connectDepth(market, (next) => setSnapshot((previous) => {
+      if (next.market !== market) return previous;
+      if (previous && (next.asOfBlock < previous.asOfBlock
+        || (next.asOfBlock === previous.asOfBlock && next.ts <= previous.ts))) return previous;
+      return next;
+    }));
+  }, [market]);
+  return <DepthCurveChart snapshot={snapshot} venues={venues} refName={refName} />;
+}
 
 export function ExecutionTab() {
   const d = useDashboard();
@@ -104,24 +122,16 @@ export function ExecutionTab() {
   // id — baselines are a comparison overlay, never ★-eligible.
   const tight = legend.find((x) => !x.oneSided && x.full && !x.baseline)?.id;
 
-  // depth ladder — per size, per venue bar widths
-  const depth = useMemo(() => SIZES_USD.map((sz) => {
-    const segsBid: { w: number; color: string; full: boolean }[] = [];
-    const segsAsk: { w: number; color: string; full: boolean }[] = [];
-    for (const v of active) {
-      const r = row(v, sz);
-      if (!r) continue;
-      const wb = Math.min(50, Math.abs(Math.min(0, r.bidBps)) / AX * 50);
-      const wa = Math.min(50, Math.max(0, r.askBps) / AX * 50);
-      const color = venueColor(v, d.theme);
-      // dim a venue's bar at a size it can't fill fully (filledFull=false)
-      segsBid.push({ w: wb, color, full: r.filledFull });
-      segsAsk.push({ w: wa, color, full: r.filledFull });
-    }
-    segsBid.sort((a, b) => b.w - a.w); segsAsk.sort((a, b) => b.w - a.w);
-    return { label: sizeLabel(sz), highlight: sz === size, segsBid, segsAsk };
+  // BID_ASK_DEPTH — the active venues, resolved to the id/label/colour the
+  // toggle row uses. The chart derives its lines AND its legend from exactly
+  // this set, so a toggle adds or removes a venue's two legs and its chip
+  // together. The curve itself is server-side (/api/depth/stream): it needs a
+  // quote at ~25 log-spaced notionals per venue, not the four SIZE pills.
+  const depthVenues = useMemo<DepthVenue[]>(
+    () => active.map((v) => ({ id: v.id, label: displayName(v), color: venueColor(v, d.theme) })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [d.quotes, d.venueToggles, d.venues, pair, size, d.frame, d.theme]);
+    [d.quotes, d.venueToggles, d.venues, pair, d.frame, d.theme],
+  );
 
   // rolling stats — percentiles of the spread sample buffer per venue
   const stats = useMemo(() => {
@@ -306,31 +316,8 @@ export function ExecutionTab() {
 
       {/* BID_ASK_DEPTH */}
       <Panel style={{ margin: '0 18px 14px' }}>
-        <PanelHead icon="≡" title="BID_ASK_DEPTH" sub={`${pair} · spread vs ${refName} mid (bps) by trade size`} />
-        <div style={{ padding: '16px 18px 8px' }}>
-          <div style={{ display: 'flex', paddingLeft: 64, marginBottom: 10 }}>
-            <div style={{ flex: 1, textAlign: 'center', fontSize: 9, color: C.faint2, letterSpacing: '.1em' }}>BIDS — below mid</div>
-            <div style={{ flex: 1, textAlign: 'center', fontSize: 9, color: C.faint2, letterSpacing: '.1em' }}>ASKS — above mid</div>
-          </div>
-          {depth.map((rowd) => (
-            <div key={rowd.label} style={{ display: 'flex', alignItems: 'center', gap: 10, height: 34, background: rowd.highlight ? 'var(--accent-row)' : undefined }}>
-              <div style={{ width: 54, textAlign: 'right', fontSize: 11, color: C.dim }}>{rowd.label}</div>
-              <div style={{ position: 'relative', flex: 1, height: 20 }}>
-                <div style={{ position: 'absolute', left: '50%', top: -3, bottom: -3, width: 1, background: 'var(--green-line)', zIndex: 5 }} />
-                {rowd.segsBid.map((s, i) => <div key={'b' + i} style={{ position: 'absolute', top: 2, height: 16, right: '50%', width: `${s.w.toFixed(2)}%`, background: hexA(s.color, s.full ? 0.9 : 0.32), borderRadius: '2px 0 0 2px' }} />)}
-                {rowd.segsAsk.map((s, i) => <div key={'a' + i} style={{ position: 'absolute', top: 2, height: 16, left: '50%', width: `${s.w.toFixed(2)}%`, background: hexA(s.color, s.full ? 0.9 : 0.32), borderRadius: '0 2px 2px 0' }} />)}
-              </div>
-            </div>
-          ))}
-          <div style={{ display: 'flex', gap: 10, marginTop: 6 }}>
-            <div style={{ width: 54 }} />
-            <div style={{ position: 'relative', flex: 1, height: 16 }}>
-              {[-20, -15, -10, -5, 0, 5, 10, 15, 20].map((t) => (
-                <div key={t} style={{ position: 'absolute', top: 0, left: `${50 + t / AX * 50}%`, transform: 'translateX(-50%)', fontSize: 8.5, color: t === 0 ? C.green : C.faint2 }}>{(t > 0 ? '+' : '') + t}</div>
-              ))}
-            </div>
-          </div>
-        </div>
+        <PanelHead icon="≡" title="BID_ASK_DEPTH" sub={`${pair} · spread vs ${refName} mid (bps) across trade size · $100 → $1M`} />
+        <LiveDepthCurve market={pair} venues={depthVenues} refName={refName} />
       </Panel>
 
       {/* ROLLING_STATS */}

@@ -372,6 +372,67 @@ export interface QuoteSnapshot {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Depth curves (Execution tab: BID_ASK_DEPTH)
+// ──────────────────────────────────────────────────────────────────────────
+
+/** Notional span of the depth curve (USD). The chart's y axis is log10 over
+ *  exactly these decades, so the sampling grid and the axis cannot disagree. */
+export const DEPTH_MIN_USD = 100;
+export const DEPTH_DECADES = 4;
+/** Derived, never typed twice: the axis top IS the grid top, by construction. */
+export const DEPTH_MAX_USD = DEPTH_MIN_USD * 10 ** DEPTH_DECADES;
+/** Samples across that span. 25 = 4 decades x 6 steps + 1, which lands EXACTLY
+ *  on every SIZES_USD pill ($100/$1k/$10k/$100k): the curve and the QUOTE /
+ *  ROLLING_STATS rows are then the same venue quote at the same notional, so
+ *  they reconcile rather than merely agreeing in shape. Keep (samples - 1)
+ *  divisible by DEPTH_DECADES to preserve that. */
+export const DEPTH_SAMPLES = 25;
+
+/** The log-spaced notionals a depth pass probes: ascending, whole dollars,
+ *  deduped (a low sample count can round two steps onto the same dollar). */
+export function depthSizes(samples: number = DEPTH_SAMPLES): number[] {
+  const n = Math.max(2, Math.floor(samples));
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const usd = Math.round(DEPTH_MIN_USD * 10 ** (DEPTH_DECADES * i / (n - 1)));
+    if (out[out.length - 1] !== usd) out.push(usd);
+  }
+  return out;
+}
+
+/** One sampled notional on a venue's executable-spread curve. A side is ABSENT
+ *  (not 0) when the venue has no executable price there — a one-sided book —
+ *  because 0 bps would read as "quoting exactly at the mid". */
+export interface DepthPoint {
+  notional: number;
+  /** (bidPx / refMid - 1) * 1e4 — negative, below the mid. */
+  bidBps?: number;
+  /** (askPx / refMid - 1) * 1e4 — positive, above the mid. */
+  askBps?: number;
+}
+
+/** One venue's curve for one market, ascending by notional. */
+export interface DepthCurve {
+  venueId: string;
+  points: DepthPoint[];
+  /** The largest SAMPLED notional this venue filled in full — the curve stops
+   *  there. Grid-resolution: the venue's true cap lies between this and the
+   *  next sample, and nothing here extrapolates into that gap. */
+  maxNotional: number;
+}
+
+/** Every active venue's depth curve for one market at one block. */
+export interface DepthSnapshot {
+  market: string;
+  /** the Monad block every curve was read at (a synthetic block in sim). */
+  asOfBlock: number;
+  /** the pair-terms CEX mid used as the bps denominator for every point. */
+  refMid: number;
+  ts: number;
+  venues: DepthCurve[];
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Fills (Tape, Markouts, Leaderboard — docs/architecture.md: fill stream)
 // ──────────────────────────────────────────────────────────────────────────
 

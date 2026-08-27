@@ -139,12 +139,13 @@ export function createUniswapAdapter(): VenueAdapter {
       ctx.note('venue.discovery', `Uniswap v4: ${markets.length} baseline pool(s) (deepest hookless tier per pair)`);
     },
 
-    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint): Promise<QuoteRow[]> {
-      if (!markets.length) return [];
+    async quote(ctx: AdapterContext, sizesUsd: readonly number[], blockNumber: bigint, requestedMarkets?: ReadonlySet<string>): Promise<QuoteRow[]> {
+      const selectedMarkets = markets.filter((m) => !requestedMarkets || requestedMarkets.has(m.market));
+      if (!selectedMarkets.length) return [];
       type Leg = { m: UniMarket; size: number; side: 'buy' | 'sell'; inHuman: number };
       const legs: Leg[] = [];
       const calls: Array<{ address: `0x${string}`; abi: typeof quoterAbi; functionName: 'quoteExactInputSingle'; args: readonly [{ poolKey: PoolKey; zeroForOne: boolean; exactAmount: bigint; hookData: `0x${string}` }] }> = [];
-      for (const m of markets) {
+      for (const m of selectedMarkets) {
         if (ctx.pricer.pairMid(m.market) <= 0) continue; // reference not warm — no comparable row
         for (const size of sizesUsd) {
           // BUY base: exact-in the quote leg (stables ≡ $, crypto quotes priced live)

@@ -1,7 +1,7 @@
 import { BaseSource } from './index.js';
 import {
-  MARKETS, SIZES_USD, HISTORY_START_UTC, ASSETS, pairOf, cexForBase,
-  type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow,
+  MARKETS, SIZES_USD, HISTORY_START_UTC, ASSETS, pairOf, cexForBase, depthSizes,
+  type DataSourceMode, type DepthSnapshot, type MarketState, type QuoteSnapshot, type QuoteRow,
   type Fill, type DailyVolume, type VenueMeta, type Side, type FillCategory,
   type GasResponse, type VenueGasDaily,
 } from '@shared';
@@ -9,6 +9,7 @@ import { config } from '../config.js';
 import { NoteBuffer } from '../notes.js';
 import { clamp, utcDay, nextId, annotateCex } from '../util.js';
 import { ADAPTERS, venueMeta, validateRegistry } from '../venues/registry.js';
+import { buildDepthSnapshot } from '../depth.js';
 
 /**
  * SimDataSource — a venue-agnostic simulator for offline/dev (`DATA_SOURCE=sim`).
@@ -23,7 +24,9 @@ const ASSET_PX: Record<string, number> = { MON: 0.01928, BTC: 98000, ETH: 3500 }
 const BASE_MON = ASSET_PX.MON;
 
 interface SimFill extends Fill { bornMs: number; }
-interface Param { offset: number; half: number; slip: number; markoutBias: number; weight: number }
+/** `capDecades` = how many log10 decades above $100 this venue can still fill
+ *  in full — its quoted depth cap, the thing BID_ASK_DEPTH draws a leg up to. */
+interface Param { offset: number; half: number; slip: number; markoutBias: number; weight: number; capDecades: number }
 
 function rnd(): number { return Math.random() * 2 - 1; }
 /** deterministic string → [0,1) — stable per-(day,venue) sim jitter. */
@@ -80,14 +83,18 @@ export class SimDataSource extends BaseSource {
     // baselines simulate a standard-DEX cost envelope (design's UniV4 mock):
     // wide half-spread, strong size sensitivity, slight positive offset.
     this.baselines.forEach((v) => {
-      this.param[v.id] = { offset: 0.8, half: 9.0, slip: 4.2, markoutBias: 0, weight: 0 };
+      this.param[v.id] = { offset: 0.8, half: 9.0, slip: 4.2, markoutBias: 0, weight: 0, capDecades: 4 };
     });
     // deterministic per-venue params by registry order (venue 0 = tightest/heaviest).
+    // Depth caps shrink down the order too, so the offline preview shows what
+    // live venues actually do on BID_ASK_DEPTH: some legs run to the top of the
+    // axis, others stop where the venue stops quoting size.
     this.display.forEach((v, i) => {
       this.param[v.id] = {
         offset: -0.4 - i * 0.7, half: 1.2 + i * 0.7, slip: 1.0 + i * 1.3,
         markoutBias: i === 0 ? 0.6 : i === 1 ? 0.0 : -0.4,
         weight: Math.max(0.1, 0.55 - i * 0.22),
+        capDecades: Math.max(2.5, 4 - i * 0.35),
       };
     });
     this.notes.note('source.sim', 'simulated data — set DATA_SOURCE=live for on-chain quotes');
@@ -132,6 +139,22 @@ export class SimDataSource extends BaseSource {
   getFills(): Fill[] { return this.fills.map(stripFill); }
   getVolume(): DailyVolume[] { return this.days.map((d) => ({ ...d, byVenue: { ...d.byVenue } })); }
 
+  /** BID_ASK_DEPTH, simulated — the same model over the log-spaced grid, run
+   *  through the SAME builder live uses, so the panel exercises the real shape
+   *  (skewed legs, depth caps, one-sided venues) with no network. Free here:
+   *  the sim's quoter is arithmetic, not RPC, so there is nothing to throttle. */
+  private buildDepth(market: string): DepthSnapshot {
+    if (!config.depthEnabled) return { market, asOfBlock: this.block, refMid: 0, ts: Date.now(), venues: [] };
+    const sizes = depthSizes(config.depthSamples);
+    // the sim's bps are all measured off basePx — the same number quoteAt() uses
+    // as the mid, so refMid and the curve can never be anchored differently.
+    return buildDepthSnapshot(this.buildMatrix(sizes), market, sizes, this.basePx(market), this.block, Date.now());
+  }
+
+  protected onDepthDemand(market: string, active: boolean): void {
+    if (active) this.publishDepth(this.buildDepth(market));
+  }
+
   /** QUOTE_UPDATE_BURN, simulated. Which venues have a series mirrors live
    *  exactly: the adapters that declare gasSources() (venue-agnostic — a venue
    *  with an external oracle simply never declares the hook). Values are
@@ -170,29 +193,46 @@ export class SimDataSource extends BaseSource {
   }
 
   // ── quote model ─────────────────────────────────────────────────────────────
+  /** Half-spread in bps at a notional: a linear cost of size plus a CONVEX tail
+   *  that runs away as the notional approaches the venue's depth cap. Real
+   *  books/pools deplete rather than degrade linearly, and it is that bend the
+   *  BID_ASK_DEPTH curve exists to show — a linear model draws a straight line
+   *  and hides the thing being measured. */
+  private halfSpread(id: string, size: number): number {
+    const p = this.param[id];
+    const st = Math.log10(size / 100);
+    return p.half + p.slip * st + (st / p.capDecades) ** 3.6 * p.slip * 0.6 * p.capDecades;
+  }
+
+  /** True while the venue can still fill the whole notional (QuoteRow.filledFull). */
+  private fillsFull(id: string, size: number): boolean {
+    return Math.log10(size / 100) <= this.param[id].capDecades + 1e-9;
+  }
+
   private quoteAt(id: string, market: string, size: number): { bidBps: number; askBps: number; bidPx: number; askPx: number } {
     const mid = this.basePx(market);
-    const p = this.param[id];
-    const sizeStep = Math.log10(size / 100);
-    const hsz = p.half + p.slip * sizeStep;
-    const o = p.offset;
+    const hsz = this.halfSpread(id, size);
+    const o = this.param[id].offset;
     const bid = o - hsz, ask = o + hsz;
     return { bidBps: bid, askBps: ask, bidPx: mid * (1 + bid / 1e4), askPx: mid * (1 + ask / 1e4) };
   }
 
-  private buildMatrix(): QuoteRow[] {
+  /** One quote matrix over an arbitrary notional grid. The four SIZE pills feed
+   *  the streamed frame; the log-spaced depth grid feeds BID_ASK_DEPTH — same
+   *  model, same params, so the two agree wherever the grids overlap. */
+  private buildMatrix(sizes: readonly number[] = SIZES_USD): QuoteRow[] {
     const ts = Date.now();
     const rows: QuoteRow[] = [];
     for (const v of this.display) {
       for (const market of MARKETS) {
-        for (const size of SIZES_USD) {
+        for (const size of sizes) {
           const q = this.quoteAt(v.id, market, size);
           const sizeStep = Math.log10(size / 100);
           rows.push({
             venueId: v.id, market, sizeUsd: size,
             bidBps: q.bidBps, askBps: q.askBps, bidPx: q.bidPx, askPx: q.askPx,
             spreadBps: q.askBps - q.bidBps,
-            filledFull: size < 100000,
+            filledFull: this.fillsFull(v.id, size),
             feeBps: v.kind === 'amm' ? 0.3 + 0.04 * sizeStep : 0,
             ts,
           });
@@ -203,13 +243,13 @@ export class SimDataSource extends BaseSource {
     // parity with live: feeBps = the mock pool's tier (0.05% → 5bps).
     for (const v of this.baselines) {
       for (const market of MARKETS) {
-        for (const size of SIZES_USD) {
+        for (const size of sizes) {
           const q = this.quoteAt(v.id, market, size);
           rows.push({
             venueId: v.id, market, sizeUsd: size,
             bidBps: q.bidBps, askBps: q.askBps, bidPx: q.bidPx, askPx: q.askPx,
             spreadBps: q.askBps - q.bidBps,
-            filledFull: true, feeBps: 5, ts,
+            filledFull: this.fillsFull(v.id, size), feeBps: 5, ts,
           });
         }
       }
@@ -223,9 +263,11 @@ export class SimDataSource extends BaseSource {
       const refId = cexForBase(base);
       if (!refIds.has(refId)) continue;
       const takerBps = refId === 'binance' ? config.binanceTakerBps : config.takerBps;
-      const half = 0.15 + takerBps;
       const mid = this.basePx(market);
-      for (const size of SIZES_USD) {
+      for (const size of sizes) {
+        // fee-dominated and barely size-sensitive — the CEX leg is the wide,
+        // near-vertical reference the on-chain curves are read against.
+        const half = 0.15 + takerBps + 0.08 * Math.log10(size / 100);
         const bid = -half, ask = half;
         refRows.push({
           venueId: refId, market, sizeUsd: size,
@@ -365,6 +407,9 @@ export class SimDataSource extends BaseSource {
     this.spawnFill();
     this.emitMsg({ ch: 'state', data: this.getState() });
     this.emitMsg({ ch: 'quotes', data: this.getQuotes() });
+    if (config.depthEnabled) {
+      for (const market of this.depthDemandedMarkets()) this.publishDepth(this.buildDepth(market));
+    }
     const last = this.days[this.days.length - 1];
     if (last) this.emitMsg({ ch: 'volume', data: { ...last, byVenue: { ...last.byVenue } } });
   }

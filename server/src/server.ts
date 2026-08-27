@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { STREAM_PATH, LEADERBOARD_WINDOW_DAYS, type MarketsResponse, type StreamMessage } from '@shared';
+import { MARKETS, STREAM_PATH, LEADERBOARD_WINDOW_DAYS, type MarketsResponse, type StreamMessage } from '@shared';
 import type { DataSource } from './datasource/index.js';
 import { config } from './config.js';
 import { venueMeta } from './venues/registry.js';
@@ -15,6 +15,7 @@ import { venueMeta } from './venues/registry.js';
 export const MAX_BACKLOG_BYTES = 1_000_000;
 /** Ping cadence; one unanswered round (≥ this long) terminates the client. */
 export const HEARTBEAT_MS = 30_000;
+const DEPTH_HEARTBEAT_MS = 15_000;
 
 /** What to do with one stream client on a broadcast. Pure so the backpressure
  *  policy is unit-tested — a wrong 'cut' here would disconnect real users, and
@@ -22,6 +23,30 @@ export const HEARTBEAT_MS = 30_000;
 export function streamAction(readyState: number, bufferedAmount: number): 'send' | 'drop' | 'cut' {
   if (readyState !== WebSocket.OPEN) return 'drop';           // closing/closed — forget it
   return bufferedAmount > MAX_BACKLOG_BYTES ? 'cut' : 'send'; // hopeless vs healthy
+}
+
+type SseWriter = {
+  readonly destroyed: boolean;
+  readonly writableLength: number;
+  write(chunk: string): unknown;
+  destroy(): unknown;
+};
+
+/** A disconnect can race the destroyed check. Contain both that write failure
+ *  and slow-client backlog to this response instead of the server process. */
+export function trySseWrite(response: SseWriter, chunk: string): boolean {
+  if (response.destroyed) return false;
+  if (response.writableLength > MAX_BACKLOG_BYTES) {
+    response.destroy();
+    return false;
+  }
+  try {
+    response.write(chunk);
+    return true;
+  } catch {
+    response.destroy();
+    return false;
+  }
 }
 
 /**
@@ -73,6 +98,53 @@ export function startServer(source: DataSource): Server {
     const size = positiveNumberParam(req.query.size);
     if (!market || size === undefined) return res.status(400).json({ error: 'market and size query params required' });
     res.json(source.quoteHistory(market, size));
+  });
+  // Depth computation is owned by an isolated worker. REST is a cache read only;
+  // it can never open RPC work on this event loop.
+  app.get('/api/depth', (req, res) => {
+    const market = depthMarketParam(req.query.market);
+    if (!market) return res.status(400).json({ error: 'market must be registered' });
+    const publication = source.getDepth(market);
+    if (!publication) return res.status(503).json({ error: 'depth warming' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('application/json').send(publication.json);
+  });
+
+  // One-way demand + updates are a natural SSE stream: the first viewer starts
+  // the market in the worker, every other viewer shares it, and only completed
+  // snapshots cross into this process. Pre-serialized payloads keep fanout cheap.
+  app.get('/api/depth/stream', (req, res) => {
+    const market = depthMarketParam(req.query.market);
+    if (!market) return res.status(400).json({ error: 'market must be registered' });
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    let closed = false;
+    let unwatch = () => {};
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      if (heartbeat) clearInterval(heartbeat);
+      unwatch();
+    };
+    const write = (chunk: string) => {
+      if (!closed && !trySseWrite(res, chunk)) cleanup();
+    };
+    res.once('close', cleanup);
+    res.once('error', cleanup);
+    write('retry: 1000\n\n');
+    if (closed) return;
+    heartbeat = setInterval(() => {
+      write(': keepalive\n\n');
+    }, DEPTH_HEARTBEAT_MS);
+    heartbeat.unref();
+    unwatch = source.watchDepth(market, (publication) => write(`data: ${publication.json}\n\n`));
+    if (closed) unwatch();
   });
   app.get('/api/fills', (req, res) => {
     // ?days=N → last N days (from the persisted store); ?limit caps the count.
@@ -198,4 +270,9 @@ function positiveNumberParam(v: unknown): number | undefined {
   if (typeof raw !== 'string' || raw.trim() === '') return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function depthMarketParam(v: unknown): string | undefined {
+  const raw = Array.isArray(v) ? v[0] : v;
+  return typeof raw === 'string' && (MARKETS as readonly string[]).includes(raw) ? raw : undefined;
 }
