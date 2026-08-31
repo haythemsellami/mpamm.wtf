@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtAmt, fmtAmtFull, fmtPx } from './format';
+import { fmtAmt, fmtAmtFull, fmtPx, fmtUsd, fmtVolUsd } from './format';
 
 /**
  * With the token's decimals, an amount is rendered EXACTLY as it traded —
@@ -160,5 +160,43 @@ describe('quote-chart tick precision', () => {
       [3082868, 3088146],   // BTC/MON
     ];
     for (const [mn, mx] of bands) expect(new Set(tickLabels(mn, mx)).size).toBe(5);
+  });
+});
+
+/**
+ * Volume passed $1B on 2026-08-31 and the millions rung started printing
+ * "$1016.10M" — a number the eye has to parse digit by digit, at a resolution
+ * (±$10M) coarser than a whole week of Monad flow.
+ */
+describe('fmtVolUsd — the rung matches the magnitude', () => {
+  it('prints past a billion in billions, to $1M of resolution', () => {
+    expect(fmtVolUsd(1_016_100_000)).toBe('$1.016B'); // the live all-time total
+    expect(fmtVolUsd(1_017_400_000)).toBe('$1.017B'); // one $1.3M day later — the tile MOVED
+    expect(fmtVolUsd(23_456_700_000)).toBe('$23.457B');
+  });
+
+  it('keeps the millions and thousands rungs unchanged', () => {
+    expect(fmtVolUsd(1_016_100)).toBe('$1.02M');
+    expect(fmtVolUsd(12_340_000)).toBe('$12.34M');
+    expect(fmtVolUsd(420_000)).toBe('$420k');
+    expect(fmtVolUsd(0)).toBe('$0k');
+  });
+
+  it('never prints a rung at the magnitude above it', () => {
+    // Rounding at 2dp/0dp can carry a value INTO the next rung's territory, so
+    // each threshold is set where that carry happens — not at the round 1e9/1e6.
+    expect(fmtVolUsd(999_994_000)).toBe('$999.99M');
+    expect(fmtVolUsd(999_999_000)).toBe('$1.000B'); // would have been "$1000.00M"
+    expect(fmtVolUsd(999_400)).toBe('$999k');
+    expect(fmtVolUsd(999_900)).toBe('$1.00M');      // would have been "$1000k"
+  });
+});
+
+describe('fmtUsd — same billions rung, for a leaderboard row that outgrows $1B', () => {
+  it('scales to B and leaves every rung below it alone', () => {
+    expect(fmtUsd(1_016_100_000)).toBe('$1.016B');
+    expect(fmtUsd(1_234_000)).toBe('$1.23M');
+    expect(fmtUsd(4_500)).toBe('$4.5k');
+    expect(fmtUsd(12.34)).toBe('$12.34');
   });
 });

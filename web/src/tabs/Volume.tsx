@@ -3,7 +3,7 @@ import type { DailyVolume } from '@shared';
 import { useDashboard } from '../store';
 import { useViewport } from '../lib/viewport';
 import { C, pill, venueColor } from '../theme';
-import { fMillions } from '../lib/format';
+import { fmtVolUsd } from '../lib/format';
 
 /** MM-DD from a 'YYYY-MM-DD' UTC day. */
 const mmdd = (utcDay: string): string => utcDay.slice(5);
@@ -234,7 +234,7 @@ export function VolumeTab() {
     // "$0" is honest for a live-but-quiet venue, misleading for one not deployed yet.
     const existsOn = (s: SeriesDef, x: DailyVolume) => !s.since || x.utcDay >= s.since;
 
-    const f = (m: number) => fMillions(m);
+    const f = (m: number) => fmtVolUsd(m);
 
     // first UTC day this venue recorded any notional (venue-agnostic; '—' if none).
     const firstActive = (s: SeriesDef): string => {
