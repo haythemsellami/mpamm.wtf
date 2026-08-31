@@ -8,12 +8,21 @@ export function sizeLabel(s: number): string {
   return s >= 1000 ? '$' + s / 1000 + 'k' : '$' + s;
 }
 
+/**
+ * Lowest value that belongs on a rung — the point where the rung BELOW would
+ * ROUND UP into it. A rung selected at its round unit (x >= 1e6) still prints
+ * the magnitude above it, because the rounding happens after the selection:
+ * $999,999 renders "$1000.0k", which is the very label the B rung exists to
+ * get rid of. `dpBelow` is the decimal count that lower rung prints.
+ */
+const rungMin = (unit: number, dpBelow: number) => unit - unit / 1000 * 0.5 * 10 ** -dpBelow;
+
 /** $1.016B / $1.23M / $4.5k / $12.34 (DCLogic.fmtUsd).
  *  The B rung carries 3dp for the reason spelled out on `fmtVolUsd`. */
 export function fmtUsd(x: number): string {
-  return x >= 1e9 ? '$' + (x / 1e9).toFixed(3) + 'B'
-    : x >= 1e6 ? '$' + (x / 1e6).toFixed(2) + 'M'
-      : x >= 1e3 ? '$' + (x / 1e3).toFixed(1) + 'k'
+  return x >= rungMin(1e9, 2) ? '$' + (x / 1e9).toFixed(3) + 'B'
+    : x >= rungMin(1e6, 1) ? '$' + (x / 1e6).toFixed(2) + 'M'
+      : x >= rungMin(1e3, 2) ? '$' + (x / 1e3).toFixed(1) + 'k'
         : '$' + x.toFixed(2);
 }
 
@@ -27,13 +36,12 @@ export function fmtUsd(x: number): string {
  * would sit frozen for days, reading as a stalled feed. 3dp is $1M of
  * resolution, which moves daily and still fits the tile.
  *
- * Each threshold tests the value at which the tier BELOW would round up into
- * the tier above, so no rung ever prints the next one's magnitude ($999,999k,
- * $1000.00M).
+ * The k rung prints whole thousands here (0dp), so its carry point sits lower
+ * than fmtUsd's — hence `rungMin` per rung rather than one shared constant.
  */
 export function fmtVolUsd(usd: number): string {
-  if (usd >= 999_995_000) return '$' + (usd / 1e9).toFixed(3) + 'B';
-  if (usd >= 999_500) return '$' + (usd / 1e6).toFixed(2) + 'M';
+  if (usd >= rungMin(1e9, 2)) return '$' + (usd / 1e9).toFixed(3) + 'B';
+  if (usd >= rungMin(1e6, 0)) return '$' + (usd / 1e6).toFixed(2) + 'M';
   return '$' + (usd / 1e3).toFixed(0) + 'k';
 }
 

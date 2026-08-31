@@ -199,4 +199,16 @@ describe('fmtUsd — same billions rung, for a leaderboard row that outgrows $1B
     expect(fmtUsd(4_500)).toBe('$4.5k');
     expect(fmtUsd(12.34)).toBe('$12.34');
   });
+
+  it('switches rung where the one below ROUNDS UP, not at the round unit', () => {
+    // Selecting on x >= 1e9/1e6/1e3 rounds these one magnitude past their own
+    // rung — "$1000.00M", "$1000.0k", "$1000.00" — the label this ladder exists
+    // to remove. Each pair below straddles a carry point.
+    expect(fmtUsd(999_994_000)).toBe('$999.99M');
+    expect(fmtUsd(999_999_999)).toBe('$1.000B');
+    expect(fmtUsd(999_949)).toBe('$999.9k');
+    expect(fmtUsd(999_999)).toBe('$1.00M');
+    expect(fmtUsd(999.99)).toBe('$999.99');
+    expect(fmtUsd(999.999)).toBe('$1.0k');
+  });
 });
