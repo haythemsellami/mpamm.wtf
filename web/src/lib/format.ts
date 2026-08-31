@@ -11,17 +11,41 @@ export function sizeLabel(s: number): string {
   return s >= 1000 ? '$' + s / 1000 + 'k' : '$' + s;
 }
 
-/** $1.23M / $4.5k / $12.34 (DCLogic.fmtUsd). */
+/**
+ * Lowest value that belongs on a rung — the point where the rung BELOW would
+ * ROUND UP into it. A rung selected at its round unit (x >= 1e6) still prints
+ * the magnitude above it, because the rounding happens after the selection:
+ * $999,999 renders "$1000.0k", which is the very label the B rung exists to
+ * get rid of. `dpBelow` is the decimal count that lower rung prints.
+ */
+const rungMin = (unit: number, dpBelow: number) => unit - unit / 1000 * 0.5 * 10 ** -dpBelow;
+
+/** $1.016B / $1.23M / $4.5k / $12.34 (DCLogic.fmtUsd).
+ *  The B rung carries 3dp for the reason spelled out on `fmtVolUsd`. */
 export function fmtUsd(x: number): string {
-  return x >= 1e6 ? '$' + (x / 1e6).toFixed(2) + 'M'
-    : x >= 1e3 ? '$' + (x / 1e3).toFixed(1) + 'k'
-      : '$' + x.toFixed(2);
+  return x >= rungMin(1e9, 2) ? '$' + (x / 1e9).toFixed(3) + 'B'
+    : x >= rungMin(1e6, 1) ? '$' + (x / 1e6).toFixed(2) + 'M'
+      : x >= rungMin(1e3, 2) ? '$' + (x / 1e3).toFixed(1) + 'k'
+        : '$' + x.toFixed(2);
 }
 
-/** millions-scaled (DCLogic.f$) — input already in USD. */
-export function fMillions(usd: number): string {
-  const m = usd / 1e6;
-  return m >= 1 ? '$' + m.toFixed(2) + 'M' : '$' + (m * 1000).toFixed(0) + 'k';
+/**
+ * USD at volume scale (DCLogic.f$) — $420k / $12.34M / $1.016B. Input is
+ * already USD; the tiles, axis labels and legends all read through here, so
+ * one number never appears in two different scales on the same screen.
+ *
+ * Billions carry THREE decimals where millions carry two. At 2dp the label
+ * advances one tick per $10M, and Monad days run $1–5M — the all-time tile
+ * would sit frozen for days, reading as a stalled feed. 3dp is $1M of
+ * resolution, which moves daily and still fits the tile.
+ *
+ * The k rung prints whole thousands here (0dp), so its carry point sits lower
+ * than fmtUsd's — hence `rungMin` per rung rather than one shared constant.
+ */
+export function fmtVolUsd(usd: number): string {
+  if (usd >= rungMin(1e9, 2)) return '$' + (usd / 1e9).toFixed(3) + 'B';
+  if (usd >= rungMin(1e6, 0)) return '$' + (usd / 1e6).toFixed(2) + 'M';
+  return '$' + (usd / 1e3).toFixed(0) + 'k';
 }
 
 /** Doubles carry ~15–17 significant digits; 15 is the last one always safe.
