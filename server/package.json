@@ -15,7 +15,7 @@
     "@mpamm/shared": "*",
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "viem": "^2.55.16",
+    "viem": "^2.56.0",
     "ws": "^8.21.3"
   },
   "devDependencies": {
@@ -25,7 +25,7 @@
     "@types/ws": "^8.5.13",
     "tsx": "^4.23.12",
     "typescript": "^5.7.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "license": "AGPL-3.0-only"
 }
