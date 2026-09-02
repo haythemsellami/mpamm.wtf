@@ -34,7 +34,15 @@ function setHidden(hidden: boolean): void {
   document.dispatchEvent(new Event('visibilitychange'));
 }
 
+/** Dispose every stream a test opened, even when it fails mid-assertion: a
+ *  leaked visibilitychange listener reopens sockets inside LATER tests and
+ *  turns one real failure into a confusing cascade. Disposers are idempotent,
+ *  so tests still dispose explicitly where that is the thing under test. */
+const opened: Array<() => void> = [];
+const track = (dispose: () => void): (() => void) => { opened.push(dispose); return dispose; };
+
 afterEach(() => {
+  for (const dispose of opened.splice(0)) dispose();
   vi.unstubAllGlobals();
   vi.useRealTimers();
   setHidden(false);
@@ -46,7 +54,7 @@ describe('connectDepth', () => {
   it('opens one market-scoped stream, validates events and closes cleanly', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     const onSnapshot = vi.fn();
-    const dispose = connectDepth('MON/USDC', onSnapshot);
+    const dispose = track(connectDepth('MON/USDC', onSnapshot));
     const stream = FakeEventSource.instances[0];
     const snapshot = { market: 'MON/USDC', asOfBlock: 12, ts: 34, refMid: 1, venues: [] } satisfies DepthSnapshot;
 
@@ -74,7 +82,7 @@ describe('suspending a hidden tab', () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', FakeWebSocket);
     const onState = vi.fn();
-    const dispose = connectStream(vi.fn(), onState);
+    const dispose = track(connectStream(vi.fn(), onState));
     const ws = FakeWebSocket.instances[0];
     ws.open();
     expect(onState).toHaveBeenLastCalledWith('live');
@@ -93,7 +101,7 @@ describe('suspending a hidden tab', () => {
   it('does not reconnect while the tab stays hidden', () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', FakeWebSocket);
-    const dispose = connectStream(vi.fn(), vi.fn());
+    const dispose = track(connectStream(vi.fn(), vi.fn()));
     FakeWebSocket.instances[0].open();
 
     setHidden(true);
@@ -109,7 +117,7 @@ describe('suspending a hidden tab', () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', FakeWebSocket);
     const onState = vi.fn();
-    const dispose = connectStream(vi.fn(), onState);
+    const dispose = track(connectStream(vi.fn(), onState));
     FakeWebSocket.instances[0].open();
     setHidden(true);
     vi.advanceTimersByTime(HIDDEN_GRACE_MS);
@@ -125,7 +133,7 @@ describe('suspending a hidden tab', () => {
   it('ignores a quick alt-tab', () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', FakeWebSocket);
-    const dispose = connectStream(vi.fn(), vi.fn());
+    const dispose = track(connectStream(vi.fn(), vi.fn()));
     const ws = FakeWebSocket.instances[0];
     ws.open();
 
@@ -143,7 +151,7 @@ describe('suspending a hidden tab', () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', FakeWebSocket);
     const onState = vi.fn();
-    const dispose = connectStream(vi.fn(), onState);
+    const dispose = track(connectStream(vi.fn(), onState));
     FakeWebSocket.instances[0].open();
 
     FakeWebSocket.instances[0].close();          // the network, not us
@@ -158,7 +166,7 @@ describe('suspending a hidden tab', () => {
     vi.useFakeTimers();
     vi.stubGlobal('EventSource', FakeEventSource);
     const onSnapshot = vi.fn();
-    const dispose = connectDepth('MON/USDC', onSnapshot);
+    const dispose = track(connectDepth('MON/USDC', onSnapshot));
     expect(FakeEventSource.instances).toHaveLength(1);
 
     setHidden(true);
@@ -176,10 +184,42 @@ describe('suspending a hidden tab', () => {
     dispose();
   });
 
+  // Opening a link in a background tab — and browser session restore, which
+  // loads many tabs hidden at once — never fires visibilitychange until the
+  // tab is first focused. An event-only gate would let exactly those tabs
+  // stream unwatched forever, which is the worst case it exists to prevent.
+  it('suspends a WS opened into an already-hidden tab', () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', FakeWebSocket);
+    setHidden(true);                              // hidden BEFORE the stream opens
+    const dispose = track(connectStream(vi.fn(), vi.fn()));
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+
+    vi.advanceTimersByTime(HIDDEN_GRACE_MS);
+    expect(ws.closed).toBe(true);
+
+    // and it still recovers when the tab is finally looked at
+    setHidden(false);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    dispose();
+  });
+
+  it('suspends a depth stream opened into an already-hidden tab', () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('EventSource', FakeEventSource);
+    setHidden(true);
+    const dispose = track(connectDepth('MON/USDC', vi.fn()));
+
+    vi.advanceTimersByTime(HIDDEN_GRACE_MS);
+    expect(FakeEventSource.instances[0].closed).toBe(true);
+    dispose();
+  });
+
   it('stops watching visibility once disposed', () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', FakeWebSocket);
-    const dispose = connectStream(vi.fn(), vi.fn());
+    const dispose = track(connectStream(vi.fn(), vi.fn()));
     FakeWebSocket.instances[0].open();
     dispose();
 

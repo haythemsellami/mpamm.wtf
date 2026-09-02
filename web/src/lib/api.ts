@@ -40,6 +40,13 @@ export function whileVisible(suspend: () => void, resume: () => void): () => voi
     else resume();
   };
   document.addEventListener('visibilitychange', onVisibilityChange);
+  // Seed from the CURRENT state, not just from future events: a tab opened in
+  // the background (cmd-click, "open in new tab", session restore) is hidden
+  // from load and fires no visibilitychange until it is first focused, so an
+  // event-only gate would let exactly those tabs stream unwatched forever.
+  // Only the suspend side is seeded — `resume` is the callers' reopen path and
+  // there is nothing to reopen before the first suspend.
+  if (document.hidden) grace = setTimeout(suspend, HIDDEN_GRACE_MS);
   return () => {
     document.removeEventListener('visibilitychange', onVisibilityChange);
     if (grace) clearTimeout(grace);
