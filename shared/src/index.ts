@@ -729,8 +729,29 @@ export interface MarketsResponse {
   volume: DailyVolume[];
 }
 
+/**
+ * `MarketState` as it travels on the WS stream.
+ *
+ * The state frame is re-broadcast on EVERY head advance and again after every
+ * quote (~6/s), so anything carried in it is paid for ~6 times a second by
+ * every connected tab. Two fields dominated it and neither had to be there:
+ * `venues` is an immutable registry (1.3KB) and `notes` is maintainer telemetry
+ * the dashboard never renders (10KB) — together ~11KB of a ~12KB frame, which
+ * was ~27% of ALL egress from the service (Render bandwidth audit, 2026-09).
+ *
+ * So the registry rides the hello frame ONCE per connection and `notes` never
+ * rides the stream at all. Both remain on `GET /api/markets` — which is
+ * brotli'd at the edge and re-fetched on connect and on every reconnect — so
+ * nothing is lost for maintainers or external consumers.
+ */
+export type StreamState = Omit<MarketState, 'venues' | 'notes'> & {
+  /** present ONLY on the hello frame; later frames omit it and the client keeps
+   *  the registry it already holds. */
+  venues?: VenueMeta[];
+};
+
 export type StreamMessage =
-  | { ch: 'state'; data: MarketState }
+  | { ch: 'state'; data: StreamState }
   | { ch: 'quotes'; data: QuoteSnapshot }
   | { ch: 'fill'; data: Fill }
   | { ch: 'volume'; data: DailyVolume };

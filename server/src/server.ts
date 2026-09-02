@@ -4,18 +4,68 @@ import { createServer, type Server } from 'node:http';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { MARKETS, STREAM_PATH, LEADERBOARD_WINDOW_DAYS, type MarketsResponse, type StreamMessage } from '@shared';
+import { MARKETS, STREAM_PATH, LEADERBOARD_WINDOW_DAYS, type MarketsResponse, type MarketState, type StreamMessage, type StreamState } from '@shared';
 import type { DataSource } from './datasource/index.js';
 import { config } from './config.js';
 import { venueMeta } from './venues/registry.js';
 
 /** Unsent bytes a stream client may accumulate before we cut it. ~20 quote
  *  ticks of backlog — generous for a real browser on a slow link, reached only
- *  by a peer that has stopped draining. */
+ *  by a peer that has stopped draining. Counted BEFORE compression (ws buffers
+ *  the payload while its deflate job is queued), so this stays a bound on the
+ *  frames a peer is behind, not on the bytes finally put on the wire. */
 export const MAX_BACKLOG_BYTES = 1_000_000;
 /** Ping cadence; one unanswered round (≥ this long) terminates the client. */
 export const HEARTBEAT_MS = 30_000;
 const DEPTH_HEARTBEAT_MS = 15_000;
+
+/**
+ * WS compression. The stream is repetitive JSON — the ~47KB quote frame
+ * deflates 6.0x and the state frame 4.6x — and NOTHING was compressing it:
+ * Render's edge brotli's the REST routes but a WebSocket is an opaque upgrade
+ * to it, and `ws` ships permessage-deflate off by default. That default cost
+ * ~230KB/s per open tab (~20GB/day, ~$3/day of egress).
+ *
+ * `ws` disables it for a real reason — zlib on Node fragments memory under
+ * concurrency — and this process has already been OOM-killed once (see the
+ * broadcast loop). So this is tuned for BOUNDED memory, not maximum ratio:
+ *
+ * - no context takeover on EITHER side ⇒ zlib retains no per-connection
+ *   sliding window between messages, so N idle clients cost O(1) instead of
+ *   O(N × ~300KB). The ratios above were measured frame-standalone, i.e. under
+ *   exactly this setting — giving up context takeover costs us nothing here,
+ *   because each frame is a full snapshot rather than a delta against the last.
+ * - `concurrencyLimit` caps simultaneous zlib jobs; excess work queues instead
+ *   of allocating in parallel.
+ * - `threshold` leaves small frames (fill/volume deltas, the lean state frame)
+ *   uncompressed, where a deflate block costs more than it saves.
+ *
+ * level 6 measured 0.22ms per quote frame — at ~3.2 frames/s/client that is
+ * single-digit ms of CPU per second even with tens of clients.
+ */
+export const PERMESSAGE_DEFLATE = {
+  zlibDeflateOptions: { level: 6 },
+  serverNoContextTakeover: true,
+  clientNoContextTakeover: true,
+  concurrencyLimit: 10,
+  threshold: 1024,
+} as const;
+
+/** The hello frame: everything the client needs to render, minus the
+ *  maintainer-only `notes` buffer (~10KB the dashboard never reads — it is
+ *  served by GET /api/markets, which the client fetches on connect anyway). */
+export function helloFrame(state: MarketState): StreamState {
+  const { notes: _notes, ...rest } = state;
+  return rest;
+}
+
+/** Every state frame after the hello: also drops the venue registry, which is
+ *  immutable for the life of the process. The client keeps the copy it got in
+ *  the hello (and re-fetches it with the REST snapshot on every reconnect). */
+export function tickFrame(state: StreamState): StreamState {
+  const { venues: _venues, ...rest } = helloFrame(state as MarketState);
+  return rest;
+}
 
 /** What to do with one stream client on a broadcast. Pure so the backpressure
  *  policy is unit-tested — a wrong 'cut' here would disconnect real users, and
@@ -193,15 +243,16 @@ export function startServer(source: DataSource): Server {
   }
 
   const httpServer = createServer(app);
-  const wss = new WebSocketServer({ server: httpServer, path: STREAM_PATH });
+  const wss = new WebSocketServer({ server: httpServer, path: STREAM_PATH, perMessageDeflate: PERMESSAGE_DEFLATE });
 
   const clients = new Set<WebSocket>();
   // Clients that owe us a pong from the last heartbeat round.
   const awaitingPong = new Set<WebSocket>();
   wss.on('connection', (ws) => {
     clients.add(ws);
-    // hello with current state so a client can render before the next tick
-    safeSend(ws, { ch: 'state', data: source.getState() });
+    // hello with current state so a client can render before the next tick.
+    // This is the ONLY frame carrying the venue registry (see StreamState).
+    safeSend(ws, { ch: 'state', data: helloFrame(source.getState()) });
     safeSend(ws, { ch: 'quotes', data: source.getQuotes() });
     ws.on('pong', () => awaitingPong.delete(ws));
     ws.on('close', () => drop(ws));
@@ -211,11 +262,14 @@ export function startServer(source: DataSource): Server {
   const cut = (ws: WebSocket) => { drop(ws); try { ws.terminate(); } catch { /* already gone */ } };
 
   const onMessage = (m: StreamMessage) => {
-    const payload = JSON.stringify(m);
+    // Serialize ONCE for the whole fanout, and strip the state frame down to
+    // what actually changes (see StreamState — this is the single biggest
+    // egress win in the protocol).
+    const payload = JSON.stringify(m.ch === 'state' ? { ch: 'state', data: tickFrame(m.data) } : m);
     for (const ws of clients) {
       // BACKPRESSURE: a stalled peer (sleeping laptop, backgrounded phone,
       // half-dead TCP) never closes, so every frame we push queues in OUR
-      // heap — the quote tick alone is ~46KB at 2/s, ~330MB per stalled
+      // heap — the quote tick alone is ~46KB at ~3/s, ~500MB per stalled
       // client per hour. That OOM-killed prod (heap 311MB after 18h uptime,
       // 2026-07-29). A live dashboard gains nothing from replaying a stale
       // backlog, so cut anyone who falls this far behind; their browser
