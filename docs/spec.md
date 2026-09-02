@@ -153,7 +153,7 @@ GET /api/volume?from=&to=          daily series
 GET /api/fills?days=&limit=        recent fills (the tape)
 GET /api/leaderboard?days=1|7|30   server-side aggregates
 GET /api/gas                       quote-update burn series (+ approx venue ids)
-WS  /stream                        channels: state, quotes, fill, volume
+WS  /stream                        channels: state, quotes, fill, volume (compressed; state = hello + lean ticks)
 ```
 
 ---
@@ -179,5 +179,5 @@ WS  /stream                        channels: state, quotes, fill, volume
 - **Fail-closed indexing**: required-source failures hold the cursor; ticks are re-entrancy-guarded; discovery merges (never shrinks) its cache; `logSources()` throws until discovery is ready.
 - **Boot**: live boot fail-fasts on a chain sanity check (chain id, Multicall3) so a supervisor restarts it. The simulator (`DATA_SOURCE=sim`) is the explicit offline mode — registry-driven, same contract, never a silent fallback.
 - **Every long job is cursor-resumable** and commits atomically with its cursor — kills mid-scan never double-count.
-- **Developer notes**: every degradation (starving feed, deferred archive, skipped ranges) is surfaced in `state.notes` as `{ ts, level, code, venue?, msg }`, sanitized so credentials never leak. Maintainer-facing telemetry, not rendered in the UI.
+- **Developer notes**: every degradation (starving feed, deferred archive, skipped ranges) is surfaced in `state.notes` as `{ ts, level, code, venue?, msg }`, sanitized so credentials never leak. Maintainer-facing telemetry, not rendered in the UI — and read from `GET /api/markets` or the service log, never from the WS stream, which does not carry it.
 - **Deploy**: single container, one replica (single-writer SQLite + in-memory state), persistent disk. See [deploy.md](deploy.md).

@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { MarketState, QuoteSnapshot, QuoteRow, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse } from '@shared';
+import type { MarketState, StreamState, QuoteSnapshot, QuoteRow, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse } from '@shared';
 import { pairOf, cexForBase } from '@shared';
 import { fetchMarkets, fetchFills, fetchLeaderboard, fetchGas, fetchQuoteHistory, connectStream } from './lib/api';
 import { pathForTab, tabFromPath, urlForTab, type Tab } from './lib/tab-route';
@@ -89,6 +89,16 @@ export const useDashboard = (): Dashboard => {
 
 /** venue ids carried by the current registry — drives the per-venue buffers. */
 const venueIds = (state: MarketState | null): string[] => (state?.venues ?? []).map((v) => v.id);
+
+/** The stream ships the venue registry ONLY on the hello frame (see StreamState
+ *  — it is immutable and was costing 1.3KB on each of ~6 frames/s). Re-attach
+ *  the copy we already hold so every consumer downstream still sees a complete
+ *  MarketState. A frame that arrives before we have a registry at all is dropped
+ *  rather than rendered: a venue-less state would blank every venue-keyed view. */
+const mergeState = (prev: MarketState | null, next: StreamState): MarketState | null => {
+  const venues = next.venues ?? prev?.venues;
+  return venues ? { ...next, venues } : prev;
+};
 
 function rowFor(q: QuoteSnapshot | null, venueId: string, market: string, size: number): QuoteRow | undefined {
   return q?.rows.find((r) => r.venueId === venueId && r.market === market && r.sizeUsd === size);
@@ -283,7 +293,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     loadSnapshot();
 
     const dispose = connectStream((msg) => {
-      if (msg.ch === 'state') { setState(msg.data); adoptVenues(msg.data.venues ?? []); }
+      if (msg.ch === 'state') {
+        setState((prev) => mergeState(prev, msg.data));
+        if (msg.data.venues) adoptVenues(msg.data.venues);
+      }
       else if (msg.ch === 'quotes') { setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1); }
       else if (msg.ch === 'volume') { if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data)); }
       else if (msg.ch === 'fill') {
