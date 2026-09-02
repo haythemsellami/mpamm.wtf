@@ -135,10 +135,20 @@ GET /api/volume?from=&to=          daily series (DailyVolume.byVenue)
 GET /api/fills?days=&limit=        recent fills (the tape)
 GET /api/leaderboard?days=1|7|30   server-side aggregated leaderboard/markout stats
 GET /api/gas                       QUOTE_UPDATE_BURN series (+ approx venue ids)
-WS  /stream                        channels: state, quotes, fill, volume
+WS  /stream                        channels: state, quotes, fill, volume (compressed; state = hello + lean ticks)
 ```
 
 The leaderboard aggregates server-side on purpose: shipping raw fills truncated the 7/30-day windows at any sane fetch cap. The browser gets small TAKER-signed group rows and derives the MAKER view as a pure sign flip.
+
+### Stream frames
+
+The WS stream is the service's dominant egress cost: it fans out to every open tab ~6×/s, so a byte added to a frame is billed (clients × 6/s × forever). A 2026-09 audit measured 228KB/s per open tab — 20GB/day each — and the protocol now reflects what that taught us.
+
+- **The `state` frame is split into a hello and a tick** (`StreamState` in `@shared`; `helloFrame`/`tickFrame` in `server.ts`). The hello, sent once per connection, carries the venue registry the client needs to render anything. Every frame after it omits the registry — it is immutable for the process's life — and the client re-attaches the copy it holds. `notes` rides neither: it is maintainer telemetry the dashboard never renders, and it was 10KB of a 12KB frame. Both remain on `GET /api/markets`, which the edge compresses and the client re-fetches on connect and on every reconnect, so no consumer lost anything.
+- **The socket is compressed.** Render's edge brotli's the REST routes, but a WebSocket upgrade is opaque to it and `ws` ships permessage-deflate off by default, so nothing was compressing the largest lane in the system. It is enabled with **no context takeover in either direction**: zlib then keeps no per-connection window between messages, which bounds memory at O(1) rather than O(clients) — the shape of the 2026-07 OOM. Frames are full snapshots, not deltas, so giving up context takeover costs no ratio (~6× on a quote frame either way).
+- **Hidden tabs stream nothing.** A backgrounded tab renders nothing, so after 60s hidden the client suspends both live streams (WS and depth SSE) and resumes on return through the same resync path a dropped connection uses. The grace period keeps a quick alt-tab from thrashing the connection; a visible-but-unfocused window keeps streaming, which is what side-by-side monitoring needs.
+
+Anything snapshot-shaped belongs on REST rather than in a frame. `server/src/__tests__/stream-egress.test.ts` and `web/src/lib/api.test.ts` lock all three properties in — none of them is visible in normal use, so only a test keeps them from regressing.
 
 ## Operations & reliability
 
@@ -149,7 +159,7 @@ The leaderboard aggregates server-side on purpose: shipping raw fills truncated 
 - **Fail-loud registry**: duplicate/invalid venue ids throw at startup; fills/quotes for undeclared venue ids are dropped with a public note, never silently stored.
 - **Boot sanity**: live mode fail-fasts on chain id 143 + Multicall3 presence rather than half-starting — but a dead primary with a healthy backup boots degraded instead of failing; wrong-chain backups are dropped loudly, a wrong-chain primary stays fatal. The ARCHIVE pool is verified too, with a deliberate split: an **unreachable** archive is NOT fatal — deep crawls are background work whose cursors hold on failure, so it costs history that resumes later, while refusing to boot would also take down live quoting, which needs no history at all. A **wrong-chain** archive primary IS fatal, because it answers successfully: the breaker can never fail away from it (only transport errors switch endpoints) and the deep crawls would persist another chain's logs as ours. Wrong history cannot be unmixed; missing history heals.
 - **Self-healing discovery**: every adapter's `discover()` re-runs periodically (default 10 min) and must merge, never replace, its cache.
-- **Developer notes**: `state.notes` (on `/api/markets`, and the same lines on stdout) carries every degradation and lifecycle event — starving reference feeds, deferred archives, skipped RPC holes, held cursors. Each entry is `{ ts, level, code, venue?, msg }` (`@shared`: `StateNote`), so a consumer filters on `level` or a `code` prefix instead of parsing prose. Messages are sanitized (URLs stripped) so a private RPC key can never leak. The served window is capped, charging overflow to the noisiest subsystem so one chatty crawl cannot evict the note that explains an incident. This is a maintainer/contributor channel: the dashboard does not render it.
+- **Developer notes**: `state.notes` (on `/api/markets`, and the same lines on stdout — deliberately NOT on the WS stream, see *Stream frames*) carries every degradation and lifecycle event — starving reference feeds, deferred archives, skipped RPC holes, held cursors. Each entry is `{ ts, level, code, venue?, msg }` (`@shared`: `StateNote`), so a consumer filters on `level` or a `code` prefix instead of parsing prose. Messages are sanitized (URLs stripped) so a private RPC key can never leak. The served window is capped, charging overflow to the noisiest subsystem so one chatty crawl cannot evict the note that explains an incident. This is a maintainer/contributor channel: the dashboard does not render it.
 
 ## Where addresses & ABIs live
 
