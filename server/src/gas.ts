@@ -84,13 +84,20 @@ export function hasCoverageEvidence(window: string[], nonzeroDays: Set<string>):
  * accrual are the same loop, so there is no separate onboarding stage.
  *
  * Monad charges gas_limit, and receipts report gasUsed == limit, so a tx's
- * true cost is exactly receipt.gasUsed × effectiveGasPrice — no estimation on
- * the cost side. Two enumeration modes (see GasSource):
- *  - 'logs':   update events → EXACT tx counts; cost receipt-sampled per chunk
- *              (keeper gas limits are flat → sub-1% error, counts untouched).
+ * true cost is exactly receipt.gasUsed × effectiveGasPrice — per receipt. The
+ * DAY total is still an estimate in BOTH modes, because neither mode reads
+ * every receipt (see GasSource):
+ *  - 'logs':   update events → EXACT tx counts; cost = a strided receipt
+ *              sample per chunk × the chunk's tx count. Costs are heavy-tailed
+ *              (ThogAMM 2026-09-03: 0.8% of pushes at 20× gas and up to
+ *              5,468 gwei carried ~40% of the day; exact 3,454 MON vs 3,332
+ *              served), so the sample lands within ~5-10%, not the sub-1%
+ *              a flat-fee keeper would give.
  *  - 'blocks': no events (POE setData) → sampled eth_getBlockReceipts scaled
- *              by stride; ESTIMATE (approx venue, UI shows ≈). Only sound for
- *              a near-constant-cadence keeper.
+ *              by stride; counts AND cost estimated. Only sound for a
+ *              near-constant-cadence keeper.
+ * Every venue with resolved sources is therefore an `approx` venue (UI shows
+ * ≈ on the MON figure; logs-mode tx counts stay exact and unmarked).
  *
  * Crash-safety: increments are ADDITIVE, committed atomically WITH the venue's
  * cursor (VolumeStore.applyGas) — a crash can never double-count. Known blind
@@ -102,8 +109,9 @@ export class GasTracker {
   private stopped = false;
   private running = false;
   private timer?: ReturnType<typeof setTimeout>;
-  /** venues whose numbers are sampled estimates — sticky, persisted as meta so
-   *  the ≈ marker survives restarts even before the venue's sources resolve. */
+  /** venues whose MON figures are sampled estimates (every mode — see the
+   *  header) — sticky, persisted as meta so the ≈ marker survives restarts
+   *  even before the venue's sources resolve. */
   private approx = new Set<string>();
   private noted = new Set<string>();
   private writer: StoreWriter;
@@ -141,7 +149,8 @@ export class GasTracker {
     if (this.timer) clearTimeout(this.timer);
   }
 
-  /** venue ids whose values are sampled estimates (blocks mode). */
+  /** venue ids whose MON values are sampled estimates — every venue whose
+   *  sources have resolved, since both modes sample receipts for cost. */
   approxVenueIds(): string[] { return [...this.approx].sort(); }
 
   /** The breaker may retry a failed primary request on a backup inside one
@@ -233,7 +242,11 @@ export class GasTracker {
       this.noteOnce('gas.mode.mixed', `${name}: mixed gas-source modes — using '${mode}' sources only`, vid);
       sources = sources.filter((s) => s.mode === mode);
     }
-    if (mode === 'blocks' && !this.approx.has(vid)) {
+    // Both modes sample receipts for the cost side (header), so the ≈ marker
+    // is earned the moment a venue's sources resolve, whatever the mode. A
+    // logs-mode venue shown without ≈ read as exact while its heavy-tailed
+    // push costs were sampled ~5-10% off (ThogAMM, 2026-09-03 audit).
+    if (!this.approx.has(vid)) {
       this.approx.add(vid);
       await this.writer.setMeta(`gas_approx_${vid}`, '1');
     }
@@ -479,9 +492,11 @@ export class GasTracker {
         if (!Number.isFinite(anchorMs)) {
           this.noteOnce('gas.range.skipped', `${name}: gas scan block timestamps unresolved near ${cursor} — chunk skipped`, vid);
         } else {
-          // receipts: evenly-strided sample, scaled to the exact tx count. Keeper
-          // limits are flat and prices ride the base-fee floor — the sample tracks
-          // the true sum to well under 1% while counts stay exact.
+          // receipts: evenly-strided sample, scaled to the exact tx count. Counts
+          // stay exact; the cost is an ESTIMATE (the venue is flagged approx):
+          // keeper limits are mostly flat, but a small share of pushes at far
+          // higher gas/price dominate a spiky day, and a 40-receipt stride can
+          // miss or over-weight them (~5-10% observed, see the header).
           const hashes = [...txBlocks.keys()];
           const target = Math.max(1, config.gasReceiptSamplePerChunk);
           const stride = Math.max(1, Math.ceil(hashes.length / target));

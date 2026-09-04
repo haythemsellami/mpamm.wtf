@@ -208,9 +208,12 @@ export const config = {
    *  the tracker (the API then serves whatever was already persisted). */
   gasMetric: (env.GAS_METRIC ?? 'on').toLowerCase() !== 'off',
   /** logs-mode receipt sampling: per processed chunk, fetch at most this many
-   *  receipts (evenly strided) and scale by the chunk's tx count. Update txs
-   *  have flat gas limits and ride the ~100 gwei base-fee floor, so a modest
-   *  sample tracks the true cost to well under 1%; counts stay EXACT. */
+   *  receipts (evenly strided) and scale by the chunk's tx count. Counts stay
+   *  EXACT; the cost is an estimate the UI marks ≈ — most pushes ride the
+   *  ~100 gwei base-fee floor at a flat limit, but the rare heavy/expensive
+   *  ones carry a large share of a spiky day, so 40 lands ~5-10% off
+   *  (ThogAMM 2026-09-03: exact 3,454 MON vs 3,332 served). Raising it
+   *  tightens that roughly with the square root of the sample. */
   gasReceiptSamplePerChunk: num('GAS_RECEIPT_SAMPLE_PER_CHUNK', 40),
   /** blocks-mode (no-event oracles, e.g. POE setData): sample one block every
    *  N blocks via eth_getBlockReceipts and scale by the stride. Only sound for

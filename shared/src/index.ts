@@ -517,8 +517,10 @@ export interface GasDay {
 
 export interface GasResponse {
   days: GasDay[];
-  /** venue ids whose numbers are sampled estimates (block-sampling mode, no
-   *  update events on-chain) — the UI prefixes them with ≈. */
+  /** venue ids whose MON figures are sampled estimates — the UI prefixes
+   *  their burn with ≈. Every venue with resolved gas sources: 'blocks' mode
+   *  samples both counts and cost, 'logs' mode keeps counts exact but still
+   *  samples receipts for cost. */
   approx: string[];
 }
 

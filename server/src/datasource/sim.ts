@@ -168,10 +168,10 @@ export class SimDataSource extends BaseSource {
       const v = a.venues()[0];
       if (!v) continue;
       vids.push(v.id);
-      // 'blocks'-mode venues are estimates (≈). Before discovery the source
-      // can't be enumerated (throws) — those are exactly the sampled ones.
-      try { if (a.gasSources!().some((s) => s.mode === 'blocks')) approx.push(v.id); }
-      catch { approx.push(v.id); }
+      // Every gas venue's MON figure is a sampled estimate (≈) — both modes
+      // sample receipts for cost (gas.ts header) — so the sim mirrors live and
+      // flags all of them.
+      approx.push(v.id);
     }
     // venue-lifetime like live: each venue's series runs from its sinceUtc
     // (clamped to the sim's own history start).
