@@ -106,7 +106,8 @@ function rowFor(q: QuoteSnapshot | null, venueId: string, market: string, size: 
 
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const [ui, setUi] = useState<UiState>(() => ({
-    tab: initialTab(), theme: initialTheme(), pair: 'MON/USDC', size: 100,
+    // size: the opening notional for QUOTE + ROLLING_STATS ($1k, one of SIZES_USD).
+    tab: initialTab(), theme: initialTheme(), pair: 'MON/USDC', size: 1000,
     venueToggles: {},
     mkProto: 'ALL', mkSide: 'ALL', mkSize: 'ANY', mkPaused: false,
     volStart: null, volEnd: null, burnStart: null, burnEnd: null,
