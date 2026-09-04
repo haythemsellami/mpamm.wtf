@@ -54,14 +54,15 @@ const FAST_QUOTER_HELPER = '0x237dB58fea34A35A8543b44C217d221606cE7788' as const
  *
  *  GENERATIONS: Hanji redeploys the FastQuoter every week or two and cuts the
  *  fleet over to it; the old contract simply stops receiving pushes. The one
- *  invariant across all six is `owner() == 0xA24D2aF7…` — so that, plus the
+ *  invariant across all eight is `owner() == 0xA24D2aF7…` — so that, plus the
  *  updatePrices(uint256) packed-word calldata, is what confirms a candidate is
  *  theirs. Do NOT identify them by gas limit: gen1+ push at a flat 45,000 but
  *  gen0 used 100,000, and the limit is a keeper setting, not an identity.
  *  Every generation is listed so the burn series spans the cutovers — a
  *  missing one doesn't error, it silently flatlines the venue's burn while the
  *  venue itself trades on (gen3 went untracked for 11 days that way, gen5 for
- *  3 days; both were noticed only because burn hit null against live volume).
+ *  3 days, gen6+gen7 for 14 days; each was noticed only because burn hit
+ *  null against live volume).
  *
  *  NOT OURS: 0xc1ff9fefdd86735bb14286caa796f72d90f4b0fc pushes the very same
  *  selector from its own rotating fleet, but `owner()` is 0x6792e60a… and it
@@ -84,7 +85,9 @@ const FAST_QUOTERS = [
   '0x48cba27861983367c3fb063877b144a628e2b48b', // gen2 — 2026-07-16 → ~2026-07-30
   '0x91855e7930044a8f13f10b336abf551f1f58ac7e', // gen3 — deployed 2026-07-30 06:39:45 UTC
   '0xeae24c729ee1a38554037e4ad25ef1e3c9e30be0', // gen4 — deployed 2026-08-08 23:36:31 UTC
-  '0x103de0b5226a2a6d8b918d8192dc23248825bb55', // gen5 — deployed 2026-08-14 15:02:12 UTC, active
+  '0x103de0b5226a2a6d8b918d8192dc23248825bb55', // gen5 — deployed 2026-08-14 15:02:12 UTC → 2026-08-22 04:41 UTC
+  '0xbb3f3cb75f3a652a3ee47c5cacceef794874e046', // gen6 — deployed 2026-08-21 12:49:27 UTC → ~2026-08-25 09:00 UTC
+  '0xf5b5f7f8ef84419c030dfc44771734810ea36d70', // gen7 — deployed 2026-08-25 10:58:54 UTC, active
 ] as const;
 
 /** Hanji markets (team-provided, tokens verified on-chain via getConfig).
