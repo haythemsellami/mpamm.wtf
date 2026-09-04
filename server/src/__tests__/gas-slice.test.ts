@@ -159,6 +159,42 @@ describe('logs-mode time slice', () => {
     expect(BigInt(store.getMeta('gas_cursor_lg')!)).toBe(START + 3_200n);
     unlinkSync(path);
   });
+
+  // The MON figure is a strided receipt SAMPLE in logs mode too (gas.ts
+  // header): a logs venue served without ≈ read as exact while ThogAMM's
+  // heavy-tailed push costs were ~5-10% off. Counts stay exact and unmarked.
+  it('marks a logs-mode venue approx (≈) once its sources resolve, and persists it', async () => {
+    const { store, path } = freshStore();
+    seed(store, 'lg', STRAT, START);
+    const client: any = {
+      getBlockNumber: async () => START + 2_000n,
+      getBlock: async () => ({ timestamp: BigInt(DAY0) }),
+      getTransactionReceipt: async () => ({ gasUsed: 30_000n, effectiveGasPrice: 1_000_000_000n }),
+      request: async ({ method, params }: any) => {
+        if (method !== 'eth_getLogs') throw new Error(`unexpected ${method}`);
+        const from = BigInt(params[0].fromBlock);
+        return [{ transactionHash: `0xt${from.toString(16)}`, blockNumber: `0x${from.toString(16)}` }];
+      },
+    };
+    const adapter = {
+      venues: () => [venueMeta('lg')],
+      discover: async () => {},
+      logSources: () => [],
+      decode: () => [],
+      gasSources: () => [{ mode: 'logs' as const, address: STRAT as `0x${string}`, topic0: TOPIC as `0x${string}` }],
+    } as unknown as VenueAdapter;
+    const tracker = new GasTracker(client, store, [adapter], () => {}, () => false, 2);
+    expect(tracker.approxVenueIds()).toEqual([]); // nothing resolved yet
+
+    await (tracker as any).pass();
+    tracker.stop();
+    expect(tracker.approxVenueIds()).toEqual(['lg']);
+    expect(store.getMeta('gas_approx_lg')).toBe('1'); // sticky across restarts
+    // a fresh tracker over the same store carries the marker before any pass
+    const again = new GasTracker(client, store, [adapter], () => {}, () => false, 2);
+    expect(again.approxVenueIds()).toEqual(['lg']);
+    unlinkSync(path);
+  });
 });
 
 describe('archive availability cursor holds', () => {

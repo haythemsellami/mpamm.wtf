@@ -75,12 +75,14 @@ export interface EntryPoint {
  *  - 'logs':   every update emits an event — enumerate update txs via getLogs
  *              (`events` ABI objects, or a raw `topic0` when the contract is
  *              unverified and only the hash is known). Counts are exact; cost
- *              is receipt-sampled per chunk (flat keeper gas limits make the
- *              estimate sub-1%).
+ *              is receipt-sampled per chunk — an ESTIMATE (UI shows ≈ on the
+ *              MON figure), ~5-10% off on days when a few heavy pushes
+ *              dominate the spend.
  *  - 'blocks': updates emit NO logs (e.g. POE's ClapOracle setData) — sample
  *              blocks with eth_getBlockReceipts, count txs `to === address`,
- *              scale by the stride. ESTIMATE (UI shows ≈) — only sound for a
- *              near-constant-cadence keeper (POE pushes every block).
+ *              scale by the stride. Counts AND cost estimated (UI shows ≈) —
+ *              only sound for a near-constant-cadence keeper (POE pushes
+ *              every block).
  *
  * A venue whose quoting cost is NOT self-funded (external oracle, taker-paid
  * JIT repricing) simply doesn't implement gasSources — absence is the honest
