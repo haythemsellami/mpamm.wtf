@@ -1,9 +1,9 @@
 // Hanji redeploys its FastQuoter every week or two, and the burn series only
 // spans a cutover if the new destination is listed. A missed generation is
 // SILENT — no throw, no note; the venue keeps trading while QUOTE_UPDATE_BURN
-// flatlines to null (gen3 went 11 days that way, gen5 three). These lock down
-// the two ways the list goes wrong: a generation dropped, or a look-alike
-// added.
+// flatlines to null (gen3 went 11 days that way, gen5 three, gen6+gen7
+// fourteen). These lock down the two ways the list goes wrong: a generation
+// dropped, or a look-alike added.
 import { describe, expect, it } from 'vitest';
 import { createHanjiAdapter } from '../hanji.js';
 import { classifyGasSourceChange, gasSourcesSignature } from '../../gas.js';
@@ -18,6 +18,8 @@ const GENERATIONS = [
   '0x91855e7930044a8f13f10b336abf551f1f58ac7e', // gen3
   '0xeae24c729ee1a38554037e4ad25ef1e3c9e30be0', // gen4
   '0x103de0b5226a2a6d8b918d8192dc23248825bb55', // gen5
+  '0xbb3f3cb75f3a652a3ee47c5cacceef794874e046', // gen6
+  '0xf5b5f7f8ef84419c030dfc44771734810ea36d70', // gen7
 ];
 
 /** Same selector, own rotating fleet — but owner() is 0x6792e60a… and it ran
@@ -61,13 +63,14 @@ describe('adding a generation rebuilds the minimum', () => {
   });
 
   it('appending is a PARTIAL rebuild — earlier days survive', () => {
-    const before = [...GENERATIONS].filter((a) => a !== GENERATIONS[0] && a !== GENERATIONS[5]).sort().join(',');
+    const newest = GENERATIONS[GENERATIONS.length - 1];
+    const before = [...GENERATIONS].filter((a) => a !== GENERATIONS[0] && a !== newest).sort().join(',');
     const change = classifyGasSourceChange(before, sigNow);
     // pure addition ⇒ rebuild from the earliest ADDED contract's creation day
     // (gen0, 2026-06-26), which is after Hanji's 2026-06-05 anchor. Dropping
     // any listed generation would make this 'full' and re-scan the lifetime.
     expect(change.kind).toBe('partial');
-    expect(change.added.sort()).toEqual([GENERATIONS[0], GENERATIONS[5]].sort());
+    expect(change.added.sort()).toEqual([GENERATIONS[0], newest].sort());
   });
 
   it('re-running with the same list is a no-op', () => {
