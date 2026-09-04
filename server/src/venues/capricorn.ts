@@ -3,7 +3,7 @@ import type { Fill, QuoteRow, Side, VenueMeta } from '@shared';
 import { TOKENS, assetForToken, baseTokenOf, pairFor } from '@shared';
 import { fromUnits, toUnits, shortHex } from '../util.js';
 import type { VenueAdapter, AdapterContext, LogBundle } from './adapter.js';
-import { createQuoteOutageReporter } from './quote-health.js';
+import { createQuoteOutageNote, createQuoteOutageReporter } from './quote-health.js';
 
 /**
  * Capricorn PAMM adapter — Capricorn's Proactive AMM on Monad, fully on-chain.
@@ -219,6 +219,9 @@ export function createCapricornAdapter(): VenueAdapter {
   // every leg FAILING is a venue-wide cause (paused, oracle down, ABI drift),
   // not a per-pair gap — name it instead of vanishing (venues/quote-health.ts).
   const reportOutage = createQuoteOutageReporter(CAPRICORN_VENUE.name);
+  // unpaused pools that will not price: raised from refresh(), which re-runs
+  // every 10 minutes, so the clear condition is re-evaluated on the same pass.
+  const noQuoteNote = createQuoteOutageNote();
   /** every pool address the factory has ever announced (seeds + tailed). */
   const candidates = new Set<string>(SEED_POOLS.map((p) => p.toLowerCase()));
   /** ADMITTED pools — structurally valid, so their fills are decodable. */
@@ -303,7 +306,10 @@ export function createCapricornAdapter(): VenueAdapter {
     // tell them apart. Naming one of them would send a reader to the wrong
     // contract — the exact failure the Metric "unfunded" note made (#58).
     if (noQuote) {
-      ctx.note('venue.quote.unavailable', `Capricorn pAMM: ${noQuote} unpaused pool(s) are not returning a quote — quoteExactIn is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
+      noQuoteNote.raise(ctx, `Capricorn pAMM: ${noQuote} unpaused pool(s) are not returning a quote — quoteExactIn is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
+    } else {
+      // recomputed from scratch every pass, so this IS the clear condition.
+      noQuoteNote.recovered(ctx, 'Capricorn pAMM: every unpaused pool is quoting again');
     }
   }
 

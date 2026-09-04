@@ -86,3 +86,37 @@ export function createQuoteOutageReporter(venueName: string): (ctx: AdapterConte
     return false;
   };
 }
+
+/**
+ * A degradation an adapter reports from `discover()`, which announces its own
+ * recovery.
+ *
+ * An adapter can only append, never retract (docs/adapters.md), so a warning
+ * raised once and never spoken of again stands in the served window describing
+ * a degradation that has already healed — `state.notes` is what a maintainer
+ * reads first during the NEXT incident, and a stale `warn` costs them real time
+ * (the scare-warning lesson of 6c3cf5b). Recovery is therefore ANNOUNCED.
+ *
+ * Silent when nothing was ever raised: `discover()` re-runs every 10 minutes
+ * and almost every pass is healthy, so an unguarded announcement would report a
+ * recovery from an outage that never happened — the same lie in the other
+ * direction. Shape borrowed from lunarbase.ts's `recovered()`, which is the
+ * only adapter that already had this right.
+ */
+export function createQuoteOutageNote(): {
+  raise: (ctx: AdapterContext, msg: string) => void;
+  recovered: (ctx: AdapterContext, msg: string) => void;
+} {
+  let raised = false;
+  return {
+    raise: (ctx, msg) => {
+      raised = true;
+      ctx.note('venue.quote.unavailable', msg);
+    },
+    recovered: (ctx, msg) => {
+      if (!raised) return;
+      raised = false;
+      ctx.note('venue.quote.recovered', msg);
+    },
+  };
+}

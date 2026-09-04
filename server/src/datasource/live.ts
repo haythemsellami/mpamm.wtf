@@ -305,6 +305,47 @@ export function checkQuoteOutage(
   }
 }
 
+/**
+ * The core's own quote-failure telemetry: `a.quote()` REJECTING, which is a
+ * different event from it returning no rows (checkQuoteOutage above).
+ *
+ * The rejection note used to be raised and never touched again, so it kept
+ * describing a venue that had been quoting again for hours — and it was raised
+ * through `noteOnce`, which then swallowed the SECOND outage's warning as a
+ * verbatim repeat of the first. Both halves are fixed by holding the reason
+ * currently on the record: a note only when the reason CHANGES (a different
+ * reason is a different event), and `venue.quote.recovered` when it clears, the
+ * same shape venues/quote-health.ts uses adapter-side.
+ *
+ * `failure` is null when the promise RESOLVED — resolving with zero rows is
+ * still a recovery of the rejection, and empty-but-resolving is the went-dark
+ * backstop's job, not this latch's. That is also why the caller announces from
+ * where the resolved rows are handled: the catch only ever runs on rejection.
+ */
+export function trackQuoteFailure(
+  venue: { id?: string; name: string },
+  failure: string | null,
+  current: Map<string, string>,
+  io: {
+    warn: (id: string | undefined, m: string) => void;
+    announce: (id: string | undefined, m: string) => void;
+  },
+): void {
+  // an adapter declaring no venues still has to be distinguishable from its
+  // siblings, so the name is the fallback key rather than a shared '' bucket.
+  const key = venue.id ?? venue.name;
+  const prior = current.get(key);
+  if (failure !== null) {
+    if (prior === failure) return; // already on the record, unchanged
+    current.set(key, failure);
+    io.warn(venue.id, `${venue.name} quote failed: ${failure}`);
+    return;
+  }
+  if (prior === undefined) return; // nothing was ever raised — stay quiet
+  current.delete(key);
+  io.announce(venue.id, `${venue.name} quoting again (was "${prior}")`);
+}
+
 /** Archive-pending lifecycle for the markout re-scan (family A of #6).
  *
  * A month's CEX price archive publishes days after the month closes, so the
@@ -851,6 +892,10 @@ export class LiveDataSource extends BaseSource {
    *  venue re-earns its run. */
   private quoteEmptyRuns = new Map<string, { runs: number; since: number }>();
   private quoteDark = new Map<string, string>();
+  /** venue key → the quote() rejection reason currently on the record, so a
+   *  repeat is not re-noted and a heal can be announced (trackQuoteFailure).
+   *  In memory for the same reason as the two above. */
+  private quoteFailure = new Map<string, string>();
   private block = 0;
   /** all registered venue ids — a fill/quote carrying an unknown id is dropped
    *  (a plugin bug must not silently store data the UI can't render). */
@@ -2248,15 +2293,31 @@ export class LiveDataSource extends BaseSource {
         const adapterStarted = performance.now();
         // a THROWN quote is a degradation like any other — swallowing it left
         // the venue's disappearance with no explanation anywhere.
+        const venueRef = { id: this.vidOf(a), name: a.venues()[0]?.name ?? 'venue' };
+        // `note`, not `noteOnce`: the latch already bounds this to one note per
+        // reason, and the dedupe would swallow a later outage that happens to
+        // read the same (#69's `dark` map exists for that exact reason).
+        const io = {
+          warn: (id: string | undefined, m: string) => this.note('venue.quote.unavailable', m, id),
+          announce: (id: string | undefined, m: string) => this.note('venue.quote.recovered', m, id),
+        };
         try {
-          const rows = await a.quote(this.frameCtxFor(a, framePricer), config.sizesUsd, blockNumber).catch((e) => {
-            // a rejection is not necessarily an Error — a bare string or an
-            // Error with an empty message would otherwise note "quote failed:
-            // undefined", which is worse than useless to whoever reads it.
-            const why = (e instanceof Error && e.message) || String(e ?? '') || 'no reason given';
-            this.noteOnce('venue.quote.unavailable', `${a.venues()[0]?.name ?? 'venue'} quote failed: ${why}`, this.vidOf(a));
-            return [] as QuoteRow[];
-          });
+          // the SUCCESS branch cannot live in the catch, so both outcomes are
+          // handled here rather than with a trailing .catch().
+          const rows = await a.quote(this.frameCtxFor(a, framePricer), config.sizesUsd, blockNumber).then(
+            (r) => {
+              trackQuoteFailure(venueRef, null, this.quoteFailure, io);
+              return r;
+            },
+            (e) => {
+              // a rejection is not necessarily an Error — a bare string or an
+              // Error with an empty message would otherwise note "quote failed:
+              // undefined", which is worse than useless to whoever reads it.
+              const why = (e instanceof Error && e.message) || String(e ?? '') || 'no reason given';
+              trackQuoteFailure(venueRef, why, this.quoteFailure, io);
+              return [] as QuoteRow[];
+            },
+          );
           return this.ownVenues(a, rows, 'quote'); // drop rows for ids the adapter didn't declare
         } finally {
           const venue = this.vidOf(a) ?? 'unknown';
