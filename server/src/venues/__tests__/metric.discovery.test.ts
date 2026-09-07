@@ -101,6 +101,9 @@ interface StubOpts {
   logsThrow?: boolean;
   /** oracle probe reverts — pools stay ADMITTED but drop out of `live`. */
   priceFails?: boolean;
+  /** the TOKEN contract does not answer, so funding is unknown ⇒ 'unreadable'.
+   *  Checked BEFORE the price probe, so it hides whatever the oracle is doing. */
+  balancesFail?: boolean;
 }
 const stub = (notes: string[], o: StubOpts = {}) => {
   const tokenOf: Record<string, [string, string]> = {
@@ -119,6 +122,7 @@ const stub = (notes: string[], o: StubOpts = {}) => {
           return { status: 'success', result: [A('0x' + '0'.repeat(40)), providerFor(p), t[0], t[1], 0n, 0n, 0n, false, 0n, 0n, 0, 0, 0n, 0n] };
         }
         if (c.functionName === 'balanceOf') {
+          if (o.balancesFail) return { status: 'failure' };
           const pool = String(c.args[0]).toLowerCase();
           const [b0, b1] = o.balances ? o.balances(pool) : [1_000n, 1_000n];
           // two balanceOf calls per pool, in order base then stable
@@ -391,5 +395,53 @@ describe('Metric no-oracle-price note announces its own recovery', () => {
     const again = recording({ priceFails: true });
     await a.discover(again.ctx);
     expect(codes(again.rec)).toEqual(['venue.quote.unavailable']);
+  });
+
+  // Absence of evidence is not recovery. `metricPoolLiveness` returns
+  // 'unreadable' as soon as a balanceOf fails — BEFORE it probes the provider —
+  // so a failed token read drives notLive['no-price'] to zero while the oracle
+  // is still down. Announcing off that would clear the latch without anyone
+  // confirming a price came back, which is the exact class of false note this
+  // PR exists to remove.
+  // The SAME hole via the other short-circuit: `metricPoolLiveness` returns
+  // 'unfunded' before it probes the provider too, so pools draining while the
+  // oracle is still refusing also drives notLive['no-price'] to zero. Guarding
+  // only 'unreadable' would still announce a recovery here.
+  it('stays silent when pools going unfunded hide a still-dark oracle', async () => {
+    const a = createMetricAdapter();
+
+    const dark = recording({ priceFails: true });
+    await a.discover(dark.ctx);
+    expect(codes(dark.rec)).toEqual(['venue.quote.unavailable']);
+
+    // every pool drains while the provider is STILL refusing: nothing priced,
+    // so there is no evidence the oracle came back.
+    const drained = recording({ priceFails: true, balances: () => [0n, 0n] });
+    await a.discover(drained.ctx);
+    expect(codes(drained.rec)).toEqual([]);
+
+    // and the latch is still armed for a real, observed recovery.
+    const healed = recording({ priceFails: false });
+    await a.discover(healed.ctx);
+    expect(codes(healed.rec)).toEqual(['venue.quote.recovered']);
+  });
+
+  it('stays silent when failed balance reads hide a still-dark oracle', async () => {
+    const a = createMetricAdapter();
+
+    const dark = recording({ priceFails: true });
+    await a.discover(dark.ctx);
+    expect(codes(dark.rec)).toEqual(['venue.quote.unavailable']);
+
+    // token reads fail while the oracle is STILL down: no verdict is possible.
+    const blind = recording({ priceFails: true, balancesFail: true });
+    await a.discover(blind.ctx);
+    expect(codes(blind.rec)).toEqual([]);
+
+    // the latch must still be armed: a readable pass with the oracle back is
+    // what announces recovery, and it must still fire.
+    const healed = recording({ priceFails: false });
+    await a.discover(healed.ctx);
+    expect(codes(healed.rec)).toEqual(['venue.quote.recovered']);
   });
 });

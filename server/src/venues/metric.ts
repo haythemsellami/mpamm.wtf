@@ -295,9 +295,20 @@ export function createMetricAdapter(): VenueAdapter {
       // contract" — a guess, when the adapter knows exactly what happened.
       if (notLive['no-price']) {
         noPrice.raise(ctx, `Metric: ${notLive['no-price']} funded pool(s) have no oracle price — their PriceProvider is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
-      } else {
+      } else if (live.length && !notLive.unreadable) {
         // `notLive` is recomputed from scratch every pass, so this IS the clear
         // condition — no separate probe, and no staleness of its own.
+        //
+        // It clears on POSITIVE evidence only. `metricPoolLiveness` short-
+        // circuits to 'unreadable' and 'unfunded' BEFORE it ever probes the
+        // provider, so either one drives `no-price` to zero while the oracle
+        // may still be refusing — and announcing off that clears the latch with
+        // nobody having seen a price. Absence of evidence is not recovery.
+        //   live.length      at least one pool was actually priced this pass
+        //   !notLive.unreadable   nothing was hidden behind a dead token read
+        // A pool merely going unfunded is fine once something else is live: the
+        // condition is about funded pools that cannot be priced, and a live one
+        // proves the provider is answering.
         noPrice.recovered(ctx, 'Metric: every funded pool has an oracle price again');
       }
 

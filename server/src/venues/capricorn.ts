@@ -307,8 +307,13 @@ export function createCapricornAdapter(): VenueAdapter {
     // contract — the exact failure the Metric "unfunded" note made (#58).
     if (noQuote) {
       noQuoteNote.raise(ctx, `Capricorn pAMM: ${noQuote} unpaused pool(s) are not returning a quote — quoteExactIn is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
-    } else {
-      // recomputed from scratch every pass, so this IS the clear condition.
+    } else if (live.length) {
+      // recomputed from scratch every pass, so this IS the clear condition —
+      // but only on POSITIVE evidence. The loop above short-circuits on
+      // `paused` BEFORE it looks at the quote, so a venue whose pools all
+      // pause while quoteExactIn is still dead drives `noQuote` to zero and
+      // would clear the latch with nothing observed quoting. Requiring a live
+      // pool means the announcement rests on a quote we actually saw.
       noQuoteNote.recovered(ctx, 'Capricorn pAMM: every unpaused pool is quoting again');
     }
   }

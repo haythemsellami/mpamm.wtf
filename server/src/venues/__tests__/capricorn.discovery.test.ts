@@ -11,13 +11,13 @@ const A = (s: string) => s as `0x${string}`;
 
 /** a stubbed chain where every admitted pool is unpaused, and `quotes` decides
  *  whether `quoteExactIn` answers — the one condition the note is about. */
-const ctxWith = (quotes: boolean, rec: { code: string; msg: string }[]) => ({
+const ctxWith = (quotes: boolean, rec: { code: string; msg: string }[], paused = false) => ({
   client: {
     getBlockNumber: async () => 1_000_000n,
     multicall: async ({ contracts }: any) => contracts.map((c: any) => {
       if (c.functionName === 'getTokens') return { status: 'success', result: [TOKENS.WMON.address, TOKENS.USDC.address] };
       if (c.functionName === 'feeBps') return { status: 'success', result: 5n };
-      if (c.functionName === 'paused') return { status: 'success', result: false };
+      if (c.functionName === 'paused') return { status: 'success', result: paused };
       if (c.functionName === 'quoteExactIn') return { status: 'success', result: quotes ? 10n ** 18n : 0n };
       return { status: 'failure' };
     }),
@@ -56,5 +56,28 @@ describe('Capricorn unquotable-pool note announces its own recovery', () => {
     const healthy: { code: string; msg: string }[] = [];
     await a.discover(ctxWith(true, healthy));
     expect(quoteCodes(healthy)).toEqual([]);
+  });
+
+  // The pool loop short-circuits on `paused` BEFORE it reads the quote, so a
+  // venue whose pools all pause while quoteExactIn is still dead drives
+  // `noQuote` to zero. Clearing off that would announce a recovery with nothing
+  // observed quoting — the same false note this PR removes (see the Metric
+  // 'unreadable'/'unfunded' cases).
+  it('stays silent when every pool pausing hides a still-dead quoteExactIn', async () => {
+    const a = createCapricornAdapter();
+
+    const dark: { code: string; msg: string }[] = [];
+    await a.discover(ctxWith(false, dark));
+    expect(quoteCodes(dark)).toEqual(['venue.quote.unavailable']);
+
+    // all pools paused, quoteExactIn STILL not answering: nothing is quotable.
+    const allPaused: { code: string; msg: string }[] = [];
+    await a.discover(ctxWith(false, allPaused, true));
+    expect(quoteCodes(allPaused)).toEqual([]);
+
+    // the latch stays armed for a real, observed recovery.
+    const healed: { code: string; msg: string }[] = [];
+    await a.discover(ctxWith(true, healed));
+    expect(quoteCodes(healed)).toEqual(['venue.quote.recovered']);
   });
 });
