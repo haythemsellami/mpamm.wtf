@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { NOTE_LEVEL, type StateNote } from '@shared';
 import { NoteBuffer, noteSubsystem, scrubNote } from '../notes.js';
-import { QUOTE_DARK_CYCLES, checkArchivePending, checkGapFill, checkQuoteOutage, checkReferenceStarvation, trackQuoteFailure } from '../datasource/live.js';
+import { QUOTE_DARK_CYCLES, checkArchivePending, checkGapFill, checkQuoteOutage, checkReferenceStarvation, quoteFailureIo, trackQuoteFailure } from '../datasource/live.js';
 
 const T0 = 1_800_000_000_000;
 
@@ -291,10 +291,9 @@ describe('a real call site: a venue whose quote() rejects', () => {
     const current = new Map<string, string>();
     const empty = new Map<string, { runs: number; since: number }>();
     const dark = new Map<string, string>();
-    const io = {
-      warn: (id: string | undefined, m: string) => b.note('venue.quote.unavailable', m, id),
-      announce: (id: string | undefined, m: string) => b.note('venue.quote.recovered', m, id),
-    };
+    // the REAL sinks poll() builds, not a copy of them: a hand-written
+    // duplicate here let `note` -> `noteOnce` pass unnoticed.
+    const io = quoteFailureIo(b);
     /** one quote tick: the adapter speaks first (inside the await), then the
      *  backstop judges the row count against the `now` stamped before it. */
     const tick = (failure: string | null, rows: number) => {

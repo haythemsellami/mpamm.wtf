@@ -20,7 +20,7 @@ import { HotHeadWatcher } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, type ResetDeletes } from '../db.js';
 import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
-import { NoteBuffer } from '../notes.js';
+import { NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
 import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, allAdapterVenueIds, validateRegistry } from '../venues/registry.js';
@@ -335,14 +335,39 @@ export function trackQuoteFailure(
   const key = venue.id ?? venue.name;
   const prior = current.get(key);
   if (failure !== null) {
-    if (prior === failure) return; // already on the record, unchanged
-    current.set(key, failure);
+    // Latch on the string the WINDOW will hold, not the raw one. The buffer
+    // scrubs URLs, collapses whitespace and truncates at 300 chars, and viem
+    // composes an HttpRequestError message that carries the whole eth_call
+    // body — calldata that changes every block because leg sizes are priced
+    // off a live CEX mid. Comparing raw would never match, and this writer
+    // uses `note` (no dedupe behind it), so a sustained 429 would deposit one
+    // note per block and evict the rest of the venue telemetry.
+    const scrubbed = scrubNote(failure);
+    if (prior === scrubbed) return; // already on the record, unchanged
+    current.set(key, scrubbed);
     io.warn(venue.id, `${venue.name} quote failed: ${failure}`);
     return;
   }
   if (prior === undefined) return; // nothing was ever raised — stay quiet
   current.delete(key);
   io.announce(venue.id, `${venue.name} quoting again (was "${prior}")`);
+}
+
+/** The sinks `trackQuoteFailure` speaks through, as ONE exported object so a
+ *  test binds the wiring the product runs rather than a hand-copy of it. The
+ *  distinction that matters here is `note` vs `noteOnce`: the latch above
+ *  already bounds this to one note per reason, and `noteOnce` would swallow a
+ *  later outage that happens to read the same. */
+export function quoteFailureIo(
+  notes: Pick<NoteBuffer, 'note' | 'noteOnce'>,
+): { warn: (id: string | undefined, m: string) => void; announce: (id: string | undefined, m: string) => void } {
+  // `note`, NOT `noteOnce` — and the choice lives in here, where a test binds
+  // it. Handing the caller a bare sink put this decision back at an untested
+  // call site, which is how it drifted once already.
+  return {
+    warn: (id, m) => notes.note('venue.quote.unavailable', m, id),
+    announce: (id, m) => notes.note('venue.quote.recovered', m, id),
+  };
 }
 
 /** Archive-pending lifecycle for the markout re-scan (family A of #6).
@@ -2280,10 +2305,7 @@ export class LiveDataSource extends BaseSource {
         // `note`, not `noteOnce`: the latch already bounds this to one note per
         // reason, and the dedupe would swallow a later outage that happens to
         // read the same (#69's `dark` map exists for that exact reason).
-        const io = {
-          warn: (id: string | undefined, m: string) => this.note('venue.quote.unavailable', m, id),
-          announce: (id: string | undefined, m: string) => this.note('venue.quote.recovered', m, id),
-        };
+        const io = quoteFailureIo(this.notes);
         try {
           // the SUCCESS branch cannot live in the catch, so both outcomes are
           // handled here rather than with a trailing .catch().

@@ -102,6 +102,18 @@ export function createQuoteOutageReporter(venueName: string): (ctx: AdapterConte
  * recovery from an outage that never happened — the same lie in the other
  * direction. Shape borrowed from lunarbase.ts's `recovered()`, which is the
  * only adapter that already had this right.
+ *
+ * KNOWN LIMIT — the boundary of what #70 can reach, and why #71 exists.
+ * `ctx.note` is `noteOnce` (live.ts `ctxFor`), so a SECOND outage whose wording
+ * matches the first is swallowed as a verbatim repeat while that first note is
+ * still in the served window. The recovery announcement is then the window's
+ * last word on a venue that is degraded again. An adapter can only append, so
+ * this cannot be closed here: it needs the recovery code to RETRACT the
+ * condition it cleared, which is #71. Until then the latch is honest about the
+ * first incident of any wording and silent about the repeat — strictly better
+ * than the pre-#70 behaviour of never announcing recovery at all, but not the
+ * whole fix. The same limit applies to `createQuoteOutageReporter` above and to
+ * lunarbase's `recovered()`.
  */
 export function createQuoteOutageNote(): {
   raise: (ctx: AdapterContext, msg: string) => void;

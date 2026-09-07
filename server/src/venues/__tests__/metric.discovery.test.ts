@@ -104,6 +104,10 @@ interface StubOpts {
   /** the TOKEN contract does not answer, so funding is unknown ⇒ 'unreadable'.
    *  Checked BEFORE the price probe, so it hides whatever the oracle is doing. */
   balancesFail?: boolean;
+  /** per-pool variants: a live pool must be able to sit beside hidden ones,
+   *  which is the only shape that exercises the !unreadable clause. */
+  balancesFailFor?: (pool: string) => boolean;
+  priceFailsFor?: (provider: string) => boolean;
 }
 const stub = (notes: string[], o: StubOpts = {}) => {
   const tokenOf: Record<string, [string, string]> = {
@@ -123,12 +127,16 @@ const stub = (notes: string[], o: StubOpts = {}) => {
         }
         if (c.functionName === 'balanceOf') {
           if (o.balancesFail) return { status: 'failure' };
+          if (o.balancesFailFor?.(String(c.args[0]).toLowerCase())) return { status: 'failure' };
           const pool = String(c.args[0]).toLowerCase();
           const [b0, b1] = o.balances ? o.balances(pool) : [1_000n, 1_000n];
           // two balanceOf calls per pool, in order base then stable
           return { status: 'success', result: c.__side === 1 ? b1 : b0 };
         }
-        if (c.functionName === 'getBidAndAskPrice') return o.priceFails ? { status: 'failure' } : { status: 'success', result: [100n, 101n] };
+        if (c.functionName === 'getBidAndAskPrice') {
+          if (o.priceFails || o.priceFailsFor?.(String(c.address).toLowerCase())) return { status: 'failure' };
+          return { status: 'success', result: [100n, 101n] };
+        }
         if (c.functionName === 'offchainOracle') {
           const or = o.oracleOf ? o.oracleOf(String(c.address)) : ORACLE_A;
           return or === null ? { status: 'failure' } : { status: 'success', result: or };
@@ -397,12 +405,6 @@ describe('Metric no-oracle-price note announces its own recovery', () => {
     expect(codes(again.rec)).toEqual(['venue.quote.unavailable']);
   });
 
-  // Absence of evidence is not recovery. `metricPoolLiveness` returns
-  // 'unreadable' as soon as a balanceOf fails — BEFORE it probes the provider —
-  // so a failed token read drives notLive['no-price'] to zero while the oracle
-  // is still down. Announcing off that would clear the latch without anyone
-  // confirming a price came back, which is the exact class of false note this
-  // PR exists to remove.
   // The SAME hole via the other short-circuit: `metricPoolLiveness` returns
   // 'unfunded' before it probes the provider too, so pools draining while the
   // oracle is still refusing also drives notLive['no-price'] to zero. Guarding
@@ -426,6 +428,38 @@ describe('Metric no-oracle-price note announces its own recovery', () => {
     expect(codes(healed.rec)).toEqual(['venue.quote.recovered']);
   });
 
+  // THE MAINTAINER'S REPORTED CASE, in the shape that actually exercises the
+  // `!notLive.unreadable` clause. Failing every balanceOf drives live.length to
+  // zero, so the other half of the guard blocks the announcement and this
+  // clause is never reached — the test passes for the wrong reason. Only a LIVE
+  // pool sitting beside hidden ones proves it. Each pool carries its OWN
+  // priceProvider, so one pool being priced says nothing about the others'.
+  it('stays silent when a live pool sits beside pools hidden by dead balance reads', async () => {
+    const a = createMetricAdapter();
+    const keep = SEEDS[0].toLowerCase();
+
+    const dark = recording({ priceFails: true });
+    await a.discover(dark.ctx);
+    expect(codes(dark.rec)).toEqual(['venue.quote.unavailable']);
+
+    // one pool readable and priced; the rest unreadable with their oracle STILL
+    // refusing. no-price falls to zero without anyone observing those oracles.
+    const mixed = recording({
+      balancesFailFor: (pool) => pool !== keep,
+      priceFailsFor: (prov) => prov !== ('0xprov' + keep.slice(6)),
+    });
+    await a.discover(mixed.ctx);
+    expect(codes(mixed.rec)).toEqual([]);
+
+    const healed = recording({ priceFails: false });
+    await a.discover(healed.ctx);
+    expect(codes(healed.rec)).toEqual(['venue.quote.recovered']);
+  });
+
+  // Absence of evidence is not recovery. `metricPoolLiveness` returns
+  // 'unreadable' as soon as a balanceOf fails — BEFORE it probes the provider —
+  // so a failed token read drives notLive['no-price'] to zero while the oracle
+  // is still down. This is the maintainer's reported case.
   it('stays silent when failed balance reads hide a still-dark oracle', async () => {
     const a = createMetricAdapter();
 

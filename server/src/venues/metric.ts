@@ -307,8 +307,12 @@ export function createMetricAdapter(): VenueAdapter {
         //   live.length      at least one pool was actually priced this pass
         //   !notLive.unreadable   nothing was hidden behind a dead token read
         // A pool merely going unfunded is fine once something else is live: the
-        // condition is about funded pools that cannot be priced, and a live one
-        // proves the provider is answering.
+        // condition names FUNDED pools that cannot be priced, so a pool that
+        // drains has left the condition rather than hidden it. Note what
+        // `live.length` does and does not prove — pools carry their OWN
+        // priceProvider, so a live pool proves ITS provider answered, not every
+        // provider. It is evidence that the pass could see prices at all, which
+        // is what the 'unreadable' and 'unfunded' short-circuits destroy.
         noPrice.recovered(ctx, 'Metric: every funded pool has an oracle price again');
       }
 

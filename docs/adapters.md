@@ -88,6 +88,8 @@ const res = await ctx.client.multicall({ contracts: calls, allowFailure: true })
 if (reportOutage(ctx, res)) return [];                            // notes: all N legs failed with "maker: paused"
 ```
 
+If your degradation is a plain on/off condition rather than a multicall verdict, `createQuoteOutageNote()` is the same shape without the results argument: `raise(ctx, msg)` while it is true, `recovered(ctx, msg)` when it clears, silent if nothing was ever raised.
+
 The core stands down once your note is on the record, so the venue is explained exactly once. Recovery is **announced**, never retracted — an adapter can only append, so a heal that said nothing would leave the warning standing until the served window rolled it off.
 
 ## Verifying your adapter (what review checks)
