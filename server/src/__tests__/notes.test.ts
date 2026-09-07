@@ -323,6 +323,23 @@ describe('a real call site: a venue whose quote() rejects', () => {
     expect(w.msgs('venue.quote.recovered')).toEqual(['Metric quoting again (was "maker: paused")']);
   });
 
+  it('announces a SECOND recovery from the same reason — the mirror of the warning case', () => {
+    // `announce` needs `note` for exactly the reason `warn` does: the recovery
+    // wording embeds only the PRIOR reason, so two incidents that failed the
+    // same way produce byte-identical announcements and `noteOnce` would drop
+    // the second — leaving the window's last word a warning about an outage
+    // that has already healed, which is the bug this issue exists to remove.
+    const w = wired();
+    w.cycle('maker: paused', 0, 3);
+    w.cycle(null, 4);                       // heal #1 -> announce
+    w.cycle('maker: paused', 0, 3);         // same reason again
+    w.cycle(null, 4);                       // heal #2 -> must announce again
+    expect(w.msgs('venue.quote.recovered')).toEqual([
+      'Metric quoting again (was "maker: paused")',
+      'Metric quoting again (was "maker: paused")',
+    ]);
+  });
+
   it('reports a SECOND outage with the SAME reason — which noteOnce would have swallowed', () => {
     const w = wired();
     w.cycle('maker: paused', 0, 3);
