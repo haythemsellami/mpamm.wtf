@@ -31,8 +31,9 @@ interface UiState {
   // markouts
   mkProto: string; mkSide: string; mkSize: string; mkPaused: boolean;
   // Volume tab windows — per chart, per the design. The two BAR charts are
-  // brush-windowed (start/end = day indexes into d.volume; null = full
-  // history), each with its own independent brush. The three date-windowed
+  // brush-windowed (start/end = day indexes into d.volume; null = the default
+  // trailing six-month window, derived per render so it tracks the newest
+  // day), each with its own independent brush. The three date-windowed
   // charts own from→to ISO pairs (null = that bound open ⇒ full range).
   // Granularities re-bucket the two bar charts ('D'|'W'|'M').
   volStart: number | null; volEnd: number | null;

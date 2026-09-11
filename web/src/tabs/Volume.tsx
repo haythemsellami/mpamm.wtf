@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DailyVolume } from '@shared';
 import { useDashboard } from '../store';
 import { useViewport } from '../lib/viewport';
+import { defaultWindowStart } from '../lib/volume-window';
 import { C, pill, venueColor } from '../theme';
 import { fmtVolUsd } from '../lib/format';
 
@@ -108,8 +109,14 @@ export function VolumeTab() {
   const allDays = d.volume;
   const nAll = allDays.length;
 
-  /** DAILY window (design volWin): the hand-drawn brush window, else full
-   *  history. Ranges are per-chart now — there is no page-level preset. */
+  // Until a brush is dragged both bar charts open on the trailing six months,
+  // re-derived each render so the window follows the newest day (see
+  // lib/volume-window). Shorter histories fall back to the full range.
+  const defaultStart = Math.min(defaultWindowStart(allDays), Math.max(0, nAll - 1 - MIN_WIN));
+
+  /** DAILY window (design volWin): the hand-drawn brush window, else the
+   *  default trailing window. Ranges are per-chart now — there is no
+   *  page-level preset. */
   const winDaily = (): [number, number] => {
     const n = nAll;
     if (n <= 1) return [0, Math.max(0, n - 1)];
@@ -117,12 +124,12 @@ export function VolumeTab() {
       const s = Math.max(0, Math.min(n - 1 - MIN_WIN, d.volStart));
       return [s, Math.max(s + MIN_WIN, Math.min(n - 1, d.volEnd))];
     }
-    return [0, n - 1];
+    return [defaultStart, n - 1];
   };
   const [wS, wE] = winDaily();
 
   /** BURN chart's brush window — same shape as the daily brush but its own
-   *  independent indexes (burnStart/burnEnd; null ⇒ full history). */
+   *  independent indexes (burnStart/burnEnd; null ⇒ default trailing window). */
   const winBurn = (): [number, number] => {
     const n = nAll;
     if (n <= 1) return [0, Math.max(0, n - 1)];
@@ -130,7 +137,7 @@ export function VolumeTab() {
       const s = Math.max(0, Math.min(n - 1 - MIN_WIN, d.burnStart));
       return [s, Math.max(s + MIN_WIN, Math.min(n - 1, d.burnEnd))];
     }
-    return [0, n - 1];
+    return [defaultStart, n - 1];
   };
   const [bWS, bWE] = winBurn();
 
