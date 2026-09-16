@@ -118,6 +118,17 @@ export const TOKENS: Record<string, TokenInfo> = {
   MON: { symbol: 'MON', address: NATIVE_MON, decimals: 18, stable: false },
   WBTC: { symbol: 'WBTC', address: '0x0555e30da8f98308edb960aa94c0db47230d2b9c', decimals: 8, stable: false },
   WETH: { symbol: 'WETH', address: '0xee8c0e9f1bffb4eb878d8f15f368a02a35481242', decimals: 18, stable: false },
+  XAUT0: {
+    symbol: 'XAUt0',
+    address: '0x01bfF41798a0BCF287b996046CA68B395dbc1071',
+    decimals: 6,
+    stable: false,
+    // Tether Gold (1 XAUt0 = 1 fine troy oz, Swiss vault). ThogAMM added it to
+    // its on-chain token registry (pool 0xce389e78…, read via getTokens on
+    // 2026-09-15: 8 tokens, 56 directed markets). Volatile like a base asset —
+    // never a $1 stable. Priced DIRECTLY as Binance XAUTUSDT (the same XAUt
+    // instrument trades there, so no PAXG-parity proxy is involved).
+  },
   // Coinbase wrapped BTC (Hanji's BTC representation). NO CEX lists a cbBTC/BTC
   // basis pair, so cbBTC pairs use wrapBasisOverride: '' (parity — Coinbase 1:1
   // mint/redeem keeps it ~sub-bp) with a UI caveat, unlike WBTC's live WBTCBTC.
@@ -170,6 +181,11 @@ export const ASSETS: Record<string, AssetSpec> = {
   MON: { key: 'MON', symbol: 'MON', token: 'WMON', cex: 'bybit', cexSymbol: 'MONUSDT' },
   BTC: { key: 'BTC', symbol: 'BTC', token: 'WBTC', cex: 'binance', cexSymbol: 'BTCUSDT', wrapBasisSymbol: 'WBTCBTC' },
   ETH: { key: 'ETH', symbol: 'ETH', token: 'WETH', cex: 'binance', cexSymbol: 'ETHUSDT' },
+  // XAUt0 IS native XAUt (Tether Gold itself trades as Binance XAUTUSDT), so —
+  // like WETH — no wrap basis applies: the CEX reference is the same instrument
+  // the on-chain token redeems for, not a proxy for it (PAXG exists but would
+  // introduce an untraded XAUt/PAXG basis; the direct symbol avoids it).
+  XAUt: { key: 'XAUt', symbol: 'XAUt', token: 'XAUT0', cex: 'binance', cexSymbol: 'XAUTUSDT' },
 };
 
 /** A tracked market: a base asset vs a quote. `symbol` is the display key used
@@ -226,6 +242,19 @@ export const PAIRS: Pair[] = [
   // uses native BTC for the cbBTC quote leg, so cbBTC parity is implicit rather
   // than a wrap-basis override.
   { symbol: 'WBTC/cbBTC', base: 'BTC', quote: 'BTC', quoteKind: 'asset' },
+  // XAUt pairs — ThogAMM crossed its whole registry against XAUt0 (on-chain
+  // 2026-09: 8 tokens → 28 crosses; the dashboard registers these 7, leaving
+  // only the stable↔stable crosses USDC/AUSD, USDC/USDT0, AUSD/USDT0 out —
+  // they have no base asset to benchmark). 'XAUt/BTC' is the WBTC cross,
+  // 'XAUt/cbBTC' the cbBTC cross; their BTC quote legs follow the existing
+  // asset-quoted convention (native BTC USDT mid, wrapper parity implicit).
+  { symbol: 'XAUt/USDC', base: 'XAUt', quote: 'USDC' },
+  { symbol: 'XAUt/USDT0', base: 'XAUt', quote: 'USDT0' },
+  { symbol: 'XAUt/AUSD', base: 'XAUt', quote: 'AUSD' },
+  { symbol: 'XAUt/MON', base: 'XAUt', quote: 'MON', quoteKind: 'asset' },
+  { symbol: 'XAUt/ETH', base: 'XAUt', quote: 'ETH', quoteKind: 'asset' },
+  { symbol: 'XAUt/BTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset' },
+  { symbol: 'XAUt/cbBTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset' },
 ];
 
 /** Market symbols (derived from the pair registry). */

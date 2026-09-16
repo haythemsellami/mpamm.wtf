@@ -20,7 +20,7 @@ import { buildDepthSnapshot } from '../depth.js';
  */
 
 /** Rough synthetic USD prices per base asset (dev only; the live source uses the CEX feeds). */
-const ASSET_PX: Record<string, number> = { MON: 0.01928, BTC: 98000, ETH: 3500 };
+const ASSET_PX: Record<string, number> = { MON: 0.01928, BTC: 98000, ETH: 3500, XAUt: 4350 };
 const BASE_MON = ASSET_PX.MON;
 
 interface SimFill extends Fill { bornMs: number; }
