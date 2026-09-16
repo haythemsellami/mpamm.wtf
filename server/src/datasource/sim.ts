@@ -20,7 +20,7 @@ import { buildDepthSnapshot } from '../depth.js';
  */
 
 /** Rough synthetic USD prices per base asset (dev only; the live source uses the CEX feeds). */
-const ASSET_PX: Record<string, number> = { MON: 0.01928, BTC: 98000, ETH: 3500 };
+const ASSET_PX: Record<string, number> = { MON: 0.01928, BTC: 98000, ETH: 3500, XAUt: 4350 };
 const BASE_MON = ASSET_PX.MON;
 
 interface SimFill extends Fill { bornMs: number; }
@@ -69,6 +69,13 @@ export class SimDataSource extends BaseSource {
   /** synthetic USD price of a market's quote token — $1 for stables, the
    *  asset's own price when the pair is quoted in a crypto asset. */
   private quotePx(market: string): number { const p = pairOf(market); return (p?.quoteKind === 'asset' && this.px[p.quote]) || 1; }
+  /** synthetic mid IN THE PAIR'S OWN TERMS (quote units per base) — the same
+   *  construction the live reference uses. Crypto-quoted pairs (MON/ETH,
+   *  XAUt/MON, …) divide by the quote asset's USD price; stable quotes divide
+   *  by 1. Quotes, depth anchors and reference rows must ALL use this — a
+   *  USD-terms mid on an asset-quoted pair mispriced it by the quote asset's
+   *  whole value (a MON/ETH row once carried a $0.019 "ETH" price). */
+  private midPx(market: string): number { return this.basePx(market) / this.quotePx(market); }
   private chg = 2.3;
   private block = 84_500_000;
   private days: DailyVolume[] = [];
@@ -146,9 +153,9 @@ export class SimDataSource extends BaseSource {
   private buildDepth(market: string): DepthSnapshot {
     if (!config.depthEnabled) return { market, asOfBlock: this.block, refMid: 0, ts: Date.now(), venues: [] };
     const sizes = depthSizes(config.depthSamples);
-    // the sim's bps are all measured off basePx — the same number quoteAt() uses
+    // the sim's bps are all measured off midPx — the same number quoteAt() uses
     // as the mid, so refMid and the curve can never be anchored differently.
-    return buildDepthSnapshot(this.buildMatrix(sizes), market, sizes, this.basePx(market), this.block, Date.now());
+    return buildDepthSnapshot(this.buildMatrix(sizes), market, sizes, this.midPx(market), this.block, Date.now());
   }
 
   protected onDepthDemand(market: string, active: boolean): void {
@@ -210,7 +217,7 @@ export class SimDataSource extends BaseSource {
   }
 
   private quoteAt(id: string, market: string, size: number): { bidBps: number; askBps: number; bidPx: number; askPx: number } {
-    const mid = this.basePx(market);
+    const mid = this.midPx(market);
     const hsz = this.halfSpread(id, size);
     const o = this.param[id].offset;
     const bid = o - hsz, ask = o + hsz;
@@ -263,7 +270,7 @@ export class SimDataSource extends BaseSource {
       const refId = cexForBase(base);
       if (!refIds.has(refId)) continue;
       const takerBps = refId === 'binance' ? config.binanceTakerBps : config.takerBps;
-      const mid = this.basePx(market);
+      const mid = this.midPx(market);
       for (const size of sizes) {
         // fee-dominated and barely size-sensitive — the CEX leg is the wide,
         // near-vertical reference the on-chain curves are read against.

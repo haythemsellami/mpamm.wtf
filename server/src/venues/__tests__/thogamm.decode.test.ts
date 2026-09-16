@@ -36,6 +36,9 @@ const REAL_MON_USDC_FILL = {
   logIndex: 50,
 };
 
+/** ThogAMM's live on-chain registry as of 2026-09-15 (getTokens on pool
+ *  0xce389e78…): 8 tokens, 56 directed markets. XAUt0 joined via the
+ *  implementation upgrade that preceded the RPC's retention window. */
 const LIVE_TOKEN_ADDRESSES = [
   TOKENS.USDC.address,
   TOKENS.AUSD.address,
@@ -44,12 +47,13 @@ const LIVE_TOKEN_ADDRESSES = [
   TOKENS.WETH.address,
   TOKENS.WBTC.address,
   TOKENS.CBBTC.address,
+  TOKENS.XAUT0.address,
 ];
 const MARKETS = thogammMarketsForTokens(LIVE_TOKEN_ADDRESSES);
 const BY_DIRECTION = indexThogammMarkets(MARKETS);
 const usdForToken = (tokenKey: string, amount: number) => {
   if (TOKENS[tokenKey]?.stable) return amount;
-  const px: Record<string, number> = { WMON: 0.021, WETH: 3_800, WBTC: 118_000, CBBTC: 118_000 };
+  const px: Record<string, number> = { WMON: 0.021, WETH: 3_800, WBTC: 118_000, CBBTC: 118_000, XAUT0: 4_350 };
   return amount * (px[tokenKey] ?? 0);
 };
 
@@ -85,15 +89,24 @@ describe('ThogAMM registered-market coverage', () => {
       'cbBTC/MON',
       'cbBTC/ETH',
       'WBTC/cbBTC',
+      'XAUt/USDC',
+      'XAUt/USDT0',
+      'XAUt/AUSD',
+      'XAUt/MON',
+      'XAUt/ETH',
+      'XAUt/cbBTC',
     ]);
-    expect(MARKETS).toHaveLength(18);
+    // 24, not 25: the XAUt0↔WBTC cross stays unlisted — its quote leg would
+    // need the live WBTCBTC basis the reference model applies to bases only
+    // (see the PAIRS comment in @shared).
+    expect(MARKETS).toHaveLength(24);
     expect(new Set(MARKETS.flatMap((market) => [market.base.address, market.quote.address]))).toEqual(new Set(LIVE_TOKEN_ADDRESSES));
-    expect(BY_DIRECTION.size).toBe(36);
+    expect(BY_DIRECTION.size).toBe(48);
   });
 
   it('does not advertise pairs for a token absent from the on-chain registry', () => {
-    const withoutCbBtc = thogammMarketsForTokens(LIVE_TOKEN_ADDRESSES.filter((address) => address !== TOKENS.CBBTC.address));
-    expect(withoutCbBtc.some((market) => market.market.includes('cbBTC'))).toBe(false);
+    const withoutXaut = thogammMarketsForTokens(LIVE_TOKEN_ADDRESSES.filter((address) => address !== TOKENS.XAUT0.address));
+    expect(withoutXaut.some((market) => market.market.includes('XAUt'))).toBe(false);
   });
 });
 
@@ -133,7 +146,7 @@ describe('decodeThogammSwap (real Monad fixture)', () => {
   });
 });
 
-/** Minimal ctx: discovery reads are stubbed to the live 7-token registry, so
+/** Minimal ctx: discovery reads are stubbed to the live 8-token registry, so
  *  decode() can exercise the upgrade path with no network. */
 const stubCtx = (notes: string[], codes: string[] = []) => ({
   client: {

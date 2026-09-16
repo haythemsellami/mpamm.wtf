@@ -2,7 +2,7 @@
 // runs with allowFailure — so the venue's disappearance from the grid carries
 // no signal by itself. These lock down that the adapter names the cause.
 import { describe, expect, it } from 'vitest';
-import { TOKENS } from '@shared';
+import { TOKENS, ASSETS, pairOf } from '@shared';
 import { createThogammAdapter } from '../thogamm.js';
 
 /**
@@ -23,6 +23,7 @@ const failed = (error: unknown) => ({ status: 'failure' as const, error });
 const LIVE_TOKEN_ADDRESSES = [
   TOKENS.USDC.address, TOKENS.AUSD.address, TOKENS.USDT0.address,
   TOKENS.WMON.address, TOKENS.WETH.address, TOKENS.WBTC.address, TOKENS.CBBTC.address,
+  TOKENS.XAUT0.address,
 ];
 
 /** ctx whose quote multicall reverts every leg, until `live` is flipped on. */
@@ -104,5 +105,72 @@ describe('ThogAMM quote outage notes', () => {
     state.live = false;
     await adapter.quote!(ctx, [100], 123n);
     expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered', 'venue.quote.unavailable']);
+  });
+});
+
+describe('ThogAMM XAUt markets (gold sizing + crypto-quoted terms)', () => {
+  /** per-token USD prices. The stub's maker echoes the same ratio, so a
+   *  correctly-sized leg lands at px == outUsd/inUsd EXACTLY — a decimals bug
+   *  (XAUT0 is 6, not 18) or a wrong pair-terms mid shows up as px off by
+   *  10^k or by the quote asset's whole value, not as a subtle drift. */
+  const USD: Record<string, number> = {
+    USDC: 1, AUSD: 1, USDT0: 1, USD1: 1,
+    WMON: 0.0207, WETH: 3_500, WBTC: 118_000, CBBTC: 118_000, XAUT0: 4_350,
+  };
+  // registry KEY of a token address (symbols differ from keys: 'cbBTC' ≠ CBBTC)
+  const keyOf = (addr: string) => Object.entries(TOKENS).find(([, t]) => t.address.toLowerCase() === addr.toLowerCase())![0];
+  const pricedCtx = () => ({
+    client: {
+      getBlockNumber: async () => 93_063_374n,
+      readContract: async ({ functionName }: any) =>
+        functionName === 'getPoolIds'
+          ? ['0xce389e78282dedac7b18ba7f775b7602d2ab3ab171bbd6711eb0239be6ef4dcc']
+          : LIVE_TOKEN_ADDRESSES,
+      multicall: async ({ contracts }: any) => contracts.map((c: any) => {
+        if (c.functionName === 'decimals') return { status: 'success', result: TOKENS[keyOf(c.address)].decimals };
+        const [inAddr, outAddr, amountIn] = c.args as [string, string, bigint];
+        const tin = TOKENS[keyOf(inAddr)], tout = TOKENS[keyOf(outAddr)];
+        const humanIn = Number(amountIn) / 10 ** tin.decimals;
+        // px = quote-per-base = usd(tokenIn)/usd(tokenOut): sell XAUt for $100 ⇒ $100 of USDC out
+        const humanOut = humanIn * (USD[keyOf(inAddr)] / USD[keyOf(outAddr)]);
+        return { status: 'success', result: [BigInt(Math.round(humanOut * 10 ** tout.decimals)), 93_063_374n] };
+      }),
+    },
+    pricer: {
+      usdPerToken: (key: string) => USD[key] ?? 0,
+      pairMid: (market: string) => {
+        const p = pairOf(market);
+        if (!p) return 0;
+        const quoteUsd = p.quoteKind === 'asset' ? USD[ASSETS[p.quote].token] : 1;
+        return quoteUsd > 0 ? USD[ASSETS[p.base].token] / quoteUsd : 0;
+      },
+    },
+    note: () => {},
+  } as any);
+
+  it('sizes and prices the gold market in USDC terms at 6-decimal precision', async () => {
+    const adapter = createThogammAdapter();
+    await adapter.discover!(pricedCtx());
+    const rows = await adapter.quote!(pricedCtx(), [100], 123n, new Set(['XAUt/USDC']));
+    expect(rows).toHaveLength(1);
+    // tolerance = one 6-dec tick of the small XAUt leg (the stub's echo
+    // rounds 0.0229885057… XAUt to 0.022989 — ~2.2e-5 relative, ~0.2bps)
+    const rel = (x: number) => Math.abs(x - 4_350) / 4_350;
+    expect(rel(rows[0].bidPx)).toBeLessThan(5e-5);
+    expect(rel(rows[0].askPx)).toBeLessThan(5e-5);
+    expect(Math.abs(rows[0].bidBps)).toBeLessThan(0.3);
+    expect(Math.abs(rows[0].askBps)).toBeLessThan(0.3);
+    expect(rows[0].oneSided).toBe(false);
+  });
+
+  it('prices a crypto-quoted gold pair in the quote asset\'s own terms', async () => {
+    const adapter = createThogammAdapter();
+    await adapter.discover!(pricedCtx());
+    const rows = await adapter.quote!(pricedCtx(), [100], 123n, new Set(['XAUt/MON']));
+    expect(rows).toHaveLength(1);
+    // 4350 USD/XAUt ÷ 0.0207 USD/MON — MON per XAUt, not a USD number
+    const rel = (x: number) => Math.abs(x - 4_350 / 0.0207) / (4_350 / 0.0207);
+    expect(rel(rows[0].bidPx)).toBeLessThan(5e-5);
+    expect(rel(rows[0].askPx)).toBeLessThan(5e-5);
   });
 });
