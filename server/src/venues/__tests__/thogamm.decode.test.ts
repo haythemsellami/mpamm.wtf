@@ -94,12 +94,14 @@ describe('ThogAMM registered-market coverage', () => {
       'XAUt/AUSD',
       'XAUt/MON',
       'XAUt/ETH',
-      'XAUt/BTC',
       'XAUt/cbBTC',
     ]);
-    expect(MARKETS).toHaveLength(25);
+    // 24, not 25: the XAUt0↔WBTC cross stays unlisted — its quote leg would
+    // need the live WBTCBTC basis the reference model applies to bases only
+    // (see the PAIRS comment in @shared).
+    expect(MARKETS).toHaveLength(24);
     expect(new Set(MARKETS.flatMap((market) => [market.base.address, market.quote.address]))).toEqual(new Set(LIVE_TOKEN_ADDRESSES));
-    expect(BY_DIRECTION.size).toBe(50);
+    expect(BY_DIRECTION.size).toBe(48);
   });
 
   it('does not advertise pairs for a token absent from the on-chain registry', () => {

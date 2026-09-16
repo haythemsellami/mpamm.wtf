@@ -243,17 +243,20 @@ export const PAIRS: Pair[] = [
   // than a wrap-basis override.
   { symbol: 'WBTC/cbBTC', base: 'BTC', quote: 'BTC', quoteKind: 'asset' },
   // XAUt pairs — ThogAMM crossed its whole registry against XAUt0 (on-chain
-  // 2026-09: 8 tokens → 28 crosses; the dashboard registers these 7, leaving
-  // only the stable↔stable crosses USDC/AUSD, USDC/USDT0, AUSD/USDT0 out —
-  // they have no base asset to benchmark). 'XAUt/BTC' is the WBTC cross,
-  // 'XAUt/cbBTC' the cbBTC cross; their BTC quote legs follow the existing
-  // asset-quoted convention (native BTC USDT mid, wrapper parity implicit).
+  // 2026-09: 8 tokens → 28 crosses; the dashboard registers these 6, leaving
+  // out the stable↔stable crosses USDC/AUSD, USDC/USDT0, AUSD/USDT0 — no base
+  // asset to benchmark — and the WBTC cross XAUt0↔WBTC: its quote leg is WBTC,
+  // and the reference model applies wrap bases to the BASE leg only, so listing
+  // it would anchor quotes in native-BTC terms ~the live WBTCBTC basis off the
+  // pair's own terms (the exact error pair-terms references exist to remove;
+  // cbBTC parity is forced because no CEX lists that pair — WBTC's is traded,
+  // so assuming it is not). List it only after quote-leg wrap-basis support.
+  // (The cross is also one-sided live: the pool holds no WBTC to pay out.)
   { symbol: 'XAUt/USDC', base: 'XAUt', quote: 'USDC' },
   { symbol: 'XAUt/USDT0', base: 'XAUt', quote: 'USDT0' },
   { symbol: 'XAUt/AUSD', base: 'XAUt', quote: 'AUSD' },
   { symbol: 'XAUt/MON', base: 'XAUt', quote: 'MON', quoteKind: 'asset' },
   { symbol: 'XAUt/ETH', base: 'XAUt', quote: 'ETH', quoteKind: 'asset' },
-  { symbol: 'XAUt/BTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset' },
   { symbol: 'XAUt/cbBTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset' },
 ];
 
