@@ -1,0 +1,119 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { once } from 'node:events';
+import { gunzipSync } from 'node:zlib';
+import { WebSocket } from 'ws';
+import type { AddressInfo } from 'node:net';
+import { BaseSource } from '../datasource/index.js';
+import { STREAM_V2_GZIP, type MarketState, type QuoteSnapshot, type StreamEnvelope, type StreamTopic, type StreamMessage } from '@shared';
+
+process.env.API_PORT = '0';
+const row = { venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000, bidBps: -1.23, askBps: 2.34, bidPx: .024123456789, askPx: .024132198765, spreadBps: 3.57, filledFull: true, feeBps: .2, ts: 100 };
+class Source extends BaseSource {
+  readonly mode = 'sim' as const;
+  async start() {} stop() {}
+  getState(): MarketState { return { chainId: 143, block: 1, monUsd: .024, monChangePct: 0, takerBps: 1, markets: ['MON/USDC', 'BTC/USDC'], sizesUsd: [1000], quoteCadenceMs: 300, source: 'sim', venues: [
+    { id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } },
+  ], notes: [{ ts: 0, level: 'info', code: 'source.sim', msg: 'private diagnostic' }] }; }
+  getQuotes(): QuoteSnapshot { return { block: 1, monUsd: .024, ts: 100, frame: { headSource: 'sim', headObservedAt: 80, quoteStartedAt: 81, quoteCompletedAt: 99, emittedAt: 100, durationMs: 18, adapterMs: { venue: 17 }, missingVenues: [], coalescedBlocks: 0 }, rows: [row, { ...row, market: 'BTC/USDC' }, { ...row, sizeUsd: 100 }] }; }
+  getFills() { return []; } getVolume() { return []; }
+  push(message: StreamMessage) { this.emitMsg(message); }
+}
+const cleanup: (() => Promise<unknown> | void)[] = [];
+afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop(); });
+const waitFor = async (predicate: () => boolean) => { for (let i = 0; i < 100 && !predicate(); i++) await new Promise((r) => setTimeout(r, 5)); expect(predicate()).toBe(true); };
+
+async function boot() {
+  const { startServer } = await import('../server.js');
+  const source = new Source();
+  const server = startServer(source);
+  await once(server, 'listening');
+  cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  return { source, port: (server.address() as AddressInfo).port };
+}
+async function connect(port: number, topics: StreamTopic[]) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/stream`, STREAM_V2_GZIP, { perMessageDeflate: false });
+  const frames: StreamEnvelope[] = [];
+  const binaries: number[] = [];
+  ws.on('message', (data, binary) => {
+    if (binary) binaries.push((data as Buffer).length);
+    frames.push(JSON.parse((binary ? gunzipSync(data as Buffer) : data).toString()));
+  });
+  await once(ws, 'open');
+  cleanup.push(() => { ws.terminate(); });
+  ws.send(JSON.stringify({ type: 'subscribe', topics }));
+  await waitFor(() => frames.length > 0);
+  return { ws, frames, binaries };
+}
+
+describe('subscription transport', () => {
+  it('filters before encoding, shares quote demand and compression, and works without extension negotiation', async () => {
+    const { source, port } = await boot();
+    const watch = vi.spyOn(source, 'watchQuotes');
+    const topic = { channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false } as const;
+    const a = await connect(port, [topic]);
+    const b = await connect(port, [topic]);
+    const historical = await connect(port, [{ channel: 'state' }]);
+    expect(watch).toHaveBeenCalledTimes(1);
+    const initial = a.frames[0].message;
+    expect(initial.ch).toBe('quotes');
+    if (initial.ch === 'quotes') expect(initial.data.rows).toEqual([row]);
+    expect(JSON.stringify(historical.frames)).not.toContain('private diagnostic');
+    source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 2 } });
+    await waitFor(() => a.frames.length === 2 && b.frames.length === 2);
+    expect(a.frames[1]).toEqual(b.frames[1]);
+    expect(a.frames[1].seq).toBe(1);
+    expect(a.binaries.length).toBe(1);
+    expect(historical.frames.every((f) => f.message.ch === 'state')).toBe(true);
+    const metrics = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
+    expect(metrics.stream.encodes).toBe(1);
+  });
+
+  it('changes subscriptions without leaking rows from the previous market', async () => {
+    const { source, port } = await boot();
+    const c = await connect(port, [{ channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false }]);
+    c.ws.send(JSON.stringify({ type: 'subscribe', topics: [{ channel: 'quotes', market: 'BTC/USDC', sizeUsd: 1000, baseline: false }] }));
+    await waitFor(() => c.frames.length === 2);
+    source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 2 } });
+    await waitFor(() => c.frames.length === 3);
+    for (const frame of c.frames.slice(1)) {
+      expect(frame.message.ch).toBe('quotes');
+      if (frame.message.ch === 'quotes') expect(frame.message.data.rows.map((r) => r.market)).toEqual(['BTC/USDC']);
+    }
+  });
+
+  it('rejects arbitrary sizes instead of creating unbounded RPC demand', async () => {
+    const { port } = await boot();
+    const c = await connect(port, [{ channel: 'state' }]);
+    const closed = once(c.ws, 'close');
+    c.ws.send(JSON.stringify({ type: 'subscribe', topics: [{ channel: 'quotes', market: 'MON/USDC', sizeUsd: 12345, baseline: false }] }));
+    expect((await closed)[0]).toBe(1008);
+  });
+
+  it('keeps only the latest pending snapshot during a burst', async () => {
+    const { source, port } = await boot();
+    const c = await connect(port, [{ channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false }]);
+    for (const block of [2, 3, 4]) source.push({ ch: 'quotes', data: { ...source.getQuotes(), block } });
+    await waitFor(() => c.frames.length === 3);
+    expect(c.frames.slice(1).map((f) => f.message.ch === 'quotes' && f.message.data.block)).toEqual([2, 4]);
+    expect(c.frames.map((f) => f.seq)).toEqual([0, 1, 2]);
+    const health = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
+    expect(health.stream.coalesced).toBe(2);
+  });
+
+  it('serves immutable compressed aggregates and rejects missing revisions', async () => {
+    const { port } = await boot();
+    const base = `http://127.0.0.1:${port}`;
+    const manifest = await fetch(`${base}/api/leaderboard/publication?days=1`).then((r) => r.json()) as { url: string };
+    const response = await fetch(base + manifest.url);
+    expect(response.headers.get('cache-control')).toContain('immutable');
+    expect(response.headers.get('content-encoding')).toBe('gzip');
+    expect(await response.json()).toMatchObject({ days: 1 });
+    const etag = response.headers.get('etag')!;
+    expect((await fetch(base + manifest.url, { headers: { 'If-None-Match': etag } })).status).toBe(304);
+    const identity = await fetch(base + manifest.url, { headers: { 'Accept-Encoding': 'gzip;q=0, identity' } });
+    expect(identity.headers.get('content-encoding')).toBeNull();
+    const missing = await fetch(`${base}/api/analytics/${'0'.repeat(64)}.json`);
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get('cache-control')).toBe('no-store');
+  });
+});

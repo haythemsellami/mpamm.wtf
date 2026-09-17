@@ -97,6 +97,7 @@ export function createUniswapAdapter(): VenueAdapter {
 
   return {
     venues: () => [UNI_VENUE],
+    quoteMarkets: () => [...new Set(markets.map((m) => m.market))],
 
     async discover(ctx: AdapterContext) {
       // candidate = every registered pair × standard hookless tier

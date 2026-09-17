@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
 import type {
   DataSourceMode, DepthSnapshot, MarketState, QuoteSnapshot, Fill, DailyVolume, StreamMessage,
-  LeaderboardResponse, GasResponse,
+  LeaderboardResponse, GasResponse, QuoteScope,
 } from '@shared';
+import { planQuotes, type QuotePlan } from '../quote-demand.js';
 import { computeLeaderboard } from '../analytics.js';
 
 /**
@@ -15,7 +16,11 @@ export interface DataSource {
   start(): Promise<void>;
   stop(): void | Promise<void>;
   getState(): MarketState;
+  manageQuoteDemand?(): void;
+  watchQuotes?(scope?: QuoteScope): () => void;
   getQuotes(): QuoteSnapshot;
+  /** Legacy REST consumers can request a complete matrix on demand. */
+  fullQuoteSnapshot?(): Promise<QuoteSnapshot>;
   getFills(): Fill[];
   getVolume(): DailyVolume[];
   /** Historical fills query (DB-backed for live, in-memory for sim). */
@@ -64,6 +69,21 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
   /** Rolling wall-time ring of broadcast quote matrices — recorded at the
    *  emitMsg choke point so live + sim get it identically for free. */
   private quoteHist: QuoteSnapshot[] = [];
+  private quoteManaged = false;
+  private quoteScopes = new Map<symbol, QuoteScope | undefined>();
+
+  manageQuoteDemand(): void { this.quoteManaged = true; }
+  watchQuotes(scope?: QuoteScope): () => void {
+    const id = Symbol();
+    this.quoteScopes.set(id, scope);
+    return () => { this.quoteScopes.delete(id); };
+  }
+  protected quotePlan(sizes: readonly number[]): QuotePlan[] {
+    const scopes = [...this.quoteScopes.values()];
+    return planQuotes(scopes.filter((s): s is QuoteScope => !!s), sizes,
+      !this.quoteManaged || scopes.some((s) => !s));
+  }
+
   private depthLatest = new Map<string, DepthPublication>();
   private depthWatchers = new Map<string, Set<(publication: DepthPublication) => void>>();
 

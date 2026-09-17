@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { SIZES_USD, TOKENS, pairOf, wrapBasisFor, type DepthSnapshot, type VenueMeta, type QuoteRow } from '@shared';
 import { useDashboard } from '../store';
-import { connectDepth } from '../lib/api';
+import { connectLiveDepth } from '../lib/api';
 import { useViewport } from '../lib/viewport';
 import { C, hexA, pill, venueColor } from '../theme';
 import { Panel, PanelHead, Field } from '../components/ui';
 import { QuoteCanvas } from '../components/QuoteCanvas';
+import { SizeAvailabilityHint } from '../components/SizeAvailabilityHint';
 import { DepthCurveChart, type DepthVenue } from '../components/DepthCurve';
 import { sgn, sizeLabel, percentile, stdev } from '../lib/format';
 
@@ -18,7 +19,7 @@ function LiveDepthCurve({ market, venues, refName }: { market: string; venues: D
   const [snapshot, setSnapshot] = useState<DepthSnapshot | null>(null);
   useEffect(() => {
     setSnapshot(null);
-    return connectDepth(market, (next) => setSnapshot((previous) => {
+    return connectLiveDepth(market, (next) => setSnapshot((previous) => {
       if (next.market !== market) return previous;
       if (previous && (next.asOfBlock < previous.asOfBlock
         || (next.asOfBlock === previous.asOfBlock && next.ts <= previous.ts))) return previous;
@@ -52,9 +53,10 @@ export function ExecutionTab() {
       const venueIds = new Set(d.displayVenues.map((v) => v.id));
       for (const r of d.quotes.rows) if (venueIds.has(r.venueId) && (r.bidPx > 0 || r.askPx > 0)) seenMarkets.current.add(r.market);
     }
+    for (const venue of d.displayVenues) for (const market of d.state?.quoteMarkets?.[venue.id] ?? []) seenMarkets.current.add(market);
     const list = allMarkets.filter((m) => seenMarkets.current.has(m));
     return list.length ? list : allMarkets;
-  }, [allMarkets, d.quotes, d.displayVenues]);
+  }, [allMarkets, d.quotes, d.displayVenues, d.state?.quoteMarkets]);
   useEffect(() => {
     // only revert when the pair isn't a registered market at all — never on a blip.
     if (allMarkets.length && !allMarkets.includes(pair)) d.set('pair', markets[0] ?? allMarkets[0]);
@@ -66,10 +68,11 @@ export function ExecutionTab() {
   // seenMarkets above) so a transient quote gap can't pop chips in/out.
   const seenVenuePairs = useRef(new Set<string>());
   useMemo(() => {
+    for (const [id, markets] of Object.entries(d.state?.quoteMarkets ?? {})) for (const market of markets) seenVenuePairs.current.add(`${id}|${market}`);
     if (!d.quotes) return;
     for (const r of d.quotes.rows) if (r.bidPx > 0 || r.askPx > 0) seenVenuePairs.current.add(`${r.venueId}|${r.market}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d.quotes]);
+  }, [d.quotes, d.state?.quoteMarkets]);
   const pairVenues = d.displayVenues.filter((v) => seenVenuePairs.current.has(`${v.id}|${pair}`));
   // toggle chips: the propAMM venues that support this pair + any BASELINE that
   // quotes it (the standard-DEX band — only pairs with a live, sane Uniswap
@@ -149,23 +152,6 @@ export function ExecutionTab() {
     return { rows, tightest };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [d.frame, d.venueToggles, d.venues, d.theme]);
-
-  // hint: active propAMM venues without a selected-size quote should read as
-  // unavailable/thin liquidity, not as a broken chart.
-  const hint = useMemo(() => {
-    const q = d.quotes; if (!q) return null;
-    const notes = active.filter((v) => v.role === 'venue').map((v) => {
-      if (q.rows.some((r) => r.venueId === v.id && r.market === pair && r.sizeUsd === size)) return null;
-      const at = SIZES_USD.filter((s) => q.rows.some((r) => r.venueId === v.id && r.market === pair && r.sizeUsd === s));
-      // a venue with NO quotes for the pair has no chip at all now (pair-filtered),
-      // so the only note worth showing is the per-size gap on a supporting venue.
-      return at.length
-        ? `${v.name} quotes ${pair} at ${at.map(sizeLabel).join(' / ')}, not ${sizeLabel(size)}`
-        : null;
-    }).filter(Boolean);
-    return notes.length ? notes.join(' · ') : null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d.quotes, d.venueToggles, d.venues, pair, size, d.frame, d.theme]);
 
   // ⚠ unit-conversion notes for the selected pair (pamm.wtf-style): the CEX
   // reference is shown in the pair's OWN terms — wrapped basis + stable cross —
@@ -302,11 +288,7 @@ export function ExecutionTab() {
             ))}
           </div>
         </div>
-        {hint && (
-          <div style={{ padding: '0 14px 10px', fontSize: 9.5, color: C.faint2, lineHeight: 1.5 }}>
-            ⓘ {hint}
-          </div>
-        )}
+        <SizeAvailabilityHint market={pair} size={size} venues={active} quotes={d.quotes} />
         {basisNotes.map((n, i) => (
           <div key={i} style={{ padding: '0 14px 10px', fontSize: 9.5, color: C.amber, lineHeight: 1.5 }}>
             ⚠ {n}

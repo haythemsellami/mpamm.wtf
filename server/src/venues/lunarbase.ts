@@ -462,6 +462,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
 
   return {
     venues: () => [LUNARBASE_VENUE],
+    quoteMarkets: () => [...new Set([...byMarket.values()].map((m) => m.market))],
     backfillFromUtc: '2026-04-30',
 
     async discover(ctx: AdapterContext) {

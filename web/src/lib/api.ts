@@ -1,8 +1,10 @@
+import { subscribeTopics } from './subscriptions';
+import type { StreamTopic } from '@shared';
 import type { MarketsResponse, StreamMessage, DepthSnapshot, Fill, QuoteSnapshot, LeaderboardResponse, GasResponse } from '@shared';
 
-export async function fetchMarkets(): Promise<MarketsResponse> {
-  const r = await fetch('/api/markets');
-  if (!r.ok) throw new Error(`/api/markets ${r.status}`);
+export async function fetchMarkets(volume = false): Promise<MarketsResponse> {
+  const r = await fetch(`/api/bootstrap${volume ? '?volume=1' : ''}`);
+  if (!r.ok) throw new Error(`/api/bootstrap ${r.status}`);
   return r.json();
 }
 
@@ -105,9 +107,17 @@ export async function fetchGas(): Promise<GasResponse> {
 
 /** Server-side aggregated leaderboard/markout stats over the FULL window. */
 export async function fetchLeaderboard(days: number): Promise<LeaderboardResponse> {
-  const r = await fetch(`/api/leaderboard?days=${days}`);
-  if (!r.ok) throw new Error(`/api/leaderboard ${r.status}`);
-  return r.json();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const index = await fetch(`/api/leaderboard/publication?days=${days}${attempt ? `&refresh=${Date.now()}` : ''}`);
+    if (!index.ok) throw new Error(`/api/leaderboard/publication ${index.status}`);
+    const { url } = await index.json() as { url: string };
+    if (!/^\/api\/analytics\/[a-f0-9]{64}\.json$/.test(url)) throw new Error('invalid aggregate revision');
+    const result = await fetch(url);
+    if (result.status === 404) continue;
+    if (!result.ok) throw new Error(`/api/analytics ${result.status}`);
+    return result.json();
+  }
+  throw new Error('aggregate revision expired');
 }
 
 /** Reconnecting WS to the service stream, suspended while the tab is hidden
@@ -152,4 +162,24 @@ export function connectStream(
   );
 
   return () => { closed = true; stopGate(); if (timer) clearTimeout(timer); ws?.close(); };
+}
+
+/** Page-scoped stream, shared across components and visible browser tabs. */
+export function connectDashboardStream(topics: StreamTopic[], onMsg: (message: StreamMessage) => void,
+  onState: (state: 'live' | 'reconnecting') => void): () => void {
+  let dispose: (() => void) | undefined;
+  const open = () => { dispose ??= subscribeTopics(topics, (m) => { if (m.ch !== 'depth') onMsg(m); }, onState); };
+  open();
+  const gate = whileVisible(() => { onState('reconnecting'); dispose?.(); dispose = undefined; }, open);
+  return () => { gate(); dispose?.(); };
+}
+
+export function connectLiveDepth(market: string, onSnapshot: (snapshot: DepthSnapshot) => void): () => void {
+  let dispose: (() => void) | undefined;
+  const open = () => { dispose ??= subscribeTopics([{ channel: 'depth', market }], (m) => {
+    if (m.ch === 'depth' && m.data.market === market) onSnapshot(m.data);
+  }); };
+  open();
+  const gate = whileVisible(() => { dispose?.(); dispose = undefined; }, open);
+  return () => { gate(); dispose?.(); };
 }

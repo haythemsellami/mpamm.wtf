@@ -740,6 +740,8 @@ export interface MarketState {
   /** the venue registry (adapters + CEX reference) — the frontend renders
    *  everything venue-related from this, so venues aren't hardcoded client-side. */
   venues: VenueMeta[];
+  /** Discovered markets per venue; independent of the selected quote subscription. */
+  quoteMarkets?: Record<string, string[]>;
   /** the indexer's own telemetry, oldest first: degradations, held cursors and
    *  lifecycle. Served for maintainers, contributors and tooling debugging the
    *  service (docs/architecture.md: public notes); the dashboard does not
@@ -795,3 +797,5 @@ export type StreamMessage =
   | { ch: 'volume'; data: DailyVolume };
 
 export const STREAM_PATH = '/stream';
+
+export * from './stream.js';

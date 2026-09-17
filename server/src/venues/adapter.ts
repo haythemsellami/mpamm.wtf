@@ -21,6 +21,8 @@ import type { Config } from '../config.js';
 export interface AdapterContext {
   /** viem public client for the Monad RPC (contract reads / multicall). */
   client: PublicClient;
+  /** Present only for cancelable live quote work. */
+  quoteSignal?: AbortSignal;
   /** range-chunked getLogs (the public RPC caps eth_getLogs spans). */
   getLogs: typeof getLogsChunked;
   /** token→USD pricing (stables = $1, base assets off their CEX reference). */
@@ -104,6 +106,8 @@ export interface VenueAdapter {
   /** the display venue(s) this adapter produces — usually one. Every `Fill`/`QuoteRow`
    *  it emits must carry a `venueId` that is one of these. */
   venues(): VenueMeta[];
+  /** Discovered quote coverage, independent of whether a viewer requested it. */
+  quoteMarkets?(): readonly string[];
   /** find the markets/pools this venue trades. The adapter holds its own state
    *  (markets, book cache, …). Called once at boot; may also be called to refresh. */
   discover(ctx: AdapterContext): Promise<void>;
@@ -120,9 +124,8 @@ export interface VenueAdapter {
    *  Monad block rather than a mixture of adjacent `latest` states.
    *
    *  `markets` narrows work before an adapter builds its contract calls. The
-   *  realtime matrix leaves it unset; the isolated depth engine passes one
-   *  requested market so a high-resolution curve never prices the registry's
-   *  entire market universe just to discard all but one pair. */
+   *  realtime engine passes subscribed markets; depth passes one requested
+   *  market. Legacy full-matrix consumers leave it unset. */
   quote?(
     ctx: AdapterContext,
     sizesUsd: readonly number[],

@@ -9,7 +9,11 @@
     "start": "tsx --env-file-if-exists=../.env src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "verify-adapter": "tsx --env-file-if-exists=../.env scripts/verify-adapter.ts"
+    "verify-adapter": "tsx --env-file-if-exists=../.env scripts/verify-adapter.ts",
+    "benchmark:delivery": "tsx scripts/benchmark-delivery.ts",
+    "benchmark:runtime": "tsx scripts/benchmark-runtime.ts",
+    "benchmark:metric": "tsx --env-file-if-exists=../.env scripts/benchmark-metric.ts",
+    "benchmark:live": "tsx scripts/benchmark-live-stream.ts"
   },
   "dependencies": {
     "@mpamm/shared": "*",

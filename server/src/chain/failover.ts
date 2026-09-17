@@ -49,6 +49,7 @@ export interface BreakerEndpoint {
   /** Traffic-class transports for this same endpoint. They share active
    * endpoint selection and health, but not the default HTTP batch queue. */
   lanes?: Record<string, RpcRequestFn>;
+  scopedQuote?: (signal: AbortSignal, key: string) => RpcRequestFn;
 }
 
 /** Public shape served on /api/markets (shared MarketState.rpc). */
@@ -224,15 +225,19 @@ export class RpcBreaker {
   /** One request through the active endpoint; on a threshold-crossing failure
    *  the request transparently retries on the next endpoint(s), at most one
    *  full rotation. Non-transport errors pass through untouched. */
-  async request(args: { method: string; params?: unknown }, lane = 'default'): Promise<unknown> {
+  async request(args: { method: string; params?: unknown }, lane = 'default', scope?: { signal: AbortSignal; key: string }): Promise<unknown> {
     let hops = 0;
     for (;;) {
       const idx = this.active;
       const generation = this.stateGeneration;
       try {
+        scope?.signal.throwIfAborted();
         await this.ensureChain(idx);
+        scope?.signal.throwIfAborted();
         const endpoint = this.endpoints[idx];
-        const res = await (endpoint.lanes?.[lane] ?? endpoint.request)(args);
+        const request = scope && endpoint.scopedQuote ? endpoint.scopedQuote(scope.signal, scope.key) : (endpoint.lanes?.[lane] ?? endpoint.request);
+        const res = await request(args);
+        scope?.signal.throwIfAborted();
         // A late result from an endpoint serving an older generation is still
         // usable by non-cursor callers, but it proves nothing about the active
         // endpoint and must not clear its failure/outage state.
@@ -247,6 +252,7 @@ export class RpcBreaker {
         }
         return res;
       } catch (e) {
+        scope?.signal.throwIfAborted();
         if (e instanceof WrongChainEndpointError) {
           if (idx === this.active && generation === this.stateGeneration) this.advance();
           if ((this.active === idx && generation === this.stateGeneration) || ++hops >= this.endpoints.length) throw e;

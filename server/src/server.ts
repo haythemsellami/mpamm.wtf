@@ -1,4 +1,7 @@
 import express from 'express';
+import { AnalyticsPublications } from './analytics-publications.js';
+import { SubscriptionGateway } from './stream-v2.js';
+import { STREAM_V2_GZIP, STREAM_V2_JSON } from '@shared';
 import cors from 'cors';
 import { createServer, type Server } from 'node:http';
 import { existsSync } from 'node:fs';
@@ -106,6 +109,9 @@ export function trySseWrite(response: SseWriter, chunk: string): boolean {
  */
 export function startServer(source: DataSource): Server {
   const app = express();
+  source.manageQuoteDemand?.();
+  const gateway = new SubscriptionGateway(source);
+  const publications = new AnalyticsPublications();
   app.use(cors());
 
   // HSTS (production only): once a browser has seen this over HTTPS, it forces
@@ -122,13 +128,22 @@ export function startServer(source: DataSource): Server {
 
   app.get('/api/health', (_req, res) => {
     const state = source.getState();
-    res.json({ ok: true, source: source.mode, block: state.block, realtime: state.realtime });
+    res.json({ ok: true, source: source.mode, block: state.block, realtime: state.realtime, stream: gateway.metrics });
   });
 
-  app.get('/api/markets', (_req, res) => {
+  app.get('/api/bootstrap', (req, res) => {
+    const { notes: _, ...state } = source.getState();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ state, quotes: { block: state.block, monUsd: state.monUsd, ts: Date.now(), rows: [] }, fills: [], volume: req.query.volume === '1' ? source.getVolume() : [] });
+  });
+
+  app.get('/api/markets', async (_req, res) => {
+    let quotes;
+    try { quotes = await (source.fullQuoteSnapshot?.() ?? source.getQuotes()); }
+    catch { return res.status(503).json({ error: 'quote snapshot unavailable' }); }
     const body: MarketsResponse = {
       state: source.getState(),
-      quotes: source.getQuotes(),
+      quotes,
       fills: source.getFills(),
       volume: source.getVolume(),
     };
@@ -140,7 +155,10 @@ export function startServer(source: DataSource): Server {
   // standalone endpoint for external consumers.
   app.get('/api/venues', (_req, res) => res.json(venueMeta()));
 
-  app.get('/api/quotes', (_req, res) => res.json(source.getQuotes()));
+  app.get('/api/quotes', async (_req, res) => {
+    try { res.json(await (source.fullQuoteSnapshot?.() ?? source.getQuotes())); }
+    catch { res.status(503).json({ error: 'quote snapshot unavailable' }); }
+  });
   // the last ~60s of real quote ticks for one (market, size) — seeds the
   // Execution chart on load / pair-switch so it never fabricates flat history.
   app.get('/api/quotes/history', (req, res) => {
@@ -207,6 +225,31 @@ export function startServer(source: DataSource): Server {
   // aggregated leaderboard/markout stats over the FULL window (?days=1|7|30) —
   // computed server-side next to the rows; shipping raw fills silently truncated
   // the wide windows at the fetch cap. TAKER-signed; clients derive MAKER.
+  app.get('/api/leaderboard/publication', async (req, res) => {
+    const days = positiveNumberParam(req.query.days) ?? 1;
+    if (!(LEADERBOARD_WINDOW_DAYS as readonly number[]).includes(days)) return res.status(400).json({ error: 'invalid window' });
+    try {
+      const artifact = await publications.publish(await source.leaderboard(days));
+      res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=5, must-revalidate');
+      res.json({ url: `/api/analytics/${artifact.revision}.json`, generatedAt: artifact.generatedAt });
+    } catch { res.status(503).json({ error: 'aggregation unavailable' }); }
+  });
+  app.get('/api/analytics/:revision.json', (req, res) => {
+    const revision = req.params.revision;
+    const artifact = /^[a-f0-9]{64}$/.test(revision) ? publications.get(revision) : undefined;
+    if (!artifact) { res.setHeader('Cache-Control', 'no-store'); return res.status(404).json({ error: 'revision expired; refresh publication' }); }
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('ETag', `W/"${revision}"`);
+    res.setHeader('Vary', 'Accept-Encoding');
+    if (req.headers['if-none-match'] === `W/"${revision}"`) return res.status(304).end();
+    res.type('application/json');
+    if (req.acceptsEncodings('gzip')) {
+      res.setHeader('Content-Encoding', 'gzip');
+      return res.send(artifact.gzip);
+    }
+    res.send(artifact.json);
+  });
+
   app.get('/api/leaderboard', async (req, res) => {
     const days = positiveNumberParam(req.query.days) ?? 1;
     if (!(LEADERBOARD_WINDOW_DAYS as readonly number[]).includes(days)) {
@@ -243,17 +286,23 @@ export function startServer(source: DataSource): Server {
   }
 
   const httpServer = createServer(app);
-  const wss = new WebSocketServer({ server: httpServer, path: STREAM_PATH, perMessageDeflate: PERMESSAGE_DEFLATE });
+  const wss = new WebSocketServer({ server: httpServer, path: STREAM_PATH, maxPayload: 16_384, perMessageDeflate: PERMESSAGE_DEFLATE });
 
   const clients = new Set<WebSocket>();
   // Clients that owe us a pong from the last heartbeat round.
   const awaitingPong = new Set<WebSocket>();
   wss.on('connection', (ws) => {
     clients.add(ws);
+    const v2 = ws.protocol === STREAM_V2_GZIP || ws.protocol === STREAM_V2_JSON;
+    const release = v2 ? undefined : source.watchQuotes?.();
+    if (v2) gateway.accept(ws);
+    else {
     // hello with current state so a client can render before the next tick.
     // This is the ONLY frame carrying the venue registry (see StreamState).
     safeSend(ws, { ch: 'state', data: helloFrame(source.getState()) });
     safeSend(ws, { ch: 'quotes', data: source.getQuotes() });
+    }
+    ws.once('close', () => release?.());
     ws.on('pong', () => awaitingPong.delete(ws));
     ws.on('close', () => drop(ws));
     ws.on('error', () => drop(ws));
@@ -262,11 +311,14 @@ export function startServer(source: DataSource): Server {
   const cut = (ws: WebSocket) => { drop(ws); try { ws.terminate(); } catch { /* already gone */ } };
 
   const onMessage = (m: StreamMessage) => {
+    gateway.onMessage(m);
+    const legacy = [...clients].filter((ws) => ws.protocol !== STREAM_V2_GZIP && ws.protocol !== STREAM_V2_JSON);
+    if (!legacy.length) return;
     // Serialize ONCE for the whole fanout, and strip the state frame down to
     // what actually changes (see StreamState — this is the single biggest
     // egress win in the protocol).
     const payload = JSON.stringify(m.ch === 'state' ? { ch: 'state', data: tickFrame(m.data) } : m);
-    for (const ws of clients) {
+    for (const ws of legacy) {
       // BACKPRESSURE: a stalled peer (sleeping laptop, backgrounded phone,
       // half-dead TCP) never closes, so every frame we push queues in OUR
       // heap — the quote tick alone is ~46KB at ~3/s, ~500MB per stalled
@@ -311,7 +363,7 @@ export function startServer(source: DataSource): Server {
     console.log(`[mpamm] ${source.mode} source · http://localhost:${config.port} · ws ${STREAM_PATH}`);
   });
 
-  httpServer.on('close', () => { clearInterval(heartbeat); source.off('message', onMessage); });
+  httpServer.on('close', () => { gateway.close(); clearInterval(heartbeat); source.off('message', onMessage); });
   return httpServer;
 }
 

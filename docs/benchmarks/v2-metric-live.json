@@ -1,0 +1,113 @@
+{
+  "measuredAt": "2026-09-17T15:03:27.362Z",
+  "method": "12 alternating same-block trials after one warmup; 3 seed pools, $100 buy and 1 base-token sell each; no transactions",
+  "node": "v26.8.2",
+  "executableMatches": 48,
+  "zeroMatches": 24,
+  "failedMatches": 0,
+  "exactMatches": 72,
+  "requestsPerFrame": {
+    "legacy": 2,
+    "helper": 1
+  },
+  "legacy": {
+    "p50Ms": 85.26941699999998,
+    "p95Ms": 89.37474999999995
+  },
+  "helper": {
+    "p50Ms": 41.67404099999999,
+    "p95Ms": 43.438917000000174
+  },
+  "samples": [
+    {
+      "block": 105636157,
+      "legacyMs": 84.80670800000007,
+      "helperMs": 41.937625000000025
+    },
+    {
+      "block": 105636157,
+      "legacyMs": 81.24766599999998,
+      "helperMs": 41.16054100000008
+    },
+    {
+      "block": 105636159,
+      "legacyMs": 87.26270900000009,
+      "helperMs": 41.67404099999999
+    },
+    {
+      "block": 105636161,
+      "legacyMs": 87.39158300000008,
+      "helperMs": 43.11374999999998
+    },
+    {
+      "block": 105636161,
+      "legacyMs": 109.29404199999999,
+      "helperMs": 43.438917000000174
+    },
+    {
+      "block": 105636161,
+      "legacyMs": 80.02212499999996,
+      "helperMs": 43.19787500000007
+    },
+    {
+      "block": 105636163,
+      "legacyMs": 85.91391700000008,
+      "helperMs": 42.01249999999982
+    },
+    {
+      "block": 105636163,
+      "legacyMs": 86.55054100000007,
+      "helperMs": 41.36449999999991
+    },
+    {
+      "block": 105636163,
+      "legacyMs": 89.37474999999995,
+      "helperMs": 41.11233399999992
+    },
+    {
+      "block": 105636164,
+      "legacyMs": 83.52583300000015,
+      "helperMs": 41.51070900000013
+    },
+    {
+      "block": 105636166,
+      "legacyMs": 85.26941699999998,
+      "helperMs": 41.31762499999968
+    },
+    {
+      "block": 105636167,
+      "legacyMs": 81.44162500000039,
+      "helperMs": 44.918709000000035
+    }
+  ],
+  "example": {
+    "block": 105636167,
+    "request": {
+      "pool": "0x2D82AC42334b394A9a8d8f097d61DC1c6B065Fd8",
+      "provider": "0x3a911762CF640b482E72Fe53462419798C9Ed591",
+      "legs": [
+        {
+          "zeroForOne": false,
+          "amount": "100000000",
+          "limit": "340282366920938463463374607431768211455"
+        },
+        {
+          "zeroForOne": true,
+          "amount": "100000000",
+          "limit": "1"
+        }
+      ]
+    },
+    "baseDecimals": 8,
+    "stableDecimals": 6,
+    "stable0": false,
+    "side": "buy",
+    "deltas": [
+      "-130896",
+      "100000000"
+    ],
+    "usd": 100,
+    "baseAmount": 0.00130896,
+    "execPx": 76396.52854174306
+  }
+}

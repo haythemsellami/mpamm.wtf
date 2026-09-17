@@ -58,6 +58,7 @@ async function setup(adapters: ReturnType<typeof healthyAdapter>[]) {
     monad: { blockTime: 300 },
     publicClient: { getBlockNumber },
     quoteClient: {},
+    headClient: { getBlockNumber: vi.fn(async () => 100n) },
     archiveClient: {},
     getLogsChunked,
     probeChain: vi.fn(async () => ({ ok: true, block: 100 })),

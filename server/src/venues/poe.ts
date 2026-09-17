@@ -77,6 +77,7 @@ export function createPoeAdapter(): VenueAdapter {
 
   return {
     venues: () => [POE_VENUE],
+    quoteMarkets: () => [...new Set([...byMarket.keys()])],
     // seed daily volume by replaying Pool.Swap on-chain from the WMON/USDC pool's
     // deployment (block 73455416 · 2026-05-09). Background — see live.ts.
     backfillFromUtc: '2026-05-09',

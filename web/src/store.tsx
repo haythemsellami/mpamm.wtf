@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { MarketState, StreamState, QuoteSnapshot, QuoteRow, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse } from '@shared';
 import { pairOf, cexForBase } from '@shared';
-import { fetchMarkets, fetchFills, fetchLeaderboard, fetchGas, fetchQuoteHistory, connectStream } from './lib/api';
+import { fetchMarkets, fetchFills, fetchLeaderboard, fetchGas, fetchQuoteHistory, connectDashboardStream } from './lib/api';
 import { pathForTab, tabFromPath, urlForTab, type Tab } from './lib/tab-route';
 import { appendQuoteSnapshot, type QuoteSeries } from './lib/quote-series';
 import type { Theme } from './theme';
@@ -164,12 +164,19 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // (the mixed-buffer scale flicker).
   const seedKeyRef = useRef('');
   const seedFetchRef = useRef(''); // key with a history fetch in flight (dedupe)
+  const recentQuotesRef = useRef<QuoteSnapshot[]>([]);
   const keyOf = () => `${selRef.current.pair}|${selRef.current.size}`;
   const pushSnapshot = (q: QuoteSnapshot) => {
     quotesRef.current = q;
     if (seedKeyRef.current !== keyOf()) reseed(); // sync re-key — mixed buffers impossible
+    const recent = recentQuotesRef.current;
+    const duplicate = recent.at(-1)?.block === q.block;
+    if (duplicate) recent[recent.length - 1] = q;
+    else recent.push(q);
+    if (recent.length > QUOTE_SAMPLE_MAX) recent.shift();
     const { pair, size } = selRef.current;
     appendQuoteSnapshot(seriesRef.current, idsRef.current, q, pair, size, QUOTE_WINDOW_MS, QUOTE_SAMPLE_MAX);
+    if (duplicate) return;
     for (const id of idsRef.current) {
       const r = rowFor(q, id, pair, size);
       if (!r) continue;
@@ -190,6 +197,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const reseed = () => {
     const q = quotesRef.current;
     const ids = idsRef.current;
+    if (seedKeyRef.current !== keyOf()) recentQuotesRef.current = [];
     seedKeyRef.current = keyOf();
     // Mutate the buffers IN PLACE (keep the seriesRef/samplesRef object references
     // stable) so `d.series` — captured in the api memo — can never point at a stale
@@ -218,7 +226,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       const ids = new Set(idsRef.current);
       const S = seriesRef.current, SM = samplesRef.current;
       for (const id of idsRef.current) { const s = (S[id] ??= { points: [] }); s.points.length = 0; (SM[id] ??= []).length = 0; }
-      for (const q of hist) {
+      // Live frames can arrive while REST is in flight. Prefer those frames
+      // at the same block and retain every newer one when rebuilding buffers.
+      const merged = new Map(hist.map((q) => [q.block, q]));
+      for (const q of recentQuotesRef.current) merged.set(q.block, q);
+      for (const q of [...merged.values()].sort((a, b) => a.block - b.block)) {
         appendQuoteSnapshot(S, idsRef.current, q, pair, Number(sizeS), QUOTE_WINDOW_MS, QUOTE_SAMPLE_MAX);
         for (const r of q.rows) {
           if (!ids.has(r.venueId)) continue;
@@ -252,6 +264,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  const baselineOn = (state?.venues ?? []).some((v) => v.role === 'baseline' && ui.venueToggles[v.id]);
+
   // cold start + stream. The snapshot is (re)loaded both on mount and on every
   // WS (re)connect, so an initial fetch that races a backend restart is healed,
   // and a reconnect re-syncs history/fills (gap-fill replay — docs/architecture.md: history).
@@ -273,11 +287,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // pre-aggregated from /api/leaderboard over the FULL window instead
         // (fetching 30d of raw fills silently truncated at the 20k cap).
         const [m, hist] = await Promise.all([
-          fetchMarkets(),
-          fetchFills(1, 5000).catch(() => null),
+          fetchMarkets(ui.tab === 'volume'),
+          ui.tab === 'markouts' ? fetchFills(1, 5000).catch(() => null) : Promise.resolve(null),
         ]);
         if (!mounted.v) return;
-        setState(m.state); setQuotes(m.quotes); setVolume(m.volume);
+        setState((previous) => previous && previous.block > m.state.block ? { ...m.state, ...previous, venues: m.state.venues } : m.state);
+        if (!quotesRef.current) { setQuotes(m.quotes); quotesRef.current = m.quotes; }
+        if (ui.tab === 'volume') setVolume(m.volume);
         snapshotLoaded.v = true;
         adoptVenues(m.state.venues ?? []);
         // /api/fills is newest-first; store oldest-first so the cap in
@@ -285,21 +301,27 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // Fills broadcast while the snapshot was in flight are NOT in the
         // response — re-apply them on top instead of discarding.
         const base = hist && hist.length ? [...hist].reverse() : m.fills;
-        setFills(pendingFills.current.reduce((acc, f) => upsertFill(acc, f), base));
+        if (ui.tab === 'markouts') setFills(pendingFills.current.reduce((acc, f) => upsertFill(acc, f), base));
         pendingFills.current = [];
-        quotesRef.current = m.quotes;
-        reseed();
+        if (ui.tab === 'exec') reseed();
         setFrame((f) => f + 1);
       } catch { /* retried on the next WS connect */ }
     };
     loadSnapshot();
 
-    const dispose = connectStream((msg) => {
+    const topics: import('@shared').StreamTopic[] = [{ channel: 'state' }];
+    if (ui.tab === 'exec') topics.push({ channel: 'quotes', market: ui.pair, sizeUsd: ui.size, baseline: baselineOn });
+    if (ui.tab === 'markouts') topics.push({ channel: 'fill' });
+    if (ui.tab === 'volume') topics.push({ channel: 'volume' });
+    const dispose = connectDashboardStream(topics, (msg) => {
       if (msg.ch === 'state') {
         setState((prev) => mergeState(prev, msg.data));
         if (msg.data.venues) adoptVenues(msg.data.venues);
       }
-      else if (msg.ch === 'quotes') { setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1); }
+      else if (msg.ch === 'quotes') {
+        if (quotesRef.current && msg.data.block < quotesRef.current.block) return;
+        setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1);
+      }
       else if (msg.ch === 'volume') { if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data)); }
       else if (msg.ch === 'fill') {
         if (!snapshotLoaded.v) pendingFills.current.push(msg.data);
@@ -309,13 +331,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setConn(s);
       // mount already fetched the snapshot; re-fetch only after a DROP (missed
       // WS deltas), not on the initial open racing that first fetch.
-      if (s === 'reconnecting') wasDropped.v = true;
+      if (s === 'reconnecting') { wasDropped.v = true; quotesRef.current = null; }
       if (s === 'live' && wasDropped.v) { wasDropped.v = false; loadSnapshot(); }
     });
 
     return () => { mounted.v = false; dispose(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [ui.tab, ui.pair, ui.size, baselineOn]);
 
   // server-side leaderboard aggregates: fetch on tab entry + window change, then
   // poll every 30s while the tab is open (fills stream live, aggregates don't).
@@ -323,29 +345,32 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (ui.tab !== 'leaderboard') return;
     let on = true;
-    const load = () => { fetchLeaderboard(lbDays).then((d) => { if (on) setLb(d); }).catch(() => { /* retried on the next poll */ }); };
+    const load = () => { if (document.hidden) return; fetchLeaderboard(lbDays).then((d) => { if (on) setLb(d); }).catch(() => { /* retried on the next poll */ }); };
     load();
+    document.addEventListener('visibilitychange', load);
     const id = setInterval(load, 30_000);
-    return () => { on = false; clearInterval(id); };
+    return () => { on = false; clearInterval(id); document.removeEventListener('visibilitychange', load); };
   }, [ui.tab, lbDays]);
   // the Markouts tab's OUTLIER_FEED reads the 24h aggregate.
   useEffect(() => {
     if (ui.tab !== 'markouts') return;
     let on = true;
-    const load = () => { fetchLeaderboard(1).then((d) => { if (on) setLbDay(d); }).catch(() => { /* retried on the next poll */ }); };
+    const load = () => { if (document.hidden) return; fetchLeaderboard(1).then((d) => { if (on) setLbDay(d); }).catch(() => { /* retried on the next poll */ }); };
     load();
+    document.addEventListener('visibilitychange', load);
     const id = setInterval(load, 30_000);
-    return () => { on = false; clearInterval(id); };
+    return () => { on = false; clearInterval(id); document.removeEventListener('visibilitychange', load); };
   }, [ui.tab]);
   // QUOTE_UPDATE_BURN accrues slowly (keeper cadence) — poll every 60s while
   // the Volume tab is open.
   useEffect(() => {
     if (ui.tab !== 'volume') return;
     let on = true;
-    const load = () => { fetchGas().then((d) => { if (on) setGas(d); }).catch(() => { /* retried on the next poll */ }); };
+    const load = () => { if (document.hidden) return; fetchGas().then((d) => { if (on) setGas(d); }).catch(() => { /* retried on the next poll */ }); };
     load();
+    document.addEventListener('visibilitychange', load);
     const id = setInterval(load, 60_000);
-    return () => { on = false; clearInterval(id); };
+    return () => { on = false; clearInterval(id); document.removeEventListener('visibilitychange', load); };
   }, [ui.tab]);
 
   // reseed when the selected pair/size changes

@@ -123,6 +123,7 @@ export class SimDataSource extends BaseSource {
       chainId: 143, block: this.block, monUsd: this.mon, monChangePct: this.chg,
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
       quoteCadenceMs: config.quoteIntervalMs, source: 'sim', venues: this.venues,
+      quoteMarkets: Object.fromEntries(this.venues.map((v) => [v.id, [...MARKETS]])),
       notes: this.notes.list(),
       realtime: {
         headBlock: this.block, quoteBlock: this.block, lagBlocks: 0, frameMs: 0, headToFrameMs: 0, eventLoopLagMs: 0,
@@ -132,11 +133,13 @@ export class SimDataSource extends BaseSource {
   }
   getQuotes(): QuoteSnapshot {
     const ts = Date.now();
+    const rows = this.quotePlan(SIZES_USD).flatMap((p) => this.buildMatrix(p.sizes, p.markets, p.markets ? p.baseline : undefined));
+    annotateCex(rows, rows.filter((r) => this.references.some((v) => v.id === r.venueId)));
     return {
       block: this.block,
       monUsd: this.mon,
       ts,
-      rows: this.buildMatrix(),
+      rows,
       frame: {
         headSource: 'sim', headObservedAt: ts, quoteStartedAt: ts, quoteCompletedAt: ts, emittedAt: ts,
         durationMs: 0, adapterMs: {}, missingVenues: [], coalescedBlocks: 0,
@@ -144,6 +147,10 @@ export class SimDataSource extends BaseSource {
     };
   }
   getFills(): Fill[] { return this.fills.map(stripFill); }
+  async fullQuoteSnapshot(): Promise<QuoteSnapshot> {
+    const release = this.watchQuotes();
+    try { return this.getQuotes(); } finally { release(); }
+  }
   getVolume(): DailyVolume[] { return this.days.map((d) => ({ ...d, byVenue: { ...d.byVenue } })); }
 
   /** BID_ASK_DEPTH, simulated — the same model over the log-spaced grid, run
@@ -227,11 +234,13 @@ export class SimDataSource extends BaseSource {
   /** One quote matrix over an arbitrary notional grid. The four SIZE pills feed
    *  the streamed frame; the log-spaced depth grid feeds BID_ASK_DEPTH — same
    *  model, same params, so the two agree wherever the grids overlap. */
-  private buildMatrix(sizes: readonly number[] = SIZES_USD): QuoteRow[] {
+  private buildMatrix(sizes: readonly number[] = SIZES_USD, markets?: ReadonlySet<string>, baseline?: boolean): QuoteRow[] {
     const ts = Date.now();
     const rows: QuoteRow[] = [];
     for (const v of this.display) {
+      if (baseline === true) continue;
       for (const market of MARKETS) {
+        if (markets && !markets.has(market)) continue;
         for (const size of sizes) {
           const q = this.quoteAt(v.id, market, size);
           const sizeStep = Math.log10(size / 100);
@@ -249,7 +258,9 @@ export class SimDataSource extends BaseSource {
     // baseline (standard-DEX band) rows — quote-only, exec page. Fee tier label
     // parity with live: feeBps = the mock pool's tier (0.05% → 5bps).
     for (const v of this.baselines) {
+      if (baseline === false) continue;
       for (const market of MARKETS) {
+        if (markets && !markets.has(market)) continue;
         for (const size of sizes) {
           const q = this.quoteAt(v.id, market, size);
           rows.push({
@@ -266,6 +277,7 @@ export class SimDataSource extends BaseSource {
     const refRows: QuoteRow[] = [];
     const refIds = new Set(this.references.map((r) => r.id));
     for (const market of MARKETS) {
+      if (baseline === true || (markets && !markets.has(market))) continue;
       const base = pairOf(market)?.base ?? 'MON';
       const refId = cexForBase(base);
       if (!refIds.has(refId)) continue;

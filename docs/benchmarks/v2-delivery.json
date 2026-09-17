@@ -1,0 +1,87 @@
+{
+  "measuredAt": "2026-09-17T15:19:24.438Z",
+  "node": "v24.11.1",
+  "platform": "darwin arm64",
+  "cpu": "Apple M4",
+  "methodology": "20 recorded-matrix quote frames at 300ms; 10/100 loopback clients in the same process. CPU/RSS include clients and decoding; excludes depth, REST, TLS and remote latency. V2 selects MON/USDC $10k, legacy receives full matrix. Bootstrap excluded.",
+  "results": [
+    {
+      "viewers": 10,
+      "mode": "legacy-raw",
+      "frames": 20,
+      "elapsedMs": 6180.9476669999995,
+      "wireBytes": 11762000,
+      "perViewerKBps": 190.29444405098536,
+      "totalCpuMs": 229.306,
+      "processRssPeakMB": 147.96875,
+      "receiptP95Ms": 8,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 0
+    },
+    {
+      "viewers": 10,
+      "mode": "legacy-deflate",
+      "frames": 20,
+      "elapsedMs": 6185.039458,
+      "wireBytes": 1937340,
+      "perViewerKBps": 31.32300146435056,
+      "totalCpuMs": 656.132,
+      "processRssPeakMB": 157.671875,
+      "receiptP95Ms": 11,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 0
+    },
+    {
+      "viewers": 10,
+      "mode": "v2-shared-gzip",
+      "frames": 20,
+      "elapsedMs": 6136.995041999999,
+      "wireBytes": 159970,
+      "perViewerKBps": 2.6066503053238095,
+      "totalCpuMs": 95.223,
+      "processRssPeakMB": 180.453125,
+      "receiptP95Ms": 3,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 20
+    },
+    {
+      "viewers": 100,
+      "mode": "legacy-raw",
+      "frames": 20,
+      "elapsedMs": 6402.610208000002,
+      "wireBytes": 117620000,
+      "perViewerKBps": 183.70632629335282,
+      "totalCpuMs": 1011.566,
+      "processRssPeakMB": 190.015625,
+      "receiptP95Ms": 38,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 0
+    },
+    {
+      "viewers": 100,
+      "mode": "legacy-deflate",
+      "frames": 20,
+      "elapsedMs": 6234.817083000002,
+      "wireBytes": 19373300,
+      "perViewerKBps": 31.072764031560272,
+      "totalCpuMs": 3126.992,
+      "processRssPeakMB": 231.40625,
+      "receiptP95Ms": 46,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 0
+    },
+    {
+      "viewers": 100,
+      "mode": "v2-shared-gzip",
+      "frames": 20,
+      "elapsedMs": 6132.5062499999985,
+      "wireBytes": 1596600,
+      "perViewerKBps": 2.603503257742298,
+      "totalCpuMs": 326.173,
+      "processRssPeakMB": 232.40625,
+      "receiptP95Ms": 8,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 20
+    }
+  ]
+}

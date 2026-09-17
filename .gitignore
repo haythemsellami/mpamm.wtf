@@ -9,3 +9,5 @@ dist/
 .DS_Store
 .vite/
 .zcode/
+test-results/
+playwright-report/

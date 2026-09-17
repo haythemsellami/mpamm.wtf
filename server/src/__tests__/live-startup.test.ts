@@ -69,6 +69,7 @@ async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
     monad: { blockTime: 300 },
     publicClient: { getBlockNumber: vi.fn(async () => 100n) },
     quoteClient: {},
+    headClient: { getBlockNumber: vi.fn(async () => 100n) },
     archiveClient: {},
     getLogsChunked: vi.fn(),
     probeChain: vi.fn(async () => ({ ok: true, block: 100 })),

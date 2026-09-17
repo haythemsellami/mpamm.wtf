@@ -1,0 +1,910 @@
+{
+  "measuredAt": "2026-09-17T15:18:25.692Z",
+  "node": "v24.11.1",
+  "sampleSeconds": 20,
+  "frames": 28,
+  "blocks": 60,
+  "coveragePct": 46.666666666666664,
+  "bytes": 21802,
+  "medianDurationMs": 44,
+  "maxDurationMs": 162,
+  "metricFrames": 28,
+  "samples": [
+    {
+      "block": 105639077,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658286012,
+        "quoteStartedAt": 1789658286014,
+        "quoteCompletedAt": 1789658286063,
+        "emittedAt": 1789658286064,
+        "durationMs": 49,
+        "adapterMs": {
+          "metric": 48.3
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76310.11854422165,
+          "ask": 76336.16922201993
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76299.37803975139,
+          "ask": 76333.73047872585
+        }
+      ]
+    },
+    {
+      "block": 105639079,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658286315,
+        "quoteStartedAt": 1789658286315,
+        "quoteCompletedAt": 1789658286359,
+        "emittedAt": 1789658286359,
+        "durationMs": 44,
+        "adapterMs": {
+          "metric": 43.8
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76310.11854422165,
+          "ask": 76336.16922201993
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76299.37803975139,
+          "ask": 76333.73047872585
+        }
+      ]
+    },
+    {
+      "block": 105639083,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658288220,
+        "quoteStartedAt": 1789658288220,
+        "quoteCompletedAt": 1789658288260,
+        "emittedAt": 1789658288260,
+        "durationMs": 40,
+        "adapterMs": {
+          "metric": 40.8
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 3
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34953012422,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76299.37803975139,
+          "ask": 76333.73047872585
+        }
+      ]
+    },
+    {
+      "block": 105639086,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658288674,
+        "quoteStartedAt": 1789658288674,
+        "quoteCompletedAt": 1789658288794,
+        "emittedAt": 1789658288794,
+        "durationMs": 120,
+        "adapterMs": {
+          "metric": 119.9
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 2
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34953012422,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76299.37803975139,
+          "ask": 76333.73047872585
+        }
+      ]
+    },
+    {
+      "block": 105639088,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658289065,
+        "quoteStartedAt": 1789658289065,
+        "quoteCompletedAt": 1789658289186,
+        "emittedAt": 1789658289186,
+        "durationMs": 121,
+        "adapterMs": {
+          "metric": 120.6
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34953012422,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76299.37803975139,
+          "ask": 76333.73047872585
+        }
+      ]
+    },
+    {
+      "block": 105639090,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658290694,
+        "quoteStartedAt": 1789658290694,
+        "quoteCompletedAt": 1789658290739,
+        "emittedAt": 1789658290739,
+        "durationMs": 45,
+        "adapterMs": {
+          "metric": 45.4
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34953012422,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76299.37803975139,
+          "ask": 76333.73047872585
+        }
+      ]
+    },
+    {
+      "block": 105639093,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658290850,
+        "quoteStartedAt": 1789658290850,
+        "quoteCompletedAt": 1789658290891,
+        "emittedAt": 1789658290891,
+        "durationMs": 41,
+        "adapterMs": {
+          "metric": 41.3
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 2
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34953012422,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76299.37803975139,
+          "ask": 76333.73047872585
+        }
+      ]
+    },
+    {
+      "block": 105639095,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658291149,
+        "quoteStartedAt": 1789658291149,
+        "quoteCompletedAt": 1789658291185,
+        "emittedAt": 1789658291185,
+        "durationMs": 36,
+        "adapterMs": {
+          "metric": 36.6
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34953012422,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76299.37803975139,
+          "ask": 76333.73047872585
+        }
+      ]
+    },
+    {
+      "block": 105639096,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658292663,
+        "quoteStartedAt": 1789658292664,
+        "quoteCompletedAt": 1789658292712,
+        "emittedAt": 1789658292712,
+        "durationMs": 48,
+        "adapterMs": {
+          "metric": 48.2
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 0
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34969507955,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76305.0508322009,
+          "ask": 76339.40582450644
+        }
+      ]
+    },
+    {
+      "block": 105639098,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658292739,
+        "quoteStartedAt": 1789658292739,
+        "quoteCompletedAt": 1789658292791,
+        "emittedAt": 1789658292791,
+        "durationMs": 52,
+        "adapterMs": {
+          "metric": 51.5
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34969507955,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76305.0508322009,
+          "ask": 76339.40582450644
+        }
+      ]
+    },
+    {
+      "block": 105639100,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658293043,
+        "quoteStartedAt": 1789658293043,
+        "quoteCompletedAt": 1789658293087,
+        "emittedAt": 1789658293087,
+        "durationMs": 44,
+        "adapterMs": {
+          "metric": 43.5
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34969507955,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76305.0508322009,
+          "ask": 76339.40582450644
+        }
+      ]
+    },
+    {
+      "block": 105639102,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658294781,
+        "quoteStartedAt": 1789658294782,
+        "quoteCompletedAt": 1789658294824,
+        "emittedAt": 1789658294824,
+        "durationMs": 42,
+        "adapterMs": {
+          "metric": 42.5
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76306.34969507955,
+          "ask": 76332.38172297452
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76305.0508322009,
+          "ask": 76339.40582450644
+        }
+      ]
+    },
+    {
+      "block": 105639105,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658294858,
+        "quoteStartedAt": 1789658294858,
+        "quoteCompletedAt": 1789658294917,
+        "emittedAt": 1789658294917,
+        "durationMs": 59,
+        "adapterMs": {
+          "metric": 59
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 2
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76315.36689011709,
+          "ask": 76341.41407201286
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76305.0508322009,
+          "ask": 76339.40582450644
+        }
+      ]
+    },
+    {
+      "block": 105639107,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658296293,
+        "quoteStartedAt": 1789658296293,
+        "quoteCompletedAt": 1789658296336,
+        "emittedAt": 1789658296336,
+        "durationMs": 43,
+        "adapterMs": {
+          "metric": 42.8
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76317.90571363512,
+          "ask": 76343.9201992271
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76315.06810478338,
+          "ask": 76349.42760587607
+        }
+      ]
+    },
+    {
+      "block": 105639108,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658296368,
+        "quoteStartedAt": 1789658296369,
+        "quoteCompletedAt": 1789658296412,
+        "emittedAt": 1789658296412,
+        "durationMs": 43,
+        "adapterMs": {
+          "metric": 42.6
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 0
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76317.90571363512,
+          "ask": 76343.9201992271
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76315.06810478338,
+          "ask": 76349.42760587607
+        }
+      ]
+    },
+    {
+      "block": 105639109,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658296820,
+        "quoteStartedAt": 1789658296820,
+        "quoteCompletedAt": 1789658296865,
+        "emittedAt": 1789658296865,
+        "durationMs": 45,
+        "adapterMs": {
+          "metric": 44.6
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 0
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76317.90571363512,
+          "ask": 76343.9201992271
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76315.06810478338,
+          "ask": 76349.42760587607
+        }
+      ]
+    },
+    {
+      "block": 105639112,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658296895,
+        "quoteStartedAt": 1789658296896,
+        "quoteCompletedAt": 1789658296939,
+        "emittedAt": 1789658296939,
+        "durationMs": 43,
+        "adapterMs": {
+          "metric": 43.2
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 2
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76317.90571363512,
+          "ask": 76343.9201992271
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76315.06810478338,
+          "ask": 76349.42760587607
+        }
+      ]
+    },
+    {
+      "block": 105639113,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658298406,
+        "quoteStartedAt": 1789658298407,
+        "quoteCompletedAt": 1789658298450,
+        "emittedAt": 1789658298450,
+        "durationMs": 43,
+        "adapterMs": {
+          "metric": 43.4
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 0
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76317.90571363512,
+          "ask": 76343.9201992271
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76315.06810478338,
+          "ask": 76349.42760587607
+        }
+      ]
+    },
+    {
+      "block": 105639115,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658298783,
+        "quoteStartedAt": 1789658298783,
+        "quoteCompletedAt": 1789658298827,
+        "emittedAt": 1789658298827,
+        "durationMs": 44,
+        "adapterMs": {
+          "metric": 42.9
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76324.29383797893,
+          "ask": 76350.33197124342
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76315.06810478338,
+          "ask": 76349.42760587607
+        }
+      ]
+    },
+    {
+      "block": 105639116,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658299162,
+        "quoteStartedAt": 1789658299162,
+        "quoteCompletedAt": 1789658299324,
+        "emittedAt": 1789658299324,
+        "durationMs": 162,
+        "adapterMs": {
+          "metric": 162.3
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 0
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76324.29383797893,
+          "ask": 76350.33197124342
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76315.06810478338,
+          "ask": 76349.42760587607
+        }
+      ]
+    },
+    {
+      "block": 105639119,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658299315,
+        "quoteStartedAt": 1789658299324,
+        "quoteCompletedAt": 1789658299372,
+        "emittedAt": 1789658299372,
+        "durationMs": 48,
+        "adapterMs": {
+          "metric": 47.5
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 2
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76324.29383797893,
+          "ask": 76350.33197124342
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76315.06810478338,
+          "ask": 76349.42760587607
+        }
+      ]
+    },
+    {
+      "block": 105639121,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658299690,
+        "quoteStartedAt": 1789658299691,
+        "quoteCompletedAt": 1789658299739,
+        "emittedAt": 1789658299739,
+        "durationMs": 48,
+        "adapterMs": {
+          "metric": 48.5
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76324.29392216391,
+          "ask": 76350.33197124342
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76316.29654399339,
+          "ask": 76352.39959718635
+        }
+      ]
+    },
+    {
+      "block": 105639122,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658299776,
+        "quoteStartedAt": 1789658299776,
+        "quoteCompletedAt": 1789658299820,
+        "emittedAt": 1789658299820,
+        "durationMs": 44,
+        "adapterMs": {
+          "metric": 43.3
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 0
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76324.29389065068,
+          "ask": 76350.33197124342
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76316.29654399339,
+          "ask": 76352.39959718635
+        }
+      ]
+    },
+    {
+      "block": 105639126,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658301349,
+        "quoteStartedAt": 1789658301349,
+        "quoteCompletedAt": 1789658301391,
+        "emittedAt": 1789658301391,
+        "durationMs": 42,
+        "adapterMs": {
+          "metric": 42.1
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 3
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76330.36192901431,
+          "ask": 76356.3950007941
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76328.66083457875,
+          "ask": 76363.02645377642
+        }
+      ]
+    },
+    {
+      "block": 105639128,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658301423,
+        "quoteStartedAt": 1789658301423,
+        "quoteCompletedAt": 1789658301464,
+        "emittedAt": 1789658301464,
+        "durationMs": 41,
+        "adapterMs": {
+          "metric": 41
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76330.36192901431,
+          "ask": 76356.3950007941
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76328.66083457875,
+          "ask": 76363.02645377642
+        }
+      ]
+    },
+    {
+      "block": 105639130,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658301722,
+        "quoteStartedAt": 1789658301722,
+        "quoteCompletedAt": 1789658301767,
+        "emittedAt": 1789658301767,
+        "durationMs": 45,
+        "adapterMs": {
+          "metric": 45.8
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76330.36192901431,
+          "ask": 76356.3950007941
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76328.66083457875,
+          "ask": 76363.02645377642
+        }
+      ]
+    },
+    {
+      "block": 105639134,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658303389,
+        "quoteStartedAt": 1789658303389,
+        "quoteCompletedAt": 1789658303432,
+        "emittedAt": 1789658303432,
+        "durationMs": 43,
+        "adapterMs": {
+          "metric": 42.5
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 3
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76332.82169241307,
+          "ask": 76358.84380493064
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76347.14734659289,
+          "ask": 76381.52128659315
+        }
+      ]
+    },
+    {
+      "block": 105639136,
+      "frame": {
+        "headSource": "http",
+        "headObservedAt": 1789658303615,
+        "quoteStartedAt": 1789658303615,
+        "quoteCompletedAt": 1789658303664,
+        "emittedAt": 1789658303664,
+        "durationMs": 49,
+        "adapterMs": {
+          "metric": 49
+        },
+        "missingVenues": [],
+        "coalescedBlocks": 1
+      },
+      "rows": [
+        {
+          "venue": "metric",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76339.60878924644,
+          "ask": 76365.66630189333
+        },
+        {
+          "venue": "binance",
+          "market": "BTC/USDC",
+          "size": 1000,
+          "bid": 76347.14734659289,
+          "ask": 76381.52128659315
+        }
+      ]
+    }
+  ]
+}

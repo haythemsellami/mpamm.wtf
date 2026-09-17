@@ -141,6 +141,7 @@ export function createHanjiAdapter(): VenueAdapter {
 
   return {
     venues: () => [HANJI_VENUE],
+    quoteMarkets: () => [...new Set(markets.map((m) => m.market))],
     // seed daily volume by replaying OrderPlaced on-chain from the CLOBs'
     // deployment day (2026-06-05). Background — see live.ts.
     backfillFromUtc: '2026-06-05',

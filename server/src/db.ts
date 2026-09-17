@@ -79,14 +79,19 @@ export interface ResetDeletes {
 export class VolumeStore {
   private db: DatabaseSync;
   private writesSealed = false;
-  private dayStmt: Stmt;
-  private dayMetaStmt: Stmt;
-  private metaStmt: Stmt;
-  private fillStmt: Stmt;
-  private midStmt: Stmt;
-  private gasStmt: Stmt;
+  private dayStmt!: Stmt;
+  private dayMetaStmt!: Stmt;
+  private metaStmt!: Stmt;
+  private fillStmt!: Stmt;
+  private midStmt!: Stmt;
+  private gasStmt!: Stmt;
 
-  constructor(path = 'data/mpamm.db') {
+  constructor(path = 'data/mpamm.db', readOnly = false) {
+    if (readOnly) {
+      this.db = new DatabaseSync(path, { readOnly: true });
+      this.writesSealed = true;
+      return;
+    }
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     // Realtime reads stay on the main connection after all post-boot mutations
@@ -213,6 +218,12 @@ export class VolumeStore {
     this.gasStmt = this.db.prepare(`
       INSERT INTO daily_gas (utc_day, venue_id, mon, txs) VALUES (?, ?, ?, ?)
       ON CONFLICT(utc_day, venue_id) DO UPDATE SET mon = mon + excluded.mon, txs = txs + excluded.txs`);
+  }
+
+  async readSnapshot<T>(read: () => Promise<T>): Promise<T> {
+    this.db.exec('BEGIN');
+    try { return await read(); }
+    finally { this.db.exec('ROLLBACK'); }
   }
 
   private runDay(d: DailyVolume): void {

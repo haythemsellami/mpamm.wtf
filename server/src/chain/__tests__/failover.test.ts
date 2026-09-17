@@ -56,6 +56,29 @@ let cleanup: RpcBreaker[] = [];
 afterEach(() => { for (const b of cleanup) b.stop(); cleanup = []; });
 const track = <T extends { breaker: RpcBreaker }>(x: T): T => { cleanup.push(x.breaker); return x; };
 
+describe('scoped quote cancellation', () => {
+  it('does not turn an expired frame into failover or start more RPC work', async () => {
+    const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 }); cleanup.push(breaker);
+    let calls = 0;
+    breaker.attach([{ label: 'primary', request: async () => '0x8f', scopedQuote: (signal) => async () => {
+      calls++;
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(timeout()), { once: true }));
+    } }, { label: 'backup', request: async () => '0x8f' }]);
+    const generation = breaker.generation();
+    for (let i = 0; i < 5; i++) {
+      const controller = new AbortController();
+      const work = breaker.request({ method: 'eth_call' }, 'quote', { key: 'venue', signal: controller.signal });
+      while (calls <= i) await Promise.resolve();
+      controller.abort();
+      await expect(work).rejects.toMatchObject({ name: 'AbortError' });
+    }
+    expect(breaker.generation()).toBe(generation);
+    const already = AbortSignal.abort();
+    await expect(breaker.request({ method: 'eth_call' }, 'quote', { key: 'venue', signal: already })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toBe(5);
+  });
+});
+
 describe('isTransportFailure', () => {
   it('counts 5xx, network errors and timeouts; never JSON-RPC errors or 429', () => {
     expect(isTransportFailure(http502())).toBe(true);
