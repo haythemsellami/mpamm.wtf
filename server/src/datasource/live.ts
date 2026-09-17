@@ -35,6 +35,9 @@ const ARCHIVE_BOUNDARY_NOTE_MS = 30_000;
 const WS_HEAD_FALLBACK_MSG = 'quote-head WebSocket unavailable — HTTP head polling is active';
 const REALTIME_WINDOW_MS = 60_000;
 
+/** Max blocks one tail cycle fetches/decodes/commits (see tailFills). */
+const TAIL_WINDOW_BLOCKS = 1_000;
+
 interface QuoteTrigger {
   blockNumber: bigint;
   source: Exclude<QuoteHeadSource, 'sim'>;
@@ -2323,6 +2326,17 @@ export class LiveDataSource extends BaseSource {
     const head = (await publicClient.getBlockNumber()) - 5n;
     if (head <= this.lastBlock) return;
     const from = this.lastBlock + 1n;
+    // Bound how much range ONE cycle materializes: the whole span is held in
+    // memory (raw logs → decoded fills) before the single cursor commit at the
+    // end, so a multi-hour gap (long outage, previously-held cursor) is
+    // hundreds of MB of log objects at once — enough to OOM the 320MB-capped
+    // prod heap on every restart boot (2026-09-16). A window commits
+    // atomically and the next cycle resumes from the new cursor; steady-state
+    // tails (1-2 blocks/cycle) never reach the cap. 1000 blocks ≈ 10 getLogs
+    // chunks per source (the RPC caps ranges at ~100 blocks). NB getLogs
+    // ranges are INCLUSIVE of both ends — the -1 keeps the capped window at
+    // exactly TAIL_WINDOW_BLOCKS blocks, not one more.
+    const to = head - from < BigInt(TAIL_WINDOW_BLOCKS) ? head : from + BigInt(TAIL_WINDOW_BLOCKS) - 1n;
 
     // Fetch every adapter's declared log sources into a per-adapter bundle. Track
     // whether any REQUIRED (fill-producing) source failed: if so we must NOT
@@ -2330,13 +2344,21 @@ export class LiveDataSource extends BaseSource {
     // silently lose those fills forever (review #1). Only attribution sources
     // are tolerated on failure; state/discovery sources are cursor-critical.
     let requiredFailed = false;
-    const perAdapter = await Promise.all(ADAPTERS.map(async (a) => {
+    // Gather every adapter's sources BEFORE any fetch starts. logSources() is
+    // the fail-closed gate: it throws while discovery hasn't succeeded, and the
+    // cursor must hold. Called inside the fetch map below, one adapter's throw
+    // rejected the outer Promise.all instantly while the OTHER adapters' range
+    // fetches kept running detached — results discarded, the whole (ever-growing)
+    // held range re-fetched on every retry. That allocation spiral OOM-killed
+    // prod within hours of a persistently undiscovered adapter (2026-09-16).
+    const declared = ADAPTERS.map((a) => ({ a, sources: a.logSources() }));
+    const perAdapter = await Promise.all(declared.map(async ({ a, sources }) => {
       const bundle: LogBundle = {};
       const all: any[] = [];
       const failed = new Set<string>(); // source keys whose fetch failed (surfaced to decode)
-      await Promise.all(a.logSources().map(async (s) => {
+      await Promise.all(sources.map(async (s) => {
         try {
-          const logs = (await getLogsChunked({ address: s.address, fromBlock: from, toBlock: head, events: s.events as any })) as any[];
+          const logs = (await getLogsChunked({ address: s.address, fromBlock: from, toBlock: to, events: s.events as any })) as any[];
           bundle[s.key] = logs;
           all.push(...logs);
         } catch {
@@ -2397,7 +2419,7 @@ export class LiveDataSource extends BaseSource {
     // backgroundHistory waits on this value before applying authoritative
     // closed-day SETs; exposing it earlier leaves a race where a late tail
     // increment double-counts a day the deep replay just replaced.
-    this.lastBlock = head;
+    this.lastBlock = to;
     // the boot gap is fully decoded once the cursor reaches bootHead: retract the
     // resume note, then announce the tail is current (checkGapFill, family B of #6).
     checkGapFill(this.lastBlock, this.bootHead, this.gapResume, {

@@ -120,7 +120,11 @@ export const TOKENS: Record<string, TokenInfo> = {
   WETH: { symbol: 'WETH', address: '0xee8c0e9f1bffb4eb878d8f15f368a02a35481242', decimals: 18, stable: false },
   XAUT0: {
     symbol: 'XAUt0',
-    address: '0x01bfF41798a0BCF287b996046CA68B395dbc1071',
+    // checksummed: viem refuses to ABI-encode a mixed-case address whose EIP-55
+    // checksum doesn't match (InvalidAddressError) — which surfaced inside
+    // multicall as a per-leg "returned no data" failure and, fail-closed,
+    // took POE (and with it the whole fills tail) offline on 2026-09-16.
+    address: '0x01bFF41798a0BcF287b996046Ca68b395DbC1071',
     decimals: 6,
     stable: false,
     // Tether Gold (1 XAUt0 = 1 fine troy oz, Swiss vault). ThogAMM added it to
