@@ -379,6 +379,7 @@ export function createMetricAdapter(): VenueAdapter {
         const prices = await ctx.client.multicall({ contracts: selectedPools.map((p) => ({
           address: p.priceProvider, abi: priceProviderAbi, functionName: 'getBidAndAskPrice' as const,
         })), allowFailure: true, blockNumber });
+        ctx.quoteSignal?.throwIfAborted();
         const known = new Map(selectedPools.map((p, i) => [p.pool, prices[i]]));
         const valid: number[] = [];
         const contracts = calls.flatMap((call, i) => {

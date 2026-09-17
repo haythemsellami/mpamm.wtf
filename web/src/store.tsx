@@ -326,7 +326,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         if (msg.data.venues) adoptVenues(msg.data.venues);
       }
       else if (msg.ch === 'quotes') {
-        if (quotesRef.current && msg.data.block < quotesRef.current.block) return;
+        // Bootstrap carries the head with empty rows, not an observed quote.
+        // The latest completed frame can legitimately be one block behind it.
+        const current = quotesRef.current;
+        if (current && (current.frame || current.rows.length > 0) && msg.data.block < current.block) return;
         setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1);
       }
       else if (msg.ch === 'volume') { if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data)); }

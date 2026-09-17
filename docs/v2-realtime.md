@@ -17,6 +17,10 @@ Quotes remain pinned to an explicit block and a synchronously captured pair-term
 
 Markets and baseline controls come from adapter discovery metadata, independently of the current quote selection. Alternate-size availability hints reuse the existing depth subscription instead of pricing the whole matrix. Quote history contains observed frames only: newly demanded pairs may warm up instead of showing an invented minute of prices. History expires after 60 seconds even while computation is idle. Legacy sockets wait for a fresh full matrix before receiving quotes. Reconnect/history races preserve newer live frames and fills, including overlapping REST requests, worker fallback and page restoration; replayed frames do not double-count spread samples.
 
+Reference sampling runs every 100ms independently of markout aging. Markouts use binary horizon lookups in chronological reference history and one non-overlapping pass every 300ms. Each pass yields after 128 fills or about 2ms of work, checked between fills, and visits at most its initial pending count. This keeps a large pending set from occupying the quote/head event loop for a complete scan. Shutdown stops and awaits the active pass; persistence updates, unobservable horizons and buy/sell signs retain their existing semantics.
+
+Quote adapters check cancellation before applying shared caches or outage notes. Lunarbase stages its validation results until parallel quote reads settle, retains its occupied slot through cancellation, and rejects older snapshots when a newer cache already exists. Bootstrap's empty quote placeholder does not reject the first completed stream frame merely because the chain head has advanced; subsequent observed frames remain monotonic. HTTP transport regressions exercise pinned calls and cancellation with batching both enabled and disabled.
+
 ## Measurements
 
 Recorded September 17, 2026 on an Apple M4. Delivery/runtime tests use Node 24.11.1, matching the production major version; the live helper comparison used Node 26.8.2. Raw samples and methodology are in [delivery](benchmarks/v2-delivery.json), [runtime](benchmarks/v2-runtime.json), [Metric](benchmarks/v2-metric-live.json) and [live stream](benchmarks/v2-live-stream.json).
@@ -30,6 +34,8 @@ Recorded September 17, 2026 on an Apple M4. Delivery/runtime tests use Node 24.1
 | RPC batch test, fast-call median | 84.9ms in a shared zero-wait batch with an 80ms sibling | 7.9ms unbatched; 9.2ms per-adapter batching |
 | Metric live, median | 85.3ms, two RPC rounds | 41.7ms, one RPC round |
 | 100k-fill analytics, main-loop p95 delay | 79.6ms | 2.4ms |
+| 50k-fill markout burst, median full-pass time | 308.1ms | 63.8ms |
+| Same burst, largest observed event-loop stall | 308.0ms | 3.1ms |
 
 The delivery test replays the same recorded full quote matrix to 10 and 100 local clients, 20 frames at 300ms intervals. All clients received all 20 frames. V2 performed 20 compression jobs even with 100 viewers. The 98.6% reduction is **quote traffic for one selected topic**, not the complete bill: depth, state, history, TLS, bootstrap, concurrent different selections and remote networking are excluded. CPU includes both server and client decoding. Sequential replay RSS measurements are not evidence of memory savings.
 
@@ -42,6 +48,10 @@ The Metric test alternates call order at the same pinned block over 12 trials af
 Analytics results matched exactly over 100,000 persisted fills. With a 128MB worker JS-heap cap, uncached aggregation after warmup took 1.19s vs 0.65s and used 1,160ms vs 719ms CPU; measured process RSS was 303MB vs 330MB in fresh child processes. This deliberately exchanges some compute time for bounded heap and a responsive main loop. The cap excludes native/typed-array memory. It is not a promise that a 512MB production instance can fit every 30-day dataset. Caching avoids repeating this computation per viewer; the edge regression serves 100 sequential requests from one origin response, and a corrected revision fetches independently.
 
 The [one-million-fill run](benchmarks/v2-runtime-million.json) also produced identical results: main-loop p95 delay fell from 192.8ms to 0.66ms, while aggregation took 12.33s vs 11.23s and process CPU rose from 11.39s to 13.36s. Measured peak RSS was 395MB vs 461MB in the isolated benchmark. Production still needs headroom for ingestion, adapters, depth and sockets.
+
+The [markout benchmark](benchmarks/v2-markouts.json) compares the previous synchronous linear scan with the actual updated `LiveDataSource` pass over 10,000 and 50,000 fills. All five horizons are due, with 1,201 reference samples at 100ms intervals. After warmup, three alternating trials produced exactly matching fill results. At 50,000 fills, median process CPU fell from 311.0ms to 82.3ms. The 2ms event-loop probe measured a largest stall of 3.1ms during yielding passes versus 308.0ms during synchronous passes. This synthetic burst excludes RPC, persistence, socket fanout, fixture construction and result hashing; it demonstrates reduced markout cost, not a production latency bound.
+
+A [live markout check](benchmarks/v2-markout-live.json) observed 67 scoped quote frames and verified a Metric WBTC/USDC buy at block 105654798 against its receipt: deltas `-819873` and `627742813`, with on-chain decimals 8 and 6, give `0.00819873 WBTC`, `627.742813 USDC`, and `76565.8599563591 USDC/WBTC`. The pair-terms reference sample 28ms from the five-second horizon was `76540.93452806244`; `(mid / execPx - 1) × 10000` equals the emitted `-3.2554232801496052 bps`. Lunarbase's `paused()` was true at the checked block; it correctly emitted no quotes while retaining its fill sources. This validates its live gate, while executable quotes and ignored-cancellation races are covered by fixtures. The check is not a production load or block-coverage benchmark.
 
 The live end-to-end sample used one Metric BTC/USDC $1k subscriber with gzip and no WebSocket compression extension. All 28 emitted frames contained executable Metric quotes; median compute was 44ms and maximum 162ms. The **HTTP-only pipeline delivered 28 of 60 blocks (46.7% coverage)**. Isolating the HTTP head lane did not eliminate those gaps; the measurement does not distinguish provider freshness from head-receiving behavior. This run validates processing and transport, **not full 300ms coverage**. Compare the provider's raw head feed with application observations, then measure `RPC_WS_URL`/HOT configurations before treating every-block delivery as achieved. Blockchain-to-browser latency includes provider observation delay and network transit in addition to these compute timings.
 
@@ -61,6 +71,7 @@ node server/scripts/compile-metric-helper.mjs --check
 npm -w server run benchmark:delivery -- /tmp/delivery.json
 npm -w server run benchmark:runtime -- /tmp/runtime.json
 BENCHMARK_FILLS=1000000 npm -w server run benchmark:runtime -- /tmp/runtime-million.json
+npm -w server run benchmark:markouts -- /tmp/markouts.json
 npm -w server run benchmark:metric -- /tmp/metric.json
 ```
 

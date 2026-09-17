@@ -99,4 +99,17 @@ describe('createQuoteOutageReporter', () => {
     expect(report(ctx, [])).toBe(false);
     expect(notes).toEqual([]);
   });
+
+  it('never lets a canceled result consume warning or recovery state', () => {
+    const { notes, ctx } = stub();
+    const report = createQuoteOutageReporter('Venue');
+    const controller = new AbortController(); controller.abort();
+    const canceled = { ...ctx, quoteSignal: controller.signal };
+    expect(() => report(canceled, [failed(PAUSED_ERROR)])).toThrow();
+    report(ctx, [failed(PAUSED_ERROR)]);
+    expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable']);
+    expect(() => report(canceled, [ok])).toThrow();
+    report(ctx, [ok]);
+    expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered']);
+  });
 });

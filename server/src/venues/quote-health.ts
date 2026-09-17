@@ -68,6 +68,7 @@ export function quoteOutageReason(results: readonly MulticallOutcome[]): string 
 export function createQuoteOutageReporter(venueName: string): (ctx: AdapterContext, results: readonly MulticallOutcome[]) => boolean {
   let current: string | null = null;
   return (ctx, results) => {
+    ctx.quoteSignal?.throwIfAborted();
     const reason = quoteOutageReason(results);
     if (reason) {
       if (current !== reason) {

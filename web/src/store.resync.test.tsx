@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Fill, MarketsResponse } from '@shared';
+import type { Fill, MarketsResponse, QuoteSnapshot } from '@shared';
 import * as api from './lib/api';
 import { DashboardProvider, useDashboard } from './store';
 
@@ -46,6 +46,23 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); document.body.replaceChildren(); });
 
 describe('fill snapshot resynchronization', () => {
+  it('accepts a completed quote behind the bootstrap head but still rejects older observed frames', async () => {
+    window.history.replaceState(null, '', '/');
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.state.block = 100; bootstrap.quotes.block = 100;
+    await mount();
+    const frame = (block: number): QuoteSnapshot => ({ block, monUsd: 1, ts: Date.now(), rows: [], frame: {
+      headSource: 'http', headObservedAt: 1, quoteStartedAt: 1, quoteCompletedAt: 2, emittedAt: 2,
+      durationMs: 1, adapterMs: {}, missingVenues: [], coalescedBlocks: 0,
+    } });
+    await act(async () => message({ ch: 'quotes', data: frame(99) }));
+    expect(dashboard.quotes?.block).toBe(99);
+    await act(async () => message({ ch: 'quotes', data: frame(98) }));
+    expect(dashboard.quotes?.block).toBe(99);
+    await act(async () => message({ ch: 'quotes', data: frame(101) }));
+    expect(dashboard.quotes?.block).toBe(101);
+  });
+
   it('retains fills arriving during the initial REST request', async () => {
     const initial = deferred<Fill[]>();
     vi.mocked(api.fetchFills).mockReturnValueOnce(initial.promise);

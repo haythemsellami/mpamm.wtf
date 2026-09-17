@@ -1,5 +1,6 @@
 import { AnalyticsWorker } from '../analytics-worker.js';
 import { QuoteRunner } from '../quote-runner.js';
+import { agePendingMarkouts, nearestReferenceSample } from '../markout-aging.js';
 import { BaseSource, QUOTE_HISTORY_MS } from './index.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import {
@@ -797,6 +798,8 @@ export class LiveDataSource extends BaseSource {
   private analyticsWorker = new AnalyticsWorker(config.dbPath);
   private quoteRunner = new QuoteRunner();
   private referenceTimer?: ReturnType<typeof setInterval>;
+  private markoutTimer?: ReturnType<typeof setInterval>;
+  private markoutWork?: Promise<void>;
   private quotes: QuoteSnapshot = { block: 0, monUsd: 0, ts: 0, rows: [] };
   private days: DailyVolume[] = [];
   private fills: Fill[] = [];
@@ -905,7 +908,8 @@ export class LiveDataSource extends BaseSource {
 
     await REFERENCES.start();
     this.sampleReferences();
-    this.referenceTimer = setInterval(() => { this.sampleReferences(); this.ageMarkouts(); }, 100);
+    this.referenceTimer = setInterval(() => this.sampleReferences(), 100);
+    this.markoutTimer = setInterval(() => { void this.ageMarkouts(); }, 300);
     // discover every venue's markets/pools (adapters hold their own state).
     for (const a of ADAPTERS) {
       try { await a.discover(this.ctxFor(a)); }
@@ -1107,6 +1111,7 @@ export class LiveDataSource extends BaseSource {
     this.headWatcher.stop();
     this.quoteRunner.stop();
     if (this.referenceTimer) clearInterval(this.referenceTimer);
+    if (this.markoutTimer) clearInterval(this.markoutTimer);
     this.eventLoopDelay.disable();
     if (this.tailTimer) clearTimeout(this.tailTimer);
     if (this.quoteRetryTimer) clearTimeout(this.quoteRetryTimer);
@@ -1118,7 +1123,7 @@ export class LiveDataSource extends BaseSource {
     const finalPersist = this.persist(true);
     const depthStop = this.depthWorker.stop();
     REFERENCES.stop();
-    this.stopPromise = Promise.all([finalPersist, depthStop]).then(() => undefined).finally(async () => {
+    this.stopPromise = Promise.all([finalPersist, depthStop, this.markoutWork]).then(() => undefined).finally(async () => {
       try { await this.analyticsWorker.close(); await this.snapshotWriter?.close(); }
       finally { this.store.close(); }
     });
@@ -2250,7 +2255,10 @@ export class LiveDataSource extends BaseSource {
       const mid = REFERENCES.midForPair(pair.symbol);
       if (!(mid > 0)) continue;
       const history = this.midHist.get(pair.symbol) ?? [];
+      const last = history.at(-1);
       history.push({ t: now, mid });
+      // A wall-clock correction must not invalidate binary horizon lookups.
+      if (last && last.t > now) history.sort((a, b) => a.t - b.t);
       while (history.length > 1 && (history[0].t < now - 120_000 || history.length > 2_000)) history.shift();
       this.midHist.set(pair.symbol, history);
     }
@@ -2547,40 +2555,44 @@ export class LiveDataSource extends BaseSource {
   }
 
   /** Join each pending fill to the reference mid at each horizon as it ages. */
-  private ageMarkouts(): void {
-    const now = Date.now();
-    for (const f of [...this.pending]) {
-      // an approximate-price fill must never be aged — mid/execPx against a
-      // pxApprox execPx fabricates markouts the contract excludes. Unreachable
-      // via hasFutureMarkoutHorizon (which refuses to queue them); defensive.
-      if (f.pxApprox) { this.pending.delete(f); continue; }
-      // an UNREGISTERED market has no CEX routing — never fall back to MON/Bybit
-      // (a BTC fill aged vs a $0.02 mid would fabricate absurd markouts). Leave
-      // its markouts null and stop tracking it (defense in depth; adapters gate
-      // discovery/decode on the pair registry so this shouldn't be reachable).
-      if (!pairOf(f.market)) { this.pending.delete(f); this.noteOnce('markout.market.unregistered', `fill market '${f.market}' is not a registered pair — markouts skipped`, f.venueId); continue; }
-      const hist = this.midHist.get(f.market) ?? [];
-      // A horizon that elapsed before we had any mid for THIS pair can't be
-      // computed faithfully — leave it null rather than fabricate it (M1).
-      const earliestMid = hist.length ? hist[0].t : now;
-      const ss = f.side === 'buy' ? 1 : -1;
-      let changed = false, complete = true;
-      for (let i = 0; i < MARKOUT_HORIZONS.length; i++) {
-        if (f.markoutsBps[i] != null) continue;
-        const at = f.ts + MARKOUT_HORIZONS[i] * 1000;
-        if (now < at) { complete = false; continue; }   // horizon not reached yet
-        if (at < earliestMid) continue;                  // elapsed unobserved → leave null
-        const mid = this.midNear(f.market, at);
-        // no near-enough mid ⇒ the horizon stays null (elapsed-unobservable),
-        // and the fill still leaves the pending queue below — never a 0.
-        if (mid > 0 && f.execPx > 0) {
-          f.markoutsBps[i] = ss * (mid / f.execPx - 1) * 1e4;
-          changed = true;
-        }
+  private ageMarkouts(): Promise<void> {
+    if (this.markoutWork) return this.markoutWork;
+    this.markoutWork = agePendingMarkouts(this.pending, (fill, now) => this.ageMarkout(fill, now), () => this.loopsStopped)
+      .finally(() => { this.markoutWork = undefined; });
+    return this.markoutWork;
+  }
+
+  private ageMarkout(f: Fill, now: number): void {
+    // an approximate-price fill must never be aged — mid/execPx against a
+    // pxApprox execPx fabricates markouts the contract excludes. Unreachable
+    // via hasFutureMarkoutHorizon (which refuses to queue them); defensive.
+    if (f.pxApprox) { this.pending.delete(f); return; }
+    // an UNREGISTERED market has no CEX routing — never fall back to MON/Bybit
+    // (a BTC fill aged vs a $0.02 mid would fabricate absurd markouts). Leave
+    // its markouts null and stop tracking it (defense in depth; adapters gate
+    // discovery/decode on the pair registry so this shouldn't be reachable).
+    if (!pairOf(f.market)) { this.pending.delete(f); this.noteOnce('markout.market.unregistered', `fill market '${f.market}' is not a registered pair — markouts skipped`, f.venueId); return; }
+    const hist = this.midHist.get(f.market) ?? [];
+    // A horizon that elapsed before we had any mid for THIS pair can't be
+    // computed faithfully — leave it null rather than fabricate it (M1).
+    const earliestMid = hist.length ? hist[0].t : now;
+    const ss = f.side === 'buy' ? 1 : -1;
+    let changed = false, complete = true;
+    for (let i = 0; i < MARKOUT_HORIZONS.length; i++) {
+      if (f.markoutsBps[i] != null) continue;
+      const at = f.ts + MARKOUT_HORIZONS[i] * 1000;
+      if (now < at) { complete = false; continue; }   // horizon not reached yet
+      if (at < earliestMid) continue;                  // elapsed unobserved → leave null
+      const mid = this.midNear(f.market, at);
+      // no near-enough mid ⇒ the horizon stays null (elapsed-unobservable),
+      // and the fill still leaves the pending queue below — never a 0.
+      if (mid > 0 && f.execPx > 0) {
+        f.markoutsBps[i] = ss * (mid / f.execPx - 1) * 1e4;
+        changed = true;
       }
-      if (changed) { this.dirty.add(f); this.emitMsg({ ch: 'fill', data: f }); }
-      if (complete) this.pending.delete(f);
     }
+    if (changed) { this.dirty.add(f); this.emitMsg({ ch: 'fill', data: f }); }
+    if (complete) this.pending.delete(f);
   }
   /** the pair mid within ±MID_NEAR_TOL_MS of `t`, else 0 (unmarkable). The
    *  history is time- and length-capped; a stalled event loop must never join
@@ -2588,9 +2600,8 @@ export class LiveDataSource extends BaseSource {
   private static readonly MID_NEAR_TOL_MS = 6_000;
   private midNear(market: string, t: number): number {
     const hist = this.midHist.get(market) ?? [];
-    let best = 0, bestDt = Infinity;
-    for (const s of hist) { const dt = Math.abs(s.t - t); if (dt < bestDt) { bestDt = dt; best = s.mid; } }
-    if (bestDt <= LiveDataSource.MID_NEAR_TOL_MS) return best;
+    const sample = nearestReferenceSample(hist, t, LiveDataSource.MID_NEAR_TOL_MS);
+    if (sample) return sample.mid;
     // live fallback only when NOW is an honest mark for t
     return Math.abs(Date.now() - t) <= LiveDataSource.MID_NEAR_TOL_MS ? REFERENCES.midForPair(market) : 0;
   }

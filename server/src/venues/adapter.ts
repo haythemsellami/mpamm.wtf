@@ -21,7 +21,8 @@ import type { Config } from '../config.js';
 export interface AdapterContext {
   /** viem public client for the Monad RPC (contract reads / multicall). */
   client: PublicClient;
-  /** Present only for cancelable live quote work. */
+  /** Present only for cancelable live quote work. Check after awaits before
+   * applying shared caches/notes; canceled transports may still settle. */
   quoteSignal?: AbortSignal;
   /** range-chunked getLogs (the public RPC caps eth_getLogs spans). */
   getLogs: typeof getLogsChunked;

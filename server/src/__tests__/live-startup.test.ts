@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MARKETS, SIZES_USD, type QuoteRow } from '@shared';
+import { MARKETS, SIZES_USD, type Fill, type QuoteRow } from '@shared';
 import type { VenueAdapter } from '../venues/adapter.js';
 
 function deferred<T>() {
@@ -116,6 +116,46 @@ async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?:
 }
 
 describe('live startup archive gate', () => {
+  it('ages fills in yielding passes with identical buy/sell signs and persistence updates', async () => {
+    const { source } = await setup();
+    const now = Date.now();
+    const fills: Fill[] = Array.from({ length: 1000 }, (_, i) => ({
+      id: String(i), venueId: 'test-venue', market: 'MON/USDC', side: i % 2 ? 'buy' : 'sell',
+      category: 'DIRECT', usd: 100, baseAmount: 100, execPx: 1, blockNumber: 1, txHash: '0x1',
+      to: 'direct', pool: 'pool', ts: now - 65_000, markoutsBps: [null, null, null, null, null],
+    }));
+    source.pending = new Set(fills);
+    source.midHist.set('MON/USDC', Array.from({ length: 1201 }, (_, i) => ({ t: now - 120_000 + i * 100, mid: 2 })));
+    let emitted = 0;
+    source.on('message', (message: { ch: string }) => { if (message.ch === 'fill') emitted++; });
+    try {
+      const work = source.ageMarkouts();
+      expect(source.ageMarkouts()).toBe(work);
+      expect(emitted).toBeLessThanOrEqual(128);
+      await work;
+      expect(emitted).toBe(fills.length);
+      expect(source.dirty.size).toBe(fills.length);
+      expect(source.pending.size).toBe(0);
+      for (const fill of fills) expect(fill.markoutsBps).toEqual(Array(5).fill(fill.side === 'buy' ? 10_000 : -10_000));
+    } finally { source.store.close(); }
+  });
+
+  it('leaves elapsed unobservable and approximate markouts null and retains future horizons', async () => {
+    const { source } = await setup();
+    const now = Date.now();
+    const fill = (id: string, ts: number, pxApprox = false) => ({ id, ts, pxApprox, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', execPx: 1, markoutsBps: [null, null, null, null, null] });
+    const expired = fill('expired', now - 130_000), approx = fill('approx', now - 65_000, true), future = fill('future', now - 1000);
+    source.pending = new Set([expired, approx, future]);
+    source.midHist.set('MON/USDC', [{ t: now - 2000, mid: 2 }, { t: now, mid: 2 }]);
+    try {
+      await source.ageMarkouts();
+      expect(expired.markoutsBps).toEqual([null, null, null, null, null]);
+      expect(approx.markoutsBps).toEqual([null, null, null, null, null]);
+      expect(future.markoutsBps).toEqual([10_000, null, null, null, null]);
+      expect(source.pending).toEqual(new Set([future]));
+    } finally { source.store.close(); }
+  });
+
   it('full demand includes regular venues, baselines and reference rows without duplicating adapter calls', async () => {
     const { source, adapters, poll } = await setup({ withQuotes: true });
     source.schedulePostQuoteMaintenance = vi.fn();

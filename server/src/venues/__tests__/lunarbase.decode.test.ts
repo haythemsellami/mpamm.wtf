@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { QuoteRunner } from '../../quote-runner.js';
+import type { QuoteRow } from '@shared';
 import {
   LUNARBASE_POOLS,
   applyLunarbaseStateLogs,
@@ -225,6 +227,37 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     note: () => {},
   }) as any;
 
+  it.each(['valid', 'invalid', 'failed'] as const)('discards canceled %s gate results without changing shared state or releasing unsettled legs', async (gate) => {
+    vi.useFakeTimers();
+    try {
+      const adapter = createLunarbaseAdapter();
+      await adapter.discover(stub(false));
+      const ctx = stub(false, gate === 'invalid' ? ZERO_SLOT : '0x' + '0'.repeat(24) + '2'.repeat(40));
+      ctx.note = vi.fn();
+      ctx.pricer.tokenForUsd = (_token: string, size: number) => size;
+      if (gate === 'failed') ctx.client.multicall = async () => { throw new Error('unavailable'); };
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      ctx.client.readContract = async () => { await held; return [100n, 0n, 0n]; };
+      const runner = new QuoteRunner();
+      let task!: Promise<QuoteRow[]>;
+      const result = runner.run('lunarbase', 10, (quoteSignal) => (task = adapter.quote!({ ...ctx, quoteSignal }, [100], 501n)), []);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await result).toEqual([]);
+      const next = vi.fn(async () => []);
+      expect(await runner.run('lunarbase', 10, next, [])).toEqual([]);
+      expect(next).not.toHaveBeenCalled();
+      expect(ctx.note).not.toHaveBeenCalled();
+      release();
+      await expect(task).rejects.toMatchObject({ name: 'AbortError' });
+      expect(ctx.note).not.toHaveBeenCalled();
+      expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
+      const healthy = stub(false); healthy.note = vi.fn();
+      await adapter.discover(healthy);
+      expect(healthy.note.mock.calls.map(([code]: [string]) => code)).toEqual(['venue.discovery']);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('keeps an unreadable pool in the tail set instead of quarantining it', async () => {
     const a = createLunarbaseAdapter();
     await a.discover(stub(false));                    // healthy: pool is known
@@ -237,6 +270,16 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     const after = a.logSources().find((s) => s.key === 'swap');
     expect(after).toBeDefined();                                    // still tailed…
     expect((after!.address as string[]).length).toBe(tailedBefore);  // …and not dropped
+  });
+
+  it('does not replace a newer cached implementation with an older snapshot', async () => {
+    const adapter = createLunarbaseAdapter();
+    const current = stub(false, '0x' + '0'.repeat(24) + '2'.repeat(40));
+    current.client.getBlockNumber = async () => 502n;
+    await adapter.discover(current);
+    const older = stub(false); older.note = vi.fn();
+    await adapter.discover(older);
+    expect(older.note.mock.calls.map(([code]: [string]) => code)).toEqual(['venue.discovery']);
   });
 
   it('reports the outage as unreadable, not as a config mismatch', async () => {
@@ -276,4 +319,3 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     expect(notes.some((n) => n.code === 'venue.quote.recovered' && /readable again/.test(n.msg))).toBe(true);
   });
 });
-

@@ -178,10 +178,14 @@ async function readPoolsAtBlock(
     if (config.expectedY.toLowerCase() !== ZERO) add(config, 'yDecimals', erc20Abi, 'decimals', undefined, config.expectedY);
   }
 
-  const [results, implementationSlots] = await Promise.all([
+  const [reads, slots] = await Promise.allSettled([
     ctx.client.multicall({ contracts: calls as any, allowFailure: true, blockNumber }),
     Promise.all(configs.map((config) => ctx.client.getStorageAt({ address: config.pool, slot: ERC1967_IMPLEMENTATION_SLOT, blockNumber }).catch(() => undefined))),
   ]);
+  ctx.quoteSignal?.throwIfAborted();
+  if (reads.status === 'rejected') throw reads.reason;
+  if (slots.status === 'rejected') throw slots.reason;
+  const results = reads.value, implementationSlots = slots.value;
 
   const found: LunarbaseCachedPool[] = [];
   for (let i = 0; i < configs.length; i++) {
@@ -448,6 +452,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
   };
   const activate = (ctx: AdapterContext, pool: LunarbaseCachedPool) => {
     const prior = byAddress.get(pool.pool.toLowerCase());
+    if (prior && newer(prior.lastApplied, pool.lastApplied)) return;
     if (prior && prior.snapshot.implementation !== pool.snapshot.implementation) {
       ctx.note('venue.upgraded', `Lunarbase ${pool.market} implementation changed ${prior.snapshot.implementation.slice(0, 10)}… → ${pool.snapshot.implementation.slice(0, 10)}…`);
     }
@@ -496,13 +501,25 @@ export function createLunarbaseAdapter(): VenueAdapter {
         ]);
         return { sizeUsd, bid, ask };
       }))]));
-      let current: LunarbaseCachedPool[];
-      try {
-        current = await readPoolsAtBlock(ctx, gatePools, head, (config, reason, transient) => transient ? unreadable(ctx, config, reason) : quarantine(ctx, config, reason));
-      } catch (error) {
-        // legs settle harmlessly (quoteLunarbaseLeg never rejects) — nothing dangles.
+      const failures: Array<{ config: LunarbasePoolConfig; reason: string; transient: boolean }> = [];
+      // Stage state changes until every parallel read settles. A deadline can
+      // discard the frame while these reads still hold the adapter's slot.
+      const [gate, quoted] = await Promise.allSettled([
+        readPoolsAtBlock(ctx, gatePools, head, (config, reason, transient) => failures.push({ config, reason, transient })),
+        Promise.all([...legsByPool].map(async ([key, work]) => [key, await work] as const)),
+      ]);
+      ctx.quoteSignal?.throwIfAborted();
+      if (gate.status === 'rejected') {
+        const error = gate.reason;
         noteOnce(ctx, 'snapshot', 'venue.quote.unavailable', `Lunarbase quote refresh failed: ${error instanceof Error ? error.message : String(error)}`);
         return [];
+      }
+      if (quoted.status === 'rejected') throw quoted.reason;
+      const current = gate.value;
+      const completedLegs = new Map(quoted.value);
+      for (const { config, reason, transient } of failures) {
+        if (transient) unreadable(ctx, config, reason);
+        else quarantine(ctx, config, reason);
       }
       recovered(ctx, 'head', 'Lunarbase chain head readable again — quoting resumed');
       recovered(ctx, 'snapshot', 'Lunarbase pool state refresh succeeded again — quoting resumed');
@@ -523,7 +540,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
         recovered(ctx, `inactive:${pool.pool}`, `Lunarbase ${pool.market} quoting again (pool live, whitelist route open, state fresh)`);
         const mid = ctx.pricer.pairMid(pool.market);
         if (!(mid > 0)) continue;
-        const legs = await (legsByPool.get(pool.pool.toLowerCase()) ?? Promise.resolve([]));
+        const legs = completedLegs.get(pool.pool.toLowerCase()) ?? [];
         for (const { sizeUsd, bid, ask } of legs) {
           const rawBidBps = bid ? (bid.px / mid - 1) * 1e4 : 0;
           const rawAskBps = ask ? (ask.px / mid - 1) * 1e4 : 0;
