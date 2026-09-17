@@ -10,10 +10,11 @@ process.env.API_PORT = '0';
 const row = { venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000, bidBps: -1.23, askBps: 2.34, bidPx: .024123456789, askPx: .024132198765, spreadBps: 3.57, filledFull: true, feeBps: .2, ts: 100 };
 class Source extends BaseSource {
   readonly mode = 'sim' as const;
+  catalog: Record<string, string[]> = { venue: ['MON/USDC'] };
   async start() {} stop() {}
   getState(): MarketState { return { chainId: 143, block: 1, monUsd: .024, monChangePct: 0, takerBps: 1, markets: ['MON/USDC', 'BTC/USDC'], sizesUsd: [1000], quoteCadenceMs: 300, source: 'sim', venues: [
     { id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } },
-  ], notes: [{ ts: 0, level: 'info', code: 'source.sim', msg: 'private diagnostic' }] }; }
+  ], quoteMarkets: this.catalog, notes: [{ ts: 0, level: 'info', code: 'source.sim', msg: 'private diagnostic' }] }; }
   getQuotes(): QuoteSnapshot { return { block: 1, monUsd: .024, ts: 100, frame: { headSource: 'sim', headObservedAt: 80, quoteStartedAt: 81, quoteCompletedAt: 99, emittedAt: 100, durationMs: 18, adapterMs: { venue: 17 }, missingVenues: [], coalescedBlocks: 0 }, rows: [row, { ...row, market: 'BTC/USDC' }, { ...row, sizeUsd: 100 }] }; }
   getFills() { return []; } getVolume() { return []; }
   push(message: StreamMessage) { this.emitMsg(message); }
@@ -45,6 +46,52 @@ async function connect(port: number, topics: StreamTopic[], protocols: string | 
 }
 
 describe('subscription transport', () => {
+  it('sends the catalog once on subscription, then only when it changes', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const { source, port } = await boot();
+    const client = await connect(port, [{ channel: 'state' }], STREAM_V2_JSON);
+    expect(client.frames[0].message.data).toHaveProperty('quoteMarkets', source.catalog);
+    for (const block of [2, 3, 4]) {
+      if (block === 3) source.catalog = { venue: ['MON/USDC', 'BTC/USDC'] };
+      now += 1_001;
+      source.push({ ch: 'state', data: { ...source.getState(), block } });
+      await waitFor(() => client.frames.length === block);
+    }
+    expect(client.frames[1].message.data).not.toHaveProperty('quoteMarkets');
+    expect(client.frames[2].message.data).toHaveProperty('quoteMarkets', source.catalog);
+    expect(client.frames[3].message.data).not.toHaveProperty('quoteMarkets');
+  });
+
+  it('does not let a new subscriber hide a catalog update from existing subscribers', async () => {
+    const { source, port } = await boot();
+    const existing = await connect(port, [{ channel: 'state' }], STREAM_V2_JSON);
+    source.catalog = { venue: ['BTC/USDC'] };
+    const joining = await connect(port, [{ channel: 'state' }], STREAM_V2_JSON);
+    expect(joining.frames[0].message.data).toHaveProperty('quoteMarkets', source.catalog);
+    source.push({ ch: 'state', data: { ...source.getState(), block: 2 } });
+    await waitFor(() => existing.frames.length === 2);
+    expect(existing.frames[1].message.data).toHaveProperty('quoteMarkets', source.catalog);
+  });
+
+  it('preserves a catalog change when newer state replaces a pending compressed frame', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const { source, port } = await boot();
+    const client = await connect(port, [{ channel: 'state' }]);
+    const largeCatalog = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`venue-${i}`, ['MON/USDC', 'BTC/USDC']]));
+    for (const block of [2, 3, 4]) {
+      source.catalog = block === 2 ? largeCatalog : { venue: ['BTC/USDC'] };
+      now += 1_001;
+      source.push({ ch: 'state', data: { ...source.getState(), block } });
+    }
+    await waitFor(() => client.frames.length === 3);
+    expect(client.binaries).toHaveLength(1);
+    expect(client.frames[1].message.data).toMatchObject({ block: 2, quoteMarkets: largeCatalog });
+    expect(client.frames[2].message.data).toMatchObject({ block: 4, quoteMarkets: source.catalog });
+    expect(client.frames.map((frame) => frame.seq)).toEqual([0, 1, 2]);
+  });
+
   it.each([
     { offered: [STREAM_V2_GZIP], selected: STREAM_V2_GZIP },
     { offered: [STREAM_V2_JSON], selected: STREAM_V2_JSON },

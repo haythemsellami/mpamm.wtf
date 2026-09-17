@@ -1,0 +1,44 @@
+{
+  "measuredAt": "2026-09-17T17:37:01.358Z",
+  "node": "v24.11.1",
+  "block": 105666670,
+  "method": "Live seed-pool discovery and block-pinned $100 quotes. Inject unsupported helper once, then abort after live fallback legs return; retry helper and compare every row field except timestamp with the live legacy path at the same block. Fixed sizing anchors are test inputs, not market data. Read-only calls; no transactions.",
+  "sizingAnchors": {
+    "WBTC": 75000,
+    "WETH": 2500,
+    "WMON": 0.025
+  },
+  "fallbackLegs": 4,
+  "canceledFrameRejected": true,
+  "helperAttempts": 2,
+  "helperRetriedImmediately": true,
+  "exactQuoteRowMatches": 2,
+  "rows": [
+    {
+      "venueId": "metric",
+      "market": "BTC/USDC",
+      "sizeUsd": 100,
+      "bidBps": 236.883292208232,
+      "askBps": 240.02621446710836,
+      "bidPx": 76776.62469156174,
+      "askPx": 76800.19660850332,
+      "spreadBps": 3.1429222588763537,
+      "filledFull": true,
+      "feeBps": 0,
+      "ts": 1789666621251
+    },
+    {
+      "venueId": "metric",
+      "market": "ETH/USDC",
+      "sizeUsd": 100,
+      "bidBps": -128.26030000000043,
+      "askBps": -123.18918627170162,
+      "bidPx": 2467.934925,
+      "askPx": 2469.2027034320745,
+      "spreadBps": 5.071113728298812,
+      "filledFull": true,
+      "feeBps": 0,
+      "ts": 1789666621251
+    }
+  ]
+}

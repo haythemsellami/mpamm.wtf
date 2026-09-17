@@ -407,8 +407,9 @@ export function createMetricAdapter(): VenueAdapter {
           // Providers can reject creation-form calls. The original block-pinned
           // path remains available and a cooldown avoids probing every frame.
           if (ctx.quoteSignal?.aborted) throw error;
-          batchRetryAt = Date.now() + 60_000;
           qRes = await legacyQuote();
+          ctx.quoteSignal?.throwIfAborted();
+          batchRetryAt = Date.now() + 60_000;
         }
       } else qRes = await legacyQuote();
       if (reportOutage(ctx, qRes)) return [];

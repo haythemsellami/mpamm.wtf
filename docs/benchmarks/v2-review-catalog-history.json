@@ -1,0 +1,64 @@
+{
+  "measuredAt": "2026-09-17T17:37:57.300Z",
+  "node": "v24.11.1",
+  "method": "Actual pre-fix gateway at 89a26a2 and updated gateway receive an identical state subscription plus one unchanged state tick. Catalog derived from the committed full quote fixture; fixed epoch for byte comparison. Actual gzip encoder, in-memory socket; payload bytes exclude WebSocket framing, TLS, REST and network latency. The saving occurs once per new state subscription, not on every tick.",
+  "catalogVenues": 9,
+  "catalogJsonBytes": 903,
+  "measurements": [
+    {
+      "protocol": "mpamm.v2.json",
+      "version": "before",
+      "snapshotPayloadBytes": 2833,
+      "firstTickPayloadBytes": 1487,
+      "firstTickJsonBytes": 1487,
+      "duplicateCatalog": true
+    },
+    {
+      "protocol": "mpamm.v2.json",
+      "version": "after",
+      "snapshotPayloadBytes": 2833,
+      "firstTickPayloadBytes": 568,
+      "firstTickJsonBytes": 568,
+      "duplicateCatalog": false
+    },
+    {
+      "protocol": "mpamm.v2.gzip",
+      "version": "before",
+      "snapshotPayloadBytes": 2833,
+      "firstTickPayloadBytes": 460,
+      "firstTickJsonBytes": 1487,
+      "duplicateCatalog": true
+    },
+    {
+      "protocol": "mpamm.v2.gzip",
+      "version": "after",
+      "snapshotPayloadBytes": 2833,
+      "firstTickPayloadBytes": 313,
+      "firstTickJsonBytes": 568,
+      "duplicateCatalog": false
+    }
+  ],
+  "browserRequestBudget": {
+    "method": "Five passing Chromium scenarios against built simulation app. Each non-Execution page is opened directly, then Execution, then the original page again. Every Execution visit returned HTTP 200 quote history and rendered rolling statistics.",
+    "pages": [
+      {
+        "tab": "markouts",
+        "initialQuoteHistoryRequests": 0,
+        "returningQuoteHistoryRequests": 0,
+        "executionHistorySucceeded": true
+      },
+      {
+        "tab": "volume",
+        "initialQuoteHistoryRequests": 0,
+        "returningQuoteHistoryRequests": 0,
+        "executionHistorySucceeded": true
+      },
+      {
+        "tab": "leaderboard",
+        "initialQuoteHistoryRequests": 0,
+        "returningQuoteHistoryRequests": 0,
+        "executionHistorySucceeded": true
+      }
+    ]
+  }
+}

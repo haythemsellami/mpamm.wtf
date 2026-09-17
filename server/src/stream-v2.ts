@@ -81,7 +81,12 @@ export class SubscriptionGateway {
       }
       group.peers.add(peer);
       const initial = this.snapshot(topic);
-      if (initial) this.send(peer, JSON.stringify(this.envelope(group, initial, true)));
+      if (initial) {
+        // A later peer's snapshot must not hide a catalog update still owed
+        // to the existing peers. Only the first snapshot establishes it.
+        if (initial.ch === 'state' && group.peers.size === 1) group.lastCatalog = JSON.stringify(initial.data.quoteMarkets);
+        this.send(peer, JSON.stringify(this.envelope(group, initial, true)));
+      }
     }
     peer.topics = wanted;
     this.metrics.topics = this.groups.size;
@@ -122,11 +127,6 @@ export class SubscriptionGateway {
       if (group.topic.channel === 'state' && Date.now() - group.lastAt < 1_000) continue;
       const selected = this.select(group.topic, message);
       if (!selected) continue;
-      if (selected.ch === 'state') {
-        const catalog = JSON.stringify(selected.data.quoteMarkets);
-        if (catalog === group.lastCatalog) delete selected.data.quoteMarkets;
-        else group.lastCatalog = catalog;
-      }
       if (selected.ch === 'volume') {
         const json = JSON.stringify(selected.data);
         if (json === group.lastJson) continue;
@@ -143,6 +143,13 @@ export class SubscriptionGateway {
   private publish(group: Group, message: TopicMessage): void {
     if (!group.peers.size) return;
     if (group.encoding) { group.pending = message; this.metrics.coalesced++; return; }
+    // Track catalogs only when publishing: a coalesced pending state must
+    // keep its catalog until the update actually reaches the shared stream.
+    if (message.ch === 'state') {
+      const catalog = JSON.stringify(message.data.quoteMarkets);
+      if (catalog === group.lastCatalog) delete message.data.quoteMarkets;
+      else group.lastCatalog = catalog;
+    }
     group.lastAt = Date.now();
     group.seq++;
     this.sequences.set(topicKey(group.topic), group.seq);

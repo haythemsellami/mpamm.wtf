@@ -5,6 +5,35 @@ test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => { try { localStorage.setItem('pamm-tour-dismissed', '1'); } catch {} });
 });
 
+for (const [tab, topics] of [['markouts', 2], ['volume', 2], ['leaderboard', 1]] as const) {
+  test(`${tab} defers quote history until Execution is opened`, async ({ page }) => {
+    const history: string[] = [];
+    page.on('request', (request) => {
+      if (new URL(request.url()).pathname === '/api/quotes/history') history.push(request.url());
+    });
+    const bootstrap = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/bootstrap' && response.ok());
+    await page.goto(`/${tab}`);
+    await bootstrap;
+    await expect.poll(async () => (await health(page)).topics).toBe(topics);
+    const initialRequests = history.length;
+    expect(initialRequests).toBe(0);
+    const quoteHistory = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/quotes/history' && response.ok());
+    await page.getByRole('button', { name: /EXECUTION$/ }).click();
+    await quoteHistory;
+    await expect(page.getByText('ROLLING_STATS', { exact: true })).toBeVisible();
+    await expect.poll(async () => (await health(page)).topics).toBe(3);
+    const executionRequests = history.length;
+    expect(executionRequests).toBeGreaterThan(0);
+    const back = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/bootstrap' && response.ok());
+    await page.getByRole('button', { name: new RegExp(`${tab.toUpperCase()}$`) }).click();
+    await back;
+    await expect.poll(async () => (await health(page)).topics).toBe(topics);
+    const returnRequests = history.length - executionRequests;
+    expect(returnRequests).toBe(0);
+    await test.info().attach('history-requests.json', { body: JSON.stringify({ tab, initialRequests, executionRequests, returnRequests }), contentType: 'application/json' });
+  });
+}
+
 test('two browser tabs share one socket, union selections, and keep every dashboard page working', async ({ context, page }) => {
   const errors: string[] = [];
   const failedApi: string[] = [];

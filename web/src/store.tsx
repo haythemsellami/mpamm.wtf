@@ -98,7 +98,7 @@ const venueIds = (state: MarketState | null): string[] => (state?.venues ?? []).
  *  rather than rendered: a venue-less state would blank every venue-keyed view. */
 const mergeState = (prev: MarketState | null, next: StreamState): MarketState | null => {
   const venues = next.venues ?? prev?.venues;
-  return venues ? { ...next, venues } : prev;
+  return venues ? { ...next, venues, quoteMarkets: next.quoteMarkets ?? prev?.quoteMarkets } : prev;
 };
 
 function rowFor(q: QuoteSnapshot | null, venueId: string, market: string, size: number): QuoteRow | undefined {
@@ -156,8 +156,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // the venue ids the buffers are keyed by — read inside the (stable) stream
   // callback so we never close over a stale registry.
   const idsRef = useRef<string[]>([]);
-  const selRef = useRef({ pair: ui.pair, size: ui.size });
-  selRef.current = { pair: ui.pair, size: ui.size };
+  const selRef = useRef({ tab: ui.tab, pair: ui.pair, size: ui.size });
+  selRef.current = { tab: ui.tab, pair: ui.pair, size: ui.size };
   // what the buffers currently CONTAIN ("pair|size"). pushSnapshot re-keys
   // synchronously on mismatch, so a WS tick arriving between a pair switch and
   // the reseed effect can never append new-pair prices onto old-pair samples
@@ -168,6 +168,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const keyOf = () => `${selRef.current.pair}|${selRef.current.size}`;
   const pushSnapshot = (q: QuoteSnapshot) => {
     quotesRef.current = q;
+    if (selRef.current.tab !== 'exec') return;
     if (seedKeyRef.current !== keyOf()) reseed(); // sync re-key — mixed buffers impossible
     const recent = recentQuotesRef.current;
     const duplicate = recent.at(-1)?.block === q.block;
@@ -195,6 +196,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // current frame while history loads — fabricating a flat minute would hide
   // both a young server and missing blocks.
   const reseed = () => {
+    if (selRef.current.tab !== 'exec') return;
     const q = quotesRef.current;
     const ids = idsRef.current;
     if (seedKeyRef.current !== keyOf()) recentQuotesRef.current = [];
@@ -217,12 +219,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // this (pair, size). Stale-guarded: a slow response for a pair the user has
   // already left is discarded (seedKey moved on).
   const seedFromHistory = async (key: string) => {
+    if (selRef.current.tab !== 'exec') return;
     if (seedFetchRef.current === key) return; // already fetching this key
     seedFetchRef.current = key;
     try {
       const [pair, sizeS] = key.split('|');
       const hist = await fetchQuoteHistory(pair, Number(sizeS));
-      if (seedKeyRef.current !== key || !hist.length) return;
+      if (selRef.current.tab !== 'exec' || seedKeyRef.current !== key || !hist.length) return;
       const ids = new Set(idsRef.current);
       const S = seriesRef.current, SM = samplesRef.current;
       for (const id of idsRef.current) { const s = (S[id] ??= { points: [] }); s.points.length = 0; (SM[id] ??= []).length = 0; }
@@ -383,11 +386,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return () => { on = false; clearInterval(id); document.removeEventListener('visibilitychange', load); };
   }, [ui.tab]);
 
-  // reseed when the selected pair/size changes
-  useEffect(() => { reseed(); setFrame((f) => f + 1); /* eslint-disable-next-line */ }, [ui.pair, ui.size]);
-  // reseed when the venue registry changes (ids added/removed) so the buffers are
-  // re-keyed and pre-filled for the new set before the next stream tick.
-  useEffect(() => { reseed(); setFrame((f) => f + 1); /* eslint-disable-next-line */ }, [venueIds(state).join(',')]);
+  // Chart buffers and their REST history are needed only on Execution. Entry
+  // also re-keys them after pair/registry changes made on another page.
+  useEffect(() => {
+    if (ui.tab !== 'exec') return;
+    reseed(); setFrame((f) => f + 1);
+    /* eslint-disable-next-line */
+  }, [ui.tab, ui.pair, ui.size, venueIds(state).join(',')]);
 
   const venues = state?.venues ?? [];
   const { displayVenues, baselines, references, reference, venuesById } = useMemo(() => {

@@ -37,6 +37,7 @@ beforeEach(() => {
   vi.mocked(api.fetchMarkets).mockResolvedValue(snapshot);
   vi.mocked(api.fetchFills).mockResolvedValue([fill('old')]);
   vi.mocked(api.fetchLeaderboard).mockReturnValue(new Promise(() => {}));
+  vi.mocked(api.fetchGas).mockResolvedValue({ days: [], approx: [] });
   vi.mocked(api.fetchQuoteHistory).mockResolvedValue([]);
   vi.mocked(api.connectDashboardStream).mockImplementation((_topics, receive, change) => {
     message = receive; status = change;
@@ -44,6 +45,57 @@ beforeEach(() => {
   });
 });
 afterEach(async () => { await act(async () => root.unmount()); document.body.replaceChildren(); });
+
+describe('state and quote history demand', () => {
+  it('retains the last catalog on unchanged ticks, accepts changes and accepts an empty catalog', async () => {
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.state.quoteMarkets = { venue: ['MON/USDC'] };
+    await mount();
+    const { venues: _, quoteMarkets: __, ...tick } = bootstrap.state;
+    await act(async () => message({ ch: 'state', data: { ...tick, block: 2 } }));
+    expect(dashboard.state?.quoteMarkets).toEqual({ venue: ['MON/USDC'] });
+    await act(async () => message({ ch: 'state', data: { ...tick, block: 3, quoteMarkets: { venue: ['BTC/USDC'] } } }));
+    expect(dashboard.state?.quoteMarkets).toEqual({ venue: ['BTC/USDC'] });
+    await act(async () => message({ ch: 'state', data: { ...tick, block: 4, quoteMarkets: {} } }));
+    expect(dashboard.state?.quoteMarkets).toEqual({});
+  });
+
+  it.each(['markouts', 'volume', 'leaderboard'] as const)('fetches no quote history on %s, including selection and registry changes', async (tab) => {
+    window.history.replaceState(null, '', `/${tab}`);
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    await mount();
+    expect(api.fetchQuoteHistory).not.toHaveBeenCalled();
+    await act(async () => { dashboard.set('pair', 'BTC/USDC'); dashboard.set('size', 100); });
+    const venues = [{ id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } }] as const;
+    await act(async () => message({ ch: 'state', data: { ...bootstrap.state, venues: [...venues] } }));
+    expect(api.fetchQuoteHistory).not.toHaveBeenCalled();
+    expect(dashboard.series).toEqual({});
+    await act(async () => dashboard.set('tab', 'exec'));
+    expect(api.fetchQuoteHistory).toHaveBeenCalledWith('BTC/USDC', 100);
+    vi.mocked(api.fetchQuoteHistory).mockClear();
+    await act(async () => dashboard.set('tab', tab));
+    await act(async () => dashboard.set('size', 1000));
+    await reconnect();
+    expect(api.fetchQuoteHistory).not.toHaveBeenCalled();
+  });
+
+  it('ignores history completing after leaving Execution and fetches it on return', async () => {
+    window.history.replaceState(null, '', '/');
+    const pending = deferred<QuoteSnapshot[]>();
+    vi.mocked(api.fetchQuoteHistory).mockReturnValue(pending.promise);
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.state.venues = [{ id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } }];
+    await mount();
+    await act(async () => dashboard.set('tab', 'markouts'));
+    const before = structuredClone(dashboard.series);
+    await act(async () => pending.resolve([{ ...bootstrap.quotes, block: 2, rows: [{ venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000,
+      bidBps: -1, askBps: 1, bidPx: 1, askPx: 2, spreadBps: 2, filledFull: true, feeBps: 0, ts: Date.now() }] }]));
+    expect(dashboard.series).toEqual(before);
+    vi.mocked(api.fetchQuoteHistory).mockClear().mockResolvedValue([]);
+    await act(async () => dashboard.set('tab', 'exec'));
+    expect(api.fetchQuoteHistory).toHaveBeenCalled();
+  });
+});
 
 describe('fill snapshot resynchronization', () => {
   it('accepts a completed quote behind the bootstrap head but still rejects older observed frames', async () => {
