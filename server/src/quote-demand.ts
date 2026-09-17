@@ -1,12 +1,15 @@
 import type { QuoteScope } from '@shared';
 
-/** No market filter means a full matrix across every venue role; baseline
- * only selects a role when markets are scoped. */
-export interface QuotePlan { markets?: ReadonlySet<string>; sizes: readonly number[]; baseline: boolean }
+/** Full demand explicitly includes every venue role. Scoped demand keeps
+ * regular and baseline work separate without duplicating reference rows. */
+export type QuotePlan = { sizes: readonly number[] } & (
+  | { role: 'all'; markets?: undefined }
+  | { role: 'venue' | 'baseline'; markets: ReadonlySet<string> }
+);
 
 /** Group equal size sets, avoiding a cross-product of every viewer's selections. */
 export function planQuotes(scopes: readonly QuoteScope[], allSizes: readonly number[], full = false): QuotePlan[] {
-  if (full) return [{ sizes: allSizes, baseline: true }];
+  if (full) return [{ sizes: allSizes, role: 'all' }];
   const byMarket = new Map<string, { sizes: Set<number>; baselineSizes: Set<number> }>();
   for (const scope of scopes) {
     let entry = byMarket.get(scope.market);
@@ -21,7 +24,7 @@ export function planQuotes(scopes: readonly QuoteScope[], allSizes: readonly num
       if (!sizes.length) continue;
       const key = `${Number(baseline)}:${sizes.join(',')}`;
       let group = groups.get(key);
-      if (!group) { group = { sizes, baseline, markets: new Set() }; groups.set(key, group); }
+      if (!group) { group = { sizes, role: baseline ? 'baseline' : 'venue', markets: new Set() }; groups.set(key, group); }
       group.markets.add(market);
     }
   }

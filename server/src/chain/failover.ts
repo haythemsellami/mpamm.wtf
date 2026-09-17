@@ -49,7 +49,7 @@ export interface BreakerEndpoint {
   /** Traffic-class transports for this same endpoint. They share active
    * endpoint selection and health, but not the default HTTP batch queue. */
   lanes?: Record<string, RpcRequestFn>;
-  scopedQuote?: (signal: AbortSignal, key: string) => RpcRequestFn;
+  scopedQuote?: (key: string, signal: AbortSignal) => RpcRequestFn;
 }
 
 /** Public shape served on /api/markets (shared MarketState.rpc). */
@@ -235,7 +235,7 @@ export class RpcBreaker {
         await this.ensureChain(idx);
         scope?.signal.throwIfAborted();
         const endpoint = this.endpoints[idx];
-        const request = scope && endpoint.scopedQuote ? endpoint.scopedQuote(scope.signal, scope.key) : (endpoint.lanes?.[lane] ?? endpoint.request);
+        const request = scope && endpoint.scopedQuote ? endpoint.scopedQuote(scope.key, scope.signal) : (endpoint.lanes?.[lane] ?? endpoint.request);
         const res = await request(args);
         scope?.signal.throwIfAborted();
         // A late result from an endpoint serving an older generation is still

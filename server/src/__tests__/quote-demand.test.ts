@@ -25,12 +25,12 @@ describe('quote demand', () => {
       { market: 'BTC/USDC', sizeUsd: 1000, baseline: true },
     ], [100, 1000, 10000, 100000]);
     expect(plan.map((p) => ({ ...p, markets: [...p.markets!] }))).toEqual([
-      { markets: ['MON/USDC'], sizes: [100], baseline: false },
-      { markets: ['BTC/USDC'], sizes: [1000], baseline: false },
-      { markets: ['BTC/USDC'], sizes: [1000], baseline: true },
+      { markets: ['MON/USDC'], sizes: [100], role: 'venue' },
+      { markets: ['BTC/USDC'], sizes: [1000], role: 'venue' },
+      { markets: ['BTC/USDC'], sizes: [1000], role: 'baseline' },
     ]);
     expect(planQuotes([], [100])).toEqual([]);
-    expect(planQuotes([], [100], true)).toEqual([{ sizes: [100], baseline: true }]);
+    expect(planQuotes([], [100], true)).toEqual([{ sizes: [100], role: 'all' }]);
   });
 
   it('groups markets with identical size sets into one adapter call', () => {

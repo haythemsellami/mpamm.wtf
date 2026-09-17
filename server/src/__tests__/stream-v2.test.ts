@@ -4,7 +4,7 @@ import { gunzipSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
 import { BaseSource } from '../datasource/index.js';
-import { STREAM_V2_GZIP, type MarketState, type QuoteSnapshot, type StreamEnvelope, type StreamTopic, type StreamMessage } from '@shared';
+import { STREAM_V2_GZIP, STREAM_V2_JSON, type MarketState, type QuoteSnapshot, type StreamEnvelope, type StreamTopic, type StreamMessage } from '@shared';
 
 process.env.API_PORT = '0';
 const row = { venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000, bidBps: -1.23, askBps: 2.34, bidPx: .024123456789, askPx: .024132198765, spreadBps: 3.57, filledFull: true, feeBps: .2, ts: 100 };
@@ -29,8 +29,8 @@ async function boot(source = new Source()) {
   cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
   return { source, port: (server.address() as AddressInfo).port };
 }
-async function connect(port: number, topics: StreamTopic[]) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/stream`, STREAM_V2_GZIP, { perMessageDeflate: false });
+async function connect(port: number, topics: StreamTopic[], protocols: string | string[] = STREAM_V2_GZIP) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/stream`, protocols, { perMessageDeflate: false });
   const frames: StreamEnvelope[] = [];
   const binaries: number[] = [];
   ws.on('message', (data, binary) => {
@@ -45,6 +45,29 @@ async function connect(port: number, topics: StreamTopic[]) {
 }
 
 describe('subscription transport', () => {
+  it.each([
+    { offered: [STREAM_V2_GZIP], selected: STREAM_V2_GZIP },
+    { offered: [STREAM_V2_JSON], selected: STREAM_V2_JSON },
+    { offered: ['mpamm.future', STREAM_V2_JSON], selected: STREAM_V2_JSON },
+    { offered: [STREAM_V2_JSON, STREAM_V2_GZIP], selected: STREAM_V2_GZIP },
+  ])('negotiates $selected from $offered and delivers versioned frames', async ({ offered, selected }) => {
+    const { source, port } = await boot();
+    const client = await connect(port, [{ channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false }], offered);
+    expect(client.ws.protocol).toBe(selected);
+    expect(client.frames[0]).toMatchObject({ v: 2, message: { ch: 'quotes', data: { rows: [row] } } });
+    source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 2 } });
+    await waitFor(() => client.frames.length === 2);
+    expect(client.frames[1]).toMatchObject({ v: 2, seq: 1, message: { ch: 'quotes', data: { block: 2, rows: [row] } } });
+    expect(client.binaries).toHaveLength(selected === STREAM_V2_GZIP ? 1 : 0);
+  });
+
+  it('does not negotiate unsupported protocols as legacy streams', async () => {
+    const { port } = await boot();
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/stream`, 'mpamm.future');
+    cleanup.push(() => ws.terminate());
+    await expect(once(ws, 'open')).rejects.toThrow('Server sent no subprotocol');
+  });
+
   it('filters before encoding, shares quote demand and compression, and works without extension negotiation', async () => {
     const { source, port } = await boot();
     const watch = vi.spyOn(source, 'watchQuotes');
@@ -132,6 +155,7 @@ describe('legacy snapshot and idle history', () => {
     ws.on('message', (data) => frames.push(JSON.parse(data.toString())));
     cleanup.push(() => ws.terminate());
     await once(ws, 'open');
+    expect(ws.protocol).toBe('');
     await waitFor(() => frames.length === 1);
     source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 2, rows: [row] } });
     source.push({ ch: 'state', data: source.getState() });

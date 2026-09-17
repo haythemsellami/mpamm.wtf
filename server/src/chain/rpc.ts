@@ -75,7 +75,7 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
       label: `${label(i)}${url === PUBLIC_RPC && i > 0 ? ' (public)' : ''}`,
       request,
       lanes: { quote, head: http(url, { batch: false, retryCount: 0, timeout: 1_000 })({ chain: monad }).request as RpcRequestFn },
-      scopedQuote: (signal: AbortSignal, key: string) => {
+      scopedQuote: (key: string, signal: AbortSignal) => {
         const scopedUrl = new URL(url);
         scopedUrl.hash = `quote-${key}`;
         return http(scopedUrl.toString(), {

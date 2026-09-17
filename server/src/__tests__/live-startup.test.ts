@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MARKETS, SIZES_USD, type Fill, type QuoteRow } from '@shared';
 import type { VenueAdapter } from '../venues/adapter.js';
+import { createQuoteOutageReporter, type MulticallOutcome } from '../venues/quote-health.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -116,6 +117,58 @@ async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?:
 }
 
 describe('live startup archive gate', () => {
+  it.each([false, true])('keeps a partially quoting venue healthy across concurrent demand (failure first: %s)', async (failureFirst) => {
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.schedulePostQuoteMaintenance = vi.fn();
+    source.manageQuoteDemand();
+    source.watchQuotes({ market: 'MON/USDC', sizeUsd: 100, baseline: false });
+    source.watchQuotes({ market: 'BTC/USDC', sizeUsd: 1000, baseline: false });
+    const failed = deferred<MulticallOutcome[]>(), healthy = deferred<MulticallOutcome[]>();
+    const original = adapters[0].quote!;
+    const report = createQuoteOutageReporter('Venue');
+    adapters[0].quote = vi.fn(async (ctx, sizes, block, markets) => {
+      const result = await (markets!.has('MON/USDC') ? failed.promise : healthy.promise);
+      return report(ctx, result) ? [] : original(ctx, sizes, block, markets);
+    });
+    const notes = vi.spyOn(source, 'noteOnce');
+    try {
+      const work = poll(100n);
+      await vi.waitFor(() => expect(adapters[0].quote).toHaveBeenCalledTimes(2));
+      const fail = () => failed.resolve([{ status: 'failure', error: new Error('unavailable') }]);
+      const recover = () => healthy.resolve([{ status: 'success' }]);
+      (failureFirst ? fail : recover)();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(notes).not.toHaveBeenCalled();
+      (failureFirst ? recover : fail)();
+      await work;
+      expect(notes).not.toHaveBeenCalled();
+      expect(source.getQuotes().rows.filter((row: QuoteRow) => row.venueId === 'venue').map((row: QuoteRow) => row.market)).toEqual(['BTC/USDC']);
+    } finally { source.store.close(); }
+  });
+
+  it('retains an adapter slot when one demand plan rejects before its sibling settles', async () => {
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.schedulePostQuoteMaintenance = vi.fn();
+    source.manageQuoteDemand();
+    source.watchQuotes({ market: 'MON/USDC', sizeUsd: 100, baseline: false });
+    source.watchQuotes({ market: 'BTC/USDC', sizeUsd: 1000, baseline: false });
+    const held = deferred<QuoteRow[]>();
+    adapters[0].quote = vi.fn(async (_ctx, _sizes, _block, markets) => {
+      if (markets!.has('MON/USDC')) throw new Error('unavailable');
+      return held.promise;
+    });
+    vi.useFakeTimers();
+    try {
+      const first = poll(100n);
+      await vi.advanceTimersByTimeAsync(250);
+      await first;
+      await poll(101n);
+      expect(adapters[0].quote).toHaveBeenCalledTimes(2);
+      held.resolve([]);
+      await vi.advanceTimersByTimeAsync(0);
+    } finally { held.resolve([]); vi.useRealTimers(); source.store.close(); }
+  });
+
   it('ages fills in yielding passes with identical buy/sell signs and persistence updates', async () => {
     const { source } = await setup();
     const now = Date.now();

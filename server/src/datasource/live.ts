@@ -1,5 +1,6 @@
 import { AnalyticsWorker } from '../analytics-worker.js';
 import { QuoteRunner } from '../quote-runner.js';
+import { QuoteHealthBatch } from '../venues/quote-health.js';
 import { agePendingMarkouts, nearestReferenceSample } from '../markout-aging.js';
 import { BaseSource, QUOTE_HISTORY_MS } from './index.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
@@ -2300,8 +2301,8 @@ export class LiveDataSource extends BaseSource {
       this.schedulePostQuoteMaintenance();
       return;
     }
-    const plansFor = (a: VenueAdapter) => plan.filter((p) => !p.markets || (
-      p.baseline === a.venues().every((v) => v.role === 'baseline')
+    const plansFor = (a: VenueAdapter) => plan.filter((p) => p.role === 'all' || (
+      p.role === (a.venues().every((v) => v.role === 'baseline') ? 'baseline' : 'venue')
       && (!a.quoteMarkets || a.quoteMarkets().some((market) => p.markets!.has(market)))));
     const requestedAdapters = ADAPTERS.filter((a) => a.quote && plansFor(a).length);
     const adapterMs: Record<string, number> = {};
@@ -2315,9 +2316,16 @@ export class LiveDataSource extends BaseSource {
             const original = this.frameCtxFor(a, framePricer);
             const ctx = { ...original, quoteSignal: signal, client: scopedQuoteClient(`${this.vidOf(a)}-${blockNumber}`, signal),
               note: (...args: Parameters<typeof original.note>) => { if (!signal.aborted) original.note(...args); } };
-            return Promise.all(plansFor(a)
-            .map((p) => a.quote!(ctx, p.sizes, blockNumber, p.markets)))
-            .then((groups) => groups.flat());
+            const health = new QuoteHealthBatch(ctx);
+            // A rejected plan must not release the adapter's slot while a
+            // sibling still reads or mutates its state.
+            const groups = await Promise.allSettled(plansFor(a).map((p, i) =>
+              a.quote!({ ...ctx, quoteHealth: health.forPlan(i) }, p.sizes, blockNumber, p.markets)));
+            signal.throwIfAborted();
+            const failed = groups.find((group) => group.status === 'rejected');
+            if (failed?.status === 'rejected') throw failed.reason;
+            health.commit();
+            return groups.flatMap((group) => group.status === 'fulfilled' ? group.value : []);
           }, [] as QuoteRow[]).catch((e) => {
             // a rejection is not necessarily an Error — a bare string or an
             // Error with an empty message would otherwise note "quote failed:
@@ -2391,7 +2399,7 @@ export class LiveDataSource extends BaseSource {
     // finality margin: Monad logs/receipts can mutate for ~2 blocks (~600ms).
     // A speculative log that mutates away after ingest would be PERMANENT
     // phantom volume — there is no un-count path. Same margin as the gas tracker.
-    const head = (await publicClient.getBlockNumber()) - 5n;
+    const head = (await headClient.getBlockNumber()) - 5n;
     if (head <= this.lastBlock) return;
     const from = this.lastBlock + 1n;
     // Bound how much range ONE cycle materializes: the whole span is held in

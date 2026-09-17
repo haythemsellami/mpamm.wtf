@@ -1,0 +1,269 @@
+{
+  "measuredAt": "2026-09-17T17:15:05.580Z",
+  "node": "v24.11.1",
+  "configuration": {
+    "venues": [
+      "metric"
+    ],
+    "quoteDeadlineMs": 250,
+    "historyBackfill": false
+  },
+  "channels": [
+    {
+      "protocol": "mpamm.v2.json",
+      "market": "BTC/USDC",
+      "sizeUsd": 1000,
+      "frames": [
+        {
+          "block": 105662282,
+          "seq": 0,
+          "snapshot": true,
+          "binary": false,
+          "metricRows": 0
+        },
+        {
+          "block": 105662284,
+          "seq": 1,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 120,
+          "metricRows": 1
+        },
+        {
+          "block": 105662289,
+          "seq": 2,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 51,
+          "metricRows": 1
+        },
+        {
+          "block": 105662290,
+          "seq": 3,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 49,
+          "metricRows": 1
+        },
+        {
+          "block": 105662292,
+          "seq": 4,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 41,
+          "metricRows": 1
+        },
+        {
+          "block": 105662293,
+          "seq": 5,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 50,
+          "metricRows": 1
+        },
+        {
+          "block": 105662295,
+          "seq": 6,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 51,
+          "metricRows": 1
+        },
+        {
+          "block": 105662297,
+          "seq": 7,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 49,
+          "metricRows": 1
+        },
+        {
+          "block": 105662300,
+          "seq": 8,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 53,
+          "metricRows": 1
+        },
+        {
+          "block": 105662303,
+          "seq": 9,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 50,
+          "metricRows": 1
+        },
+        {
+          "block": 105662304,
+          "seq": 10,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 48,
+          "metricRows": 1
+        },
+        {
+          "block": 105662306,
+          "seq": 11,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 50,
+          "metricRows": 1
+        },
+        {
+          "block": 105662309,
+          "seq": 12,
+          "snapshot": false,
+          "binary": false,
+          "computeMs": 50,
+          "metricRows": 1
+        }
+      ],
+      "errors": []
+    },
+    {
+      "protocol": "mpamm.v2.gzip",
+      "market": "ETH/USDC",
+      "sizeUsd": 100,
+      "frames": [
+        {
+          "block": 105662282,
+          "seq": 0,
+          "snapshot": true,
+          "binary": false,
+          "metricRows": 0
+        },
+        {
+          "block": 105662284,
+          "seq": 1,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 120,
+          "metricRows": 1
+        },
+        {
+          "block": 105662289,
+          "seq": 2,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 51,
+          "metricRows": 1
+        },
+        {
+          "block": 105662290,
+          "seq": 3,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 49,
+          "metricRows": 1
+        },
+        {
+          "block": 105662292,
+          "seq": 4,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 41,
+          "metricRows": 1
+        },
+        {
+          "block": 105662293,
+          "seq": 5,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 50,
+          "metricRows": 1
+        },
+        {
+          "block": 105662295,
+          "seq": 6,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 51,
+          "metricRows": 1
+        },
+        {
+          "block": 105662297,
+          "seq": 7,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 49,
+          "metricRows": 1
+        },
+        {
+          "block": 105662300,
+          "seq": 8,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 53,
+          "metricRows": 1
+        },
+        {
+          "block": 105662303,
+          "seq": 9,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 50,
+          "metricRows": 1
+        },
+        {
+          "block": 105662304,
+          "seq": 10,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 48,
+          "metricRows": 1
+        },
+        {
+          "block": 105662306,
+          "seq": 11,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 50,
+          "metricRows": 1
+        },
+        {
+          "block": 105662309,
+          "seq": 12,
+          "snapshot": false,
+          "binary": true,
+          "computeMs": 50,
+          "metricRows": 1
+        }
+      ],
+      "errors": []
+    }
+  ],
+  "legacy": {
+    "protocol": "",
+    "frames": [
+      {
+        "block": 105662311,
+        "rows": 108
+      },
+      {
+        "block": 105662314,
+        "rows": 108
+      },
+      {
+        "block": 105662316,
+        "rows": 108
+      }
+    ],
+    "metricSizesComplete": true
+  },
+  "rest": {
+    "status": 200,
+    "rows": 108,
+    "metricSizesComplete": true
+  },
+  "tail": {
+    "from": "105662282",
+    "to": "105662309",
+    "fiveBlockMargin": true
+  },
+  "noteCodes": [
+    "metric:venue.discovery",
+    "metric:venue.gas.suspect",
+    "core:tail.resume"
+  ],
+  "limitations": "Local read-only integration check for two concurrent scopes, protocol negotiation, full handoffs and advancing fill tail. Not a production load or full block-coverage benchmark; baseline roles are verified in fixtures and browser tests."
+}

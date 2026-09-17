@@ -286,7 +286,12 @@ export function startServer(source: DataSource): Server {
   }
 
   const httpServer = createServer(app);
-  const wss = new WebSocketServer({ server: httpServer, path: STREAM_PATH, maxPayload: 16_384, perMessageDeflate: PERMESSAGE_DEFLATE });
+  const wss = new WebSocketServer({
+    server: httpServer, path: STREAM_PATH, maxPayload: 16_384, perMessageDeflate: PERMESSAGE_DEFLATE,
+    // Prefer a supported v2 encoding even when it is not offered first.
+    // Clients offering no subprotocol retain the legacy stream.
+    handleProtocols: (protocols) => protocols.has(STREAM_V2_GZIP) ? STREAM_V2_GZIP : protocols.has(STREAM_V2_JSON) ? STREAM_V2_JSON : false,
+  });
 
   const clients = new Set<WebSocket>();
   const legacyReady = new Set<WebSocket>();

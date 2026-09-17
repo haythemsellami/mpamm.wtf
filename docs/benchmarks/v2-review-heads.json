@@ -1,0 +1,190 @@
+{
+  "measuredAt": "2026-09-17T17:11:32.926Z",
+  "node": "v24.11.1",
+  "cpu": "Apple M4",
+  "method": "Actual exported publicClient and headClient against a loopback JSON-RPC provider: concurrent 80ms log read and 5ms head read, batches respond only after all members finish. One warmup and twenty trials per mode. Read-only; no live provider, database, browser or socket fanout.",
+  "results": [
+    {
+      "mode": "shared-tail-head",
+      "trials": 20,
+      "headP50Ms": 93.3447910000001,
+      "headP95Ms": 94.21137499999998,
+      "logsP50Ms": 93.33695799999998,
+      "httpRequestsIncludingWarmup": 21,
+      "mixedBatchesIncludingWarmup": 21,
+      "samples": [
+        {
+          "headMs": 92.00691599999999,
+          "logsMs": 92.00041599999997
+        },
+        {
+          "headMs": 93.9615,
+          "logsMs": 93.95166700000004
+        },
+        {
+          "headMs": 93.46591699999999,
+          "logsMs": 93.45595800000001
+        },
+        {
+          "headMs": 93.63662499999998,
+          "logsMs": 93.62725
+        },
+        {
+          "headMs": 94.21137499999998,
+          "logsMs": 94.20287500000006
+        },
+        {
+          "headMs": 93.876125,
+          "logsMs": 93.86816699999997
+        },
+        {
+          "headMs": 93.3447910000001,
+          "logsMs": 93.33695799999998
+        },
+        {
+          "headMs": 92.46979099999999,
+          "logsMs": 92.45658300000014
+        },
+        {
+          "headMs": 94.39637500000003,
+          "logsMs": 94.38325000000009
+        },
+        {
+          "headMs": 93.92158399999994,
+          "logsMs": 93.91266700000006
+        },
+        {
+          "headMs": 93.8991669999998,
+          "logsMs": 93.8907499999998
+        },
+        {
+          "headMs": 92.26774999999998,
+          "logsMs": 92.25795799999992
+        },
+        {
+          "headMs": 93.95254100000011,
+          "logsMs": 93.94308300000012
+        },
+        {
+          "headMs": 93.79116599999998,
+          "logsMs": 93.78341599999999
+        },
+        {
+          "headMs": 92.5880830000001,
+          "logsMs": 92.58162500000003
+        },
+        {
+          "headMs": 93.08595799999989,
+          "logsMs": 93.07858299999998
+        },
+        {
+          "headMs": 93.01095799999985,
+          "logsMs": 93.00233299999991
+        },
+        {
+          "headMs": 92.89525000000026,
+          "logsMs": 92.88879199999997
+        },
+        {
+          "headMs": 92.68704200000002,
+          "logsMs": 92.67883299999994
+        },
+        {
+          "headMs": 92.78254199999992,
+          "logsMs": 92.77437499999996
+        }
+      ]
+    },
+    {
+      "mode": "isolated-tail-head",
+      "trials": 20,
+      "headP50Ms": 7.935042000000067,
+      "headP95Ms": 8.975667000000158,
+      "logsP50Ms": 91.67724999999973,
+      "httpRequestsIncludingWarmup": 42,
+      "mixedBatchesIncludingWarmup": 0,
+      "samples": [
+        {
+          "headMs": 8.02554199999986,
+          "logsMs": 90.25529199999983
+        },
+        {
+          "headMs": 8.023333000000093,
+          "logsMs": 91.94124999999985
+        },
+        {
+          "headMs": 8.012709000000086,
+          "logsMs": 90.96462500000007
+        },
+        {
+          "headMs": 7.753791000000092,
+          "logsMs": 93.080375
+        },
+        {
+          "headMs": 8.07858299999998,
+          "logsMs": 91.67724999999973
+        },
+        {
+          "headMs": 7.661792000000332,
+          "logsMs": 92.33183300000019
+        },
+        {
+          "headMs": 7.702582999999777,
+          "logsMs": 91.41508299999987
+        },
+        {
+          "headMs": 8.259457999999995,
+          "logsMs": 92.30212500000016
+        },
+        {
+          "headMs": 7.707915999999841,
+          "logsMs": 92.31474999999955
+        },
+        {
+          "headMs": 7.780874999999924,
+          "logsMs": 91.15358300000025
+        },
+        {
+          "headMs": 9.444167000000107,
+          "logsMs": 92.16629199999988
+        },
+        {
+          "headMs": 8.975667000000158,
+          "logsMs": 91.7735419999999
+        },
+        {
+          "headMs": 7.971082999999908,
+          "logsMs": 91.40395799999988
+        },
+        {
+          "headMs": 8.639708000000155,
+          "logsMs": 92.91816699999981
+        },
+        {
+          "headMs": 7.523416999999881,
+          "logsMs": 91.8827080000001
+        },
+        {
+          "headMs": 7.599041999999827,
+          "logsMs": 90.7077089999998
+        },
+        {
+          "headMs": 7.970250000000306,
+          "logsMs": 91.33154100000002
+        },
+        {
+          "headMs": 7.935042000000067,
+          "logsMs": 91.98491700000022
+        },
+        {
+          "headMs": 7.611332999999831,
+          "logsMs": 91.50129099999958
+        },
+        {
+          "headMs": 7.580832999999984,
+          "logsMs": 90.25720799999999
+        }
+      ]
+    }
+  ]
+}

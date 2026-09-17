@@ -133,7 +133,7 @@ export class SimDataSource extends BaseSource {
   }
   getQuotes(): QuoteSnapshot {
     const ts = Date.now();
-    const rows = this.quotePlan(SIZES_USD).flatMap((p) => this.buildMatrix(p.sizes, p.markets, p.markets ? p.baseline : undefined));
+    const rows = this.quotePlan(SIZES_USD).flatMap((p) => this.buildMatrix(p.sizes, p.markets, p.role === 'all' ? undefined : p.role === 'baseline'));
     annotateCex(rows, rows.filter((r) => this.references.some((v) => v.id === r.venueId)));
     return {
       block: this.block,

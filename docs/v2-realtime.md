@@ -21,6 +21,8 @@ Reference sampling runs every 100ms independently of markout aging. Markouts use
 
 Quote adapters check cancellation before applying shared caches or outage notes. Lunarbase stages its validation results until parallel quote reads settle, retains its occupied slot through cancellation, and rejects older snapshots when a newer cache already exists. Bootstrap's empty quote placeholder does not reject the first completed stream frame merely because the chain head has advanced; subsequent observed frames remain monotonic. HTTP transport regressions exercise pinned calls and cancellation with batching both enabled and disabled.
 
+Full quote plans explicitly select all venue roles; scoped plans select regular or baseline venues. When an adapter receives several market/size plans, its outage reporter evaluates their combined results once, in plan order. One failed market cannot flip a successfully quoting venue between unavailable and recovered, and canceled or rejected frames cannot commit partial health. Rejected plans retain the adapter's slot until every sibling has settled. The fill tail reads its boundary through the same isolated head lane as quote observation, retaining the five-block finality margin and cursor hold on failure.
+
 ## Measurements
 
 Recorded September 17, 2026 on an Apple M4. Delivery/runtime tests use Node 24.11.1, matching the production major version; the live helper comparison used Node 26.8.2. Raw samples and methodology are in [delivery](benchmarks/v2-delivery.json), [runtime](benchmarks/v2-runtime.json), [Metric](benchmarks/v2-metric-live.json) and [live stream](benchmarks/v2-live-stream.json).
@@ -36,12 +38,19 @@ Recorded September 17, 2026 on an Apple M4. Delivery/runtime tests use Node 24.1
 | 100k-fill analytics, main-loop p95 delay | 79.6ms | 2.4ms |
 | 50k-fill markout burst, median full-pass time | 308.1ms | 63.8ms |
 | Same burst, largest observed event-loop stall | 308.0ms | 3.1ms |
+| Tail-head read alongside an 80ms log read, loopback median | 93.3ms, shared batch | 7.9ms, isolated head lane |
 
 The delivery test replays the same recorded full quote matrix to 10 and 100 local clients, 20 frames at 300ms intervals. All clients received all 20 frames. V2 performed 20 compression jobs even with 100 viewers. The 98.6% reduction is **quote traffic for one selected topic**, not the complete bill: depth, state, history, TLS, bootstrap, concurrent different selections and remote networking are excluded. CPU includes both server and client decoding. Sequential replay RSS measurements are not evidence of memory savings.
 
 The [follow-up replay](benchmarks/v2-review-delivery.json) after snapshot/reconnect fixes retained 98.6% fewer quote bytes and delivered every frame. At 100 viewers it measured 186.3 KB/s per viewer raw, 31.3 KB/s with legacy deflate, and 2.61 KB/s with shared gzip; v2 receipt p95 was 6ms on loopback. A [live handoff check](benchmarks/v2-review-live.json) verified four consecutive legacy frames contained Metric BTC/USDC and ETH/USDC at all four sizes, idle resubscription started with empty rows then received fresh executable quotes, and full REST quotes returned HTTP 200 with 108 rows. Other adapters are covered by generic/simulated tests rather than that live check.
 
 The batching test deliberately models a provider returning a JSON-RPC batch only after its slowest member. Separating requests doubles HTTP request count in this two-call example; it does not claim that every provider behaves identically. `QUOTE_HTTP_BATCH=on` permits provider-specific comparison without restoring cross-adapter batching.
+
+The [tail-head benchmark](benchmarks/v2-review-heads.json) uses the actual exported RPC clients against a loopback provider with a 5ms head read and an 80ms concurrent log read. After one warmup, twenty trials measured head p50/p95 at 93.3/94.2ms in the shared lane and 7.9/9.0ms in the isolated lane. No isolated head joined a log batch; both modes returned identical heads and logs. Isolation used 42 HTTP requests instead of 21 including warmup, so this demonstrates latency isolation rather than fewer requests. A regression also holds the log response indefinitely and verifies that the isolated head still completes.
+
+The [protocol replay](benchmarks/v2-review-protocol-delivery.json) retained every frame and the 98.6% quote-byte reduction after explicit subprotocol selection: at 100 viewers, 184.5 KB/s per viewer raw versus 2.60 KB/s with shared gzip, with 8ms loopback receipt p95. Handshake regressions cover gzip, JSON, multiple offers, unsupported offers and legacy clients without a subprotocol.
+
+A [live protocol check](benchmarks/v2-review-protocol-live.json) subscribed concurrently to BTC/USDC $1,000 over JSON and ETH/USDC $100 over gzip. Each received twelve executable Metric quote frames with the correct selection and uninterrupted sequence numbers. Three subsequent legacy snapshots and `/api/quotes` each contained 108 rows, including Metric's two live markets at all four sizes. The fill cursor advanced from 105662282 to 105662309 through the isolated head lane. This is a bounded local integration check; baseline roles remain covered by fixtures and browser tests, and the run does not establish full block coverage.
 
 The Metric test alternates call order at the same pinned block over 12 trials after a warmup. All 72 leg results matched exactly: 48 executable quotes and 24 zero-output results; no failed legs. The zero-output seed pool was independently reported unfunded by live discovery. A real WBTC/USDC buy at block 105636167 returned deltas `-130896` and `100000000`: 8 base decimals give `0.00130896 WBTC`, 6 quote decimals give `100 USDC`, and `100 / 0.00130896 = 76396.52854174306 USDC/WBTC`. Both paths returned the same raw integers. The sample is small; raw tail timings are retained.
 
@@ -72,6 +81,7 @@ npm -w server run benchmark:delivery -- /tmp/delivery.json
 npm -w server run benchmark:runtime -- /tmp/runtime.json
 BENCHMARK_FILLS=1000000 npm -w server run benchmark:runtime -- /tmp/runtime-million.json
 npm -w server run benchmark:markouts -- /tmp/markouts.json
+npm -w server run benchmark:heads -- /tmp/heads.json
 npm -w server run benchmark:metric -- /tmp/metric.json
 ```
 
@@ -86,6 +96,8 @@ A v2 connection sends a complete replacement subscription set:
 ```
 
 Topics are validated against the market/size registry and bounded to 128 per connection. Responses wrap `{v:2, epoch, topic, seq, snapshot?, message}`. `mpamm.v2.gzip` receives gzip binary frames for larger messages and ordinary JSON text for small events/initial snapshots; `mpamm.v2.json` receives text. Epoch changes, connection drops and fill sequence gaps trigger a REST resync. State travels at most once per second; quote/depth cadence remains independent. `/api/health` exposes stream connection/topic counts, compression jobs, byte counters, coalescing and slow-client cuts, labeled `protocol: "v2"`; these counters exclude legacy sockets.
+
+WebSocket negotiation explicitly prefers `mpamm.v2.gzip` when offered, otherwise `mpamm.v2.json`; unsupported protocols are not selected. A connection offering no subprotocol retains the legacy stream.
 
 Unchanged analytics data reuses its existing immutable artifact and original `generatedAt`, even after the aggregation TTL expires. A regression checks 100 timestamp-only refreshes plus simultaneous requests reuse the same artifact; a corrected fill produces a new revision. The URL remains a hash of the exact bytes, so neither a refresh nor a restart changes a published response in place.
 

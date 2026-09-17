@@ -60,7 +60,7 @@ describe('scoped quote cancellation', () => {
   it('does not turn an expired frame into failover or start more RPC work', async () => {
     const breaker = new RpcBreaker({ probeIntervalMs: 3_600_000 }); cleanup.push(breaker);
     let calls = 0;
-    breaker.attach([{ label: 'primary', request: async () => '0x8f', scopedQuote: (signal) => async () => {
+    breaker.attach([{ label: 'primary', request: async () => '0x8f', scopedQuote: (_key, signal) => async () => {
       calls++;
       return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(timeout()), { once: true }));
     } }, { label: 'backup', request: async () => '0x8f' }]);

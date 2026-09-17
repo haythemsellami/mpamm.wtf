@@ -33,6 +33,33 @@ function revertReason(err: unknown): string | null {
 /** One entry of an `allowFailure: true` multicall result. */
 export interface MulticallOutcome { status: 'success' | 'failure'; error?: unknown }
 
+export type QuoteHealthReport = (ctx: AdapterContext, results: readonly MulticallOutcome[]) => boolean;
+
+/** One adapter can serve several market/size plans concurrently. Its health
+ * is committed once for their union, in plan order rather than RPC order. */
+export class QuoteHealthBatch {
+  private reports = new Map<QuoteHealthReport, Array<{ plan: number; results: readonly MulticallOutcome[] }>>();
+
+  constructor(private readonly ctx: AdapterContext) {}
+
+  forPlan(plan: number): NonNullable<AdapterContext['quoteHealth']> {
+    return (report, results) => {
+      this.ctx.quoteSignal?.throwIfAborted();
+      const parts = this.reports.get(report) ?? [];
+      parts.push({ plan, results });
+      this.reports.set(report, parts);
+    };
+  }
+
+  commit(): void {
+    this.ctx.quoteSignal?.throwIfAborted();
+    for (const [report, parts] of this.reports) {
+      report(this.ctx, parts.sort((a, b) => a.plan - b.plan).flatMap((part) => part.results));
+    }
+    this.reports.clear();
+  }
+}
+
 /**
  * The venue-wide quote outage reason, or null while ANY leg still quotes.
  *
@@ -67,7 +94,7 @@ export function quoteOutageReason(results: readonly MulticallOutcome[]): string 
  */
 export function createQuoteOutageReporter(venueName: string): (ctx: AdapterContext, results: readonly MulticallOutcome[]) => boolean {
   let current: string | null = null;
-  return (ctx, results) => {
+  const apply: QuoteHealthReport = (ctx, results) => {
     ctx.quoteSignal?.throwIfAborted();
     const reason = quoteOutageReason(results);
     if (reason) {
@@ -85,5 +112,11 @@ export function createQuoteOutageReporter(venueName: string): (ctx: AdapterConte
       current = null;
     }
     return false;
+  };
+  return (ctx, results) => {
+    ctx.quoteSignal?.throwIfAborted();
+    if (!ctx.quoteHealth) return apply(ctx, results);
+    ctx.quoteHealth(apply, results);
+    return quoteOutageReason(results) !== null;
   };
 }

@@ -3,6 +3,7 @@ import type { Fill, NoteCode, QuoteRow, VenueMeta } from '@shared';
 import type { getLogsChunked } from '../chain/rpc.js';
 import type { UsdPricer } from '../pricer.js';
 import type { Config } from '../config.js';
+import type { MulticallOutcome, QuoteHealthReport } from './quote-health.js';
 
 /**
  * Venue adapter contract — the composable unit.
@@ -24,6 +25,8 @@ export interface AdapterContext {
   /** Present only for cancelable live quote work. Check after awaits before
    * applying shared caches/notes; canceled transports may still settle. */
   quoteSignal?: AbortSignal;
+  /** Stage per-plan health until the adapter's complete demand has settled. */
+  quoteHealth?: (report: QuoteHealthReport, results: readonly MulticallOutcome[]) => void;
   /** range-chunked getLogs (the public RPC caps eth_getLogs spans). */
   getLogs: typeof getLogsChunked;
   /** token→USD pricing (stables = $1, base assets off their CEX reference). */
