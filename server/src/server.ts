@@ -230,6 +230,7 @@ export function startServer(source: DataSource): Server {
   app.get('/api/leaderboard/publication', async (req, res) => {
     const days = positiveNumberParam(req.query.days) ?? 1;
     if (!(LEADERBOARD_WINDOW_DAYS as readonly number[]).includes(days)) return res.status(400).json({ error: 'invalid window' });
+    if (source.isReady?.() === false) return res.setHeader('Retry-After', '1').status(503).json({ error: 'history warming' });
     try {
       const artifact = await publications.publish(await source.leaderboard(days));
       res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=5, must-revalidate');
@@ -257,6 +258,7 @@ export function startServer(source: DataSource): Server {
     if (!(LEADERBOARD_WINDOW_DAYS as readonly number[]).includes(days)) {
       return res.status(400).json({ error: `days must be one of ${LEADERBOARD_WINDOW_DAYS.join(', ')}` });
     }
+    if (source.isReady?.() === false) return res.setHeader('Retry-After', '1').status(503).json({ error: 'history warming' });
     try { res.json(await source.leaderboard(days)); }
     catch { res.status(500).json({ error: 'aggregation failed' }); }
   });

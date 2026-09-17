@@ -363,8 +363,10 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     expect(old.note).not.toHaveBeenCalled();
     if (gate === 'quarantined') {
       expect(adapter.logSources()).toEqual([]);
+      expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
       await adapter.discover(quoteContext(501n));
       expect(adapter.logSources()).toEqual([]);
+      expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
       await adapter.discover(quoteContext(503n));
     }
     expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
@@ -404,6 +406,23 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     await a.discover(ctx);
     expect(notes.some((n) => n.code === 'venue.quarantined')).toBe(true);
     expect(a.logSources().find((s) => s.key === 'swap')).toBeUndefined();  // dropped, correctly
+  });
+
+  it('retains only previously admitted markets through quarantine and recovery', async () => {
+    const adapter = createLunarbaseAdapter();
+    await adapter.discover(stub(false, ZERO_SLOT));
+    expect(adapter.quoteMarkets?.()).toEqual([]);
+    await adapter.discover(stub(false));
+    expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
+    await adapter.discover(stub(false, ZERO_SLOT));
+    expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
+    expect(adapter.logSources()).toEqual([]);
+    const ctx = stub(false); ctx.client.multicall = vi.fn();
+    expect(await adapter.quote!(ctx, [100], 501n, new Set([cfg.market]))).toEqual([]);
+    expect(ctx.client.multicall).not.toHaveBeenCalled();
+    await adapter.discover(stub(false));
+    expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
+    expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
   });
 
   it('retracts the unreadable warning once the pool reads again', async () => {

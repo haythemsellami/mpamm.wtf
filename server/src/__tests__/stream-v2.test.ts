@@ -45,6 +45,14 @@ async function connect(port: number, topics: StreamTopic[], protocols: string | 
   await waitFor(() => frames.length > 0);
   return { ws, frames, binaries };
 }
+function localPeer(gateway: SubscriptionGateway) {
+  const frames: StreamEnvelope[] = [];
+  const ws = Object.assign(new EventEmitter(), { readyState: WebSocket.OPEN as number, protocol: STREAM_V2_GZIP, bufferedAmount: 0,
+    send: vi.fn((payload: string | Buffer) => frames.push(JSON.parse((typeof payload === 'string' ? payload : gunzipSync(payload)).toString()))),
+    close: vi.fn(), terminate: vi.fn(() => { ws.readyState = WebSocket.CLOSED; ws.emit('close'); }) });
+  gateway.accept(ws as unknown as WebSocket);
+  return { ws, frames, subscribe: (topics: StreamTopic[]) => ws.emit('message', JSON.stringify({ type: 'subscribe', topics })) };
+}
 
 describe('subscription transport', () => {
   it('sends the catalog once on subscription, then only when it changes', async () => {
@@ -227,6 +235,66 @@ describe('subscription transport', () => {
     }
   });
 
+  it('discards removed snapshots and queued updates while preserving retained fill events', async () => {
+    const gateway = new SubscriptionGateway(new Source());
+    cleanup.push(() => gateway.close());
+    const client = localPeer(gateway);
+    const topic = (market: string): StreamTopic => ({ channel: 'quotes', market, sizeUsd: 1000, baseline: false });
+    client.subscribe([topic('MON/USDC'), { channel: 'fill' }]);
+    gateway.onMessage({ ch: 'quotes', data: { block: 2, ts: 101, monUsd: .024, rows: [] } });
+    const fill = { id: 'retained-fill', venueId: 'venue', market: 'MON/USDC', side: 'buy' as const, category: 'UNKNOWN' as const,
+      usd: 100, baseAmount: 1, execPx: 100, txHash: '0x123', to: '0x456', pool: 'pool', blockNumber: 2, ts: 101,
+      markoutsBps: [null, null, null, null, null] as [null, null, null, null, null] };
+    gateway.onMessage({ ch: 'fill', data: fill });
+    client.subscribe([topic('BTC/USDC'), { channel: 'fill' }]);
+    gateway.onMessage({ ch: 'quotes', data: { block: 3, ts: 102, monUsd: .024, rows: [] } });
+    await waitFor(() => client.frames.length === 3);
+    expect(client.frames[0]).toMatchObject({ seq: 1, message: { ch: 'fill', data: fill } });
+    expect(client.frames.slice(1).map((frame) => frame.topic)).toEqual(['quotes:BTC/USDC:1000:0', 'quotes:BTC/USDC:1000:0']);
+    expect(client.frames[1]).toMatchObject({ snapshot: true, seq: 0 });
+    expect(client.frames[2]).toMatchObject({ seq: 1, message: { data: { block: 3 } } });
+    expect(client.ws.terminate).not.toHaveBeenCalled();
+  });
+
+  it('releases abandoned snapshot backlog during rapid market switches', async () => {
+    const source = new Source();
+    const quote = source.getQuotes();
+    quote.rows = Array.from({ length: 300 }, () => [row, { ...row, market: 'BTC/USDC' }]).flat();
+    vi.spyOn(source, 'getQuotes').mockReturnValue(quote);
+    const gateway = new SubscriptionGateway(source);
+    cleanup.push(() => gateway.close());
+    const client = localPeer(gateway);
+    for (let i = 0; i < 10; i++) client.subscribe([{ channel: 'quotes', market: i % 2 ? 'BTC/USDC' : 'MON/USDC', sizeUsd: 1000, baseline: false }]);
+    expect(client.ws.terminate).not.toHaveBeenCalled();
+    await waitFor(() => client.frames.length === 1);
+    expect(client.frames[0]).toMatchObject({ snapshot: true, message: { data: { rows: Array.from({ length: 300 }, () => ({ ...row, market: 'BTC/USDC' })) } } });
+    expect(gateway.metrics.slowClients).toBe(0);
+  });
+
+  it('does not deliver an older compression job into a replacement subscription for the same topic', async () => {
+    const source = new Source();
+    let quote = source.getQuotes();
+    vi.spyOn(source, 'getQuotes').mockImplementation(() => quote);
+    const gateway = new SubscriptionGateway(source);
+    cleanup.push(() => gateway.close());
+    const observer = localPeer(gateway), client = localPeer(gateway);
+    const topic = { channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false } as const;
+    observer.subscribe([topic]); client.subscribe([topic]);
+    await waitFor(() => observer.frames.length === 1 && client.frames.length === 1);
+    quote = { ...quote, block: 2 };
+    gateway.onMessage({ ch: 'quotes', data: quote });
+    client.subscribe([]);
+    quote = { ...quote, block: 3 };
+    client.subscribe([topic]);
+    await waitFor(() => observer.frames.length === 2 && client.frames.length === 2);
+    quote = { ...quote, block: 4 };
+    gateway.onMessage({ ch: 'quotes', data: quote });
+    await waitFor(() => observer.frames.length === 3 && client.frames.length === 3);
+    expect(client.frames.map((frame) => frame.message.ch === 'quotes' && frame.message.data.block)).toEqual([1, 3, 4]);
+    expect(observer.frames.map((frame) => frame.message.ch === 'quotes' && frame.message.data.block)).toEqual([1, 2, 4]);
+    expect(client.frames.map((frame) => frame.seq)).toEqual([0, 1, 2]);
+  });
+
   it('rejects arbitrary sizes instead of creating unbounded RPC demand', async () => {
     const { port } = await boot();
     const c = await connect(port, [{ channel: 'state' }]);
@@ -263,6 +331,29 @@ describe('subscription transport', () => {
     const missing = await fetch(`${base}/api/analytics/${'0'.repeat(64)}.json`);
     expect(missing.status).toBe(404);
     expect(missing.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('never computes or publishes cached aggregates before persisted history is ready', async () => {
+    const source = new Source(); let ready = false;
+    Object.assign(source, { isReady: () => ready });
+    const leaderboard = vi.spyOn(source, 'leaderboard').mockImplementation(async (days) => ({
+      days, generatedAt: 123, totalFills: ready ? 42 : 0, groups: { protocol: {}, pool: {}, to: {}, category: {} }, topSwaps: {}, outliers: [],
+    }));
+    const { port } = await boot(source);
+    const base = `http://127.0.0.1:${port}`;
+    for (const days of [1, 7, 30]) for (const path of ['/api/leaderboard', '/api/leaderboard/publication']) {
+      const response = await fetch(`${base}${path}?days=${days}`);
+      expect(response.status).toBe(503);
+      expect(response.headers.get('retry-after')).toBe('1');
+    }
+    expect(leaderboard).not.toHaveBeenCalled();
+    ready = true;
+    for (const days of [1, 7, 30]) {
+      const direct = await fetch(`${base}/api/leaderboard?days=${days}`).then((response) => response.json());
+      expect(direct).toMatchObject({ days, totalFills: 42 });
+      const manifest = await fetch(`${base}/api/leaderboard/publication?days=${days}`).then((response) => response.json()) as { url: string };
+      expect(await fetch(base + manifest.url).then((response) => response.json())).toEqual(direct);
+    }
   });
 });
 

@@ -1,0 +1,37 @@
+{
+  "measuredAt": "2026-09-17T19:15:50.052Z",
+  "node": "v24.11.1",
+  "method": "Read-only same-block comparison using actual Lunarbase discovery reads. Inject an empty implementation slot locally for the quarantine pass, then restore the real slot. No on-chain upgrade or transaction; verifies catalog retention independently of the active quote/fill gates, not latency or executable prices.",
+  "block": 105686305,
+  "paused": true,
+  "results": [
+    {
+      "version": "7f81fd9",
+      "admitted": [
+        "MON/USDC"
+      ],
+      "quarantined": [],
+      "recovered": [
+        "MON/USDC"
+      ],
+      "quarantinedQuoteRows": 0,
+      "quarantinedFillSources": 0,
+      "recoveredFillSources": 1
+    },
+    {
+      "version": "updated",
+      "admitted": [
+        "MON/USDC"
+      ],
+      "quarantined": [
+        "MON/USDC"
+      ],
+      "recovered": [
+        "MON/USDC"
+      ],
+      "quarantinedQuoteRows": 0,
+      "quarantinedFillSources": 0,
+      "recoveredFillSources": 1
+    }
+  ]
+}

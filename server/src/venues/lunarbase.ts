@@ -434,6 +434,9 @@ export function decodeLunarbaseSwap(log: any, config: LunarbasePoolConfig, ts: n
 export function createLunarbaseAdapter(): VenueAdapter {
   const byAddress = new Map<string, LunarbaseCachedPool>();
   const byMarket = new Map<string, LunarbaseCachedPool>();
+  // Admission history remains visible while a pool is quarantined; only the
+  // active caches decide whether it can quote or contribute decoded fills.
+  const discoveredMarkets = new Set<string>();
   // Keep the ordering boundary after quarantine removes the active cache,
   // or an older in-flight read could re-admit the invalidated pool.
   const lastValidatedBlock = new Map<string, bigint>();
@@ -476,6 +479,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
     }
     byAddress.set(pool.pool.toLowerCase(), pool);
     byMarket.set(pool.market, pool);
+    discoveredMarkets.add(pool.market);
     lastValidatedBlock.set(pool.pool.toLowerCase(), pool.snapshot.blockNumber);
     recovered(ctx, `quarantine:${pool.pool}`, `Lunarbase ${pool.market} re-admitted — the quarantine condition cleared`);
     // the pool just read cleanly, so retract the unreadable warning too — an
@@ -487,7 +491,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
 
   return {
     venues: () => [LUNARBASE_VENUE],
-    quoteMarkets: () => [...new Set([...byMarket.values()].map((m) => m.market))],
+    quoteMarkets: () => [...discoveredMarkets],
     backfillFromUtc: '2026-04-30',
 
     async discover(ctx: AdapterContext) {

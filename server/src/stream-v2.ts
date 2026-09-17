@@ -11,9 +11,10 @@ import type { DataSource } from './datasource/index.js';
 const zip = promisify(gzip);
 const BACKLOG = 256_000;
 type Payload = string | Buffer;
+type Queued = { topic: string; subscription: symbol; payload: Payload | Promise<Payload>; bytes: number };
 type Peer = {
-  ws: WebSocket; topics: Set<string>;
-  sending: boolean; queuedBytes: number; queue: Array<{ payload: Payload | Promise<Payload>; bytes: number }>;
+  ws: WebSocket; topics: Map<string, symbol>;
+  sending: boolean; queuedBytes: number; queue: Queued[];
 };
 type Group = {
   topic: StreamTopic; peers: Set<Peer>; seq: number; stop?: () => void;
@@ -33,7 +34,7 @@ export class SubscriptionGateway {
   constructor(private readonly source: DataSource) {}
 
   accept(ws: WebSocket): void {
-    const peer: Peer = { ws, topics: new Set(), sending: false, queuedBytes: 0, queue: [] };
+    const peer: Peer = { ws, topics: new Map(), sending: false, queuedBytes: 0, queue: [] };
     this.peers.add(peer);
     this.metrics.connections = this.peers.size;
     let changes = 0;
@@ -63,15 +64,21 @@ export class SubscriptionGateway {
 
   private subscribe(peer: Peer, topics: StreamTopic[]): void {
     const wanted = new Set(topics.map(topicKey));
-    for (const key of peer.topics) {
+    for (const key of peer.topics.keys()) {
       if (wanted.has(key)) continue;
+      peer.topics.delete(key);
       const group = this.groups.get(key);
       group?.peers.delete(peer);
       if (group && !group.peers.size) { group.stop?.(); this.groups.delete(key); }
     }
+    // Include the entry currently awaiting compression. Retained topics keep
+    // their ordered events; removed topics immediately release their budget.
+    peer.queue = peer.queue.filter((entry) => peer.topics.get(entry.topic) === entry.subscription);
+    peer.queuedBytes = peer.queue.reduce((total, entry) => total + entry.bytes, 0);
     for (const topic of topics) {
       const key = topicKey(topic);
       if (peer.topics.has(key)) continue;
+      peer.topics.set(key, Symbol());
       let group = this.groups.get(key);
       if (!group) {
         group = { topic, peers: new Set(), seq: this.sequences.get(key) ?? 0, encoding: false, lastAt: 0 };
@@ -93,7 +100,6 @@ export class SubscriptionGateway {
         this.sendSnapshot(peer, group, initial);
       }
     }
-    peer.topics = wanted;
     this.metrics.topics = this.groups.size;
   }
 
@@ -150,8 +156,9 @@ export class SubscriptionGateway {
   }
 
   private sendSnapshot(peer: Peer, group: Group, message: TopicMessage): void {
+    const key = topicKey(group.topic);
     const json = JSON.stringify(this.envelope(group, message, true));
-    if (peer.ws.protocol !== STREAM_V2_GZIP || json.length < 512) { this.send(peer, json); return; }
+    if (peer.ws.protocol !== STREAM_V2_GZIP || json.length < 512) { this.send(peer, key, json); return; }
     if (group.initial?.json !== json) {
       this.metrics.rawBytes += Buffer.byteLength(json);
       this.metrics.encodes++;
@@ -161,7 +168,7 @@ export class SubscriptionGateway {
       }).catch(() => json);
       group.initial = { json, payload };
     }
-    this.send(peer, group.initial.payload, Buffer.byteLength(json));
+    this.send(peer, key, group.initial.payload, Buffer.byteLength(json));
   }
 
   private publish(group: Group, message: TopicMessage): void {
@@ -178,20 +185,27 @@ export class SubscriptionGateway {
     group.seq++;
     this.sequences.set(topicKey(group.topic), group.seq);
     const json = JSON.stringify(this.envelope(group, message));
+    const key = topicKey(group.topic);
     this.metrics.rawBytes += Buffer.byteLength(json);
     // Small events avoid zlib entirely, keeping fill ordering independent of
     // compression. Each snapshot topic permits only one queued replacement.
     const compress = message.ch !== 'fill' && json.length >= 512
       && [...group.peers].some((peer) => peer.ws.protocol === STREAM_V2_GZIP);
-    if (!compress) { for (const peer of group.peers) this.send(peer, json); return; }
+    if (!compress) { for (const peer of group.peers) this.send(peer, key, json); return; }
+    // A peer joining during compression already gets its own snapshot. An
+    // earlier subscription must not deliver into a later one for the same key.
+    const recipients = new Map([...group.peers].map((peer) => [peer, peer.topics.get(key)]));
+    const fanout = (payload: Payload) => {
+      for (const [peer, subscription] of recipients) {
+        if (peer.topics.get(key) === subscription) this.send(peer, key, peer.ws.protocol === STREAM_V2_GZIP ? payload : json);
+      }
+    };
     group.encoding = true;
     this.metrics.encodes++;
     void zip(json, { level: 3 }).then((buffer) => {
       this.metrics.encodedBytes += buffer.length;
-      for (const peer of group.peers) this.send(peer, peer.ws.protocol === STREAM_V2_GZIP ? buffer : json);
-    }).catch(() => {
-      for (const peer of group.peers) this.send(peer, json);
-    }).finally(() => {
+      fanout(buffer);
+    }).catch(() => fanout(json)).finally(() => {
       group.encoding = false;
       const next = group.pending;
       group.pending = undefined;
@@ -199,8 +213,9 @@ export class SubscriptionGateway {
     });
   }
 
-  private send(peer: Peer, payload: Payload | Promise<Payload>, bytes = payload instanceof Promise ? 0 : Buffer.byteLength(payload)): void {
-    if (peer.ws.readyState !== WebSocket.OPEN) return;
+  private send(peer: Peer, topic: string, payload: Payload | Promise<Payload>, bytes = payload instanceof Promise ? 0 : Buffer.byteLength(payload)): void {
+    const subscription = peer.topics.get(topic);
+    if (!subscription || peer.ws.readyState !== WebSocket.OPEN) return;
     if (peer.ws.bufferedAmount + peer.queuedBytes + bytes > BACKLOG) {
       this.metrics.slowClients++;
       peer.ws.terminate();
@@ -209,7 +224,7 @@ export class SubscriptionGateway {
     // Initial compression must complete before any subsequent frame reaches
     // this peer. Bound queued memory too, including the uncompressed input.
     if (peer.sending || payload instanceof Promise) {
-      peer.queue.push({ payload, bytes });
+      peer.queue.push({ topic, subscription, payload, bytes });
       peer.queuedBytes += bytes;
       if (!peer.sending) { peer.sending = true; void this.drain(peer); }
       return;
@@ -220,8 +235,10 @@ export class SubscriptionGateway {
   private async drain(peer: Peer): Promise<void> {
     try {
       while (peer.queue.length && peer.ws.readyState === WebSocket.OPEN) {
-        const next = peer.queue.shift()!;
+        const next = peer.queue[0];
         const payload = await next.payload;
+        if (peer.queue[0] !== next) continue;
+        peer.queue.shift();
         peer.queuedBytes -= next.bytes;
         if (peer.ws.readyState !== WebSocket.OPEN) break;
         if (peer.ws.bufferedAmount + Buffer.byteLength(payload) > BACKLOG) {
