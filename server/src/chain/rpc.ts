@@ -144,7 +144,8 @@ const archivePool = hasDedicatedArchive
   : hotPool;
 
 export const publicClient: PublicClient = hotPool.client;
-/** Head observations must never wait behind a batched log/receipt response. */
+/** Hot-chain head lane for quotes, fills, depth, boot and adapter discovery.
+ * Archive retention/boundary checks stay on the archive pool. */
 export const headClient: PublicClient = hotPool.headClient;
 /** Block-pinned adapter calls share the hot pool's failover state, but use a
  * zero-wait HTTP batch lane isolated from heads, logs and attribution. */

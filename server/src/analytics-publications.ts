@@ -11,10 +11,21 @@ export interface AnalyticsArtifact { revision: string; json: string; gzip: Buffe
 export class AnalyticsPublications {
   private artifacts = new Map<string, AnalyticsArtifact>();
   private current = new Map<number, { revision: string; contentHash: string }>();
-  private pending = new Map<string, Promise<AnalyticsArtifact>>();
+  private queues = new Map<number, Promise<AnalyticsArtifact>>();
   private byResult = new WeakMap<LeaderboardResponse, AnalyticsArtifact>();
 
-  async publish(result: LeaderboardResponse): Promise<AnalyticsArtifact> {
+  publish(result: LeaderboardResponse): Promise<AnalyticsArtifact> {
+    // Compression can finish out of order. Each window commits in request
+    // order, while independent windows may still encode concurrently.
+    const prior = this.queues.get(result.days);
+    const work = prior ? prior.catch(() => {}).then(() => this.publishNext(result)) : this.publishNext(result);
+    this.queues.set(result.days, work);
+    const settled = () => { if (this.queues.get(result.days) === work) this.queues.delete(result.days); };
+    void work.then(settled, settled);
+    return work;
+  }
+
+  private async publishNext(result: LeaderboardResponse): Promise<AnalyticsArtifact> {
     const cached = this.byResult.get(result);
     if (cached && this.artifacts.has(cached.revision)) return cached;
     // Recomputing unchanged data must not force another download. Reuse the
@@ -26,27 +37,17 @@ export class AnalyticsPublications {
       const existing = this.artifacts.get(current.revision);
       if (existing) { this.byResult.set(result, existing); return existing; }
     }
-    const inFlight = this.pending.get(contentHash);
-    if (inFlight) {
-      const artifact = await inFlight;
-      this.byResult.set(result, artifact);
-      return artifact;
-    }
     const json = JSON.stringify(result);
     const revision = createHash('sha256').update(json).digest('hex');
-    const work = (async () => {
-      const artifact = this.artifacts.get(revision) ?? { revision, json, gzip: await zip(json, { level: 6 }), generatedAt: result.generatedAt };
-      this.artifacts.set(revision, artifact);
-      this.byResult.set(result, artifact);
-      this.current.set(result.days, { revision, contentHash });
-      for (const key of this.artifacts.keys()) {
-        if (this.artifacts.size <= 32) break;
-        if (![...this.current.values()].some((entry) => entry.revision === key)) this.artifacts.delete(key);
-      }
-      return artifact;
-    })().finally(() => this.pending.delete(contentHash));
-    this.pending.set(contentHash, work);
-    return work;
+    const artifact = this.artifacts.get(revision) ?? { revision, json, gzip: await zip(json, { level: 6 }), generatedAt: result.generatedAt };
+    this.artifacts.set(revision, artifact);
+    this.byResult.set(result, artifact);
+    this.current.set(result.days, { revision, contentHash });
+    for (const key of this.artifacts.keys()) {
+      if (this.artifacts.size <= 32) break;
+      if (![...this.current.values()].some((entry) => entry.revision === key)) this.artifacts.delete(key);
+    }
+    return artifact;
   }
 
   get(revision: string): AnalyticsArtifact | undefined { return this.artifacts.get(revision); }

@@ -117,6 +117,61 @@ async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?:
 }
 
 describe('live startup archive gate', () => {
+  it('uses the isolated head lane for adapter discovery while retaining the general RPC client for other calls', async () => {
+    const { source, adapter } = await setup({ withAdapter: true });
+    const { publicClient, headClient } = await import('../chain/rpc.js');
+    try {
+      expect(source.ctxFor(adapter).client.getBlockNumber).toBe(headClient.getBlockNumber);
+      await expect(source.ctxFor(adapter).client.getBlockNumber()).resolves.toBe(100n);
+      expect(publicClient.getBlockNumber).not.toHaveBeenCalled();
+    } finally { source.store.close(); }
+  });
+
+  it.each([false, true])('keeps timeout/busy frames out of outage counters (already dark: %s)', async (alreadyDark) => {
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    const { QUOTE_DARK_CYCLES } = await import('../datasource/live.js');
+    source.bootMs = Date.now() - 65_000;
+    source.schedulePostQuoteMaintenance = vi.fn();
+    source.manageQuoteDemand();
+    source.watchQuotes({ market: 'MON/USDC', sizeUsd: 100, baseline: false });
+    const healthy = adapters[0].quote!;
+    const notes = vi.spyOn(source, 'noteOnce'), recoveries = vi.spyOn(source, 'note');
+    const held = deferred<QuoteRow[]>();
+    let block = 100n;
+    vi.useFakeTimers();
+    try {
+      await poll(block++);
+      if (alreadyDark) {
+        adapters[0].quote = vi.fn(async () => []);
+        for (let i = 0; i < QUOTE_DARK_CYCLES; i++) await poll(block++);
+        expect(source.quoteDark.has('venue')).toBe(true);
+      }
+      const before = structuredClone(source.quoteEmptyRuns), dark = structuredClone(source.quoteDark);
+      notes.mockClear(); recoveries.mockClear();
+      adapters[0].quote = vi.fn(() => held.promise);
+      const timed = poll(block++);
+      await vi.advanceTimersByTimeAsync(250);
+      await timed;
+      for (let i = 0; i < QUOTE_DARK_CYCLES + 1; i++) await poll(block++);
+      expect(adapters[0].quote).toHaveBeenCalledTimes(1);
+      expect(source.getQuotes().frame.missingVenues).toContain('venue');
+      expect(source.quoteEmptyRuns).toEqual(before);
+      expect(source.quoteDark).toEqual(dark);
+      expect(notes).not.toHaveBeenCalled(); expect(recoveries).not.toHaveBeenCalled();
+      held.resolve([]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(source.quoteEmptyRuns).toEqual(before);
+      adapters[0].quote = healthy;
+      await poll(block++);
+      expect(source.quoteEmptyRuns.get('venue').runs).toBe(0);
+      expect(source.quoteDark.has('venue')).toBe(false);
+      expect(recoveries.mock.calls.filter(([code]) => code === 'venue.quote.recovered')).toHaveLength(alreadyDark ? 1 : 0);
+      adapters[0].quote = vi.fn(async () => []);
+      for (let i = 0; i < QUOTE_DARK_CYCLES; i++) await poll(block++);
+      expect(source.quoteDark.has('venue')).toBe(true);
+    } finally { held.resolve([]); vi.useRealTimers(); source.store.close(); }
+  });
+
   it.each([false, true])('keeps a partially quoting venue healthy across concurrent demand (failure first: %s)', async (failureFirst) => {
     const { source, adapters, poll } = await setup({ withQuotes: true });
     source.schedulePostQuoteMaintenance = vi.fn();

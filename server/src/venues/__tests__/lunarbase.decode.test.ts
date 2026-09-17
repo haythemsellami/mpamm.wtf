@@ -282,6 +282,55 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     expect(older.note.mock.calls.map(([code]: [string]) => code)).toEqual(['venue.discovery']);
   });
 
+  it.each(['valid', 'invalid', 'failed', 'quarantined'] as const)('discards obsolete %s quote gates and legs after a newer discovery', async (gate) => {
+    const adapter = createLunarbaseAdapter();
+    const quoteContext = (block: bigint, slot = IMPL_SLOT) => {
+      const ctx = stub(false, slot);
+      ctx.note = vi.fn();
+      ctx.client.getBlockNumber = async () => block;
+      ctx.client.multicall = async ({ contracts }: any) => contracts.map((c: any) => ({ status: 'success',
+        result: c.functionName === 'state' ? [1_000_000n, 100, 100, block] : ok[c.functionName] }));
+      ctx.pricer.tokenForUsd = (_token: string, size: number) => size;
+      ctx.client.readContract = async ({ functionName }: any) => [functionName === 'quoteXToY' ? 100_000_000n : 100n * 10n ** 18n, 0n, 0n];
+      return ctx;
+    };
+    await adapter.discover(quoteContext(500n));
+    expect(await adapter.quote!(quoteContext(500n), [100], 500n)).toHaveLength(1);
+    const old = quoteContext(501n, gate === 'invalid' ? ZERO_SLOT : IMPL_SLOT);
+    if (gate === 'failed') old.client.multicall = async () => { throw new Error('old snapshot unavailable'); };
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const quoteLeg = old.client.readContract;
+    old.client.readContract = async (request: any) => { entered(); await held; return quoteLeg(request); };
+    const pending = adapter.quote!(old, [100], 501n);
+    await started;
+    const newer = quoteContext(502n, gate === 'quarantined' ? ZERO_SLOT : '0x' + '0'.repeat(24) + '2'.repeat(40));
+    await adapter.discover(newer);
+    release();
+    expect(await pending).toEqual([]);
+    expect(old.note).not.toHaveBeenCalled();
+    if (gate === 'quarantined') {
+      expect(adapter.logSources()).toEqual([]);
+      await adapter.discover(quoteContext(501n));
+      expect(adapter.logSources()).toEqual([]);
+      await adapter.discover(quoteContext(503n));
+    }
+    expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
+    expect(await adapter.quote!(quoteContext(503n), [100], 503n)).toHaveLength(1);
+  });
+
+  it.each(['invalid', 'failed'] as const)('ignores an obsolete %s rediscovery instead of quarantining a newer pool', async (gate) => {
+    const adapter = createLunarbaseAdapter();
+    const latest = stub(false); latest.client.getBlockNumber = async () => 502n;
+    await adapter.discover(latest);
+    const older = stub(gate === 'failed', gate === 'invalid' ? ZERO_SLOT : undefined);
+    older.note = vi.fn();
+    await adapter.discover(older);
+    expect(older.note.mock.calls.map(([code]: [string]) => code)).toEqual(['venue.discovery']);
+    expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
+  });
+
   it('reports the outage as unreadable, not as a config mismatch', async () => {
     const notes: { code: string; msg: string }[] = [];
     const ctx = stub(true);

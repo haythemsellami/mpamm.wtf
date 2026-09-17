@@ -775,7 +775,7 @@ export class LiveDataSource extends BaseSource {
     if (!ctx) {
       const venue = this.vidOf(a);
       ctx = {
-        client: publicClient,
+        client: { ...publicClient, getBlockNumber: headClient.getBlockNumber },
         getLogs: getLogsChunked,
         pricer: this.pricer,
         config,
@@ -1008,7 +1008,7 @@ export class LiveDataSource extends BaseSource {
       for (;;) {
         nowMs = Date.now();
         runDay = utcDay(nowMs);
-        const head = await guardRpcRead(() => publicClient.getBlockNumber(), hotUnavailable, rpcGeneration);
+        const head = await guardRpcRead(() => headClient.getBlockNumber(), hotUnavailable, rpcGeneration);
         if (head > this.deepEnd) this.deepEnd = head;
         if (hasDedicatedArchive) {
           let lagWasAnnounced = false;
@@ -1311,7 +1311,7 @@ export class LiveDataSource extends BaseSource {
     this.dirtyDays.clear();
 
     // 3. resume point — same-day gap-fill, else start at tip
-    const head = await publicClient.getBlockNumber();
+    const head = await headClient.getBlockNumber();
     this.block = Number(head);
     this.bootHead = head; // upper bound for the live gap-fill (tail owns > head)
     // Initial deep handoff. Each background run refreshes this from the healthy
@@ -2306,13 +2306,16 @@ export class LiveDataSource extends BaseSource {
       && (!a.quoteMarkets || a.quoteMarkets().some((market) => p.markets!.has(market)))));
     const requestedAdapters = ADAPTERS.filter((a) => a.quote && plansFor(a).length);
     const adapterMs: Record<string, number> = {};
+    const completedAdapters = new Set<VenueAdapter>();
     const venueRowsNested = await Promise.all(requestedAdapters.map(async (a) => {
         if (!a.quote) return [] as QuoteRow[];
         const adapterStarted = performance.now();
+        let quoteSignal: AbortSignal | undefined;
         // a THROWN quote is a degradation like any other — swallowing it left
         // the venue's disappearance with no explanation anywhere.
         try {
           const rows = await this.quoteRunner.run(this.vidOf(a) ?? 'unknown', config.quoteDeadlineMs, async (signal) => {
+            quoteSignal = signal;
             const original = this.frameCtxFor(a, framePricer);
             const ctx = { ...original, quoteSignal: signal, client: scopedQuoteClient(`${this.vidOf(a)}-${blockNumber}`, signal),
               note: (...args: Parameters<typeof original.note>) => { if (!signal.aborted) original.note(...args); } };
@@ -2325,8 +2328,10 @@ export class LiveDataSource extends BaseSource {
             const failed = groups.find((group) => group.status === 'rejected');
             if (failed?.status === 'rejected') throw failed.reason;
             health.commit();
+            completedAdapters.add(a);
             return groups.flatMap((group) => group.status === 'fulfilled' ? group.value : []);
           }, [] as QuoteRow[]).catch((e) => {
+            if (quoteSignal?.aborted) return [] as QuoteRow[];
             // a rejection is not necessarily an Error — a bare string or an
             // Error with an empty message would otherwise note "quote failed:
             // undefined", which is worse than useless to whoever reads it.
@@ -2349,7 +2354,9 @@ export class LiveDataSource extends BaseSource {
     if (quoteStartedAt - this.bootMs > 60_000 && !rpcStatus().degraded) {
       const counts = new Map<string, number>();
       for (const r of venueRows) counts.set(r.venueId, (counts.get(r.venueId) ?? 0) + 1);
-      const quoting = requestedAdapters.map((a) => a.venues()[0]).filter(Boolean);
+      // Deadline and busy-slot misses are frame telemetry, not evidence that
+      // an accepted adapter result reported a venue outage or recovery.
+      const quoting = requestedAdapters.filter((a) => completedAdapters.has(a)).flatMap((a) => a.venues());
       // `quoteStartedAt` is stamped BEFORE the adapters quote, so a
       // note an adapter raises from inside this tick lands on or after `since`.
       checkQuoteOutage(quoting, (id) => counts.get(id) ?? 0, this.quoteEmptyRuns, this.quoteDark, quoteStartedAt, {

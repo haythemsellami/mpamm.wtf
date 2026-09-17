@@ -426,6 +426,14 @@ export function decodeLunarbaseSwap(log: any, config: LunarbasePoolConfig, ts: n
 export function createLunarbaseAdapter(): VenueAdapter {
   const byAddress = new Map<string, LunarbaseCachedPool>();
   const byMarket = new Map<string, LunarbaseCachedPool>();
+  // Keep the ordering boundary after quarantine removes the active cache,
+  // or an older in-flight read could re-admit the invalidated pool.
+  const lastValidatedBlock = new Map<string, bigint>();
+  const hasNewerSnapshot = (config: LunarbasePoolConfig, blockNumber: bigint) => {
+    const key = config.pool.toLowerCase();
+    return (lastValidatedBlock.get(key) ?? -1n) > blockNumber
+      || (byAddress.get(key)?.snapshot.blockNumber ?? -1n) > blockNumber;
+  };
   const noted = new Set<string>();
   let discovered = false;
   const noteOnce = (ctx: AdapterContext, key: string, code: NoteCode, message: string) => {
@@ -445,24 +453,28 @@ export function createLunarbaseAdapter(): VenueAdapter {
   const unreadable = (ctx: AdapterContext, config: LunarbasePoolConfig, reason: string) => {
     noteOnce(ctx, `unread:${config.pool}`, 'venue.quote.unavailable', `Lunarbase ${config.market} state unreadable: ${reason}`);
   };
-  const quarantine = (ctx: AdapterContext, config: LunarbasePoolConfig, reason: string) => {
+  const quarantine = (ctx: AdapterContext, config: LunarbasePoolConfig, reason: string, blockNumber: bigint) => {
+    if (hasNewerSnapshot(config, blockNumber)) return;
+    lastValidatedBlock.set(config.pool.toLowerCase(), blockNumber);
     byAddress.delete(config.pool.toLowerCase());
     byMarket.delete(config.market);
     noteOnce(ctx, `quarantine:${config.pool}`, 'venue.quarantined', `Lunarbase ${config.market} quarantined: ${reason}`);
   };
   const activate = (ctx: AdapterContext, pool: LunarbaseCachedPool) => {
     const prior = byAddress.get(pool.pool.toLowerCase());
-    if (prior && newer(prior.lastApplied, pool.lastApplied)) return;
+    if (hasNewerSnapshot(pool, pool.snapshot.blockNumber) || (prior && newer(prior.lastApplied, pool.lastApplied))) return false;
     if (prior && prior.snapshot.implementation !== pool.snapshot.implementation) {
       ctx.note('venue.upgraded', `Lunarbase ${pool.market} implementation changed ${prior.snapshot.implementation.slice(0, 10)}… → ${pool.snapshot.implementation.slice(0, 10)}…`);
     }
     byAddress.set(pool.pool.toLowerCase(), pool);
     byMarket.set(pool.market, pool);
+    lastValidatedBlock.set(pool.pool.toLowerCase(), pool.snapshot.blockNumber);
     recovered(ctx, `quarantine:${pool.pool}`, `Lunarbase ${pool.market} re-admitted — the quarantine condition cleared`);
     // the pool just read cleanly, so retract the unreadable warning too — an
     // adapter can only append, so a heal that said nothing would leave a stale
     // warning standing until the served window rolled it off.
     recovered(ctx, `unread:${pool.pool}`, `Lunarbase ${pool.market} state readable again`);
+    return true;
   };
 
   return {
@@ -474,7 +486,10 @@ export function createLunarbaseAdapter(): VenueAdapter {
       const blockNumber = await ctx.client.getBlockNumber();
       // Validation is intentionally per pool: a failed behavioral gate must
       // never block every venue's fill cursor.
-      const staged = await readPoolsAtBlock(ctx, LUNARBASE_POOLS, blockNumber, (config, reason, transient) => transient ? unreadable(ctx, config, reason) : quarantine(ctx, config, reason));
+      const staged = await readPoolsAtBlock(ctx, LUNARBASE_POOLS, blockNumber, (config, reason, transient) => {
+        if (hasNewerSnapshot(config, blockNumber)) return;
+        if (transient) unreadable(ctx, config, reason); else quarantine(ctx, config, reason, blockNumber);
+      });
       for (const pool of staged) activate(ctx, pool);
       discovered = true;
       ctx.note('venue.discovery', `Lunarbase: ${staged.length}/${LUNARBASE_POOLS.length} validated production pool(s), whitelist fee mode`);
@@ -509,23 +524,26 @@ export function createLunarbaseAdapter(): VenueAdapter {
         Promise.all([...legsByPool].map(async ([key, work]) => [key, await work] as const)),
       ]);
       ctx.quoteSignal?.throwIfAborted();
+      if (gatePools.every((pool) => hasNewerSnapshot(pool, head))) return [];
       if (gate.status === 'rejected') {
         const error = gate.reason;
         noteOnce(ctx, 'snapshot', 'venue.quote.unavailable', `Lunarbase quote refresh failed: ${error instanceof Error ? error.message : String(error)}`);
         return [];
       }
       if (quoted.status === 'rejected') throw quoted.reason;
-      const current = gate.value;
       const completedLegs = new Map(quoted.value);
       for (const { config, reason, transient } of failures) {
+        if (hasNewerSnapshot(config, head)) continue;
         if (transient) unreadable(ctx, config, reason);
-        else quarantine(ctx, config, reason);
+        else quarantine(ctx, config, reason, head);
       }
+      // A newer discovery may finish while this frame reads. Discard its old
+      // gates AND legs instead of combining old prices with the newer cache.
+      const current = gate.value.filter((pool) => activate(ctx, pool));
       recovered(ctx, 'head', 'Lunarbase chain head readable again — quoting resumed');
       recovered(ctx, 'snapshot', 'Lunarbase pool state refresh succeeded again — quoting resumed');
       for (const pool of current) {
         recovered(ctx, `snapshot:${pool.pool}`, `Lunarbase ${pool.market} pool state readable again`);
-        activate(ctx, pool);
       }
 
       const rows: QuoteRow[] = [];
@@ -604,7 +622,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
     decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
       const staged = applyLunarbaseStateLogs(byAddress, logs.state ?? []);
       for (const [address, pool] of staged) {
-        if (pool.needsRediscovery) quarantine(ctx, pool, 'proxy upgrade observed — revalidating');
+        if (pool.needsRediscovery) quarantine(ctx, pool, 'proxy upgrade observed — revalidating', pool.snapshot.blockNumber);
         else activate(ctx, pool);
       }
       const fills: Fill[] = [];
