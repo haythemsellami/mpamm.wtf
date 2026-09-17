@@ -10,11 +10,13 @@ let startup: ReturnType<typeof setTimeout> | undefined;
 let lastHeard = 0;
 let failedShared = false;
 let syncPending = false;
+let pageSuspended = false;
 
 function fallback(): void {
   if (startup) clearTimeout(startup);
   startup = undefined;
   failedShared = true;
+  if (shared) for (const listener of listeners.values()) listener.status('reconnecting');
   shared?.port.postMessage({ type: 'close' });
   shared?.port.close(); shared = undefined;
   if (heartbeat) clearInterval(heartbeat);
@@ -24,6 +26,7 @@ function fallback(): void {
 }
 
 function sync(): void {
+  if (pageSuspended) return;
   if (!listeners.size) {
     if (startup) clearTimeout(startup);
     startup = undefined;
@@ -36,9 +39,11 @@ function sync(): void {
   if (direct) return;
   if (!shared && !failedShared && typeof SharedWorker !== 'undefined') {
     try {
-      shared = new SharedWorker(new URL('./stream.shared-worker.ts', import.meta.url), { type: 'module', name: 'mpamm-stream-v2' });
-      shared.onerror = () => fallback();
-      shared.port.onmessage = ({ data }: MessageEvent<{ envelope?: StreamEnvelope; status?: StreamStatus }>) => {
+      const worker = new SharedWorker(new URL('./stream.shared-worker.ts', import.meta.url), { type: 'module', name: 'mpamm-stream-v2' });
+      shared = worker;
+      worker.onerror = () => { if (shared === worker) fallback(); };
+      worker.port.onmessage = ({ data }: MessageEvent<{ envelope?: StreamEnvelope; status?: StreamStatus }>) => {
+        if (shared !== worker) return;
         lastHeard = Date.now();
         if (startup) clearTimeout(startup);
         startup = undefined;
@@ -81,6 +86,7 @@ export function subscribeTopics(topics: StreamTopic[], message: (message: TopicM
 // the same union on return, including browsers without SharedWorker support.
 if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', () => {
+    pageSuspended = true;
     if (startup) clearTimeout(startup);
     startup = undefined;
     shared?.port.postMessage({ type: 'close' }); shared?.port.close(); shared = undefined;
@@ -88,5 +94,10 @@ if (typeof window !== 'undefined') {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = undefined;
   });
-  window.addEventListener('pageshow', () => { if (listeners.size) scheduleSync(); });
+  window.addEventListener('pageshow', () => {
+    if (!pageSuspended) return;
+    pageSuspended = false;
+    for (const listener of listeners.values()) listener.status('reconnecting');
+    if (listeners.size) scheduleSync();
+  });
 }

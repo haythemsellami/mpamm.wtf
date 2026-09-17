@@ -128,7 +128,7 @@ export function startServer(source: DataSource): Server {
 
   app.get('/api/health', (_req, res) => {
     const state = source.getState();
-    res.json({ ok: true, source: source.mode, block: state.block, realtime: state.realtime, stream: gateway.metrics });
+    res.json({ ok: true, source: source.mode, block: state.block, realtime: state.realtime, stream: { protocol: 'v2', ...gateway.metrics } });
   });
 
   app.get('/api/bootstrap', (req, res) => {
@@ -289,6 +289,7 @@ export function startServer(source: DataSource): Server {
   const wss = new WebSocketServer({ server: httpServer, path: STREAM_PATH, maxPayload: 16_384, perMessageDeflate: PERMESSAGE_DEFLATE });
 
   const clients = new Set<WebSocket>();
+  const legacyReady = new Set<WebSocket>();
   // Clients that owe us a pong from the last heartbeat round.
   const awaitingPong = new Set<WebSocket>();
   wss.on('connection', (ws) => {
@@ -297,22 +298,33 @@ export function startServer(source: DataSource): Server {
     const release = v2 ? undefined : source.watchQuotes?.();
     if (v2) gateway.accept(ws);
     else {
-    // hello with current state so a client can render before the next tick.
-    // This is the ONLY frame carrying the venue registry (see StreamState).
-    safeSend(ws, { ch: 'state', data: helloFrame(source.getState()) });
-    safeSend(ws, { ch: 'quotes', data: source.getQuotes() });
+      // The matrix left by scoped viewers is not a full legacy snapshot.
+      // Hold quote broadcasts until a complete plan has finished, including
+      // any scoped frame already running when this connection arrived.
+      safeSend(ws, { ch: 'state', data: helloFrame(source.getState()) });
+      if (source.fullQuoteSnapshot) {
+        void source.fullQuoteSnapshot(true).then((quotes) => {
+          if (!clients.has(ws) || ws.readyState !== WebSocket.OPEN) return;
+          safeSend(ws, { ch: 'quotes', data: quotes });
+          legacyReady.add(ws);
+        }).catch(() => cut(ws));
+      } else {
+        safeSend(ws, { ch: 'quotes', data: source.getQuotes() });
+        legacyReady.add(ws);
+      }
     }
     ws.once('close', () => release?.());
     ws.on('pong', () => awaitingPong.delete(ws));
     ws.on('close', () => drop(ws));
     ws.on('error', () => drop(ws));
   });
-  const drop = (ws: WebSocket) => { clients.delete(ws); awaitingPong.delete(ws); };
+  const drop = (ws: WebSocket) => { clients.delete(ws); legacyReady.delete(ws); awaitingPong.delete(ws); };
   const cut = (ws: WebSocket) => { drop(ws); try { ws.terminate(); } catch { /* already gone */ } };
 
   const onMessage = (m: StreamMessage) => {
     gateway.onMessage(m);
-    const legacy = [...clients].filter((ws) => ws.protocol !== STREAM_V2_GZIP && ws.protocol !== STREAM_V2_JSON);
+    const legacy = [...clients].filter((ws) => ws.protocol !== STREAM_V2_GZIP && ws.protocol !== STREAM_V2_JSON
+      && (m.ch !== 'quotes' || legacyReady.has(ws)));
     if (!legacy.length) return;
     // Serialize ONCE for the whole fanout, and strip the state frame down to
     // what actually changes (see StreamState — this is the single biggest

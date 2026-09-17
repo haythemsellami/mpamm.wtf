@@ -1,6 +1,6 @@
 import { AnalyticsWorker } from '../analytics-worker.js';
 import { QuoteRunner } from '../quote-runner.js';
-import { BaseSource } from './index.js';
+import { BaseSource, QUOTE_HISTORY_MS } from './index.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import {
   MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase,
@@ -1187,11 +1187,13 @@ export class LiveDataSource extends BaseSource {
       ...(realtime ? { realtime } : {}),
     };
   }
-  getQuotes(): QuoteSnapshot { return this.quotes; }
+  getQuotes(): QuoteSnapshot {
+    return Date.now() - this.quotes.ts <= QUOTE_HISTORY_MS ? this.quotes : { ...this.quotes, rows: [] };
+  }
   private quotesFull = false;
   private fullSnapshotPending?: Promise<QuoteSnapshot>;
-  fullQuoteSnapshot(): Promise<QuoteSnapshot> {
-    if (this.quotesFull && Date.now() - this.quotes.ts < 300) return Promise.resolve(this.quotes);
+  fullQuoteSnapshot(fresh = false): Promise<QuoteSnapshot> {
+    if (!fresh && this.quotesFull && Date.now() - this.quotes.ts < 300) return Promise.resolve(this.quotes);
     if (this.fullSnapshotPending) return this.fullSnapshotPending;
     const release = this.watchQuotes();
     this.fullSnapshotPending = new Promise<QuoteSnapshot>((resolve, reject) => {
@@ -2285,6 +2287,8 @@ export class LiveDataSource extends BaseSource {
     if (!plan.length) {
       this.realtimeFrames = [];
       this.block = Number(blockNumber);
+      this.quotes = { block: this.block, monUsd, ts: quoteStartedAt, rows: [] };
+      this.quotesFull = false;
       this.schedulePostQuoteMaintenance();
       return;
     }

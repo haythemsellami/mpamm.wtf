@@ -1,5 +1,7 @@
 import type { QuoteScope } from '@shared';
 
+/** No market filter means a full matrix across every venue role; baseline
+ * only selects a role when markets are scoped. */
 export interface QuotePlan { markets?: ReadonlySet<string>; sizes: readonly number[]; baseline: boolean }
 
 /** Group equal size sets, avoiding a cross-product of every viewer's selections. */

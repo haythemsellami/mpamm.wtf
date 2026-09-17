@@ -279,7 +279,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     // snapshot carries today's bucket anyway, and the next tick re-syncs it.
     const snapshotLoaded = { v: false };
     const pendingFills: { current: Fill[] } = { current: [] };
+    let snapshotRequest = 0;
+    let resyncing = false;
     const loadSnapshot = async () => {
+      const request = ++snapshotRequest;
+      resyncing = true;
       try {
         // markets snapshot + the persisted historical fills window (the tape /
         // markouts / leaderboard operate on real history, not a live buffer).
@@ -290,7 +294,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           fetchMarkets(ui.tab === 'volume'),
           ui.tab === 'markouts' ? fetchFills(1, 5000).catch(() => null) : Promise.resolve(null),
         ]);
-        if (!mounted.v) return;
+        if (!mounted.v || request !== snapshotRequest) return;
         setState((previous) => previous && previous.block > m.state.block ? { ...m.state, ...previous, venues: m.state.venues } : m.state);
         if (!quotesRef.current) { setQuotes(m.quotes); quotesRef.current = m.quotes; }
         if (ui.tab === 'volume') setVolume(m.volume);
@@ -300,12 +304,15 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // upsertFill drops the genuine oldest, not the newest (audit B4).
         // Fills broadcast while the snapshot was in flight are NOT in the
         // response — re-apply them on top instead of discarding.
-        const base = hist && hist.length ? [...hist].reverse() : m.fills;
-        if (ui.tab === 'markouts') setFills(pendingFills.current.reduce((acc, f) => upsertFill(acc, f), base));
-        pendingFills.current = [];
+        const buffered = pendingFills.current;
+        if (ui.tab === 'markouts') setFills((previous) => buffered.reduce((acc, f) => upsertFill(acc, f),
+          hist === null ? previous : [...hist].reverse()));
         if (ui.tab === 'exec') reseed();
         setFrame((f) => f + 1);
-      } catch { /* retried on the next WS connect */ }
+      } catch { /* retried on the next WS connect; streamed fills remain visible */ }
+      finally {
+        if (request === snapshotRequest) { resyncing = false; pendingFills.current = []; }
+      }
     };
     loadSnapshot();
 
@@ -324,7 +331,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       }
       else if (msg.ch === 'volume') { if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data)); }
       else if (msg.ch === 'fill') {
-        if (!snapshotLoaded.v) pendingFills.current.push(msg.data);
+        if (resyncing) pendingFills.current = upsertFill(pendingFills.current, msg.data);
         setFills((prev) => upsertFill(prev, msg.data));
       }
     }, (s) => {

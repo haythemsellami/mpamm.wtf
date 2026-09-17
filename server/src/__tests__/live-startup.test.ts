@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { MARKETS, SIZES_USD, type QuoteRow } from '@shared';
+import type { VenueAdapter } from '../venues/adapter.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -18,12 +20,13 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.resetModules();
   vi.clearAllMocks();
+  vi.restoreAllMocks();
   for (const path of paths.splice(0)) {
     try { unlinkSync(path); } catch { /* already removed */ }
   }
 });
 
-async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
+async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?: boolean } = {}) {
   const path = join(tmpdir(), `live-startup-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   paths.push(path);
   vi.stubEnv('DB_PATH', path);
@@ -40,7 +43,7 @@ async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
     assetUsd: vi.fn(() => 1),
     changePctFor: vi.fn(() => 0),
     midForPair: vi.fn(() => 1),
-    quote: vi.fn(() => []),
+    quote: vi.fn((_sizes: readonly number[]): QuoteRow[] => []),
     metas: vi.fn(() => []),
   };
   const adapter = {
@@ -55,7 +58,15 @@ async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
     logSources: () => [],
     decode: vi.fn(async () => []),
   };
-  const adapters = opts.withAdapter ? [adapter] : [];
+  const quoteRows = (venueId: string, sizes: readonly number[], markets?: ReadonlySet<string>): QuoteRow[] =>
+    [...(markets ?? MARKETS)].flatMap((market) => sizes.map((sizeUsd) => ({ venueId, market, sizeUsd,
+      bidBps: -1, askBps: 1, bidPx: .9999, askPx: 1.0001, spreadBps: 2, feeBps: 0, filledFull: true, ts: Date.now() })));
+  const adapters: VenueAdapter[] = opts.withQuotes ? ['venue', 'baseline'].map((role) => ({
+    ...adapter,
+    venues: () => [{ ...adapter.venues()[0], id: role, role: role as 'venue' | 'baseline' }],
+    quote: vi.fn(async (_ctx, sizes, _block, markets) => quoteRows(role, sizes, markets)),
+  })) : opts.withAdapter ? [adapter] : [];
+  if (opts.withQuotes) references.quote.mockImplementation((sizes: readonly number[] = []) => quoteRows('bybit', sizes));
   vi.doMock('../venues/registry.js', () => ({
     ADAPTERS: adapters,
     REFERENCES: references,
@@ -69,6 +80,7 @@ async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
     monad: { blockTime: 300 },
     publicClient: { getBlockNumber: vi.fn(async () => 100n) },
     quoteClient: {},
+    scopedQuoteClient: () => ({}),
     headClient: { getBlockNumber: vi.fn(async () => 100n) },
     archiveClient: {},
     getLogsChunked: vi.fn(),
@@ -93,16 +105,78 @@ async function setup(opts: { reset?: string; withAdapter?: boolean } = {}) {
 
   const { LiveDataSource } = await import('../datasource/live.js');
   const source = new LiveDataSource() as any;
+  const poll = source.poll.bind(source);
   source.initHistory = vi.fn(async () => {});
   source.bootHead = 100n;
   source.poll = vi.fn(async () => {});
   source.scheduleTail = vi.fn();
   source.backgroundHistory = vi.fn(async () => {});
   source.gas = { start: vi.fn(), stop: vi.fn(), setWriter: vi.fn() };
-  return { source, archiveProbe, adapter, headWatcher };
+  return { source, archiveProbe, adapter, adapters, headWatcher, poll };
 }
 
 describe('live startup archive gate', () => {
+  it('full demand includes regular venues, baselines and reference rows without duplicating adapter calls', async () => {
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.schedulePostQuoteMaintenance = vi.fn();
+    source.manageQuoteDemand();
+    const release = source.watchQuotes({ market: 'MON/USDC', sizeUsd: 1000, baseline: false });
+    try {
+      await poll(100n);
+      expect(new Set(source.getQuotes().rows.map((row: QuoteRow) => row.venueId))).toEqual(new Set(['venue', 'bybit']));
+      const snapshot = source.fullQuoteSnapshot();
+      await poll(101n);
+      const full = await snapshot;
+      for (const venueId of ['venue', 'baseline', 'bybit']) {
+        expect(full.rows.filter((row: QuoteRow) => row.venueId === venueId)).toHaveLength(MARKETS.length * SIZES_USD.length);
+      }
+      expect(adapters[0].quote).toHaveBeenCalledTimes(2);
+      expect(adapters[1].quote).toHaveBeenCalledTimes(1);
+    } finally { release(); source.store.close(); }
+  });
+
+  it('clears idle quotes and never serves a snapshot older than the history window', async () => {
+    const { source, poll } = await setup({ withQuotes: true });
+    source.schedulePostQuoteMaintenance = vi.fn();
+    source.manageQuoteDemand();
+    const release = source.watchQuotes();
+    try {
+      await poll(100n);
+      expect(source.getQuotes().rows.length).toBeGreaterThan(0);
+      const ts = source.getQuotes().ts;
+      vi.spyOn(Date, 'now').mockReturnValue(ts + 60_001);
+      expect(source.getQuotes().rows).toEqual([]);
+      expect(source.quoteHistory('MON/USDC', 1000)).toEqual([]);
+      vi.restoreAllMocks();
+      release();
+      await poll(101n);
+      expect(source.getQuotes().rows).toEqual([]);
+      expect(source.quotesFull).toBe(false);
+    } finally { release(); source.store.close(); }
+  });
+
+  it('waits past an in-flight scoped frame when a fresh full snapshot is requested', async () => {
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.schedulePostQuoteMaintenance = vi.fn();
+    source.manageQuoteDemand();
+    const first = source.fullQuoteSnapshot();
+    await poll(100n);
+    await first;
+    const release = source.watchQuotes({ market: 'MON/USDC', sizeUsd: 1000, baseline: false });
+    try {
+      const partial = deferred<QuoteRow[]>();
+      vi.mocked(adapters[0].quote!).mockImplementationOnce(() => partial.promise);
+      const running = poll(101n);
+      let completed = false;
+      const fresh = source.fullQuoteSnapshot(true).then((snapshot: { block: number }) => { completed = true; return snapshot; });
+      partial.resolve([]);
+      await running;
+      expect(completed).toBe(false);
+      await poll(102n);
+      expect((await fresh).block).toBe(102);
+    } finally { release(); source.store.close(); }
+  });
+
   it('warms hot loops while archive verification is still pending, then starts deep workers', async () => {
     const { source, archiveProbe, headWatcher } = await setup();
     const started = source.start();

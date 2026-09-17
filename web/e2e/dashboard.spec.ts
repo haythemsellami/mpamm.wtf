@@ -36,6 +36,12 @@ test('two browser tabs share one socket, union selections, and keep every dashbo
   await expect.poll(() => paths.has('/api/gas')).toBe(true);
   await page.getByRole('button', { name: /MARKOUTS$/ }).click();
   await expect(page.getByRole('button', { name: 'Pause the live tape' })).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })));
+  await expect.poll(async () => (await health(page)).connections).toBe(0);
+  const restoredFills = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/fills' && response.ok());
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
+  await restoredFills;
+  await expect.poll(async () => (await health(page)).connections).toBe(1);
   await page.getByRole('button', { name: 'Pause the live tape' }).click();
   await expect(page.getByRole('button', { name: 'Resume the live tape' })).toBeVisible();
   await page.getByRole('button', { name: /LEADERBOARD$/ }).click();

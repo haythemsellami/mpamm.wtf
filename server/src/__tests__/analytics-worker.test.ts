@@ -29,6 +29,13 @@ describe('isolated historical aggregates', () => {
     const first = await publications.publish(actual);
     expect(JSON.parse(gunzipSync(first.gzip).toString())).toEqual(actual);
     expect(await publications.publish(actual)).toBe(first);
+    for (let i = 1; i <= 100; i++) {
+      expect(await publications.publish({ ...actual, generatedAt: now + i * 30_000 })).toBe(first);
+    }
+    expect(publications.get(first.revision)?.json).toBe(JSON.stringify(actual));
+    const concurrent = new AnalyticsPublications();
+    const sameData = await Promise.all([actual, { ...actual, generatedAt: now + 1 }].map((result) => concurrent.publish(result)));
+    expect(sameData[0]).toBe(sameData[1]);
     writer.upsertFills([fill('fill-0', now, 500)]);
     const changed = await publications.publish(await worker.compute(1, now));
     expect(changed.revision).not.toBe(first.revision);

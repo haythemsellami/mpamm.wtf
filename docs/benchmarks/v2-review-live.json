@@ -1,0 +1,24 @@
+{
+  "measuredAt": "2026-09-17T16:01:25.864Z",
+  "node": "v24.11.1",
+  "scope": "Local live backend, Metric adapter, configured HTTP RPC; read-only legacy snapshot and idle/resume regression. No every-block coverage claim.",
+  "initialSelectedBlock": 105647658,
+  "legacyQuoteFrames": 4,
+  "legacyFirstBlock": 105647661,
+  "legacyMetricMarkets": [
+    "BTC/USDC",
+    "ETH/USDC"
+  ],
+  "legacyMetricSizesUsd": [
+    100,
+    1000,
+    10000,
+    100000
+  ],
+  "resumedSnapshotRows": 0,
+  "resumedExecutableBlock": 105647678,
+  "fullRestStatus": 200,
+  "fullRestBlock": 105647681,
+  "fullRestRows": 108,
+  "allAssertionsPassed": true
+}

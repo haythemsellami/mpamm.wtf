@@ -3,6 +3,21 @@ import { planQuotes } from '../quote-demand.js';
 import { QuoteRunner } from '../quote-runner.js';
 
 describe('quote demand', () => {
+  it('simulated full snapshots retain every venue role, market and size under managed demand', async () => {
+    const { SimDataSource } = await import('../datasource/sim.js');
+    const source = new SimDataSource();
+    source.manageQuoteDemand();
+    expect(source.getQuotes().rows).toEqual([]);
+    const full = await source.fullQuoteSnapshot();
+    const state = source.getState();
+    const roles = new Map(state.venues.map((v) => [v.id, v.role]));
+    expect(new Set(full.rows.map((row) => roles.get(row.venueId)))).toEqual(new Set(['venue', 'baseline', 'reference']));
+    expect(new Set(full.rows.map((row) => row.market))).toEqual(new Set(state.markets));
+    expect(new Set(full.rows.map((row) => row.sizeUsd))).toEqual(new Set(state.sizesUsd));
+    expect(new Set(full.rows.map((row) => `${row.venueId}|${row.market}|${row.sizeUsd}`)).size).toBe(full.rows.length);
+    expect(source.getQuotes().rows).toEqual([]);
+  });
+
   it('shares identical demand without adding unrelated market/size combinations', () => {
     const plan = planQuotes([
       { market: 'MON/USDC', sizeUsd: 100, baseline: false },

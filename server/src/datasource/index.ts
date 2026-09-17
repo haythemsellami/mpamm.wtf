@@ -19,8 +19,9 @@ export interface DataSource {
   manageQuoteDemand?(): void;
   watchQuotes?(scope?: QuoteScope): () => void;
   getQuotes(): QuoteSnapshot;
-  /** Legacy REST consumers can request a complete matrix on demand. */
-  fullQuoteSnapshot?(): Promise<QuoteSnapshot>;
+  /** Complete matrix on demand. Fresh stream handoffs bypass cached results
+   * so an in-flight scoped frame cannot follow the initial full snapshot. */
+  fullQuoteSnapshot?(fresh?: boolean): Promise<QuoteSnapshot>;
   getFills(): Fill[];
   getVolume(): DailyVolume[];
   /** Historical fills query (DB-backed for live, in-memory for sim). */
@@ -54,7 +55,7 @@ export interface DepthPublication {
 
 /** Quote history is retained by wall time, not sample count: live quotes now
  *  arrive per block (~300ms) while the simulator still ticks at 500ms. */
-const QUOTE_HISTORY_MS = 60_000;
+export const QUOTE_HISTORY_MS = 60_000;
 const QUOTE_HISTORY_MAX = 400; // safety cap if timestamps regress or cadence changes
 
 export abstract class BaseSource extends EventEmitter implements DataSource {
@@ -160,6 +161,8 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
   /** The retained ticks filtered to one (market, size) — oldest first, ready to
    *  replay into the chart buffer. Empty until the first poll after boot. */
   quoteHistory(market: string, size: number): QuoteSnapshot[] {
+    const cutoff = Date.now() - QUOTE_HISTORY_MS;
+    this.quoteHist = this.quoteHist.filter((q) => q.ts >= cutoff);
     const out: QuoteSnapshot[] = [];
     for (const q of this.quoteHist) {
       const rows = q.rows.filter((r) => r.market === market && r.sizeUsd === size);

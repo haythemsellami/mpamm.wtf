@@ -19,12 +19,11 @@ class Source extends BaseSource {
   push(message: StreamMessage) { this.emitMsg(message); }
 }
 const cleanup: (() => Promise<unknown> | void)[] = [];
-afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop(); });
+afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop(); vi.restoreAllMocks(); });
 const waitFor = async (predicate: () => boolean) => { for (let i = 0; i < 100 && !predicate(); i++) await new Promise((r) => setTimeout(r, 5)); expect(predicate()).toBe(true); };
 
-async function boot() {
+async function boot(source = new Source()) {
   const { startServer } = await import('../server.js');
-  const source = new Source();
   const server = startServer(source);
   await once(server, 'listening');
   cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
@@ -66,6 +65,7 @@ describe('subscription transport', () => {
     expect(historical.frames.every((f) => f.message.ch === 'state')).toBe(true);
     const metrics = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
     expect(metrics.stream.encodes).toBe(1);
+    expect(metrics.stream.protocol).toBe('v2');
   });
 
   it('changes subscriptions without leaking rows from the previous market', async () => {
@@ -104,6 +104,8 @@ describe('subscription transport', () => {
     const { port } = await boot();
     const base = `http://127.0.0.1:${port}`;
     const manifest = await fetch(`${base}/api/leaderboard/publication?days=1`).then((r) => r.json()) as { url: string };
+    const unchanged = await fetch(`${base}/api/leaderboard/publication?days=1`).then((r) => r.json());
+    expect(unchanged).toEqual(manifest);
     const response = await fetch(base + manifest.url);
     expect(response.headers.get('cache-control')).toContain('immutable');
     expect(response.headers.get('content-encoding')).toBe('gzip');
@@ -115,5 +117,57 @@ describe('subscription transport', () => {
     const missing = await fetch(`${base}/api/analytics/${'0'.repeat(64)}.json`);
     expect(missing.status).toBe(404);
     expect(missing.headers.get('cache-control')).toBe('no-store');
+  });
+});
+
+describe('legacy snapshot and idle history', () => {
+  it('withholds scoped frames until the first full snapshot, then streams subsequent quotes', async () => {
+    let resolve!: (quotes: QuoteSnapshot) => void;
+    const source = new Source();
+    const pending = new Promise<QuoteSnapshot>((done) => { resolve = done; });
+    Object.assign(source, { fullQuoteSnapshot: () => pending });
+    const { port } = await boot(source);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/stream`);
+    const frames: StreamMessage[] = [];
+    ws.on('message', (data) => frames.push(JSON.parse(data.toString())));
+    cleanup.push(() => ws.terminate());
+    await once(ws, 'open');
+    await waitFor(() => frames.length === 1);
+    source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 2, rows: [row] } });
+    source.push({ ch: 'state', data: source.getState() });
+    await waitFor(() => frames.filter((frame) => frame.ch === 'state').length === 2);
+    expect(frames.some((frame) => frame.ch === 'quotes')).toBe(false);
+    const full = { ...source.getQuotes(), block: 3 };
+    resolve(full);
+    await waitFor(() => frames.some((frame) => frame.ch === 'quotes'));
+    expect(frames.find((frame) => frame.ch === 'quotes')?.data).toEqual(full);
+    source.push({ ch: 'quotes', data: { ...full, block: 4 } });
+    await waitFor(() => frames.filter((frame) => frame.ch === 'quotes').length === 2);
+    expect(frames.at(-1)?.data).toMatchObject({ block: 4 });
+  });
+
+  it('closes a legacy connection if a full snapshot cannot be produced', async () => {
+    let reject!: (error: Error) => void;
+    const pending = new Promise<QuoteSnapshot>((_resolve, fail) => { reject = fail; });
+    const source = new Source();
+    Object.assign(source, { fullQuoteSnapshot: () => pending });
+    const { port } = await boot(source);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/stream`);
+    cleanup.push(() => ws.terminate());
+    const closed = once(ws, 'close');
+    await once(ws, 'open');
+    reject(new Error('no fresh full frame'));
+    await closed;
+  });
+
+  it('expires history by wall time even when no new quotes are emitted', () => {
+    let now = 1_800_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const source = new Source();
+    source.push({ ch: 'quotes', data: { ...source.getQuotes(), ts: now } });
+    now += 60_000;
+    expect(source.quoteHistory('MON/USDC', 1000)).toHaveLength(1);
+    now++;
+    expect(source.quoteHistory('MON/USDC', 1000)).toEqual([]);
   });
 });
