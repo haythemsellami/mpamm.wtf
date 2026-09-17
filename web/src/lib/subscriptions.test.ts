@@ -18,6 +18,7 @@ class Worker {
   port = { postMessage: vi.fn(), close: vi.fn(), start: vi.fn(), onmessage: undefined as ((event: { data: unknown }) => void) | undefined };
   constructor() { Worker.instances.push(this); }
   live() { this.port.onmessage?.({ data: { status: 'live' } }); }
+  closed() { this.port.onmessage?.({ data: { type: 'closed' } }); }
 }
 const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 const clean: (() => void)[] = [];
@@ -62,6 +63,8 @@ describe('subscription recovery', () => {
     expect(first).toHaveBeenLastCalledWith('reconnecting');
     Socket.instances[0].open();
     for (const status of [first, second]) expect(status.mock.calls.map(([s]) => s)).toEqual(['live', 'reconnecting', 'live']);
+    expect(worker.port.close).not.toHaveBeenCalled();
+    worker.closed();
     expect(worker.port.close).toHaveBeenCalledOnce();
   });
 
@@ -72,6 +75,11 @@ describe('subscription recovery', () => {
     else Socket.instances[0].open();
     window.dispatchEvent(new Event('pagehide'));
     await tick();
+    if (mode === 'shared') {
+      expect(Worker.instances[0].port.close).not.toHaveBeenCalled();
+      Worker.instances[0].closed();
+      expect(Worker.instances[0].port.close).toHaveBeenCalledOnce();
+    }
     expect(status.mock.calls.map(([s]) => s)).toEqual(['live']);
     window.dispatchEvent(new Event('pageshow'));
     expect(status).toHaveBeenLastCalledWith('reconnecting');
@@ -88,5 +96,18 @@ describe('subscription recovery', () => {
     expect(Socket.instances).toHaveLength(1);
     Socket.instances[0].open();
     expect(status).toHaveBeenLastCalledWith('live');
+  });
+
+  it.each([true, false])('retires the last listener after acknowledgement or a dead-worker timeout (ack: %s)', async (ack) => {
+    const { subscribeTopics } = await import('./subscriptions');
+    const dispose = subscribeTopics([{ channel: 'fill' }], vi.fn()); clean.push(dispose);
+    await tick();
+    const worker = Worker.instances[0]; worker.live();
+    dispose(); await tick();
+    expect(worker.port.postMessage).toHaveBeenLastCalledWith({ type: 'close' });
+    expect(worker.port.close).not.toHaveBeenCalled();
+    if (ack) worker.closed(); else await vi.advanceTimersByTimeAsync(5_000);
+    expect(worker.port.close).toHaveBeenCalledOnce();
+    expect(Socket.instances).toHaveLength(0);
   });
 });

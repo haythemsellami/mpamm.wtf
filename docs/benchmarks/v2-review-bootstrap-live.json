@@ -1,0 +1,67 @@
+{
+  "measuredAt": "2026-09-17T18:24:00.112Z",
+  "node": "v24.11.1",
+  "method": "Read-only local live cold start using Metric, Capricorn and Lunarbase, disposable SQLite database and disabled backfills. REST startup and gzip bootstrap correctness; not a production latency or full-block-coverage benchmark.",
+  "cold": [
+    {
+      "path": "/api/markets",
+      "status": 200,
+      "elapsedMs": 1.32241700000003,
+      "rows": 0,
+      "block": 0
+    },
+    {
+      "path": "/api/quotes",
+      "status": 200,
+      "elapsedMs": 0.5691669999999931,
+      "rows": 0,
+      "block": 0
+    }
+  ],
+  "executableMetricFrames": 8,
+  "quoteBlocks": [
+    105675984,
+    105676002
+  ],
+  "depthPublications": 11,
+  "initial": [
+    {
+      "channel": "depth",
+      "gzip": true,
+      "payloadBytes": 715,
+      "jsonBytes": 2579,
+      "seq": 8
+    },
+    {
+      "channel": "quotes",
+      "gzip": true,
+      "payloadBytes": 552,
+      "jsonBytes": 992,
+      "seq": 8
+    },
+    {
+      "channel": "state",
+      "gzip": true,
+      "payloadBytes": 776,
+      "jsonBytes": 1674,
+      "seq": 3
+    }
+  ],
+  "metricCatalog": [
+    "MON/USDC",
+    "BTC/USDC",
+    "ETH/USDC"
+  ],
+  "fullRest": {
+    "status": 200,
+    "rows": 110,
+    "metricQuotedMarkets": [
+      "BTC/USDC",
+      "ETH/USDC"
+    ]
+  },
+  "servedBlocks": [
+    0,
+    105676005
+  ]
+}

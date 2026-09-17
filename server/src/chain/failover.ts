@@ -232,10 +232,10 @@ export class RpcBreaker {
       const generation = this.stateGeneration;
       try {
         scope?.signal.throwIfAborted();
-        await this.ensureChain(idx);
-        scope?.signal.throwIfAborted();
         const endpoint = this.endpoints[idx];
         const request = scope && endpoint.scopedQuote ? endpoint.scopedQuote(scope.key, scope.signal) : (endpoint.lanes?.[lane] ?? endpoint.request);
+        await this.ensureChain(idx, request, scope?.signal);
+        scope?.signal.throwIfAborted();
         const res = await request(args);
         scope?.signal.throwIfAborted();
         // A late result from an endpoint serving an older generation is still
@@ -430,10 +430,11 @@ export class RpcBreaker {
   /** Verify an endpoint before it serves traffic after being unreachable at
    *  boot. This runs through the raw endpoint, not the breaker, so a wrong-chain
    *  answer can never satisfy the caller's original request. */
-  private async ensureChain(idx: number): Promise<void> {
+  private async ensureChain(idx: number, request: RpcRequestFn, signal?: AbortSignal): Promise<void> {
     if (this.expectedChainId === undefined || this.endpointHealth[idx] === 'valid') return;
     if (this.endpointHealth[idx] === 'wrong-chain') throw new WrongChainEndpointError(`${this.endpoints[idx].label} is on the wrong chain`);
-    const id = await this.endpoints[idx].request({ method: 'eth_chainId' });
+    const id = await request({ method: 'eth_chainId' });
+    signal?.throwIfAborted();
     const chainId = Number(BigInt(String(id)));
     if (chainId !== this.expectedChainId) {
       this.markWrongChain(idx, chainId, 'after recovery');

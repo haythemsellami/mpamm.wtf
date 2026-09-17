@@ -31,13 +31,16 @@ async function sample(viewers: number, mode: 'legacy-raw' | 'legacy-deflate' | '
   const port = (server.address() as AddressInfo).port;
   const clients: WebSocket[] = [];
   const received: number[] = [], latency: number[] = [];
+  let bootstrapPayloadBytes = 0, bootstrapJsonBytes = 0;
   for (let i = 0; i < viewers; i++) {
     const v2 = mode === 'v2-shared-gzip';
     const ws = new WebSocket(`ws://127.0.0.1:${port}/stream`, v2 ? STREAM_V2_GZIP : [], { perMessageDeflate: mode === 'legacy-deflate' });
     received[i] = 0;
     ws.on('message', (raw, binary) => {
-      const parsed = JSON.parse((binary ? gunzipSync(raw as Buffer) : raw).toString());
+      const json = (binary ? gunzipSync(raw as Buffer) : raw).toString();
+      const parsed = JSON.parse(json);
       const message = v2 ? parsed.message : parsed;
+      if (v2 && parsed.snapshot) { bootstrapPayloadBytes += (raw as Buffer).length; bootstrapJsonBytes += Buffer.byteLength(json); }
       if (message?.ch === 'quotes' && message.data.block > fixture.block) { received[i]++; latency.push(Date.now() - message.data.ts); }
     });
     await once(ws, 'open');
@@ -45,6 +48,7 @@ async function sample(viewers: number, mode: 'legacy-raw' | 'legacy-deflate' | '
     clients.push(ws);
   }
   await pause(100);
+  const initialHealth = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
   const bytes = () => clients.reduce((total, ws) => total + (ws as unknown as { _socket: { bytesRead: number } })._socket.bytesRead, 0);
   const before = bytes(), cpu = process.cpuUsage();
   let rssPeak = process.memoryUsage().rss;
@@ -62,7 +66,8 @@ async function sample(viewers: number, mode: 'legacy-raw' | 'legacy-deflate' | '
   const report = { viewers, mode, frames, elapsedMs, wireBytes, perViewerKBps: wireBytes / viewers / (elapsedMs / 1000) / 1000,
     totalCpuMs: (usage.user + usage.system) / 1000, processRssPeakMB: rssPeak / 1024 ** 2,
     receiptP95Ms: latency[Math.floor((latency.length - 1) * .95)], receivedMin: Math.min(...received),
-    sharedCompressionJobs: health.stream.encodes };
+    ...(mode === 'v2-shared-gzip' ? { bootstrapPayloadBytesPerViewer: bootstrapPayloadBytes / viewers, bootstrapJsonBytesPerViewer: bootstrapJsonBytes / viewers, bootstrapCompressionJobs: initialHealth.stream.encodes } : {}),
+    sharedCompressionJobs: health.stream.encodes - initialHealth.stream.encodes };
   for (const ws of clients) ws.terminate();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   if (report.receivedMin !== frames) throw new Error(`lost frames in ${mode}`);

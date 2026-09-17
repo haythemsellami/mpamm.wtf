@@ -12,13 +12,24 @@ let failedShared = false;
 let syncPending = false;
 let pageSuspended = false;
 
+function disconnectShared(): void {
+  const worker = shared;
+  shared = undefined;
+  if (!worker) return;
+  // Keep the channel open until the worker has removed its demand. Closing
+  // immediately can race the cleanup message; a dead worker has the lease.
+  const finish = () => { clearTimeout(timer); worker.port.onmessage = null; worker.port.close(); };
+  const timer = setTimeout(finish, 5_000);
+  worker.port.onmessage = ({ data }) => { if (data.type === 'closed') finish(); };
+  try { worker.port.postMessage({ type: 'close' }); } catch { finish(); }
+}
+
 function fallback(): void {
   if (startup) clearTimeout(startup);
   startup = undefined;
   failedShared = true;
   if (shared) for (const listener of listeners.values()) listener.status('reconnecting');
-  shared?.port.postMessage({ type: 'close' });
-  shared?.port.close(); shared = undefined;
+  disconnectShared();
   if (heartbeat) clearInterval(heartbeat);
   heartbeat = undefined;
   direct ??= new StreamHub(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/stream`);
@@ -30,7 +41,7 @@ function sync(): void {
   if (!listeners.size) {
     if (startup) clearTimeout(startup);
     startup = undefined;
-    shared?.port.postMessage({ type: 'close' }); shared?.port.close(); shared = undefined;
+    disconnectShared();
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = undefined;
     direct?.close(); direct = undefined;
@@ -89,7 +100,7 @@ if (typeof window !== 'undefined') {
     pageSuspended = true;
     if (startup) clearTimeout(startup);
     startup = undefined;
-    shared?.port.postMessage({ type: 'close' }); shared?.port.close(); shared = undefined;
+    disconnectShared();
     direct?.close(); direct = undefined;
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = undefined;

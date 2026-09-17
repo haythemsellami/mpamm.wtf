@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { gunzipSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
 import { BaseSource } from '../datasource/index.js';
-import { STREAM_V2_GZIP, STREAM_V2_JSON, type MarketState, type QuoteSnapshot, type StreamEnvelope, type StreamTopic, type StreamMessage } from '@shared';
+import { SubscriptionGateway } from '../stream-v2.js';
+import { SIZES_USD, STREAM_V2_GZIP, STREAM_V2_JSON, type MarketState, type QuoteSnapshot, type StreamEnvelope, type StreamTopic, type StreamMessage } from '@shared';
 
 process.env.API_PORT = '0';
 const row = { venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000, bidBps: -1.23, askBps: 2.34, bidPx: .024123456789, askPx: .024132198765, spreadBps: 3.57, filledFull: true, feeBps: .2, ts: 100 };
@@ -79,6 +80,7 @@ describe('subscription transport', () => {
     vi.spyOn(Date, 'now').mockImplementation(() => now);
     const { source, port } = await boot();
     const client = await connect(port, [{ channel: 'state' }]);
+    const initialBinaries = client.binaries.length;
     const largeCatalog = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`venue-${i}`, ['MON/USDC', 'BTC/USDC']]));
     for (const block of [2, 3, 4]) {
       source.catalog = block === 2 ? largeCatalog : { venue: ['BTC/USDC'] };
@@ -86,7 +88,7 @@ describe('subscription transport', () => {
       source.push({ ch: 'state', data: { ...source.getState(), block } });
     }
     await waitFor(() => client.frames.length === 3);
-    expect(client.binaries).toHaveLength(1);
+    expect(client.binaries).toHaveLength(initialBinaries + 1);
     expect(client.frames[1].message.data).toMatchObject({ block: 2, quoteMarkets: largeCatalog });
     expect(client.frames[2].message.data).toMatchObject({ block: 4, quoteMarkets: source.catalog });
     expect(client.frames.map((frame) => frame.seq)).toEqual([0, 1, 2]);
@@ -105,7 +107,7 @@ describe('subscription transport', () => {
     source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 2 } });
     await waitFor(() => client.frames.length === 2);
     expect(client.frames[1]).toMatchObject({ v: 2, seq: 1, message: { ch: 'quotes', data: { block: 2, rows: [row] } } });
-    expect(client.binaries).toHaveLength(selected === STREAM_V2_GZIP ? 1 : 0);
+    expect(client.binaries).toHaveLength(selected === STREAM_V2_GZIP ? 2 : 0);
   });
 
   it('does not negotiate unsupported protocols as legacy streams', async () => {
@@ -121,7 +123,13 @@ describe('subscription transport', () => {
     const topic = { channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false } as const;
     const a = await connect(port, [topic]);
     const b = await connect(port, [topic]);
+    expect(a.binaries).toHaveLength(1);
+    expect(b.binaries).toHaveLength(1);
+    expect(a.frames[0]).toEqual(b.frames[0]);
+    const before = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
+    expect(before.stream.encodes).toBe(1);
     const historical = await connect(port, [{ channel: 'state' }]);
+    const initialMetrics = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
     expect(watch).toHaveBeenCalledTimes(1);
     const initial = a.frames[0].message;
     expect(initial.ch).toBe('quotes');
@@ -131,11 +139,79 @@ describe('subscription transport', () => {
     await waitFor(() => a.frames.length === 2 && b.frames.length === 2);
     expect(a.frames[1]).toEqual(b.frames[1]);
     expect(a.frames[1].seq).toBe(1);
-    expect(a.binaries.length).toBe(1);
+    expect(a.binaries.length).toBe(2);
     expect(historical.frames.every((f) => f.message.ch === 'state')).toBe(true);
     const metrics = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
-    expect(metrics.stream.encodes).toBe(1);
+    expect(metrics.stream.encodes - initialMetrics.stream.encodes).toBe(1);
     expect(metrics.stream.protocol).toBe('v2');
+  });
+
+  it('keeps a small live update behind its compressed initial snapshot', async () => {
+    const source = new Source();
+    vi.spyOn(source, 'watchQuotes').mockImplementation(() => {
+      queueMicrotask(() => source.push({ ch: 'quotes', data: { block: 2, ts: 101, monUsd: .024, rows: [] } }));
+      return () => {};
+    });
+    const { port } = await boot(source);
+    const client = await connect(port, [{ channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false }]);
+    await waitFor(() => client.frames.length === 2);
+    expect(client.binaries).toHaveLength(1);
+    expect(client.frames[0]).toMatchObject({ snapshot: true, seq: 0, message: { ch: 'quotes', data: { block: 1, rows: [row] } } });
+    expect(client.frames[1]).toMatchObject({ seq: 1, message: { ch: 'quotes', data: { block: 2, rows: [] } } });
+    expect(client.frames[1]).not.toHaveProperty('snapshot');
+  });
+
+  it('bounds live frames queued behind initial compression and forces a resync', async () => {
+    const source = new Source();
+    const gateway = new SubscriptionGateway(source);
+    const ws = Object.assign(new EventEmitter(), { readyState: WebSocket.OPEN as number, protocol: STREAM_V2_GZIP, bufferedAmount: 0,
+      send: vi.fn(), close: vi.fn(), terminate: vi.fn(() => { ws.readyState = WebSocket.CLOSED; ws.emit('close'); }) });
+    gateway.accept(ws as unknown as WebSocket);
+    cleanup.push(() => gateway.close());
+    ws.emit('message', JSON.stringify({ type: 'subscribe', topics: [{ channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false }] }));
+    for (let block = 2; block < 2_000 && ws.readyState === WebSocket.OPEN; block++) {
+      gateway.onMessage({ ch: 'quotes', data: { block, ts: 101, monUsd: .024, rows: [] } });
+    }
+    expect(ws.terminate).toHaveBeenCalledOnce();
+    expect(gateway.metrics.slowClients).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(ws.send).not.toHaveBeenCalled();
+    expect(gateway.metrics.connections).toBe(0);
+    expect(gateway.metrics.topics).toBe(0);
+  });
+
+  it('compresses state, quote and depth bootstraps once for identical subscribers', async () => {
+    const source = new Source();
+    source.catalog = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`venue-${i}`, ['MON/USDC', 'BTC/USDC']]));
+    const depth = { market: 'MON/USDC', asOfBlock: 1, refMid: .024, ts: 100, venues: [{ venueId: 'venue', maxNotional: 100_000,
+      points: Array.from({ length: 25 }, (_, i) => ({ notional: 10 * (i + 1), bidBps: i ? -i : 0, askBps: i })) }] };
+    vi.spyOn(source, 'getDepth').mockReturnValue({ market: depth.market, asOfBlock: 1, ts: 100, json: JSON.stringify(depth) });
+    const { port } = await boot(source);
+    const topics: StreamTopic[] = [{ channel: 'state' }, { channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false }, { channel: 'depth', market: 'MON/USDC' }];
+    const a = await connect(port, topics);
+    const b = await connect(port, topics);
+    await waitFor(() => a.frames.length === 3 && b.frames.length === 3);
+    expect(a.binaries).toHaveLength(3);
+    expect(b.binaries).toHaveLength(3);
+    expect(a.frames).toEqual(b.frames);
+    expect(a.frames.every((frame) => frame.snapshot && frame.seq === 0)).toBe(true);
+    const state = a.frames.find((frame) => frame.message.ch === 'state')!.message.data;
+    expect(state).toHaveProperty('venues');
+    expect(state).not.toHaveProperty('notes');
+    expect(a.frames.find((frame) => frame.message.ch === 'depth')!.message.data).toEqual(depth);
+    const metrics = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
+    expect(metrics.stream.encodes).toBe(3);
+  });
+
+  it('reads the baseline registry once per publication across quote topics', async () => {
+    const { source, port } = await boot();
+    const topics: StreamTopic[] = ['MON/USDC', 'BTC/USDC'].flatMap((market) => SIZES_USD.map((sizeUsd) => ({ channel: 'quotes' as const, market, sizeUsd, baseline: false })));
+    const client = await connect(port, topics, STREAM_V2_JSON);
+    await waitFor(() => client.frames.length === topics.length);
+    const reads = vi.spyOn(source, 'getState');
+    source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 2 } });
+    await waitFor(() => client.frames.length === topics.length * 2);
+    expect(reads).toHaveBeenCalledTimes(1);
   });
 
   it('changes subscriptions without leaking rows from the previous market', async () => {

@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
 import { MARKETS, SIZES_USD, type Fill, type QuoteRow } from '@shared';
 import type { VenueAdapter } from '../venues/adapter.js';
 import { createQuoteOutageReporter, type MulticallOutcome } from '../venues/quote-health.js';
@@ -117,6 +119,28 @@ async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?:
 }
 
 describe('live startup archive gate', () => {
+  it('serves empty REST snapshots without waiting for cold-start quote demand', async () => {
+    vi.stubEnv('API_PORT', '0');
+    const { source } = await setup({ withQuotes: true });
+    const { startServer } = await import('../server.js');
+    const server = startServer(source);
+    await once(server, 'listening');
+    try {
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      for (const path of ['/api/markets', '/api/quotes']) {
+        const response = await fetch(origin + path, { signal: AbortSignal.timeout(1_500) });
+        expect(response.status).toBe(200);
+        const body = await response.json() as any;
+        expect((path === '/api/markets' ? body.quotes : body).rows).toEqual([]);
+      }
+      expect(source.quoteScopes.size).toBe(0);
+      expect(source.fullSnapshotPending).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      source.store.close();
+    }
+  });
+
   it('uses the isolated head lane for adapter discovery while retaining the general RPC client for other calls', async () => {
     const { source, adapter } = await setup({ withAdapter: true });
     const { publicClient, headClient } = await import('../chain/rpc.js');

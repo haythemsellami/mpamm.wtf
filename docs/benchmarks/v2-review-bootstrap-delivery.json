@@ -1,0 +1,93 @@
+{
+  "measuredAt": "2026-09-17T18:23:25.358Z",
+  "node": "v24.11.1",
+  "platform": "darwin arm64",
+  "cpu": "Apple M4",
+  "methodology": "20 recorded-matrix quote frames at 300ms; 10/100 loopback clients in the same process. CPU/RSS include clients and decoding; excludes depth, REST, TLS and remote latency. V2 selects MON/USDC $10k, legacy receives full matrix. Bootstrap excluded.",
+  "results": [
+    {
+      "viewers": 10,
+      "mode": "legacy-raw",
+      "frames": 20,
+      "elapsedMs": 6165.096667,
+      "wireBytes": 11762000,
+      "perViewerKBps": 190.78370762552072,
+      "totalCpuMs": 176.234,
+      "processRssPeakMB": 145.265625,
+      "receiptP95Ms": 7,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 0
+    },
+    {
+      "viewers": 10,
+      "mode": "legacy-deflate",
+      "frames": 20,
+      "elapsedMs": 6172.546667,
+      "wireBytes": 1937470,
+      "perViewerKBps": 31.38850306889061,
+      "totalCpuMs": 526.847,
+      "processRssPeakMB": 176.625,
+      "receiptP95Ms": 13,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 0
+    },
+    {
+      "viewers": 10,
+      "mode": "v2-shared-gzip",
+      "frames": 20,
+      "elapsedMs": 6131.849292000001,
+      "wireBytes": 159620,
+      "perViewerKBps": 2.6031298617898253,
+      "totalCpuMs": 90.16,
+      "processRssPeakMB": 180.03125,
+      "receiptP95Ms": 3,
+      "receivedMin": 20,
+      "bootstrapPayloadBytesPerViewer": 805,
+      "bootstrapJsonBytesPerViewer": 1695,
+      "bootstrapCompressionJobs": 1,
+      "sharedCompressionJobs": 20
+    },
+    {
+      "viewers": 100,
+      "mode": "legacy-raw",
+      "frames": 20,
+      "elapsedMs": 6410.0765420000025,
+      "wireBytes": 117620000,
+      "perViewerKBps": 183.49234869401653,
+      "totalCpuMs": 1028.478,
+      "processRssPeakMB": 189.53125,
+      "receiptP95Ms": 38,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 0
+    },
+    {
+      "viewers": 100,
+      "mode": "legacy-deflate",
+      "frames": 20,
+      "elapsedMs": 6229.048584,
+      "wireBytes": 19373600,
+      "perViewerKBps": 31.10202102093606,
+      "totalCpuMs": 3198.471,
+      "processRssPeakMB": 229.046875,
+      "receiptP95Ms": 47,
+      "receivedMin": 20,
+      "sharedCompressionJobs": 0
+    },
+    {
+      "viewers": 100,
+      "mode": "v2-shared-gzip",
+      "frames": 20,
+      "elapsedMs": 6134.145750000003,
+      "wireBytes": 1600400,
+      "perViewerKBps": 2.6090022396354033,
+      "totalCpuMs": 337.722,
+      "processRssPeakMB": 230.015625,
+      "receiptP95Ms": 8,
+      "receivedMin": 20,
+      "bootstrapPayloadBytesPerViewer": 807,
+      "bootstrapJsonBytesPerViewer": 1695,
+      "bootstrapCompressionJobs": 1,
+      "sharedCompressionJobs": 20
+    }
+  ]
+}

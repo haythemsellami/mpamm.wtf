@@ -1197,8 +1197,12 @@ export class LiveDataSource extends BaseSource {
     return Date.now() - this.quotes.ts <= QUOTE_HISTORY_MS ? this.quotes : { ...this.quotes, rows: [] };
   }
   private quotesFull = false;
+  private quotePollingStarted = false;
   private fullSnapshotPending?: Promise<QuoteSnapshot>;
   fullQuoteSnapshot(fresh = false): Promise<QuoteSnapshot> {
+    // REST remains non-blocking while discovery/history warms up. A legacy
+    // stream handoff still waits for a genuinely complete first frame.
+    if (!fresh && !this.quotePollingStarted) return Promise.resolve(this.getQuotes());
     if (!fresh && this.quotesFull && Date.now() - this.quotes.ts < 300) return Promise.resolve(this.quotes);
     if (this.fullSnapshotPending) return this.fullSnapshotPending;
     const release = this.watchQuotes();
@@ -2271,6 +2275,7 @@ export class LiveDataSource extends BaseSource {
     observedAt: Date.now(),
     coalescedBlocks: 0,
   }): Promise<void> {
+    this.quotePollingStarted = true;
     const quoteStartedAt = Date.now();
 
     // One synchronous turn captures every mutable CEX input before adapters

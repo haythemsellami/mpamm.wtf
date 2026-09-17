@@ -309,7 +309,7 @@ export function createCapricornAdapter(): VenueAdapter {
 
   return {
     venues: () => [CAPRICORN_VENUE],
-    quoteMarkets: () => [...new Set(quotable.map((p) => p.market))],
+    quoteMarkets: () => [...new Set(admittedPools.map((p) => p.market))],
     // seed daily volume by replaying Pool.Swap from the factory's first
     // PoolCreated (block 65199911 · 2026-04-01). Background — see live.ts.
     backfillFromUtc: '2026-04-01',

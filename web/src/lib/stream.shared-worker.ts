@@ -14,7 +14,13 @@ worker.onconnect = (event) => {
     if (!entry) return;
     entry.seen = Date.now();
     if (data.type === 'ping') { port.postMessage({ ready: true }); return; }
-    if (data.type === 'close') { hub.set(id); ports.delete(id); port.close(); return; }
+    if (data.type === 'close') {
+      hub.set(id); ports.delete(id);
+      port.onmessage = null;
+      // The client closes the channel after receiving this acknowledgement.
+      port.postMessage({ type: 'closed' });
+      return;
+    }
     const topics = parseTopics(data.topics);
     if (!topics) return;
     hub.set(id, { topics, message: (envelope) => port.postMessage({ envelope }), status: (status) => port.postMessage({ status }) });

@@ -341,7 +341,7 @@ export function createMetricAdapter(): VenueAdapter {
 
   return {
     venues: () => [METRIC_VENUE],
-    quoteMarkets: () => [...new Set(pools.map((p) => p.market))],
+    quoteMarkets: () => [...new Set(admittedPools.map((p) => p.market))],
     // seed daily volume by replaying Pool.Swap on-chain from the earliest pool's
     // deployment era (WMON/USDC block 65042020 · 2026-03-31). Background — see live.ts.
     backfillFromUtc: '2026-03-31',

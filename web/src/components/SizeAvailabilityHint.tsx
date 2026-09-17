@@ -12,6 +12,12 @@ export function SizeAvailabilityHint({ market, size, venues, quotes }: {
 }) {
   const [depth, setDepth] = useState<DepthSnapshot | null>(null);
   useEffect(() => { setDepth(null); return connectLiveDepth(market, setDepth); }, [market]);
+  useEffect(() => {
+    if (!depth) return;
+    const remaining = Math.max(0, 5_001 - Math.max(0, Date.now() - depth.ts));
+    const timer = setTimeout(() => setDepth((current) => current === depth ? null : current), remaining);
+    return () => clearTimeout(timer);
+  }, [depth]);
   if (!depth || depth.market !== market || Date.now() - depth.ts > 5_000 || !quotes?.rows.some((r) => r.market === market)) return null;
   const notes = venues.filter((v) => v.role === 'venue').flatMap((venue) => {
     if (quotes.rows.some((r) => r.venueId === venue.id && r.market === market && r.sizeUsd === size)) return [];
