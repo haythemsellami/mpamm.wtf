@@ -147,6 +147,14 @@ function readResult<T>(results: readonly any[], index: number | undefined): T | 
   return result?.status === 'success' ? result.result as T : undefined;
 }
 
+/** A rejected leg must retain the quote slot until every sibling finishes. */
+async function settleQuotes<T>(work: Iterable<PromiseLike<T>>): Promise<T[]> {
+  const results = await Promise.allSettled(work);
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failed) throw failed.reason;
+  return results.map((result) => (result as PromiseFulfilledResult<T>).value);
+}
+
 async function readPoolsAtBlock(
   ctx: AdapterContext,
   configs: readonly LunarbasePoolConfig[],
@@ -507,10 +515,10 @@ export function createLunarbaseAdapter(): VenueAdapter {
       // network round-trip per tick).
       const gatePools = [...byMarket.values()].filter((pool) => !markets || markets.has(pool.market));
       if (!gatePools.length) return [];
-      const legsByPool = new Map(gatePools.map((pool) => [pool.pool.toLowerCase(), Promise.all(sizesUsd.map(async (sizeUsd) => {
+      const legsByPool = new Map(gatePools.map((pool) => [pool.pool.toLowerCase(), settleQuotes(sizesUsd.map(async (sizeUsd) => {
         const sellIn = toUnits(ctx.pricer.tokenForUsd(pool.baseToken, sizeUsd), pool.baseDec);
         const buyIn = toUnits(sizeUsd, pool.stableDec);
-        const [bid, ask] = await Promise.all([
+        const [bid, ask] = await settleQuotes([
           quoteLunarbaseLeg(ctx, pool, 'sell', sellIn, head),
           quoteLunarbaseLeg(ctx, pool, 'buy', buyIn, head),
         ]);
@@ -521,7 +529,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
       // discard the frame while these reads still hold the adapter's slot.
       const [gate, quoted] = await Promise.allSettled([
         readPoolsAtBlock(ctx, gatePools, head, (config, reason, transient) => failures.push({ config, reason, transient })),
-        Promise.all([...legsByPool].map(async ([key, work]) => [key, await work] as const)),
+        settleQuotes([...legsByPool].map(async ([key, work]) => [key, await work] as const)),
       ]);
       ctx.quoteSignal?.throwIfAborted();
       if (gatePools.every((pool) => hasNewerSnapshot(pool, head))) return [];

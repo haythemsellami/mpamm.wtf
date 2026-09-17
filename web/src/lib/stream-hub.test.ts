@@ -33,7 +33,9 @@ describe('shared subscription hub', () => {
     hub.set('c', { topics: [{ channel: 'depth', market: 'BTC/USDC' }], message: depth, status: vi.fn() });
     await tick();
     expect(Socket.instances).toHaveLength(1);
+    expect(hub.isLive()).toBe(false);
     const socket = Socket.instances[0]; socket.open();
+    expect(hub.isLive()).toBe(true);
     expect(socket.sent[0].topics).toHaveLength(2);
     socket.emit(quote(1)); await tick();
     expect(a).toHaveBeenCalledTimes(1); expect(b).toHaveBeenCalledTimes(1); expect(depth).not.toHaveBeenCalled();
@@ -41,6 +43,7 @@ describe('shared subscription hub', () => {
     expect(socket.readyState).toBe(Socket.OPEN);
     hub.set('b'); hub.set('c'); await tick();
     expect(socket.readyState).toBe(3);
+    expect(hub.isLive()).toBe(false);
   });
 
   it('drops older quote frames and resynchronizes on an epoch change', async () => {

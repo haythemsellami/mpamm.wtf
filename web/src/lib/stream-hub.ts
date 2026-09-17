@@ -21,6 +21,8 @@ export class StreamHub {
 
   constructor(private readonly url: string) {}
 
+  isLive(): boolean { return this.status === 'live' && this.socket?.readyState === WebSocket.OPEN; }
+
   set(id: string, listener?: HubListener): void {
     if (listener) {
       this.listeners.set(id, listener);

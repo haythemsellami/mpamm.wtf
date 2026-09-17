@@ -18,6 +18,8 @@ class Worker {
   port = { postMessage: vi.fn(), close: vi.fn(), start: vi.fn(), onmessage: undefined as ((event: { data: unknown }) => void) | undefined };
   constructor() { Worker.instances.push(this); }
   live() { this.port.onmessage?.({ data: { status: 'live' } }); }
+  ready(upstreamLive?: boolean) { this.port.onmessage?.({ data: { ready: true, upstreamLive } }); }
+  reconnecting() { this.port.onmessage?.({ data: { status: 'reconnecting' } }); }
   closed() { this.port.onmessage?.({ data: { type: 'closed' } }); }
 }
 const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -93,6 +95,35 @@ describe('subscription recovery', () => {
     const status = await listen();
     await vi.advanceTimersByTimeAsync(5_000);
     expect(status).toHaveBeenLastCalledWith('reconnecting');
+    expect(Socket.instances).toHaveLength(1);
+    Socket.instances[0].open();
+    expect(status).toHaveBeenLastCalledWith('live');
+  });
+
+  it('falls back when the port is ready but its upstream never connects', async () => {
+    const status = await listen(), worker = Worker.instances[0];
+    worker.ready();
+    for (let i = 0; i < 4; i++) { await vi.advanceTimersByTimeAsync(1_000); worker.ready(false); }
+    expect(Socket.instances).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(status).toHaveBeenLastCalledWith('reconnecting');
+    expect(Socket.instances).toHaveLength(1);
+    Socket.instances[0].open();
+    expect(status).toHaveBeenLastCalledWith('live');
+  });
+
+  it('keeps a healthy idle upstream through explicit socket heartbeats', async () => {
+    const status = await listen(), worker = Worker.instances[0]; worker.live();
+    for (let i = 0; i < 5; i++) { await vi.advanceTimersByTimeAsync(20_000); worker.ready(true); }
+    expect(Socket.instances).toHaveLength(0);
+    expect(status.mock.calls.map(([s]) => s)).toEqual(['live']);
+  });
+
+  it('bounds upstream reconnection even while the worker port still answers', async () => {
+    const status = await listen(), worker = Worker.instances[0]; worker.live(); worker.reconnecting();
+    for (let i = 0; i < 4; i++) { await vi.advanceTimersByTimeAsync(1_000); worker.ready(false); worker.reconnecting(); }
+    expect(Socket.instances).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(Socket.instances).toHaveLength(1);
     Socket.instances[0].open();
     expect(status).toHaveBeenLastCalledWith('live');

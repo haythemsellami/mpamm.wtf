@@ -13,7 +13,7 @@ worker.onconnect = (event) => {
     const entry = ports.get(id);
     if (!entry) return;
     entry.seen = Date.now();
-    if (data.type === 'ping') { port.postMessage({ ready: true }); return; }
+    if (data.type === 'ping') { port.postMessage({ ready: true, upstreamLive: hub.isLive() }); return; }
     if (data.type === 'close') {
       hub.set(id); ports.delete(id);
       port.onmessage = null;

@@ -53,11 +53,17 @@ function sync(): void {
       const worker = new SharedWorker(new URL('./stream.shared-worker.ts', import.meta.url), { type: 'module', name: 'mpamm-stream-v2' });
       shared = worker;
       worker.onerror = () => { if (shared === worker) fallback(); };
-      worker.port.onmessage = ({ data }: MessageEvent<{ envelope?: StreamEnvelope; status?: StreamStatus }>) => {
+      worker.port.onmessage = ({ data }: MessageEvent<{ envelope?: StreamEnvelope; status?: StreamStatus; upstreamLive?: boolean }>) => {
         if (shared !== worker) return;
-        lastHeard = Date.now();
-        if (startup) clearTimeout(startup);
-        startup = undefined;
+        // Port readiness and ping replies do not prove the upstream socket is
+        // usable. Keep the recovery deadline until a live stream is observed.
+        if (data.status === 'live' || data.envelope || data.upstreamLive === true) {
+          lastHeard = Date.now();
+          if (startup) clearTimeout(startup);
+          startup = undefined;
+        } else if (data.status === 'reconnecting' && !startup) {
+          startup = setTimeout(fallback, 5_000);
+        }
         for (const listener of listeners.values()) {
           if (data.status) listener.status(data.status);
           if (data.envelope && listener.topics.some((topic) => topicKey(topic) === data.envelope!.topic)) listener.message(data.envelope);

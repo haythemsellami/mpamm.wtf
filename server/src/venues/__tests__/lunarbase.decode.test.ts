@@ -227,6 +227,57 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     note: () => {},
   }) as any;
 
+  it.each([
+    { failure: 'size', expired: false }, { failure: 'size', expired: true },
+    { failure: 'leg', expired: false }, { failure: 'leg', expired: true },
+  ])('holds every sibling after a $failure rejection (expired: $expired)', async ({ failure, expired }) => {
+    vi.useFakeTimers();
+    const releases: Array<() => void> = [];
+    try {
+      const adapter = createLunarbaseAdapter();
+      await adapter.discover(stub(false));
+      const ctx = stub(false, ZERO_SLOT); ctx.note = vi.fn();
+      ctx.pricer.tokenForUsd = (_token: string, size: number) => {
+        if (failure === 'size' && size === 1000) throw new Error('sizing unavailable');
+        return size;
+      };
+      ctx.client.readContract = async ({ functionName, args }: any) => {
+        if (failure === 'leg' && functionName === 'quoteXToY' && args[0] === 100n * 10n ** 18n) {
+          return [100n, 0n, undefined]; // A malformed decoded fee rejects after the read.
+        }
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return [100n, 0n, 0n];
+      };
+      const runner = new QuoteRunner();
+      let task!: Promise<QuoteRow[]>, settled = false;
+      const result = runner.run('lunarbase', 10, (quoteSignal) => (task = adapter.quote!({ ...ctx, quoteSignal }, [100, 1000], 501n)), []);
+      const outcome = result.then((value) => { settled = true; return value; }, (error) => { settled = true; return error; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(releases).toHaveLength(failure === 'size' ? 2 : 3);
+      expect(settled).toBe(false);
+      expect(ctx.note).not.toHaveBeenCalled();
+      const next = vi.fn(async () => []);
+      expect(await runner.run('lunarbase', 10, next, [])).toEqual([]);
+      expect(next).not.toHaveBeenCalled();
+      if (expired) { await vi.advanceTimersByTimeAsync(9); expect(await outcome).toEqual([]); }
+      releases[0](); await vi.advanceTimersByTimeAsync(0);
+      expect(await runner.run('lunarbase', 10, next, [])).toEqual([]);
+      expect(next).not.toHaveBeenCalled();
+      expect(ctx.note).not.toHaveBeenCalled();
+      for (const release of releases) release();
+      await expect(task).rejects.toMatchObject(expired ? { name: 'AbortError' } : failure === 'size' ? { message: 'sizing unavailable' } : { name: 'TypeError' });
+      await outcome;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
+      expect(ctx.note).not.toHaveBeenCalled();
+      await runner.run('lunarbase', 10, next, []);
+      expect(next).toHaveBeenCalledOnce();
+    } finally {
+      for (const release of releases) release();
+      vi.useRealTimers();
+    }
+  });
+
   it.each(['valid', 'invalid', 'failed'] as const)('discards canceled %s gate results without changing shared state or releasing unsettled legs', async (gate) => {
     vi.useFakeTimers();
     try {
