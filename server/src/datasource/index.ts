@@ -16,12 +16,16 @@ export interface DataSource {
   start(): Promise<void>;
   stop(): void | Promise<void>;
   getState(): MarketState;
+  /** False until persisted history is available to dashboard snapshots. */
+  isReady?(): boolean;
   manageQuoteDemand?(): void;
   watchQuotes?(scope?: QuoteScope): () => void;
   getQuotes(): QuoteSnapshot;
   /** Complete matrix on demand. Fresh stream handoffs bypass cached results
    * so an in-flight scoped frame cannot follow the initial full snapshot. */
   fullQuoteSnapshot?(fresh?: boolean): Promise<QuoteSnapshot>;
+  /** Whether the current frame completed every requested adapter. */
+  quoteSnapshotComplete?(): boolean;
   getFills(): Fill[];
   getVolume(): DailyVolume[];
   /** Historical fills query (DB-backed for live, in-memory for sim). */

@@ -21,6 +21,39 @@ const contextFor = (call: unknown, multicall: unknown) => ({
 }) as unknown as AdapterContext;
 
 describe('Metric read-only helper', () => {
+  it.each([false, true])('shares concurrent plans without mixing their results (unsupported: %s)', async (unsupported) => {
+    const call = vi.fn(async () => {
+      if (unsupported) throw new Error('creation calls unsupported');
+      return { data: encodeAbiParameters(abi, [Array.from({ length: SEED_POOLS.length * 6 }, (_, i) => result(i % 2 === 0))]) };
+    });
+    const multicall = vi.fn(async ({ contracts }: any) => contracts.map(contractResult));
+    const ctx = contextFor(call, multicall), adapter = createMetricAdapter();
+    await adapter.discover(ctx); multicall.mockClear();
+    const sizes = [[100], [100, 1000]];
+    const actual = await Promise.all(sizes.map((size) => adapter.quote!(ctx, size, 123n, new Set(['MON/USDC']))));
+    expect(call).toHaveBeenCalledOnce();
+    expect(multicall).toHaveBeenCalledTimes(unsupported ? 4 : 0);
+    const legacy = { ...ctx, config: { ...ctx.config, metricBatchQuote: false } };
+    for (let i = 0; i < sizes.length; i++) {
+      const expected = await adapter.quote!(legacy, sizes[i], 123n, new Set(['MON/USDC']));
+      expect(actual[i].map(({ ts, ...row }) => row)).toEqual(expected.map(({ ts, ...row }) => row));
+    }
+  });
+
+  it('waits for an already-running unsupported probe before serving a later plan', async () => {
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const call = vi.fn(async () => { entered(); await held; throw new Error('unsupported'); });
+    const ctx = contextFor(call, async ({ contracts }: any) => contracts.map(contractResult));
+    const adapter = createMetricAdapter(); await adapter.discover(ctx);
+    const first = adapter.quote!(ctx, [100], 123n);
+    await started;
+    const second = adapter.quote!(ctx, [100, 1000], 123n);
+    release(); await Promise.all([first, second]);
+    expect(call).toHaveBeenCalledOnce();
+  });
+
   it('preserves signed deltas, per-leg failures and the requested block', async () => {
     const call = vi.fn(async (_request: unknown) => ({ data: encodeAbiParameters(abi, [[result(true), { success: false, amount0Delta: 0n, amount1Delta: 0n }]]) }));
     const actual = await metricBatchQuote({ call } as unknown as PublicClient, ROUTER, [{ pool: SEED_POOLS[0], provider, legs: [

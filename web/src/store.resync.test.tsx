@@ -44,9 +44,34 @@ beforeEach(() => {
     return () => {};
   });
 });
-afterEach(async () => { await act(async () => root.unmount()); document.body.replaceChildren(); });
+afterEach(async () => { await act(async () => root.unmount()); document.body.replaceChildren(); vi.useRealTimers(); });
 
 describe('state and quote history demand', () => {
+  it('rejects cached state older than either bootstrap or the latest streamed state', async () => {
+    const bootstrap = await vi.mocked(api.fetchMarkets)(); bootstrap.state.block = 100;
+    await mount();
+    await act(async () => message({ ch: 'state', data: { ...bootstrap.state, block: 50, monUsd: 99 } }));
+    expect(dashboard.state).toMatchObject({ block: 100, monUsd: 1 });
+    await act(async () => message({ ch: 'state', data: { ...bootstrap.state, block: 101, monUsd: 2 } }));
+    await act(async () => message({ ch: 'state', data: { ...bootstrap.state, block: 100, monUsd: 99 } }));
+    expect(dashboard.state).toMatchObject({ block: 101, monUsd: 2 });
+  });
+
+  it.each(['markouts', 'volume'] as const)('retries cold %s history without requiring a stream reconnect', async (tab) => {
+    vi.useFakeTimers(); window.history.replaceState(null, '', `/${tab}`);
+    const snapshot = await vi.mocked(api.fetchMarkets)();
+    snapshot.volume = [{ utcDay: '2026-09-16', byVenue: { venue: { usd: 123, swaps: 1 } }, partial: false }];
+    vi.mocked(api.fetchMarkets).mockClear().mockRejectedValueOnce(new Error('503 warming')).mockResolvedValue(snapshot);
+    await mount();
+    await act(async () => { status('live'); message({ ch: 'fill', data: fill('during-startup') }); });
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(api.fetchMarkets).toHaveBeenCalledTimes(2);
+    if (tab === 'volume') expect(dashboard.volume).toEqual(snapshot.volume);
+    else expect(dashboard.fills.map((f) => f.id)).toEqual(['old', 'during-startup']);
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(api.fetchMarkets).toHaveBeenCalledTimes(2);
+  });
+
   it('retains the last catalog on unchanged ticks, accepts changes and accepts an empty catalog', async () => {
     const bootstrap = await vi.mocked(api.fetchMarkets)();
     bootstrap.state.quoteMarkets = { venue: ['MON/USDC'] };

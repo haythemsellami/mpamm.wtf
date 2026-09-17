@@ -135,6 +135,13 @@ describe('live startup archive gate', () => {
       }
       expect(source.quoteScopes.size).toBe(0);
       expect(source.fullSnapshotPending).toBeUndefined();
+      for (const path of ['/api/bootstrap?volume=1', '/api/fills']) {
+        const response = await fetch(origin + path);
+        expect(response.status).toBe(503);
+        expect(response.headers.get('retry-after')).toBe('1');
+      }
+      source.historyReady = true;
+      for (const path of ['/api/bootstrap?volume=1', '/api/fills']) expect((await fetch(origin + path)).status).toBe(200);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       source.store.close();
@@ -349,6 +356,35 @@ describe('live startup archive gate', () => {
     } finally { release(); source.store.close(); }
   });
 
+  it.each(['recovery', 'timeout'] as const)('holds an incomplete full matrix through deadlines and busy slots until %s', async (mode) => {
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.schedulePostQuoteMaintenance = vi.fn(); source.manageQuoteDemand();
+    const held = deferred<QuoteRow[]>();
+    const healthy = adapters[0].quote!;
+    vi.useFakeTimers();
+    try {
+      await poll(100n);
+      adapters[0].quote = vi.fn(() => held.promise);
+      let complete = false;
+      const snapshot = source.fullQuoteSnapshot(true).then((value: unknown) => { complete = true; return value; });
+      const result = snapshot.then((value: unknown) => value, (error: Error) => error);
+      const first = poll(101n); await vi.advanceTimersByTimeAsync(250); await first;
+      expect(source.quoteSnapshotComplete()).toBe(false); expect(complete).toBe(false);
+      await poll(102n);
+      expect(source.quoteSnapshotComplete()).toBe(false); expect(complete).toBe(false);
+      if (mode === 'timeout') {
+        await vi.advanceTimersByTimeAsync(2_750);
+        expect(await result).toMatchObject({ message: 'quote snapshot unavailable' });
+      } else {
+        held.resolve([]); await vi.advanceTimersByTimeAsync(0);
+        adapters[0].quote = healthy;
+        await poll(103n);
+        expect(source.quoteSnapshotComplete()).toBe(true);
+        expect(await result).toMatchObject({ block: 103 });
+      }
+    } finally { held.resolve([]); await vi.advanceTimersByTimeAsync(0); vi.useRealTimers(); source.store.close(); }
+  });
+
   it('warms hot loops while archive verification is still pending, then starts deep workers', async () => {
     const { source, archiveProbe, headWatcher } = await setup();
     const started = source.start();
@@ -357,6 +393,7 @@ describe('live startup archive gate', () => {
       expect(source.poll).toHaveBeenCalledOnce();
       expect(source.poll).toHaveBeenCalledWith(100n, expect.objectContaining({ blockNumber: 100n, source: 'http', coalescedBlocks: 0 }));
       expect(headWatcher.start).toHaveBeenCalledOnce();
+      expect(source.isReady()).toBe(true);
       expect(source.scheduleTail).toHaveBeenCalledOnce();
     });
     expect(source.backgroundHistory).not.toHaveBeenCalled();

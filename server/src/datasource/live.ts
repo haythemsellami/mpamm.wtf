@@ -918,6 +918,7 @@ export class LiveDataSource extends BaseSource {
     }
 
     await this.initHistory();
+    this.historyReady = true;
     const resetWant = config.backfillReset.trim();
     if (resetWant) adoptLegacyResetMarker(this.store, resetWant, parseBackfillReset(resetWant));
     // The schema/migrations above finish on the main connection first. Every
@@ -1197,6 +1198,9 @@ export class LiveDataSource extends BaseSource {
     return Date.now() - this.quotes.ts <= QUOTE_HISTORY_MS ? this.quotes : { ...this.quotes, rows: [] };
   }
   private quotesFull = false;
+  private historyReady = false;
+  isReady(): boolean { return this.historyReady; }
+  quoteSnapshotComplete(): boolean { return this.quotesFull; }
   private quotePollingStarted = false;
   private fullSnapshotPending?: Promise<QuoteSnapshot>;
   fullQuoteSnapshot(fresh = false): Promise<QuoteSnapshot> {
@@ -2396,7 +2400,7 @@ export class LiveDataSource extends BaseSource {
       coalescedBlocks: trigger.coalescedBlocks,
     };
     this.quotes = { block: this.block, monUsd, ts: emittedAt, rows, frame };
-    this.quotesFull = plan.some((p) => !p.markets);
+    this.quotesFull = plan.some((p) => !p.markets) && requestedAdapters.every((adapter) => completedAdapters.has(adapter));
     this.realtimeFrames.push({ block: this.block, emittedAt, coalescedBlocks: trigger.coalescedBlocks });
     this.realtimeFrames = this.realtimeFrames.filter((f) => f.emittedAt >= emittedAt - REALTIME_WINDOW_MS);
     this.emitMsg({ ch: 'quotes', data: this.quotes });

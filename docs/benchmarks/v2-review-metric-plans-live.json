@@ -1,0 +1,156 @@
+{
+  "measuredAt": "2026-09-17T18:58:07.455Z",
+  "node": "v24.11.1",
+  "block": 105682776,
+  "method": "Actual Metric adapters before (dfb0b10) and after sharing concurrent plans. One BTC/USDC $100 plan and one ETH/USDC $1,000 plan at a fixed live block; identical test sizing anchors. Supported cases execute real constructor calls; unsupported cases inject rejection before RPC and use real oracle/router fallback reads. Counts and exact row equivalence, not a latency benchmark (one sample per case). No transactions.",
+  "samples": [
+    {
+      "version": "before",
+      "unsupported": false,
+      "helperAttempts": 2,
+      "fallbackMulticalls": 0,
+      "elapsedMs": 123.31987500000002,
+      "rows": [
+        [
+          {
+            "venueId": "metric",
+            "market": "BTC/USDC",
+            "sizeUsd": 100,
+            "bidBps": -62.738062738064706,
+            "askBps": -59.69155222886546,
+            "bidPx": 76516.9169169169,
+            "askPx": 76540.37504783773,
+            "spreadBps": 3.046510509199244,
+            "filledFull": true,
+            "feeBps": 0
+          }
+        ],
+        [
+          {
+            "venueId": "metric",
+            "market": "ETH/USDC",
+            "sizeUsd": 1000,
+            "bidBps": 209.00504999999958,
+            "askBps": 213.6428952387126,
+            "bidPx": 2450.161212,
+            "askPx": 2451.274294857291,
+            "spreadBps": 4.637845238713027,
+            "filledFull": true,
+            "feeBps": 0
+          }
+        ]
+      ]
+    },
+    {
+      "version": "after",
+      "unsupported": false,
+      "helperAttempts": 1,
+      "fallbackMulticalls": 0,
+      "elapsedMs": 43.28125,
+      "rows": [
+        [
+          {
+            "venueId": "metric",
+            "market": "BTC/USDC",
+            "sizeUsd": 100,
+            "bidBps": -62.738062738064706,
+            "askBps": -59.69155222886546,
+            "bidPx": 76516.9169169169,
+            "askPx": 76540.37504783773,
+            "spreadBps": 3.046510509199244,
+            "filledFull": true,
+            "feeBps": 0
+          }
+        ],
+        [
+          {
+            "venueId": "metric",
+            "market": "ETH/USDC",
+            "sizeUsd": 1000,
+            "bidBps": 209.00504999999958,
+            "askBps": 213.6428952387126,
+            "bidPx": 2450.161212,
+            "askPx": 2451.274294857291,
+            "spreadBps": 4.637845238713027,
+            "filledFull": true,
+            "feeBps": 0
+          }
+        ]
+      ]
+    },
+    {
+      "version": "before",
+      "unsupported": true,
+      "helperAttempts": 2,
+      "fallbackMulticalls": 4,
+      "elapsedMs": 78.43550000000005,
+      "rows": [
+        [
+          {
+            "venueId": "metric",
+            "market": "BTC/USDC",
+            "sizeUsd": 100,
+            "bidBps": -62.738062738064706,
+            "askBps": -59.69155222886546,
+            "bidPx": 76516.9169169169,
+            "askPx": 76540.37504783773,
+            "spreadBps": 3.046510509199244,
+            "filledFull": true,
+            "feeBps": 0
+          }
+        ],
+        [
+          {
+            "venueId": "metric",
+            "market": "ETH/USDC",
+            "sizeUsd": 1000,
+            "bidBps": 209.00504999999958,
+            "askBps": 213.6428952387126,
+            "bidPx": 2450.161212,
+            "askPx": 2451.274294857291,
+            "spreadBps": 4.637845238713027,
+            "filledFull": true,
+            "feeBps": 0
+          }
+        ]
+      ]
+    },
+    {
+      "version": "after",
+      "unsupported": true,
+      "helperAttempts": 1,
+      "fallbackMulticalls": 4,
+      "elapsedMs": 85.26929200000018,
+      "rows": [
+        [
+          {
+            "venueId": "metric",
+            "market": "BTC/USDC",
+            "sizeUsd": 100,
+            "bidBps": -62.738062738064706,
+            "askBps": -59.69155222886546,
+            "bidPx": 76516.9169169169,
+            "askPx": 76540.37504783773,
+            "spreadBps": 3.046510509199244,
+            "filledFull": true,
+            "feeBps": 0
+          }
+        ],
+        [
+          {
+            "venueId": "metric",
+            "market": "ETH/USDC",
+            "sizeUsd": 1000,
+            "bidBps": 209.00504999999958,
+            "askBps": 213.6428952387126,
+            "bidPx": 2450.161212,
+            "askPx": 2451.274294857291,
+            "spreadBps": 4.637845238713027,
+            "filledFull": true,
+            "feeBps": 0
+          }
+        ]
+      ]
+    }
+  ]
+}

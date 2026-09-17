@@ -17,6 +17,7 @@ export class StreamHub {
   private epoch = '';
   private sequences = new Map<string, number>();
   private latest = new Map<string, StreamEnvelope>();
+  private receivedAt = new Map<string, number>();
   private status?: StreamStatus;
 
   constructor(private readonly url: string) {}
@@ -29,7 +30,10 @@ export class StreamHub {
       if (this.status) listener.status(this.status);
       for (const topic of listener.topics) {
         const cached = this.latest.get(topicKey(topic));
-        if (cached && topic.channel !== 'fill') listener.message(cached);
+        const receivedAt = this.receivedAt.get(topicKey(topic)) ?? -Infinity;
+        if (cached && topic.channel !== 'fill' && this.isLive() && Date.now() - receivedAt <= 5_000
+          && (cached.message.ch !== 'quotes' || Date.now() - cached.message.data.ts <= 60_000)
+          && (cached.message.ch !== 'depth' || Date.now() - cached.message.data.ts <= 5_000)) listener.message(cached);
       }
     } else this.listeners.delete(id);
     if (!this.scheduled) {
@@ -46,7 +50,7 @@ export class StreamHub {
   private sync(): void {
     const topics = new Map<string, StreamTopic>();
     for (const listener of this.listeners.values()) for (const topic of listener.topics) topics.set(topicKey(topic), topic);
-    for (const key of this.latest.keys()) if (!topics.has(key)) { this.latest.delete(key); this.sequences.delete(key); }
+    for (const key of this.latest.keys()) if (!topics.has(key)) { this.latest.delete(key); this.receivedAt.delete(key); this.sequences.delete(key); }
     if (!topics.size) {
       if (this.retry) clearTimeout(this.retry);
       this.retry = undefined;
@@ -71,6 +75,7 @@ export class StreamHub {
     socket.binaryType = 'arraybuffer';
     this.sequences.clear();
     this.latest.clear();
+    this.receivedAt.clear();
     let queue = Promise.resolve();
     let pending = 0;
     socket.onopen = () => { if (this.socket !== socket) return; this.sync(); this.notify('live'); };
@@ -84,7 +89,7 @@ export class StreamHub {
         const envelope = JSON.parse(text) as StreamEnvelope;
         if (envelope.v !== 2 || !envelope.message || !Number.isSafeInteger(envelope.seq)) throw new Error('invalid stream frame');
         if (this.epoch && this.epoch !== envelope.epoch) {
-          this.sequences.clear(); this.latest.clear();
+          this.sequences.clear(); this.latest.clear(); this.receivedAt.clear();
           this.notify('reconnecting'); this.notify('live');
         }
         this.epoch = envelope.epoch;
@@ -99,7 +104,7 @@ export class StreamHub {
           const prior = this.latest.get(envelope.topic);
           if (prior?.message.ch === 'state') envelope.message.data = { ...prior.message.data, ...envelope.message.data };
         }
-        if (envelope.topic !== 'fill') this.latest.set(envelope.topic, envelope);
+        if (envelope.topic !== 'fill') { this.latest.set(envelope.topic, envelope); this.receivedAt.set(envelope.topic, Date.now()); }
         for (const listener of this.listeners.values()) {
           if (listener.topics.some((topic) => topicKey(topic) === envelope.topic)) listener.message(envelope);
         }
@@ -109,6 +114,7 @@ export class StreamHub {
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.socket = undefined;
+      this.latest.clear(); this.receivedAt.clear();
       this.notify('reconnecting');
       this.retry = setTimeout(() => { this.retry = undefined; this.sync(); }, 1_000 + Math.random() * 250);
     };

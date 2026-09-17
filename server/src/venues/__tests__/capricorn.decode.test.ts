@@ -268,6 +268,24 @@ function quoteStubCtx(notes: { code: string; msg: string }[] = []) {
 }
 
 describe('Capricorn quote aggregation across pools on one market', () => {
+  it.each(['getTokens', 'feeBps'])('retains a non-seed catalog market when %s becomes unreadable', async (field) => {
+    const adapter = createCapricornAdapter(), ctx = quoteStubCtx();
+    const read = ctx.client.multicall;
+    let unavailable = false;
+    ctx.client.multicall = async (request: any) => (await read(request)).map((result: any, i: number) => {
+      const call = request.contracts[i];
+      if (call.address.toLowerCase() !== NEW_USDC) return result;
+      if (unavailable && call.functionName === field) return { status: 'failure' };
+      return call.functionName === 'getTokens' ? { status: 'success', result: [TOKENS.USDC.address, TOKENS.WBTC.address] } : result;
+    });
+    await adapter.discover(ctx);
+    await adapter.decode(ctx, { poolCreated: [{ args: { pool: NEW_USDC } }], swap: [] }, () => 0, new Set());
+    expect(adapter.quoteMarkets!()).toContain('BTC/USDC');
+    unavailable = true; await adapter.discover(ctx);
+    expect(adapter.quoteMarkets!()).toContain('BTC/USDC');
+    expect(await adapter.quote!(ctx, [100], 123n, new Set(['BTC/USDC']))).toEqual([]);
+  });
+
   it('retains admitted markets while quote probes fail, and recovers without changing the catalog', async () => {
     const adapter = createCapricornAdapter(), healthy = quoteStubCtx();
     await adapter.discover(healthy);

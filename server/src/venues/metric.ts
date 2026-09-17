@@ -1,4 +1,4 @@
-import { metricBatchQuote } from './metric-quote-batch.js';
+import { metricBatchQuote, type MetricBatchPool } from './metric-quote-batch.js';
 import { parseAbi } from 'viem';
 import type { QuoteRow, Fill, Side, VenueMeta } from '@shared';
 import { TOKENS, assetForToken, baseTokenOf, pairFor } from '@shared';
@@ -187,6 +187,54 @@ export function createMetricAdapter(): VenueAdapter {
   // source swaps against it regardless of whether we can read one.
   let admittedPools: MetricPool[] = [];               // tailed + decodable
   let batchRetryAt = 0;
+  type QuoteResults = Awaited<ReturnType<typeof metricBatchQuote>>;
+  type BatchRequest = { pools: MetricBatchPool[]; fallback: () => Promise<QuoteResults>; resolve: (result: QuoteResults) => void; reject: (error: unknown) => void };
+  type QuoteBatch = { ctx: AdapterContext; block: bigint; requests: BatchRequest[]; started: boolean; settled: Promise<void>; finish: () => void };
+  const quoteBatches = new Set<QuoteBatch>();
+  // Plans from the same frame share one constructor call, preserving each
+  // plan's leg ordering. A failed helper cannot multiply capability probes.
+  const sharedHelper = (ctx: AdapterContext, requestPools: MetricBatchPool[], block: bigint, fallback: BatchRequest['fallback']): Promise<QuoteResults> => new Promise((resolve, reject) => {
+    let batch = [...quoteBatches].find((b) => b.ctx.client === ctx.client && b.ctx.quoteSignal === ctx.quoteSignal && b.block === block);
+    if (batch?.started) {
+      void batch.settled.then(() => {
+        ctx.quoteSignal?.throwIfAborted();
+        return Date.now() < batchRetryAt ? fallback() : sharedHelper(ctx, requestPools, block, fallback);
+      }).then(resolve, reject);
+      return;
+    }
+    if (batch) { batch.requests.push({ pools: requestPools, fallback, resolve, reject }); return; }
+    let finish!: () => void;
+    batch = { ctx, block, requests: [{ pools: requestPools, fallback, resolve, reject }], started: false,
+      settled: new Promise<void>((done) => { finish = done; }), finish: () => finish() };
+    quoteBatches.add(batch);
+    const current = batch;
+    queueMicrotask(() => {
+      current.started = true;
+      void (async (): Promise<QuoteResults[]> => {
+        ctx.quoteSignal?.throwIfAborted();
+        try {
+          const results = await metricBatchQuote(ctx.client, ROUTER, current.requests.flatMap((request) => request.pools), block);
+          ctx.quoteSignal?.throwIfAborted();
+          let offset = 0;
+          return current.requests.map((request) => {
+            const count = request.pools.reduce((total, pool) => total + pool.legs.length, 0);
+            const selected = results.slice(offset, offset + count); offset += count;
+            return selected;
+          });
+        } catch (error) {
+          if (ctx.quoteSignal?.aborted) throw error;
+          const results = await Promise.allSettled(current.requests.map((request) => request.fallback()));
+          ctx.quoteSignal?.throwIfAborted();
+          const failed = results.find((result) => result.status === 'rejected');
+          if (failed?.status === 'rejected') throw failed.reason;
+          batchRetryAt = Date.now() + 60_000;
+          return results.map((result) => (result as PromiseFulfilledResult<QuoteResults>).value);
+        }
+      })().then((results) => { current.requests.forEach((request, i) => request.resolve(results[i])); },
+        (error) => { current.requests.forEach((request) => request.reject(error)); })
+        .finally(() => { quoteBatches.delete(current); current.finish(); });
+    });
+  });
   let pools: MetricPool[] = [];                       // live: quoted
   let byAddr = new Map<string, MetricPool>();         // MONOTONIC decode map
   let discovered = false;
@@ -341,7 +389,7 @@ export function createMetricAdapter(): VenueAdapter {
 
   return {
     venues: () => [METRIC_VENUE],
-    quoteMarkets: () => [...new Set(admittedPools.map((p) => p.market))],
+    quoteMarkets: () => [...new Set([...byAddr.values()].map((p) => p.market))],
     // seed daily volume by replaying Pool.Swap on-chain from the earliest pool's
     // deployment era (WMON/USDC block 65042020 · 2026-03-31). Background — see live.ts.
     backfillFromUtc: '2026-03-31',
@@ -396,21 +444,12 @@ export function createMetricAdapter(): VenueAdapter {
       };
       let qRes: Awaited<ReturnType<typeof legacyQuote>>;
       if (ctx.config.metricBatchQuote && Date.now() >= batchRetryAt && typeof ctx.client.call === 'function') {
-        try {
-          qRes = await metricBatchQuote(ctx.client, ROUTER, selectedPools.flatMap((pool) => {
+          qRes = await sharedHelper(ctx, selectedPools.flatMap((pool) => {
             const selected = calls.filter((call) => call.args[0] === pool.pool);
             return selected.length ? [{ pool: pool.pool, provider: pool.priceProvider, legs: selected.map((call) => ({
               zeroForOne: call.args[1], amount: call.args[2], limit: call.args[3],
             })) }] : [];
-          }), blockNumber);
-        } catch (error) {
-          // Providers can reject creation-form calls. The original block-pinned
-          // path remains available and a cooldown avoids probing every frame.
-          if (ctx.quoteSignal?.aborted) throw error;
-          qRes = await legacyQuote();
-          ctx.quoteSignal?.throwIfAborted();
-          batchRetryAt = Date.now() + 60_000;
-        }
+          }), blockNumber, legacyQuote);
       } else qRes = await legacyQuote();
       if (reportOutage(ctx, qRes)) return [];
 

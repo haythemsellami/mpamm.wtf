@@ -25,6 +25,20 @@ function boot() { vi.stubGlobal('WebSocket', Socket); const hub = new StreamHub(
 afterEach(async () => { for (const hub of hubs.splice(0)) hub.close(); await tick(); vi.unstubAllGlobals(); vi.useRealTimers(); Socket.instances = []; });
 
 describe('shared subscription hub', () => {
+  it.each(['aged', 'disconnected', 'old-quote'] as const)('does not replay a stale cache to a new listener (%s)', async (mode) => {
+    vi.useFakeTimers(); const hub = boot();
+    hub.set('a', { topics: [quoteTopic], message: vi.fn(), status: vi.fn() }); await tick();
+    const socket = Socket.instances[0]; socket.open();
+    const frame = quote(1);
+    if (frame.message.ch === 'quotes') frame.message.data.ts = Date.now() - (mode === 'old-quote' ? 60_001 : 0);
+    socket.emit(frame); await tick();
+    if (mode === 'aged') await vi.advanceTimersByTimeAsync(5_001);
+    if (mode === 'disconnected') socket.close();
+    const later = vi.fn();
+    hub.set('b', { topics: [quoteTopic], message: later, status: vi.fn() });
+    expect(later).not.toHaveBeenCalled();
+  });
+
   it('uses one socket for multiple tabs/components and sends the union only once', async () => {
     const hub = boot();
     const a = vi.fn(), b = vi.fn(), depth = vi.fn();

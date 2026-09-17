@@ -132,6 +132,7 @@ export function startServer(source: DataSource): Server {
   });
 
   app.get('/api/bootstrap', (req, res) => {
+    if (source.isReady?.() === false) return res.setHeader('Retry-After', '1').status(503).json({ error: 'history warming' });
     const { notes: _, ...state } = source.getState();
     res.setHeader('Cache-Control', 'no-store');
     res.json({ state, quotes: { block: state.block, monUsd: state.monUsd, ts: Date.now(), rows: [] }, fills: [], volume: req.query.volume === '1' ? source.getVolume() : [] });
@@ -215,6 +216,7 @@ export function startServer(source: DataSource): Server {
     if (closed) unwatch();
   });
   app.get('/api/fills', (req, res) => {
+    if (source.isReady?.() === false) return res.setHeader('Retry-After', '1').status(503).json({ error: 'history warming' });
     // ?days=N → last N days (from the persisted store); ?limit caps the count.
     const days = positiveNumberParam(req.query.days);
     const sinceMs = days === undefined ? undefined : Date.now() - days * 86_400_000;
@@ -328,6 +330,7 @@ export function startServer(source: DataSource): Server {
 
   const onMessage = (m: StreamMessage) => {
     gateway.onMessage(m);
+    if (m.ch === 'quotes' && source.quoteSnapshotComplete?.() === false) return;
     const legacy = [...clients].filter((ws) => ws.protocol !== STREAM_V2_GZIP && ws.protocol !== STREAM_V2_JSON
       && (m.ch !== 'quotes' || legacyReady.has(ws)));
     if (!legacy.length) return;

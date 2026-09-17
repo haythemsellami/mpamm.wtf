@@ -267,6 +267,24 @@ describe('subscription transport', () => {
 });
 
 describe('legacy snapshot and idle history', () => {
+  it('keeps partial deadline frames on v2 while withholding them from ready legacy sockets', async () => {
+    const source = new Source(); let complete = true;
+    Object.assign(source, { quoteSnapshotComplete: () => complete });
+    const { port } = await boot(source);
+    const v2 = await connect(port, [{ channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false }], STREAM_V2_JSON);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/stream`);
+    const quotes: QuoteSnapshot[] = [];
+    ws.on('message', (data) => { const m = JSON.parse(data.toString()); if (m.ch === 'quotes') quotes.push(m.data); });
+    cleanup.push(() => ws.terminate());
+    await once(ws, 'open'); await waitFor(() => quotes.length === 1);
+    complete = false; source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 2, rows: [] } });
+    await waitFor(() => v2.frames.length === 2);
+    expect(quotes.map((q) => q.block)).toEqual([1]);
+    complete = true; source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 3 } });
+    await waitFor(() => quotes.length === 2);
+    expect(quotes.map((q) => q.block)).toEqual([1, 3]);
+  });
+
   it('withholds scoped frames until the first full snapshot, then streams subsequent quotes', async () => {
     let resolve!: (quotes: QuoteSnapshot) => void;
     const source = new Source();

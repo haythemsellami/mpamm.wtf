@@ -94,10 +94,11 @@ export function createUniswapAdapter(): VenueAdapter {
   // not a per-pair gap — name it instead of vanishing (venues/quote-health.ts).
   const reportOutage = createQuoteOutageReporter(UNI_VENUE.name);
   let markets: UniMarket[] = [];
+  const discoveredMarkets = new Set<string>();
 
   return {
     venues: () => [UNI_VENUE],
-    quoteMarkets: () => [...new Set(markets.map((m) => m.market))],
+    quoteMarkets: () => [...discoveredMarkets],
 
     async discover(ctx: AdapterContext) {
       // candidate = every registered pair × standard hookless tier
@@ -139,6 +140,7 @@ export function createUniswapAdapter(): VenueAdapter {
         baseDec: cand.base.dec, quoteDec: cand.quote.dec,
         baseTok: cand.base.tok, quoteTok: cand.quote.tok,
       }));
+      for (const market of markets) discoveredMarkets.add(market.market);
       ctx.note('venue.discovery', `Uniswap v4: ${markets.length} baseline pool(s) (deepest hookless tier per pair)`);
     },
 

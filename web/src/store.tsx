@@ -118,6 +118,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }));
   const [conn, setConn] = useState<'connecting' | 'live' | 'reconnecting'>('connecting');
   const [state, setState] = useState<MarketState | null>(null);
+  const stateBlockRef = useRef(0);
   const [quotes, setQuotes] = useState<QuoteSnapshot | null>(null);
   const [volume, setVolume] = useState<DailyVolume[]>([]);
   const [fills, setFills] = useState<Fill[]>([]);
@@ -284,9 +285,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const pendingFills: { current: Fill[] } = { current: [] };
     let snapshotRequest = 0;
     let resyncing = false;
+    let snapshotRetry: ReturnType<typeof setTimeout> | undefined;
     const loadSnapshot = async () => {
+      if (snapshotRetry) clearTimeout(snapshotRetry);
+      snapshotRetry = undefined;
       const request = ++snapshotRequest;
       resyncing = true;
+      let loaded = false;
       try {
         // markets snapshot + the persisted historical fills window (the tape /
         // markouts / leaderboard operate on real history, not a live buffer).
@@ -295,9 +300,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // (fetching 30d of raw fills silently truncated at the 20k cap).
         const [m, hist] = await Promise.all([
           fetchMarkets(ui.tab === 'volume'),
-          ui.tab === 'markouts' ? fetchFills(1, 5000).catch(() => null) : Promise.resolve(null),
+          ui.tab === 'markouts' ? fetchFills(1, 5000) : Promise.resolve(null),
         ]);
         if (!mounted.v || request !== snapshotRequest) return;
+        stateBlockRef.current = Math.max(stateBlockRef.current, m.state.block);
         setState((previous) => previous && previous.block > m.state.block ? { ...m.state, ...previous, venues: m.state.venues } : m.state);
         if (!quotesRef.current) { setQuotes(m.quotes); quotesRef.current = m.quotes; }
         if (ui.tab === 'volume') setVolume(m.volume);
@@ -312,9 +318,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           hist === null ? previous : [...hist].reverse()));
         if (ui.tab === 'exec') reseed();
         setFrame((f) => f + 1);
-      } catch { /* retried on the next WS connect; streamed fills remain visible */ }
+        loaded = true;
+      } catch {
+        // The socket can be live before persisted history is ready. Retry
+        // independently of reconnects and keep buffering deltas until success.
+        if (mounted.v && request === snapshotRequest) snapshotRetry = setTimeout(loadSnapshot, 1_000);
+      }
       finally {
-        if (request === snapshotRequest) { resyncing = false; pendingFills.current = []; }
+        if (loaded && request === snapshotRequest) { resyncing = false; pendingFills.current = []; }
       }
     };
     loadSnapshot();
@@ -325,6 +336,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     if (ui.tab === 'volume') topics.push({ channel: 'volume' });
     const dispose = connectDashboardStream(topics, (msg) => {
       if (msg.ch === 'state') {
+        if (msg.data.block < stateBlockRef.current) return;
+        stateBlockRef.current = msg.data.block;
         setState((prev) => mergeState(prev, msg.data));
         if (msg.data.venues) adoptVenues(msg.data.venues);
       }
@@ -348,7 +361,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       if (s === 'live' && wasDropped.v) { wasDropped.v = false; loadSnapshot(); }
     });
 
-    return () => { mounted.v = false; dispose(); };
+    return () => { mounted.v = false; if (snapshotRetry) clearTimeout(snapshotRetry); dispose(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ui.tab, ui.pair, ui.size, baselineOn]);
 
