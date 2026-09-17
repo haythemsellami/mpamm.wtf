@@ -162,8 +162,15 @@ export const config = {
   /** Periodic re-discovery cadence (ms) — re-runs each adapter's discover() so
    *  mid-run/missed pool state self-heals from its authoritative source. */
   rediscoverMs: num('REDISCOVER_MS', 600_000),
-  /** Max same-day gap to fill from getLogs on restart (else start at tip). */
-  gapFillMaxBlocks: num('GAPFILL_MAX_BLOCKS', 200000),
+  /** Max tail-cursor gap to gap-fill on restart (else cold-start at tip — the
+   *  hole's fills are LOST). UNLIMITED by default: the windowed tail
+   *  (TAIL_WINDOW_BLOCKS) bounds gap-fill memory per window, so an outage gap
+   *  of any size only costs catch-up time — the old 200k default silently
+   *  dropped a ~216k-block hole after the 2026-09-16 crash-loop and the day's
+   *  volume stayed undercounted. Set explicitly ONLY on a range-limited RPC
+   *  that cannot serve old logs, and treat the tail.gap.skipped warning it
+   *  raises as "fills were lost" (recoverable via BACKFILL_RESET). */
+  gapFillMaxBlocks: num('GAPFILL_MAX_BLOCKS', Number.MAX_SAFE_INTEGER),
   /** Decoded fills are persisted; rows older than this are pruned. The
    *  leaderboard's widest window is 30d, so keep a little more. */
   fillsRetentionDays: num('FILLS_RETENTION_DAYS', 35),

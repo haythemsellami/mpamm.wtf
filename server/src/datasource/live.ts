@@ -344,6 +344,24 @@ export function checkArchivePending(
   io.announce(`${a.name} ${a.market}: CEX price archive for ${a.day} published — markouts resumed`);
 }
 
+/** Resume the persisted tail cursor (gap-fill the hole), or cold-start at the
+ * tip and LOSE every fill inside the hole.
+ *
+ * Resume is correct for a gap of ANY size: the windowed tail
+ * (TAIL_WINDOW_BLOCKS) bounds gap-fill memory per window and commits the
+ * cursor per window, so gap size only buys catch-up time. The 200k default
+ * cap predates that windowing and silently dropped a ~216k-block outage hole
+ * on 2026-09-17 — the fix deploy cold-started past it and the day's volume
+ * stayed undercounted (POE alone lost $183k of real, on-chain swaps). The
+ * cap survives only as an explicit operator brake for a range-limited RPC;
+ * tripping it loses the hole's fills (warned, recoverable via
+ * BACKFILL_RESET). Pure so the boundary is unit-testable (gap-fill.test.ts).
+ */
+export function shouldGapFill(lpb: string | undefined, head: bigint, maxBlocks: number): boolean {
+  if (!lpb) return false; // first boot — nothing to resume, not a loss
+  return head - BigInt(lpb) <= BigInt(maxBlocks);
+}
+
 /** Gap-fill catch-up lifecycle for the live tail (family B of #6).
  *
  * On boot the tail resumes from the persisted cursor and raises a sticky
@@ -1266,24 +1284,27 @@ export class LiveDataSource extends BaseSource {
     // an authoritative SET to any newly closed day.
     this.deepEnd = head;
     const lpb = this.store.getMeta('lastProcessedBlock');
-    // gap-fill ANY bounded gap — including across UTC midnight: decoded fills
-    // carry real block timestamps and dayFor() buckets them onto the right
-    // (possibly just-closed) day; countedIds/fill-id dedup keeps it idempotent.
+    // gap-fill ANY gap — including across UTC midnight and multi-hour outages:
+    // decoded fills carry real block timestamps and dayFor() buckets them onto
+    // the right (possibly just-closed) day; countedIds/fill-id dedup keeps it
+    // idempotent, and the windowed tail bounds the memory a huge gap uses.
     // The old same-day condition silently dropped the gap's fills on every
-    // midnight-crossing restart.
-    if (lpb && head - BigInt(lpb) <= BigInt(config.gapFillMaxBlocks)) {
-      this.lastBlock = BigInt(lpb);
+    // midnight-crossing restart; the 200k-size condition silently dropped the
+    // 2026-09-17 outage hole (see shouldGapFill).
+    const gap = lpb ? head - BigInt(lpb) : 0n;
+    if (shouldGapFill(lpb, head, config.gapFillMaxBlocks)) {
+      this.lastBlock = BigInt(lpb!);
       // remember this exact line so the tail can retract it once it catches up to
       // bootHead (checkGapFill, family B of #6); the count is fixed here while the
       // cursor keeps moving, so the string is stored rather than rebuilt.
-      const resume = `resuming: gap-filling ${head - BigInt(lpb)} block(s) since last run`;
+      const resume = `resuming: gap-filling ${gap} block(s) since last run`;
       this.note('tail.resume', resume);
       this.gapResume.msg = resume;
     } else {
       this.lastBlock = head;
       // two different events: a bounded gap was skipped (fills in it are lost
       // for good, so it is a warning) versus a first boot with nothing to resume.
-      if (lpb) this.note('tail.gap.skipped', `gap exceeds ${config.gapFillMaxBlocks} blocks — resuming at tip (interim fills not decoded)`);
+      if (lpb) this.note('tail.gap.skipped', `gap of ${gap} block(s) exceeds GAPFILL_MAX_BLOCKS=${config.gapFillMaxBlocks} — resuming at tip; the gap's fills are NOT decoded (recover with BACKFILL_RESET)`);
       else this.note('tail.resume', 'cold start — today builds forward from now');
     }
   }
