@@ -2333,8 +2333,10 @@ export class LiveDataSource extends BaseSource {
     // prod heap on every restart boot (2026-09-16). A window commits
     // atomically and the next cycle resumes from the new cursor; steady-state
     // tails (1-2 blocks/cycle) never reach the cap. 1000 blocks ≈ 10 getLogs
-    // chunks per source (the RPC caps ranges at ~100 blocks).
-    const to = head - from < BigInt(TAIL_WINDOW_BLOCKS) ? head : from + BigInt(TAIL_WINDOW_BLOCKS);
+    // chunks per source (the RPC caps ranges at ~100 blocks). NB getLogs
+    // ranges are INCLUSIVE of both ends — the -1 keeps the capped window at
+    // exactly TAIL_WINDOW_BLOCKS blocks, not one more.
+    const to = head - from < BigInt(TAIL_WINDOW_BLOCKS) ? head : from + BigInt(TAIL_WINDOW_BLOCKS) - 1n;
 
     // Fetch every adapter's declared log sources into a per-adapter bundle. Track
     // whether any REQUIRED (fill-producing) source failed: if so we must NOT
