@@ -26,9 +26,12 @@ export class StreamHub {
 
   set(id: string, listener?: HubListener): void {
     if (listener) {
+      const previous = this.listeners.get(id);
+      const retained = new Set(previous?.topics.map(topicKey));
       this.listeners.set(id, listener);
-      if (this.status) listener.status(this.status);
+      if (!previous && this.status) listener.status(this.status);
       for (const topic of listener.topics) {
+        if (retained.has(topicKey(topic))) continue;
         const cached = this.latest.get(topicKey(topic));
         const receivedAt = this.receivedAt.get(topicKey(topic)) ?? -Infinity;
         if (cached && topic.channel !== 'fill' && this.isLive() && Date.now() - receivedAt <= 5_000

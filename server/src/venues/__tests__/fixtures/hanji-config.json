@@ -1,0 +1,121 @@
+{
+  "recordedAt": "2026-09-18T09:39:07.395Z",
+  "block": 105857551,
+  "method": "Actual getConfig multicall at one pinned Monad block; no transactions.",
+  "markets": [
+    {
+      "market": "MON/USDC",
+      "address": "0xC35b1Ca1a2C398A21df5783b3a5eA6A2D56f298F",
+      "result": [
+        "1000000000000000000",
+        "1",
+        "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "1",
+        "1",
+        "0x33A247C5c599045Ad87F13E6c43Bf744b5896221",
+        "0x52C17a34a80a01F205815C92E4D2121628b5F6f4",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "ETH/USDC",
+      "address": "0xAC652E05Ac4B2e9eCaE5C65595E4E4E2734F61Cc",
+      "result": [
+        "100000000000000",
+        "1",
+        "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0xe5F9306D13372F97f26543923332b004Da782669",
+        "0x08Cb8796ebC9cA7DE40694Af8A649ff103b4F271",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "cbBTC/USDC",
+      "address": "0xbc87C6e5A9788404C143D42474508956267B253D",
+      "result": [
+        "100",
+        "1",
+        "0xd18B7EC58Cdf4876f6AFebd3Ed1730e4Ce10414b",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x5D98f1dB7696A4b144a7d0A3e434A3717A368bB2",
+        "0xA953a55c0bE4E3678BffEc307A914E289Fc7e164",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "MON/ETH",
+      "address": "0xBe717AEdc2cdc0a4d3903B7A6a70691942E72793",
+      "result": [
+        "100000000000000",
+        "100",
+        "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+        "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+        "1",
+        "1",
+        "0x62977fe0da960a80d399620EA5569e6559929386",
+        "0x8869825480810B12c98e20a0669DD888683d7911",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "cbBTC/MON",
+      "address": "0x77ED4fcB978fa0CE78799064cB38D12FE7c3ce7d",
+      "result": [
+        "1",
+        "10000000000",
+        "0xd18B7EC58Cdf4876f6AFebd3Ed1730e4Ce10414b",
+        "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
+        "1",
+        "0",
+        "0x705C7bCb0943e6D472dDc432aF00337e509873B2",
+        "0x106422A26D3194E6a7AFD79D8cC344FC906e8Cc9",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "cbBTC/ETH",
+      "address": "0x8A89f08d3B5aB37f634f2B4dCf2DB29Ecf9938c7",
+      "result": [
+        "1",
+        "1000000",
+        "0xd18B7EC58Cdf4876f6AFebd3Ed1730e4Ce10414b",
+        "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242",
+        "0",
+        "0",
+        "0xc071cE4e12c5DDE00334b4276f29a852e1CD5711",
+        "0xb291c65723E8e175365d313eC12A8787d5CE66E9",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    }
+  ]
+}

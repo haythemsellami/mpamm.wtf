@@ -53,7 +53,7 @@ function sync(): void {
       const worker = new SharedWorker(new URL('./stream.shared-worker.ts', import.meta.url), { type: 'module', name: 'mpamm-stream-v2' });
       shared = worker;
       worker.onerror = () => { if (shared === worker) fallback(); };
-      worker.port.onmessage = ({ data }: MessageEvent<{ envelope?: StreamEnvelope; status?: StreamStatus; upstreamLive?: boolean }>) => {
+      worker.port.onmessage = ({ data }: MessageEvent<{ id?: string; ids?: string[]; envelope?: StreamEnvelope; status?: StreamStatus; upstreamLive?: boolean }>) => {
         if (shared !== worker) return;
         // Port readiness and ping replies do not prove the upstream socket is
         // usable. Keep the recovery deadline until a live stream is observed.
@@ -64,7 +64,10 @@ function sync(): void {
         } else if (data.status === 'reconnecting' && !startup) {
           startup = setTimeout(fallback, 5_000);
         }
-        for (const listener of listeners.values()) {
+        const recipients = data.envelope ? data.ids ?? [] : data.id === undefined ? [] : [data.id];
+        for (const id of recipients) {
+          const listener = listeners.get(id);
+          if (!listener) continue;
           if (data.status) listener.status(data.status);
           if (data.envelope && listener.topics.some((topic) => topicKey(topic) === data.envelope!.topic)) listener.message(data.envelope);
         }
@@ -79,9 +82,9 @@ function sync(): void {
     } catch { fallback(); }
   }
   if (!shared) { fallback(); return; }
-  const topics = new Map<string, StreamTopic>();
-  for (const listener of listeners.values()) for (const topic of listener.topics) topics.set(topicKey(topic), topic);
-  shared.port.postMessage({ type: 'subscribe', topics: [...topics.values()] });
+  // Preserve local consumer identities so a joining component receives its
+  // own cached snapshot without replaying it to existing components.
+  shared.port.postMessage({ type: 'subscribe', listeners: [...listeners].map(([id, listener]) => ({ id, topics: listener.topics })) });
 }
 
 function scheduleSync(): void {

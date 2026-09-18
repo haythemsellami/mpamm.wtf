@@ -17,9 +17,13 @@ class Worker {
   onerror?: () => void;
   port = { postMessage: vi.fn(), close: vi.fn(), start: vi.fn(), onmessage: undefined as ((event: { data: unknown }) => void) | undefined };
   constructor() { Worker.instances.push(this); }
-  live() { this.port.onmessage?.({ data: { status: 'live' } }); }
+  status(status: string) {
+    const subscription = this.port.postMessage.mock.calls.map(([message]) => message).findLast((message) => message.type === 'subscribe');
+    for (const listener of subscription?.listeners ?? []) this.port.onmessage?.({ data: { id: listener.id, status } });
+  }
+  live() { this.status('live'); }
   ready(upstreamLive?: boolean) { this.port.onmessage?.({ data: { ready: true, upstreamLive } }); }
-  reconnecting() { this.port.onmessage?.({ data: { status: 'reconnecting' } }); }
+  reconnecting() { this.status('reconnecting'); }
   closed() { this.port.onmessage?.({ data: { type: 'closed' } }); }
 }
 const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -52,6 +56,26 @@ async function listen() {
 }
 
 describe('subscription recovery', () => {
+  it('delivers worker snapshots only to the intended local consumer', async () => {
+    const { subscribeTopics } = await import('./subscriptions');
+    const first = vi.fn(), second = vi.fn();
+    const topics = [{ channel: 'state' as const }];
+    const dispose = subscribeTopics(topics, first); clean.push(dispose);
+    clean.push(subscribeTopics(topics, second)); await tick();
+    const worker = Worker.instances[0];
+    const request = worker.port.postMessage.mock.calls.at(-1)![0];
+    const [a, b] = request.listeners;
+    expect(a.topics).toEqual(topics); expect(b.topics).toEqual(topics);
+    const envelope = { topic: 'state', message: { ch: 'state', data: { block: 1 } } };
+    worker.port.onmessage?.({ data: { ids: [a.id], envelope } });
+    expect(first).toHaveBeenCalledOnce(); expect(second).not.toHaveBeenCalled();
+    worker.port.onmessage?.({ data: { ids: [b.id], envelope } });
+    expect(first).toHaveBeenCalledOnce(); expect(second).toHaveBeenCalledOnce();
+    dispose();
+    worker.port.onmessage?.({ data: { ids: [a.id], envelope } });
+    expect(first).toHaveBeenCalledOnce(); expect(second).toHaveBeenCalledOnce();
+  });
+
   it.each(['error', 'heartbeat'] as const)('signals a gap before replacing a worker after %s', async (failure) => {
     const first = await listen(), second = await listen();
     const worker = Worker.instances[0];
