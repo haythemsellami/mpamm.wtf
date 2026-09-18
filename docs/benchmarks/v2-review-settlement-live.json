@@ -1,0 +1,17 @@
+{
+  "measuredAt": "2026-09-17T18:38:23.209Z",
+  "node": "v24.11.1",
+  "method": "Read-only Lunarbase check at one live block. Force a local sizing failure while holding completion of two actual pool-quote reads; verify a 20ms deadline cannot release the adapter slot before both settle. Fixed sizing anchor, no transactions. This checks cancellation/settlement, not executable prices or latency.",
+  "block": 105678864,
+  "completedLegReads": 2,
+  "deadlineReturnedEmpty": true,
+  "slotHeldUntilSiblingsSettled": true,
+  "canceledTaskRejected": true,
+  "slotReusableAfterSettlement": true,
+  "paused": true,
+  "quotedRows": 0,
+  "catalog": [
+    "MON/USDC"
+  ],
+  "retainedFillSources": 1
+}

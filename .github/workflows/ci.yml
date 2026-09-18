@@ -57,6 +57,23 @@ jobs:
       - name: Build frontend
         run: npm -w web run build
 
+      - name: Verify Metric helper bytecode
+        run: node server/scripts/compile-metric-helper.mjs --check
+
+      - name: Install browser for dashboard regressions
+        run: npx playwright install --with-deps chromium
+
+      - name: Dashboard browser regressions (simulated data)
+        run: npm -w web run test:e2e
+
+      - name: Upload browser failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-browser-failures
+          path: web/test-results
+          if-no-files-found: ignore
+
       # Build the production image so a broken Dockerfile fails CI.
       - name: Build Docker image
         run: docker build -t mpamm:ci .

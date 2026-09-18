@@ -49,6 +49,7 @@ export interface BreakerEndpoint {
   /** Traffic-class transports for this same endpoint. They share active
    * endpoint selection and health, but not the default HTTP batch queue. */
   lanes?: Record<string, RpcRequestFn>;
+  scopedQuote?: (key: string, signal: AbortSignal) => RpcRequestFn;
 }
 
 /** Public shape served on /api/markets (shared MarketState.rpc). */
@@ -224,15 +225,19 @@ export class RpcBreaker {
   /** One request through the active endpoint; on a threshold-crossing failure
    *  the request transparently retries on the next endpoint(s), at most one
    *  full rotation. Non-transport errors pass through untouched. */
-  async request(args: { method: string; params?: unknown }, lane = 'default'): Promise<unknown> {
+  async request(args: { method: string; params?: unknown }, lane = 'default', scope?: { signal: AbortSignal; key: string }): Promise<unknown> {
     let hops = 0;
     for (;;) {
       const idx = this.active;
       const generation = this.stateGeneration;
       try {
-        await this.ensureChain(idx);
+        scope?.signal.throwIfAborted();
         const endpoint = this.endpoints[idx];
-        const res = await (endpoint.lanes?.[lane] ?? endpoint.request)(args);
+        const request = scope && endpoint.scopedQuote ? endpoint.scopedQuote(scope.key, scope.signal) : (endpoint.lanes?.[lane] ?? endpoint.request);
+        await this.ensureChain(idx, request, scope?.signal);
+        scope?.signal.throwIfAborted();
+        const res = await request(args);
+        scope?.signal.throwIfAborted();
         // A late result from an endpoint serving an older generation is still
         // usable by non-cursor callers, but it proves nothing about the active
         // endpoint and must not clear its failure/outage state.
@@ -247,6 +252,7 @@ export class RpcBreaker {
         }
         return res;
       } catch (e) {
+        scope?.signal.throwIfAborted();
         if (e instanceof WrongChainEndpointError) {
           if (idx === this.active && generation === this.stateGeneration) this.advance();
           if ((this.active === idx && generation === this.stateGeneration) || ++hops >= this.endpoints.length) throw e;
@@ -424,10 +430,11 @@ export class RpcBreaker {
   /** Verify an endpoint before it serves traffic after being unreachable at
    *  boot. This runs through the raw endpoint, not the breaker, so a wrong-chain
    *  answer can never satisfy the caller's original request. */
-  private async ensureChain(idx: number): Promise<void> {
+  private async ensureChain(idx: number, request: RpcRequestFn, signal?: AbortSignal): Promise<void> {
     if (this.expectedChainId === undefined || this.endpointHealth[idx] === 'valid') return;
     if (this.endpointHealth[idx] === 'wrong-chain') throw new WrongChainEndpointError(`${this.endpoints[idx].label} is on the wrong chain`);
-    const id = await this.endpoints[idx].request({ method: 'eth_chainId' });
+    const id = await request({ method: 'eth_chainId' });
+    signal?.throwIfAborted();
     const chainId = Number(BigInt(String(id)));
     if (chainId !== this.expectedChainId) {
       this.markWrongChain(idx, chainId, 'after recovery');

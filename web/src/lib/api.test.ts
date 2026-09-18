@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DepthSnapshot } from '@shared';
-import { HIDDEN_GRACE_MS, connectDepth, connectStream } from './api';
+import { HIDDEN_GRACE_MS, connectDepth, connectStream, fetchLeaderboard } from './api';
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -227,5 +227,22 @@ describe('suspending a hidden tab', () => {
     vi.advanceTimersByTime(HIDDEN_GRACE_MS);
     setHidden(false);
     expect(FakeWebSocket.instances).toHaveLength(1);  // no zombie reconnect
+  });
+});
+
+describe('historical publications', () => {
+  it('refreshes an expired revision after a server restart', async () => {
+    const oldUrl = `/api/analytics/${'a'.repeat(64)}.json`;
+    const freshUrl = `/api/analytics/${'b'.repeat(64)}.json`;
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ url: oldUrl }) })
+      .mockResolvedValueOnce({ ok: false, status: 404 })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ url: freshUrl }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ days: 7, generatedAt: 123 }) });
+    vi.stubGlobal('fetch', fetcher);
+    expect(await fetchLeaderboard(7)).toEqual({ days: 7, generatedAt: 123 });
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      '/api/leaderboard/publication?days=7', oldUrl, expect.stringContaining('days=7&refresh='), freshUrl,
+    ]);
   });
 });

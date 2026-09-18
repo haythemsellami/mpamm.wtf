@@ -1,3 +1,4 @@
+import { metricBatchQuote, type MetricBatchPool } from './metric-quote-batch.js';
 import { parseAbi } from 'viem';
 import type { QuoteRow, Fill, Side, VenueMeta } from '@shared';
 import { TOKENS, assetForToken, baseTokenOf, pairFor } from '@shared';
@@ -23,7 +24,7 @@ import { createQuoteOutageReporter } from './quote-health.js';
 const METRIC_VENUE: VenueMeta = { id: 'metric', name: 'Metric', color: { light: '#0F9D8C', dark: '#0D9488' }, kind: 'amm', role: 'venue', sinceUtc: '2026-03-31' };
 
 /** Shared MetricOmmSwapRouter on Monad (same for every pool). */
-const ROUTER = '0xaF9ADa6b6eC7993CE146f6c0bF98f7211CDfD3e5' as const;
+export const ROUTER = '0xaF9ADa6b6eC7993CE146f6c0bF98f7211CDfD3e5' as const;
 
 /** MetricOmmFactory — the permissionless deployer. Metric is a DEX whose pool
  *  architecture lets anyone run their own propAMM on it, so the pool set is
@@ -35,7 +36,7 @@ const FACTORY = '0xe22F9fc0f04486dE25ed6CF1800a4a47aFD82e0C' as const;
 /** Seed pools — the funded, team-run pools that predate event discovery. They
  *  are the ONLY entries that fail loud: a seed that stops resolving is a real
  *  regression, while a permissionless pool that misbehaves is just skipped. */
-const SEED_POOLS: `0x${string}`[] = [
+export const SEED_POOLS: `0x${string}`[] = [
   '0xFA32f9ec28787d1F9C5BA5c39e54e59984FEF3f0', // WMON/USDC
   '0x2D82AC42334b394A9a8d8f097d61DC1c6B065Fd8', // WBTC/USDC
   '0x354D92279cA0190fF275095fE6A2a6989BAa66Fb', // WETH/USDC
@@ -56,11 +57,11 @@ const SEED_POOLS: `0x${string}`[] = [
 const PRICE_LIMIT_UP = (1n << 128n) - 1n;
 const PRICE_LIMIT_DOWN = 1n;
 
-const metricPoolAbi = parseAbi([
+export const metricPoolAbi = parseAbi([
   'function getImmutables() view returns (address factory, address priceProvider, address token0, address token1, uint104 a, uint104 b, uint104 c, bool reportSwapToPriceProvider, uint256 maxDriftE8, uint256 maxDriftDecayPerSecondE8, int16 lowestBin, int16 highestBin, uint256 token0ScaleMultiplier, uint256 token1ScaleMultiplier)',
   'event Swap(address sender, address recipient, bool exactInput, int128 amount0Delta, int128 amount1Delta, int16 newTick, uint104 newPositionInBin)',
 ]);
-const priceProviderAbi = parseAbi(['function getBidAndAskPrice() view returns (uint128, uint128)']);
+export const priceProviderAbi = parseAbi(['function getBidAndAskPrice() view returns (uint128, uint128)']);
 const erc20Abi = parseAbi(['function balanceOf(address) view returns (uint256)']);
 /** Recovered from a real creation log (topic0 0xe1c304ac…): the indexed
  *  priceProvider is the one set AT CREATION and pools expose
@@ -76,7 +77,7 @@ const providerOracleAbi = parseAbi([
   'function offchainFeedId() view returns (bytes32)',
 ]);
 const pushOracleAbi = parseAbi(['function getOracleCount() view returns (uint256)']);
-const metricRouterAbi = parseAbi([
+export const metricRouterAbi = parseAbi([
   'function quoteSwap(address pool, bool zeroForOne, int128 amountSpecified, uint128 priceLimitX64, uint128 bidPriceX64, uint128 askPriceX64) returns (int128 amount0Delta, int128 amount1Delta)',
 ]);
 
@@ -185,6 +186,55 @@ export function createMetricAdapter(): VenueAdapter {
   // router takes bid/ask as CALL PARAMETERS, so an aggregator with its own price
   // source swaps against it regardless of whether we can read one.
   let admittedPools: MetricPool[] = [];               // tailed + decodable
+  let batchRetryAt = 0;
+  type QuoteResults = Awaited<ReturnType<typeof metricBatchQuote>>;
+  type BatchRequest = { pools: MetricBatchPool[]; fallback: () => Promise<QuoteResults>; resolve: (result: QuoteResults) => void; reject: (error: unknown) => void };
+  type QuoteBatch = { ctx: AdapterContext; block: bigint; requests: BatchRequest[]; started: boolean; settled: Promise<void>; finish: () => void };
+  const quoteBatches = new Set<QuoteBatch>();
+  // Plans from the same frame share one constructor call, preserving each
+  // plan's leg ordering. A failed helper cannot multiply capability probes.
+  const sharedHelper = (ctx: AdapterContext, requestPools: MetricBatchPool[], block: bigint, fallback: BatchRequest['fallback']): Promise<QuoteResults> => new Promise((resolve, reject) => {
+    let batch = [...quoteBatches].find((b) => b.ctx.client === ctx.client && b.ctx.quoteSignal === ctx.quoteSignal && b.block === block);
+    if (batch?.started) {
+      void batch.settled.then(() => {
+        ctx.quoteSignal?.throwIfAborted();
+        return Date.now() < batchRetryAt ? fallback() : sharedHelper(ctx, requestPools, block, fallback);
+      }).then(resolve, reject);
+      return;
+    }
+    if (batch) { batch.requests.push({ pools: requestPools, fallback, resolve, reject }); return; }
+    let finish!: () => void;
+    batch = { ctx, block, requests: [{ pools: requestPools, fallback, resolve, reject }], started: false,
+      settled: new Promise<void>((done) => { finish = done; }), finish: () => finish() };
+    quoteBatches.add(batch);
+    const current = batch;
+    queueMicrotask(() => {
+      current.started = true;
+      void (async (): Promise<QuoteResults[]> => {
+        ctx.quoteSignal?.throwIfAborted();
+        try {
+          const results = await metricBatchQuote(ctx.client, ROUTER, current.requests.flatMap((request) => request.pools), block);
+          ctx.quoteSignal?.throwIfAborted();
+          let offset = 0;
+          return current.requests.map((request) => {
+            const count = request.pools.reduce((total, pool) => total + pool.legs.length, 0);
+            const selected = results.slice(offset, offset + count); offset += count;
+            return selected;
+          });
+        } catch (error) {
+          if (ctx.quoteSignal?.aborted) throw error;
+          const results = await Promise.allSettled(current.requests.map((request) => request.fallback()));
+          ctx.quoteSignal?.throwIfAborted();
+          const failed = results.find((result) => result.status === 'rejected');
+          if (failed?.status === 'rejected') throw failed.reason;
+          batchRetryAt = Date.now() + 60_000;
+          return results.map((result) => (result as PromiseFulfilledResult<QuoteResults>).value);
+        }
+      })().then((results) => { current.requests.forEach((request, i) => request.resolve(results[i])); },
+        (error) => { current.requests.forEach((request) => request.reject(error)); })
+        .finally(() => { quoteBatches.delete(current); current.finish(); });
+    });
+  });
   let pools: MetricPool[] = [];                       // live: quoted
   let byAddr = new Map<string, MetricPool>();         // MONOTONIC decode map
   let discovered = false;
@@ -339,6 +389,7 @@ export function createMetricAdapter(): VenueAdapter {
 
   return {
     venues: () => [METRIC_VENUE],
+    quoteMarkets: () => [...new Set([...byAddr.values()].map((p) => p.market))],
     // seed daily volume by replaying Pool.Swap on-chain from the earliest pool's
     // deployment era (WMON/USDC block 65042020 · 2026-03-31). Background — see live.ts.
     backfillFromUtc: '2026-03-31',
@@ -349,25 +400,16 @@ export function createMetricAdapter(): VenueAdapter {
       const selectedPools = pools.filter((p) => !markets || markets.has(p.market));
       if (!selectedPools.length) return [];
 
-      // 1) each pool's oracle bid/ask (needed as quoteSwap args).
-      const ppRes = await ctx.client.multicall({
-        contracts: selectedPools.map((p) => ({ address: p.priceProvider, abi: priceProviderAbi, functionName: 'getBidAndAskPrice' as const })),
-        allowFailure: true,
-        blockNumber,
-      });
-
       // 2) quoteSwap for each pool × size × side (eth_call — no state change).
       type Leg = { pool: MetricPool; size: number; side: Side; reqIn: bigint; basePx: number };
       const legs: Leg[] = [];
       const calls: { address: `0x${string}`; abi: typeof metricRouterAbi; functionName: 'quoteSwap'; args: readonly [`0x${string}`, boolean, bigint, bigint, bigint, bigint] }[] = [];
       selectedPools.forEach((p, i) => {
-        const r = ppRes[i];
-        if (r.status !== 'success') return;
         // bps anchor = the pair-terms CEX mid (wrap basis + stable cross applied),
         // NOT the raw USDT price — venue quotes are in the pair's stable terms.
         const basePx = ctx.pricer.pairMid(p.market);
         if (basePx <= 0) return;
-        const [bid, ask] = r.result as readonly [bigint, bigint];
+        const bid = 0n, ask = 0n;
         const sellZeroForOne = p.baseIsToken0; // token0→token1 sells the base when base is token0
         for (const size of sizesUsd) {
           // BUY base: exact-in the stable, no upper price bound.
@@ -381,7 +423,34 @@ export function createMetricAdapter(): VenueAdapter {
         }
       });
       if (!calls.length) return [];
-      const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
+      const legacyQuote = async () => {
+        const prices = await ctx.client.multicall({ contracts: selectedPools.map((p) => ({
+          address: p.priceProvider, abi: priceProviderAbi, functionName: 'getBidAndAskPrice' as const,
+        })), allowFailure: true, blockNumber });
+        ctx.quoteSignal?.throwIfAborted();
+        const known = new Map(selectedPools.map((p, i) => [p.pool, prices[i]]));
+        const valid: number[] = [];
+        const contracts = calls.flatMap((call, i) => {
+          const price = known.get(call.args[0]);
+          if (price?.status !== 'success') return [];
+          valid.push(i);
+          const [bid, ask] = price.result as readonly [bigint, bigint];
+          return [{ ...call, args: [call.args[0], call.args[1], call.args[2], call.args[3], bid, ask] as const }];
+        });
+        const quoted = contracts.length ? await ctx.client.multicall({ contracts, allowFailure: true, blockNumber }) : [];
+        const result: Array<{ status: 'failure' } | { status: 'success'; result: readonly [bigint, bigint] }> = legs.map(() => ({ status: 'failure' }));
+        valid.forEach((index, i) => { if (quoted[i].status === 'success') result[index] = { status: 'success', result: quoted[i].result as readonly [bigint, bigint] }; });
+        return result;
+      };
+      let qRes: Awaited<ReturnType<typeof legacyQuote>>;
+      if (ctx.config.metricBatchQuote && Date.now() >= batchRetryAt && typeof ctx.client.call === 'function') {
+          qRes = await sharedHelper(ctx, selectedPools.flatMap((pool) => {
+            const selected = calls.filter((call) => call.args[0] === pool.pool);
+            return selected.length ? [{ pool: pool.pool, provider: pool.priceProvider, legs: selected.map((call) => ({
+              zeroForOne: call.args[1], amount: call.args[2], limit: call.args[3],
+            })) }] : [];
+          }), blockNumber, legacyQuote);
+      } else qRes = await legacyQuote();
       if (reportOutage(ctx, qRes)) return [];
 
       const rowByKey = new Map<string, QuoteRow>();

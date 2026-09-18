@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
 import type {
   DataSourceMode, DepthSnapshot, MarketState, QuoteSnapshot, Fill, DailyVolume, StreamMessage,
-  LeaderboardResponse, GasResponse,
+  LeaderboardResponse, GasResponse, QuoteScope,
 } from '@shared';
+import { planQuotes, type QuotePlan } from '../quote-demand.js';
 import { computeLeaderboard } from '../analytics.js';
 
 /**
@@ -15,7 +16,16 @@ export interface DataSource {
   start(): Promise<void>;
   stop(): void | Promise<void>;
   getState(): MarketState;
+  /** False until persisted history is available to dashboard snapshots. */
+  isReady?(): boolean;
+  manageQuoteDemand?(): void;
+  watchQuotes?(scope?: QuoteScope): () => void;
   getQuotes(): QuoteSnapshot;
+  /** Complete matrix on demand. Fresh stream handoffs bypass cached results
+   * so an in-flight scoped frame cannot follow the initial full snapshot. */
+  fullQuoteSnapshot?(fresh?: boolean): Promise<QuoteSnapshot>;
+  /** Whether the current frame completed every requested adapter. */
+  quoteSnapshotComplete?(): boolean;
   getFills(): Fill[];
   getVolume(): DailyVolume[];
   /** Historical fills query (DB-backed for live, in-memory for sim). */
@@ -49,7 +59,7 @@ export interface DepthPublication {
 
 /** Quote history is retained by wall time, not sample count: live quotes now
  *  arrive per block (~300ms) while the simulator still ticks at 500ms. */
-const QUOTE_HISTORY_MS = 60_000;
+export const QUOTE_HISTORY_MS = 60_000;
 const QUOTE_HISTORY_MAX = 400; // safety cap if timestamps regress or cadence changes
 
 export abstract class BaseSource extends EventEmitter implements DataSource {
@@ -64,6 +74,21 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
   /** Rolling wall-time ring of broadcast quote matrices — recorded at the
    *  emitMsg choke point so live + sim get it identically for free. */
   private quoteHist: QuoteSnapshot[] = [];
+  private quoteManaged = false;
+  private quoteScopes = new Map<symbol, QuoteScope | undefined>();
+
+  manageQuoteDemand(): void { this.quoteManaged = true; }
+  watchQuotes(scope?: QuoteScope): () => void {
+    const id = Symbol();
+    this.quoteScopes.set(id, scope);
+    return () => { this.quoteScopes.delete(id); };
+  }
+  protected quotePlan(sizes: readonly number[]): QuotePlan[] {
+    const scopes = [...this.quoteScopes.values()];
+    return planQuotes(scopes.filter((s): s is QuoteScope => !!s), sizes,
+      !this.quoteManaged || scopes.some((s) => !s));
+  }
+
   private depthLatest = new Map<string, DepthPublication>();
   private depthWatchers = new Map<string, Set<(publication: DepthPublication) => void>>();
 
@@ -140,6 +165,8 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
   /** The retained ticks filtered to one (market, size) — oldest first, ready to
    *  replay into the chart buffer. Empty until the first poll after boot. */
   quoteHistory(market: string, size: number): QuoteSnapshot[] {
+    const cutoff = Date.now() - QUOTE_HISTORY_MS;
+    this.quoteHist = this.quoteHist.filter((q) => q.ts >= cutoff);
     const out: QuoteSnapshot[] = [];
     for (const q of this.quoteHist) {
       const rows = q.rows.filter((r) => r.market === market && r.sizeUsd === size);

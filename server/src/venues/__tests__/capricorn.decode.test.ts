@@ -268,6 +268,42 @@ function quoteStubCtx(notes: { code: string; msg: string }[] = []) {
 }
 
 describe('Capricorn quote aggregation across pools on one market', () => {
+  it.each(['getTokens', 'feeBps'])('retains a non-seed catalog market when %s becomes unreadable', async (field) => {
+    const adapter = createCapricornAdapter(), ctx = quoteStubCtx();
+    const read = ctx.client.multicall;
+    let unavailable = false;
+    ctx.client.multicall = async (request: any) => (await read(request)).map((result: any, i: number) => {
+      const call = request.contracts[i];
+      if (call.address.toLowerCase() !== NEW_USDC) return result;
+      if (unavailable && call.functionName === field) return { status: 'failure' };
+      return call.functionName === 'getTokens' ? { status: 'success', result: [TOKENS.USDC.address, TOKENS.WBTC.address] } : result;
+    });
+    await adapter.discover(ctx);
+    await adapter.decode(ctx, { poolCreated: [{ args: { pool: NEW_USDC } }], swap: [] }, () => 0, new Set());
+    expect(adapter.quoteMarkets!()).toContain('BTC/USDC');
+    unavailable = true; await adapter.discover(ctx);
+    expect(adapter.quoteMarkets!()).toContain('BTC/USDC');
+    expect(await adapter.quote!(ctx, [100], 123n, new Set(['BTC/USDC']))).toEqual([]);
+  });
+
+  it('retains admitted markets while quote probes fail, and recovers without changing the catalog', async () => {
+    const adapter = createCapricornAdapter(), healthy = quoteStubCtx();
+    await adapter.discover(healthy);
+    const catalog = adapter.quoteMarkets!();
+    expect(catalog).toContain('MON/USDC');
+    const unavailable = quoteStubCtx();
+    const read = unavailable.client.multicall;
+    unavailable.client.multicall = async (request: any) => (await read(request)).map((result: any, i: number) =>
+      request.contracts[i].functionName === 'quoteExactIn' ? { status: 'failure' } : result);
+    await adapter.discover(unavailable);
+    expect(adapter.quoteMarkets!()).toEqual(catalog);
+    expect(await adapter.quote!(unavailable, [100], 123n)).toEqual([]);
+    expect(adapter.logSources().find((s) => s.key === 'swap')?.address).toHaveLength(2);
+    await adapter.discover(healthy);
+    expect(adapter.quoteMarkets!()).toEqual(catalog);
+    expect((await adapter.quote!(healthy, [100], 124n)).map((r) => r.market)).toContain('MON/USDC');
+  });
+
   it('takes the BEST price per side, not whichever leg multicall returned last', async () => {
     const adapter = createCapricornAdapter();
     const ctx = quoteStubCtx();

@@ -267,6 +267,7 @@ export function createThogammAdapter(): VenueAdapter {
 
   return {
     venues: () => [THOGAMM_VENUE],
+    quoteMarkets: () => [...new Set([...byMarket.values()].map((m) => m.market))],
     backfillFromUtc: '2026-07-26',
 
     discover: refresh,

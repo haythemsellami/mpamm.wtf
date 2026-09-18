@@ -57,6 +57,7 @@ async function setup(failure: Failure, readDelayMs = 0) {
   vi.doMock('../chain/rpc.js', () => ({
     publicClient: {},
     quoteClient: {},
+    headClient: { getBlockNumber: vi.fn(async () => 100n) },
     archiveClient,
     getLogsChunked: vi.fn(),
     probeChain: vi.fn(),

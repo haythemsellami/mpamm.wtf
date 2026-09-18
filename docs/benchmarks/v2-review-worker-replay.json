@@ -1,0 +1,47 @@
+{
+  "measuredAt": "2026-09-18T09:42:42.497Z",
+  "node": "v24.11.1",
+  "method": "Actual page subscription, SharedWorker and StreamHub modules at 55be501 versus updated code. Loopback MessagePorts and a deterministic WebSocket source; ten depth-hint mount/unmount cycles with cached state/quote/depth, then ten live updates per topic. Counts deliveries and worker-to-page envelope messages, not latency, CPU or Render bandwidth.",
+  "results": [
+    {
+      "version": "55be501",
+      "replay": {
+        "callbacks": {
+          "dashboard": 40,
+          "chart": 20,
+          "hint": 10
+        },
+        "messages": 60
+      },
+      "steady": {
+        "callbacks": {
+          "dashboard": 20,
+          "chart": 10,
+          "hint": 10
+        },
+        "messages": 30
+      },
+      "sockets": 1
+    },
+    {
+      "version": "updated",
+      "replay": {
+        "callbacks": {
+          "dashboard": 0,
+          "chart": 0,
+          "hint": 10
+        },
+        "messages": 10
+      },
+      "steady": {
+        "callbacks": {
+          "dashboard": 20,
+          "chart": 10,
+          "hint": 10
+        },
+        "messages": 30
+      },
+      "sockets": 1
+    }
+  ]
+}

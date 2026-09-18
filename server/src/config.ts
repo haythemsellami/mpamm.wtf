@@ -125,6 +125,12 @@ export const config = {
   tailIntervalMs: num('TAIL_INTERVAL_MS', 500),
 
   sizesUsd: [...SIZES_USD],
+  /** Quotes expire with their block; history/tail transports keep reliable retries. */
+  quoteDeadlineMs: Math.max(50, num('QUOTE_DEADLINE_MS', 250)),
+  metricBatchQuote: (env.METRIC_BATCH_QUOTE ?? 'on') !== 'off',
+  quoteHttpBatch: (env.QUOTE_HTTP_BATCH ?? 'off') === 'on',
+  quoteHttpBatchSize: Math.max(1, num('QUOTE_HTTP_BATCH_SIZE', 8)),
+  analyticsWorkerHeapMb: Math.max(64, num('ANALYTICS_WORKER_HEAP_MB', 128)),
 
   // ── depth curves (Execution tab: BID_ASK_DEPTH) ────────────────────────────
   /** The curve runs in an isolated, demand-driven worker process. The main

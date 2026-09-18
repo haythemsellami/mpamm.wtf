@@ -1,20 +1,23 @@
-import { BaseSource } from './index.js';
+import { AnalyticsWorker } from '../analytics-worker.js';
+import { QuoteRunner } from '../quote-runner.js';
+import { QuoteHealthBatch } from '../venues/quote-health.js';
+import { agePendingMarkouts, nearestReferenceSample } from '../markout-aging.js';
+import { BaseSource, QUOTE_HISTORY_MS } from './index.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import {
-  MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf,
+  MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase,
   type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode, type QuoteFrameTelemetry,
   type QuoteHeadSource, type RealtimeHealth,
 } from '@shared';
 import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from '../chain/failover.js';
-import { computeLeaderboard } from '../analytics.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
 import { GasTracker } from '../gas.js';
 import { DepthWorkerClient } from '../depth/worker-client.js';
 import { config } from '../config.js';
 import {
-  monad, publicClient, quoteClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
+  monad, publicClient, headClient, quoteClient, scopedQuoteClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
   onRpcEvent, onArchiveRpcEvent, rpcStatus, rpcGeneration, archiveRpcStatus, archiveRpcGeneration, hasDedicatedArchive,
 } from '../chain/rpc.js';
 import { HotHeadWatcher } from '../chain/heads.js';
@@ -78,11 +81,12 @@ export function realtimeCoverage(
 export function captureReferenceFrame(
   references: Pick<ReferenceRegistry, 'assetUsd' | 'midForPair' | 'quote'>,
   sizesUsd: readonly number[],
+  markets?: ReadonlySet<string>,
 ): { pricer: UsdPricer; monUsd: number; rows: QuoteRow[]; assetPrices: Map<string, number>; pairMids: Map<string, number> } {
   const assetPrices = new Map<string, number>();
   for (const key of Object.keys(ASSETS)) assetPrices.set(key, references.assetUsd(key));
   const pairMids = new Map(PAIRS.map((pair) => [pair.symbol, references.midForPair(pair.symbol)]));
-  const rows = references.quote(sizesUsd);
+  const rows = references.quote(sizesUsd, markets);
   return {
     pricer: new UsdPricer(
       (key) => assetPrices.get(key) ?? 0,
@@ -771,7 +775,7 @@ export class LiveDataSource extends BaseSource {
     if (!ctx) {
       const venue = this.vidOf(a);
       ctx = {
-        client: publicClient,
+        client: { ...publicClient, getBlockNumber: headClient.getBlockNumber },
         getLogs: getLogsChunked,
         pricer: this.pricer,
         config,
@@ -792,6 +796,11 @@ export class LiveDataSource extends BaseSource {
   /** the adapter's primary venue id — what its notes are stamped with. */
   private vidOf(a: VenueAdapter): string | undefined { return a.venues()[0]?.id; }
 
+  private analyticsWorker = new AnalyticsWorker(config.dbPath);
+  private quoteRunner = new QuoteRunner();
+  private referenceTimer?: ReturnType<typeof setInterval>;
+  private markoutTimer?: ReturnType<typeof setInterval>;
+  private markoutWork?: Promise<void>;
   private quotes: QuoteSnapshot = { block: 0, monUsd: 0, ts: 0, rows: [] };
   private days: DailyVolume[] = [];
   private fills: Fill[] = [];
@@ -821,7 +830,7 @@ export class LiveDataSource extends BaseSource {
   private postQuoteImmediate?: ReturnType<typeof setImmediate>;
   /** newHeads + HTTP-watchdog feed. Both paths are deduped before they reach the
    *  latest-only quote runner below. */
-  private headWatcher = new HotHeadWatcher(publicClient, { wsUrl: config.rpcWs, pollMs: config.headPollMs });
+  private headWatcher = new HotHeadWatcher(headClient, { wsUrl: config.rpcWs, pollMs: config.headPollMs });
   private quotedBlock = 0n;
   private pendingQuote?: QuoteTrigger;
   private runningQuoteBlock?: bigint;
@@ -899,6 +908,9 @@ export class LiveDataSource extends BaseSource {
     const archiveProbePending = probeArchiveChain();
 
     await REFERENCES.start();
+    this.sampleReferences();
+    this.referenceTimer = setInterval(() => this.sampleReferences(), 100);
+    this.markoutTimer = setInterval(() => { void this.ageMarkouts(); }, 300);
     // discover every venue's markets/pools (adapters hold their own state).
     for (const a of ADAPTERS) {
       try { await a.discover(this.ctxFor(a)); }
@@ -906,6 +918,7 @@ export class LiveDataSource extends BaseSource {
     }
 
     await this.initHistory();
+    this.historyReady = true;
     const resetWant = config.backfillReset.trim();
     if (resetWant) adoptLegacyResetMarker(this.store, resetWant, parseBackfillReset(resetWant));
     // The schema/migrations above finish on the main connection first. Every
@@ -996,7 +1009,7 @@ export class LiveDataSource extends BaseSource {
       for (;;) {
         nowMs = Date.now();
         runDay = utcDay(nowMs);
-        const head = await guardRpcRead(() => publicClient.getBlockNumber(), hotUnavailable, rpcGeneration);
+        const head = await guardRpcRead(() => headClient.getBlockNumber(), hotUnavailable, rpcGeneration);
         if (head > this.deepEnd) this.deepEnd = head;
         if (hasDedicatedArchive) {
           let lagWasAnnounced = false;
@@ -1098,6 +1111,9 @@ export class LiveDataSource extends BaseSource {
     if (this.stopPromise) return this.stopPromise;
     this.loopsStopped = true;
     this.headWatcher.stop();
+    this.quoteRunner.stop();
+    if (this.referenceTimer) clearInterval(this.referenceTimer);
+    if (this.markoutTimer) clearInterval(this.markoutTimer);
     this.eventLoopDelay.disable();
     if (this.tailTimer) clearTimeout(this.tailTimer);
     if (this.quoteRetryTimer) clearTimeout(this.quoteRetryTimer);
@@ -1109,8 +1125,8 @@ export class LiveDataSource extends BaseSource {
     const finalPersist = this.persist(true);
     const depthStop = this.depthWorker.stop();
     REFERENCES.stop();
-    this.stopPromise = Promise.all([finalPersist, depthStop]).then(() => undefined).finally(async () => {
-      try { await this.snapshotWriter?.close(); }
+    this.stopPromise = Promise.all([finalPersist, depthStop, this.markoutWork]).then(() => undefined).finally(async () => {
+      try { await this.analyticsWorker.close(); await this.snapshotWriter?.close(); }
       finally { this.store.close(); }
     });
     return this.stopPromise;
@@ -1166,9 +1182,10 @@ export class LiveDataSource extends BaseSource {
   getState(): MarketState {
     const realtime = this.realtimeHealth();
     return {
-      chainId: 143, block: this.block, monUsd: this.quotes.frame ? this.quotes.monUsd : REFERENCES.assetUsd('MON'), monChangePct: REFERENCES.changePctFor('MON'),
+      chainId: 143, block: this.block, monUsd: REFERENCES.assetUsd('MON'), monChangePct: REFERENCES.changePctFor('MON'),
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
-      quoteCadenceMs: monad.blockTime ?? 300, source: 'live', venues: venueMeta(), notes: this.notes.list(),
+      quoteCadenceMs: monad.blockTime ?? 300, source: 'live', venues: venueMeta(),
+      quoteMarkets: Object.fromEntries(ADAPTERS.flatMap((a) => a.venues().map((v) => [v.id, [...(a.quoteMarkets?.() ?? [])]]))), notes: this.notes.list(),
       rpc: rpcStatus(),
       // Only when the pools actually differ: with no dedicated archive this
       // would be a copy of `rpc`, and a duplicated chip reads as a second
@@ -1177,7 +1194,33 @@ export class LiveDataSource extends BaseSource {
       ...(realtime ? { realtime } : {}),
     };
   }
-  getQuotes(): QuoteSnapshot { return this.quotes; }
+  getQuotes(): QuoteSnapshot {
+    return Date.now() - this.quotes.ts <= QUOTE_HISTORY_MS ? this.quotes : { ...this.quotes, rows: [] };
+  }
+  private quotesFull = false;
+  private historyReady = false;
+  isReady(): boolean { return this.historyReady; }
+  quoteSnapshotComplete(): boolean { return this.quotesFull; }
+  private quotePollingStarted = false;
+  private fullSnapshotPending?: Promise<QuoteSnapshot>;
+  fullQuoteSnapshot(fresh = false): Promise<QuoteSnapshot> {
+    // REST remains non-blocking while discovery/history warms up. A legacy
+    // stream handoff still waits for a genuinely complete first frame.
+    if (!fresh && !this.quotePollingStarted) return Promise.resolve(this.getQuotes());
+    if (!fresh && this.quotesFull && Date.now() - this.quotes.ts < 300) return Promise.resolve(this.quotes);
+    if (this.fullSnapshotPending) return this.fullSnapshotPending;
+    const release = this.watchQuotes();
+    this.fullSnapshotPending = new Promise<QuoteSnapshot>((resolve, reject) => {
+      const finish = () => { clearTimeout(timer); this.off('message', receive); release(); };
+      const receive = (message: import('@shared').StreamMessage) => {
+        if (message.ch !== 'quotes' || !this.quotesFull) return;
+        finish(); resolve(message.data);
+      };
+      const timer = setTimeout(() => { finish(); reject(new Error('quote snapshot unavailable')); }, 3_000);
+      this.on('message', receive);
+    }).finally(() => { this.fullSnapshotPending = undefined; });
+    return this.fullSnapshotPending;
+  }
   getFills(): Fill[] { return this.fills; }
   getVolume(): DailyVolume[] { return this.days.map((d) => ({ ...d, byVenue: { ...d.byVenue } })); }
 
@@ -1276,7 +1319,7 @@ export class LiveDataSource extends BaseSource {
     this.dirtyDays.clear();
 
     // 3. resume point — same-day gap-fill, else start at tip
-    const head = await publicClient.getBlockNumber();
+    const head = await headClient.getBlockNumber();
     this.block = Number(head);
     this.bootHead = head; // upper bound for the live gap-fill (tail owns > head)
     // Initial deep handoff. Each background run refreshes this from the healthy
@@ -2056,8 +2099,7 @@ export class LiveDataSource extends BaseSource {
   /** Aggregated leaderboard over the FULL window, from SQLite (no fetch cap).
    *  TTL-cached per window so polling clients share one computation, and
    *  inflight-deduped so concurrent cold hits can't stack N computes. The pass
-   *  itself yields to the event loop (computeLeaderboard) — only the SQL scan
-   *  is a synchronous slice. */
+   *  runs on the read-only analytics worker, including SQL and sorts. */
   private lbCache = new Map<number, { at: number; res: LeaderboardResponse }>();
   private lbInflight = new Map<number, Promise<LeaderboardResponse>>();
   leaderboard(days: number): Promise<LeaderboardResponse> {
@@ -2068,20 +2110,7 @@ export class LiveDataSource extends BaseSource {
     const inflight = this.lbInflight.get(days);
     if (inflight) return inflight;
     const p = (async () => {
-      // keyset pages (never the whole window — a 30d materialization OOM'd the
-      // 512MB box), upper bound pinned to the request time so BOTH passes see
-      // the same snapshot while live fills keep landing.
-      const since = now - days * 86_400_000;
-      const makePass = () => {
-        let afterTs = -1;
-        let afterId = '';
-        return () => {
-          const page = this.store.lbFillsChunk(since, afterTs, afterId, 25_000, now);
-          if (page.length) { const last = page[page.length - 1]; afterTs = last.ts; afterId = last.id; }
-          return page;
-        };
-      };
-      const res = await computeLeaderboard(makePass, days, now, (ids) => this.store.fillsByIds(ids));
+      const res = await this.analyticsWorker.compute(days, now);
       this.lbCache.set(days, { at: now, res });
       return res;
     })().finally(() => this.lbInflight.delete(days));
@@ -2175,18 +2204,17 @@ export class LiveDataSource extends BaseSource {
   }
 
   private emitRealtimeState(): void {
-    if (this.quotes.frame) this.emitMsg({ ch: 'state', data: this.getState() });
+    this.emitMsg({ ch: 'state', data: this.getState() });
   }
 
-  /** Quote delivery is the latency-sensitive result. Markout aging and the
-   * accompanying state fanout run on the next event-loop turn, after a pending
+  /** Quote delivery is the latency-sensitive result. State fanout runs on
+   * the next event-loop turn, after a pending
    * newer frame has already been allowed to enter its RPC wait. */
   private schedulePostQuoteMaintenance(): void {
     if (this.postQuoteImmediate || this.loopsStopped) return;
     this.postQuoteImmediate = setImmediate(() => {
       this.postQuoteImmediate = undefined;
       if (this.loopsStopped) return;
-      this.ageMarkouts();
       this.emitRealtimeState();
     });
   }
@@ -2230,18 +2258,36 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
+  private sampleReferences(): void {
+    const now = Date.now();
+    for (const pair of PAIRS) {
+      const mid = REFERENCES.midForPair(pair.symbol);
+      if (!(mid > 0)) continue;
+      const history = this.midHist.get(pair.symbol) ?? [];
+      const last = history.at(-1);
+      history.push({ t: now, mid });
+      // A wall-clock correction must not invalidate binary horizon lookups.
+      if (last && last.t > now) history.sort((a, b) => a.t - b.t);
+      while (history.length > 1 && (history[0].t < now - 120_000 || history.length > 2_000)) history.shift();
+      this.midHist.set(pair.symbol, history);
+    }
+  }
+
   private async poll(blockNumber: bigint, trigger: QuoteTrigger = {
     blockNumber,
     source: 'http',
     observedAt: Date.now(),
     coalescedBlocks: 0,
   }): Promise<void> {
+    this.quotePollingStarted = true;
     const quoteStartedAt = Date.now();
 
     // One synchronous turn captures every mutable CEX input before adapters
     // start awaiting RPC. The chain reads below are pinned to `blockNumber`; the
     // frame pricer makes their USD sizing and bps anchors equally immutable.
-    const referenceFrame = captureReferenceFrame(REFERENCES, config.sizesUsd);
+    const plan = this.quotePlan(config.sizesUsd);
+    const requestedMarkets = plan.some((p) => !p.markets) ? undefined : new Set(plan.flatMap((p) => [...p.markets!]));
+    const referenceFrame = captureReferenceFrame(REFERENCES, [...new Set(plan.flatMap((p) => [...p.sizes]))], requestedMarkets);
     const { pricer: framePricer, monUsd, rows: refRows, assetPrices, pairMids } = referenceFrame;
     // Surface a starving reference feed LOUDLY (state.notes): with no base mid
     // there are no reference rows, no venue bps anchors and no markouts for that
@@ -2256,24 +2302,45 @@ export class LiveDataSource extends BaseSource {
         announce: (m) => this.note('reference.recovered', m),
       });
     }
-    // record each PAIR's CEX mid history in its own terms (the markout anchors).
-    for (const pair of PAIRS) {
-      const mid = pairMids.get(pair.symbol) ?? 0;
-      if (mid <= 0) continue;
-      const h = this.midHist.get(pair.symbol) ?? [];
-      h.push({ t: quoteStartedAt, mid });
-      if (h.length > 400) h.shift();
-      this.midHist.set(pair.symbol, h);
+    if (!plan.length) {
+      this.realtimeFrames = [];
+      this.block = Number(blockNumber);
+      this.quotes = { block: this.block, monUsd, ts: quoteStartedAt, rows: [] };
+      this.quotesFull = false;
+      this.schedulePostQuoteMaintenance();
+      return;
     }
-
+    const plansFor = (a: VenueAdapter) => plan.filter((p) => p.role === 'all' || (
+      p.role === (a.venues().every((v) => v.role === 'baseline') ? 'baseline' : 'venue')
+      && (!a.quoteMarkets || a.quoteMarkets().some((market) => p.markets!.has(market)))));
+    const requestedAdapters = ADAPTERS.filter((a) => a.quote && plansFor(a).length);
     const adapterMs: Record<string, number> = {};
-    const venueRowsNested = await Promise.all(ADAPTERS.map(async (a) => {
+    const completedAdapters = new Set<VenueAdapter>();
+    const venueRowsNested = await Promise.all(requestedAdapters.map(async (a) => {
         if (!a.quote) return [] as QuoteRow[];
         const adapterStarted = performance.now();
+        let quoteSignal: AbortSignal | undefined;
         // a THROWN quote is a degradation like any other — swallowing it left
         // the venue's disappearance with no explanation anywhere.
         try {
-          const rows = await a.quote(this.frameCtxFor(a, framePricer), config.sizesUsd, blockNumber).catch((e) => {
+          const rows = await this.quoteRunner.run(this.vidOf(a) ?? 'unknown', config.quoteDeadlineMs, async (signal) => {
+            quoteSignal = signal;
+            const original = this.frameCtxFor(a, framePricer);
+            const ctx = { ...original, quoteSignal: signal, client: scopedQuoteClient(`${this.vidOf(a)}-${blockNumber}`, signal),
+              note: (...args: Parameters<typeof original.note>) => { if (!signal.aborted) original.note(...args); } };
+            const health = new QuoteHealthBatch(ctx);
+            // A rejected plan must not release the adapter's slot while a
+            // sibling still reads or mutates its state.
+            const groups = await Promise.allSettled(plansFor(a).map((p, i) =>
+              a.quote!({ ...ctx, quoteHealth: health.forPlan(i) }, p.sizes, blockNumber, p.markets)));
+            signal.throwIfAborted();
+            const failed = groups.find((group) => group.status === 'rejected');
+            if (failed?.status === 'rejected') throw failed.reason;
+            health.commit();
+            completedAdapters.add(a);
+            return groups.flatMap((group) => group.status === 'fulfilled' ? group.value : []);
+          }, [] as QuoteRow[]).catch((e) => {
+            if (quoteSignal?.aborted) return [] as QuoteRow[];
             // a rejection is not necessarily an Error — a bare string or an
             // Error with an empty message would otherwise note "quote failed:
             // undefined", which is worse than useless to whoever reads it.
@@ -2296,7 +2363,9 @@ export class LiveDataSource extends BaseSource {
     if (quoteStartedAt - this.bootMs > 60_000 && !rpcStatus().degraded) {
       const counts = new Map<string, number>();
       for (const r of venueRows) counts.set(r.venueId, (counts.get(r.venueId) ?? 0) + 1);
-      const quoting = ADAPTERS.filter((a) => a.quote).map((a) => a.venues()[0]).filter(Boolean);
+      // Deadline and busy-slot misses are frame telemetry, not evidence that
+      // an accepted adapter result reported a venue outage or recovery.
+      const quoting = requestedAdapters.filter((a) => completedAdapters.has(a)).flatMap((a) => a.venues());
       // `quoteStartedAt` is stamped BEFORE the adapters quote, so a
       // note an adapter raises from inside this tick lands on or after `since`.
       checkQuoteOutage(quoting, (id) => counts.get(id) ?? 0, this.quoteEmptyRuns, this.quoteDark, quoteStartedAt, {
@@ -2307,11 +2376,12 @@ export class LiveDataSource extends BaseSource {
       });
     }
     annotateCex(venueRows, refRows); // docs/architecture.md: fill stream — matched per market, so each venue row hits its pair's CEX
-    const rows = [...venueRows, ...refRows];
+    const requestedRefs = refRows.filter((r) => plan.some((p) => !p.markets || (p.markets.has(r.market) && p.sizes.includes(r.sizeUsd))));
+    const rows = [...venueRows, ...requestedRefs];
     const present = new Set(rows.map((row) => row.venueId));
     const expected = new Set([
-      ...ADAPTERS.filter((a) => a.quote).flatMap((a) => a.venues().map((v) => v.id)),
-      ...REFERENCES.metas().map((v) => v.id),
+      ...requestedAdapters.flatMap((a) => a.venues().map((v) => v.id)),
+      ...PAIRS.filter((pair) => plan.some((p) => !p.markets || p.markets.has(pair.symbol))).map((pair) => cexForBase(pair.base)),
     ]);
     const quoteCompletedAt = Date.now();
     const loopMaxNs = this.eventLoopDelay.max;
@@ -2330,6 +2400,7 @@ export class LiveDataSource extends BaseSource {
       coalescedBlocks: trigger.coalescedBlocks,
     };
     this.quotes = { block: this.block, monUsd, ts: emittedAt, rows, frame };
+    this.quotesFull = plan.some((p) => !p.markets) && requestedAdapters.every((adapter) => completedAdapters.has(adapter));
     this.realtimeFrames.push({ block: this.block, emittedAt, coalescedBlocks: trigger.coalescedBlocks });
     this.realtimeFrames = this.realtimeFrames.filter((f) => f.emittedAt >= emittedAt - REALTIME_WINDOW_MS);
     this.emitMsg({ ch: 'quotes', data: this.quotes });
@@ -2344,7 +2415,7 @@ export class LiveDataSource extends BaseSource {
     // finality margin: Monad logs/receipts can mutate for ~2 blocks (~600ms).
     // A speculative log that mutates away after ingest would be PERMANENT
     // phantom volume — there is no un-count path. Same margin as the gas tracker.
-    const head = (await publicClient.getBlockNumber()) - 5n;
+    const head = (await headClient.getBlockNumber()) - 5n;
     if (head <= this.lastBlock) return;
     const from = this.lastBlock + 1n;
     // Bound how much range ONE cycle materializes: the whole span is held in
@@ -2508,50 +2579,53 @@ export class LiveDataSource extends BaseSource {
   }
 
   /** Join each pending fill to the reference mid at each horizon as it ages. */
-  private ageMarkouts(): void {
-    const now = Date.now();
-    for (const f of [...this.pending]) {
-      // an approximate-price fill must never be aged — mid/execPx against a
-      // pxApprox execPx fabricates markouts the contract excludes. Unreachable
-      // via hasFutureMarkoutHorizon (which refuses to queue them); defensive.
-      if (f.pxApprox) { this.pending.delete(f); continue; }
-      // an UNREGISTERED market has no CEX routing — never fall back to MON/Bybit
-      // (a BTC fill aged vs a $0.02 mid would fabricate absurd markouts). Leave
-      // its markouts null and stop tracking it (defense in depth; adapters gate
-      // discovery/decode on the pair registry so this shouldn't be reachable).
-      if (!pairOf(f.market)) { this.pending.delete(f); this.noteOnce('markout.market.unregistered', `fill market '${f.market}' is not a registered pair — markouts skipped`, f.venueId); continue; }
-      const hist = this.midHist.get(f.market) ?? [];
-      // A horizon that elapsed before we had any mid for THIS pair can't be
-      // computed faithfully — leave it null rather than fabricate it (M1).
-      const earliestMid = hist.length ? hist[0].t : now;
-      const ss = f.side === 'buy' ? 1 : -1;
-      let changed = false, complete = true;
-      for (let i = 0; i < MARKOUT_HORIZONS.length; i++) {
-        if (f.markoutsBps[i] != null) continue;
-        const at = f.ts + MARKOUT_HORIZONS[i] * 1000;
-        if (now < at) { complete = false; continue; }   // horizon not reached yet
-        if (at < earliestMid) continue;                  // elapsed unobserved → leave null
-        const mid = this.midNear(f.market, at);
-        // no near-enough mid ⇒ the horizon stays null (elapsed-unobservable),
-        // and the fill still leaves the pending queue below — never a 0.
-        if (mid > 0 && f.execPx > 0) {
-          f.markoutsBps[i] = ss * (mid / f.execPx - 1) * 1e4;
-          changed = true;
-        }
+  private ageMarkouts(): Promise<void> {
+    if (this.markoutWork) return this.markoutWork;
+    this.markoutWork = agePendingMarkouts(this.pending, (fill, now) => this.ageMarkout(fill, now), () => this.loopsStopped)
+      .finally(() => { this.markoutWork = undefined; });
+    return this.markoutWork;
+  }
+
+  private ageMarkout(f: Fill, now: number): void {
+    // an approximate-price fill must never be aged — mid/execPx against a
+    // pxApprox execPx fabricates markouts the contract excludes. Unreachable
+    // via hasFutureMarkoutHorizon (which refuses to queue them); defensive.
+    if (f.pxApprox) { this.pending.delete(f); return; }
+    // an UNREGISTERED market has no CEX routing — never fall back to MON/Bybit
+    // (a BTC fill aged vs a $0.02 mid would fabricate absurd markouts). Leave
+    // its markouts null and stop tracking it (defense in depth; adapters gate
+    // discovery/decode on the pair registry so this shouldn't be reachable).
+    if (!pairOf(f.market)) { this.pending.delete(f); this.noteOnce('markout.market.unregistered', `fill market '${f.market}' is not a registered pair — markouts skipped`, f.venueId); return; }
+    const hist = this.midHist.get(f.market) ?? [];
+    // A horizon that elapsed before we had any mid for THIS pair can't be
+    // computed faithfully — leave it null rather than fabricate it (M1).
+    const earliestMid = hist.length ? hist[0].t : now;
+    const ss = f.side === 'buy' ? 1 : -1;
+    let changed = false, complete = true;
+    for (let i = 0; i < MARKOUT_HORIZONS.length; i++) {
+      if (f.markoutsBps[i] != null) continue;
+      const at = f.ts + MARKOUT_HORIZONS[i] * 1000;
+      if (now < at) { complete = false; continue; }   // horizon not reached yet
+      if (at < earliestMid) continue;                  // elapsed unobserved → leave null
+      const mid = this.midNear(f.market, at);
+      // no near-enough mid ⇒ the horizon stays null (elapsed-unobservable),
+      // and the fill still leaves the pending queue below — never a 0.
+      if (mid > 0 && f.execPx > 0) {
+        f.markoutsBps[i] = ss * (mid / f.execPx - 1) * 1e4;
+        changed = true;
       }
-      if (changed) { this.dirty.add(f); this.emitMsg({ ch: 'fill', data: f }); }
-      if (complete) this.pending.delete(f);
     }
+    if (changed) { this.dirty.add(f); this.emitMsg({ ch: 'fill', data: f }); }
+    if (complete) this.pending.delete(f);
   }
   /** the pair mid within ±MID_NEAR_TOL_MS of `t`, else 0 (unmarkable). The
-   *  history is length-capped, not time-capped, and poll() can starve during a
-   *  long catch-up tail — an uncapped "nearest" sample could be minutes off. */
+   *  history is time- and length-capped; a stalled event loop must never join
+   *  a fill to a reference sample minutes away from its horizon. */
   private static readonly MID_NEAR_TOL_MS = 6_000;
   private midNear(market: string, t: number): number {
     const hist = this.midHist.get(market) ?? [];
-    let best = 0, bestDt = Infinity;
-    for (const s of hist) { const dt = Math.abs(s.t - t); if (dt < bestDt) { bestDt = dt; best = s.mid; } }
-    if (bestDt <= LiveDataSource.MID_NEAR_TOL_MS) return best;
+    const sample = nearestReferenceSample(hist, t, LiveDataSource.MID_NEAR_TOL_MS);
+    if (sample) return sample.mid;
     // live fallback only when NOW is an honest mark for t
     return Math.abs(Date.now() - t) <= LiveDataSource.MID_NEAR_TOL_MS ? REFERENCES.midForPair(market) : 0;
   }

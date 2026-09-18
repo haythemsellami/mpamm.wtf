@@ -1,0 +1,85 @@
+{
+  "measuredAt": "2026-09-17T15:25:51.691Z",
+  "node": "v24.11.1",
+  "cpu": "Apple M4",
+  "analytics": {
+    "count": 1000000,
+    "exactResults": true,
+    "workerHeapMb": 128,
+    "method": "Deterministic persisted fills, warmed; original 25k-page scan on main vs 25k-page consistent read-only worker. Fresh child per scenario, fixture construction excluded; one warmup, parent GC before measurement. CPU/RSS include worker, RSS is not a production sizing estimate; 5ms loop probe.",
+    "direct": {
+      "elapsedMs": 11228.093,
+      "cpuMs": 11391.001,
+      "eventLoopP95Ms": 192.8350410000021,
+      "eventLoopMaxMs": 206.09491699999853,
+      "rssPeakMB": 460.734375
+    },
+    "worker": {
+      "elapsedMs": 12330.379708,
+      "cpuMs": 13363.008,
+      "eventLoopP95Ms": 0.6573340000013559,
+      "eventLoopMaxMs": 0.7914579999996931,
+      "rssPeakMB": 394.6875
+    }
+  },
+  "quoteDemand": {
+    "method": "Simulator arithmetic only; 100 warmups + 1000 samples. Row counts measure avoided combinations, not live RPC latency.",
+    "results": [
+      {
+        "mode": "idle",
+        "rows": 0,
+        "p50Ms": 0.0003749999959836714,
+        "p95Ms": 0.0006250000005820766
+      },
+      {
+        "mode": "selected",
+        "rows": 8,
+        "p50Ms": 0.005916000001889188,
+        "p95Ms": 0.007874999995692633
+      },
+      {
+        "mode": "full",
+        "rows": 900,
+        "p50Ms": 0.25974999999743886,
+        "p95Ms": 0.3343749999985448
+      }
+    ]
+  },
+  "rpcBatching": {
+    "method": "Loopback JSON-RPC server returns batch after all members; 5ms fast call and 80ms slow call; 1 warmup + 20 trials.",
+    "results": [
+      {
+        "mode": "shared-8ms",
+        "trials": 20,
+        "fastP50Ms": 93.63550000000396,
+        "fastP95Ms": 95.24895799999649,
+        "slowP50Ms": 93.63741700000537,
+        "httpRequestsIncludingWarmup": 21
+      },
+      {
+        "mode": "shared-0ms",
+        "trials": 20,
+        "fastP50Ms": 84.96054200000071,
+        "fastP95Ms": 86.20191700000578,
+        "slowP50Ms": 84.96175000000221,
+        "httpRequestsIncludingWarmup": 21
+      },
+      {
+        "mode": "per-adapter-0ms",
+        "trials": 20,
+        "fastP50Ms": 9.332750000001397,
+        "fastP95Ms": 10.08391699999629,
+        "slowP50Ms": 85.06508400000166,
+        "httpRequestsIncludingWarmup": 42
+      },
+      {
+        "mode": "no-http-batch",
+        "trials": 20,
+        "fastP50Ms": 8.182416999996349,
+        "fastP95Ms": 8.937082999997074,
+        "slowP50Ms": 83.97600000000239,
+        "httpRequestsIncludingWarmup": 42
+      }
+    ]
+  }
+}

@@ -53,11 +53,13 @@ async function setup(adapters: ReturnType<typeof healthyAdapter>[]) {
   vi.resetModules();
 
   const getBlockNumber = vi.fn(async () => 100n);
+  const getHead = vi.fn(async () => 100n);
   const getLogsChunked = vi.fn(async () => []);
   vi.doMock('../chain/rpc.js', () => ({
     monad: { blockTime: 300 },
     publicClient: { getBlockNumber },
     quoteClient: {},
+    headClient: { getBlockNumber: getHead },
     archiveClient: {},
     getLogsChunked,
     probeChain: vi.fn(async () => ({ ok: true, block: 100 })),
@@ -97,11 +99,35 @@ async function setup(adapters: ReturnType<typeof healthyAdapter>[]) {
   source.backgroundHistory = vi.fn(async () => {});
   source.bootHead = 0n;
   /** point the (mocked) chain tip so tailFills sees `head` = tip - 5 */
-  const setHead = (head: bigint) => getBlockNumber.mockResolvedValue(head + 5n);
-  return { source, getLogsChunked, setHead };
+  const setHead = (head: bigint) => getHead.mockResolvedValue(head + 5n);
+  return { source, getLogsChunked, setHead, getHead, getBlockNumber };
 }
 
 describe('tailFills fetch window', () => {
+  it('uses the isolated head lane while keeping the five-block finality margin', async () => {
+    const { source, getLogsChunked, setHead, getHead, getBlockNumber } = await setup([healthyAdapter()]);
+    source.lastBlock = 123n;
+    setHead(130n);
+    try {
+      await source.tailFills();
+      expect(getHead).toHaveBeenCalledOnce();
+      expect(getBlockNumber).not.toHaveBeenCalled();
+      expect(getLogsChunked).toHaveBeenCalledWith(expect.objectContaining({ fromBlock: 124n, toBlock: 130n }));
+      expect(source.lastBlock).toBe(130n);
+    } finally { source.store.close(); }
+  });
+
+  it('holds the cursor when the isolated head request fails', async () => {
+    const { source, getLogsChunked, getHead } = await setup([healthyAdapter()]);
+    source.lastBlock = 123n;
+    getHead.mockRejectedValueOnce(new Error('head unavailable'));
+    try {
+      await expect(source.tailFills()).rejects.toThrow('head unavailable');
+      expect(getLogsChunked).not.toHaveBeenCalled();
+      expect(source.lastBlock).toBe(123n);
+    } finally { source.store.close(); }
+  });
+
   it('capped at exactly TAIL_WINDOW_BLOCKS: a 1000-block gap fetches 1000, not 1001 (inclusive ends)', async () => {
     const { source, getLogsChunked, setHead } = await setup([healthyAdapter()]);
     source.lastBlock = 0n; // from = 1

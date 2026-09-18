@@ -147,6 +147,21 @@ const stub = (notes: string[], o: StubOpts = {}) => {
 };
 
 describe('Metric permissionless discovery', () => {
+  it('retains discovered markets through liveness failures while withholding unavailable quotes', async () => {
+    const adapter = createMetricAdapter();
+    await adapter.discover(stub([]));
+    const catalog = adapter.quoteMarkets!();
+    expect(catalog).toEqual(expect.arrayContaining(['MON/USDC', 'BTC/USDC', 'ETH/USDC']));
+    for (const ctx of [stub([], { priceFails: true }), stub([], { balances: () => [0n, 0n] })]) {
+      await adapter.discover(ctx);
+      expect(adapter.quoteMarkets!()).toEqual(catalog);
+      expect(await adapter.quote!(ctx, [100], 1_000_000n, new Set(['BTC/USDC']))).toEqual([]);
+      expect(adapter.logSources().find((s) => s.key === 'swap')?.address).toHaveLength(3);
+    }
+    await adapter.discover(stub([]));
+    expect(adapter.quoteMarkets!()).toEqual(catalog);
+  });
+
   it('tails the factory even before any pool is live, so a new deployment can reach us', async () => {
     const notes: string[] = [];
     const a = createMetricAdapter();

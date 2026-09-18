@@ -2,7 +2,7 @@
 // revert reason out of an allowFailure multicall so a venue that leaves the
 // grid says WHY, instead of reading as an adapter we broke.
 import { describe, expect, it } from 'vitest';
-import { createQuoteOutageReporter, quoteOutageReason } from '../quote-health.js';
+import { createQuoteOutageReporter, QuoteHealthBatch, quoteOutageReason } from '../quote-health.js';
 
 /**
  * The real viem error a reverted leg carries, recorded live from ThogAMM while
@@ -98,5 +98,58 @@ describe('createQuoteOutageReporter', () => {
     const report = createQuoteOutageReporter('POE');
     expect(report(ctx, [])).toBe(false);
     expect(notes).toEqual([]);
+  });
+
+  it('never lets a canceled result consume warning or recovery state', () => {
+    const { notes, ctx } = stub();
+    const report = createQuoteOutageReporter('Venue');
+    const controller = new AbortController(); controller.abort();
+    const canceled = { ...ctx, quoteSignal: controller.signal };
+    expect(() => report(canceled, [failed(PAUSED_ERROR)])).toThrow();
+    report(ctx, [failed(PAUSED_ERROR)]);
+    expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable']);
+    expect(() => report(canceled, [ok])).toThrow();
+    report(ctx, [ok]);
+    expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered']);
+  });
+
+  it.each([false, true])('reports the whole demand once regardless of completion order (failure first: %s)', (failureFirst) => {
+    const { notes, ctx } = stub();
+    const report = createQuoteOutageReporter('Venue');
+    report(ctx, [failed(PAUSED_ERROR)]);
+    notes.length = 0;
+    const batch = new QuoteHealthBatch(ctx);
+    for (const plan of failureFirst ? [0, 1] : [1, 0]) {
+      expect(report({ ...ctx, quoteHealth: batch.forPlan(plan) }, plan === 0 ? [failed(PAUSED_ERROR)] : [ok])).toBe(plan === 0);
+      expect(notes).toEqual([]);
+    }
+    batch.commit(); batch.commit();
+    expect(notes.map((n) => n.code)).toEqual(['venue.quote.recovered']);
+  });
+
+  it('selects a stable outage reason from plan order instead of response order', () => {
+    const { notes, ctx } = stub();
+    const report = createQuoteOutageReporter('Venue');
+    const batch = new QuoteHealthBatch(ctx);
+    report({ ...ctx, quoteHealth: batch.forPlan(1) }, [failed(new Error('unavailable'))]);
+    report({ ...ctx, quoteHealth: batch.forPlan(0) }, [failed(PAUSED_ERROR)]);
+    expect(notes).toEqual([]);
+    batch.commit();
+    expect(notes).toHaveLength(1);
+    expect(notes[0].msg).toContain('all 2 legs failed with "maker: paused"');
+  });
+
+  it('does not apply health collected before a deadline when the frame is canceled', () => {
+    const { notes, ctx } = stub();
+    const controller = new AbortController();
+    const frame = { ...ctx, quoteSignal: controller.signal };
+    const batch = new QuoteHealthBatch(frame);
+    const report = createQuoteOutageReporter('Venue');
+    report({ ...frame, quoteHealth: batch.forPlan(0) }, [failed(PAUSED_ERROR)]);
+    controller.abort();
+    expect(() => batch.commit()).toThrow();
+    expect(notes).toEqual([]);
+    report(ctx, [failed(PAUSED_ERROR)]);
+    expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable']);
   });
 });

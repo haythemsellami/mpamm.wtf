@@ -1,0 +1,88 @@
+{
+  "measuredAt": "2026-09-17T17:58:25.050Z",
+  "node": "v24.11.1",
+  "method": "12-second read-only local live integration with Metric and Lunarbase, disposable DB and backfills disabled. Gzip BTC/USDC $100 quotes plus live depth worker, followed by eight concurrent publication requests and a block-pinned Lunarbase pause read. Correctness check, not a latency or full-block-coverage benchmark.",
+  "quoteFrames": 12,
+  "executableMetricFrames": 12,
+  "depthPublications": 11,
+  "depthBlocks": [
+    105670892,
+    105670917
+  ],
+  "servedBlocks": [
+    0,
+    105670923
+  ],
+  "sharedPublicationRequests": 8,
+  "publicationRevisions": 1,
+  "immutableArtifactStatus": 200,
+  "immutableArtifactEncoding": "gzip",
+  "lunarbase": {
+    "checkedBlock": 105670921,
+    "paused": true,
+    "quotedRows": 0,
+    "remainsRegistered": true
+  },
+  "samples": [
+    {
+      "block": 105670888,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670889,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670892,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670894,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670898,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670900,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670901,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670904,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670906,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670912,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670915,
+      "rows": 2,
+      "missingVenues": []
+    },
+    {
+      "block": 105670917,
+      "rows": 2,
+      "missingVenues": []
+    }
+  ]
+}

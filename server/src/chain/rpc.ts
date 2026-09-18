@@ -32,6 +32,8 @@ const PUBLIC_RPC = 'https://rpc.monad.xyz';
 interface RpcPool {
   client: PublicClient;
   quoteClient: PublicClient;
+  headClient: PublicClient;
+  scopedQuote: (key: string, signal: AbortSignal) => PublicClient;
   status: () => RpcStatusView;
   generation: () => number;
   onEvent: (cb: (n: RpcNote) => void) => void;
@@ -72,7 +74,16 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
     return {
       label: `${label(i)}${url === PUBLIC_RPC && i > 0 ? ' (public)' : ''}`,
       request,
-      lanes: { quote },
+      lanes: { quote, head: http(url, { batch: false, retryCount: 0, timeout: 1_000 })({ chain: monad }).request as RpcRequestFn },
+      scopedQuote: (key: string, signal: AbortSignal) => {
+        const scopedUrl = new URL(url);
+        scopedUrl.hash = `quote-${key}`;
+        return http(scopedUrl.toString(), {
+          batch: config.quoteHttpBatch ? { batchSize: config.quoteHttpBatchSize, wait: 0 } : false,
+          retryCount: 0, timeout: config.quoteDeadlineMs,
+          fetchOptions: { signal },
+        })({ chain: monad }).request as RpcRequestFn;
+      },
     };
   }));
   const transport: Transport = () => createTransport({
@@ -100,6 +111,14 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
   return {
     client,
     quoteClient,
+    headClient: createPublicClient({ chain: monad, cacheTime: 0, transport: () => createTransport({
+      key: 'failover-head', name: 'Unbatched head watchdog', type: 'http', retryCount: 0,
+      request: (args) => breaker.request(args, 'head') as Promise<any>,
+    }) }),
+    scopedQuote: (key, signal) => createPublicClient({ chain: monad, cacheTime: 0, transport: () => createTransport({
+      key: 'quote-deadline', name: 'Block-bounded quote', type: 'http', retryCount: 0,
+      request: (args) => breaker.request(args, 'quote', { signal, key }) as Promise<any>,
+    }) }),
     status: () => breaker.status(),
     generation: () => breaker.generation(),
     onEvent: (cb) => breaker.subscribe(cb),
@@ -125,9 +144,13 @@ const archivePool = hasDedicatedArchive
   : hotPool;
 
 export const publicClient: PublicClient = hotPool.client;
+/** Hot-chain head lane for quotes, fills, depth, boot and adapter discovery.
+ * Archive retention/boundary checks stay on the archive pool. */
+export const headClient: PublicClient = hotPool.headClient;
 /** Block-pinned adapter calls share the hot pool's failover state, but use a
  * zero-wait HTTP batch lane isolated from heads, logs and attribution. */
 export const quoteClient: PublicClient = hotPool.quoteClient;
+export const scopedQuoteClient = (key: string, signal: AbortSignal): PublicClient => hotPool.scopedQuote(key, signal);
 export const archiveClient: PublicClient = archivePool.client;
 
 /** Failover status for /api/markets (labels only) + event sink for state.notes

@@ -1,7 +1,7 @@
 import { ASSETS, depthSizes, MARKETS, type QuoteRow } from '@shared';
 import { guardRpcRead } from '../chain/failover.js';
 import {
-  getLogsChunked, probeChain, publicClient, quoteClient, rpcGeneration, rpcStatus,
+  getLogsChunked, headClient, probeChain, publicClient, quoteClient, rpcGeneration, rpcStatus,
 } from '../chain/rpc.js';
 import { HotHeadWatcher } from '../chain/heads.js';
 import { config } from '../config.js';
@@ -40,7 +40,7 @@ function ctxFor(adapter: VenueAdapter, pricer: UsdPricer): AdapterContext {
   let base = contexts.get(adapter);
   if (!base) {
     base = {
-      client: publicClient,
+      client: { ...publicClient, getBlockNumber: headClient.getBlockNumber },
       getLogs: getLogsChunked,
       pricer,
       config,
@@ -108,7 +108,7 @@ async function drain(): Promise<void> {
       if (!active.has(market) || stopped) continue;
       const blockNumber = latestHead > 0n
         ? latestHead
-        : await guardRpcRead(() => publicClient.getBlockNumber(), unavailable, rpcGeneration);
+        : await guardRpcRead(() => headClient.getBlockNumber(), unavailable, rpcGeneration);
       lastStarted.set(market, Date.now());
       await compute(market, blockNumber);
     }
@@ -120,7 +120,7 @@ async function drain(): Promise<void> {
   }
 }
 
-const watcher = new HotHeadWatcher(publicClient, { wsUrl: config.rpcWs, pollMs: Math.max(75, config.headPollMs) });
+const watcher = new HotHeadWatcher(headClient, { wsUrl: config.rpcWs, pollMs: Math.max(75, config.headPollMs) });
 
 async function shutdown(): Promise<void> {
   if (stopped) return;
@@ -173,7 +173,7 @@ async function boot(): Promise<void> {
     onWsFallback: () => {},
     onWsRecovered: () => {},
   });
-  const initialHead = await guardRpcRead(() => publicClient.getBlockNumber(), unavailable, rpcGeneration);
+  const initialHead = await guardRpcRead(() => headClient.getBlockNumber(), unavailable, rpcGeneration);
   if (initialHead > latestHead) latestHead = initialHead;
   ready = true;
   for (const market of active) pending.add(market);

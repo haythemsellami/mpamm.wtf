@@ -466,6 +466,7 @@ export function createCloberVaultAdapter(): VenueAdapter {
 
   return {
     venues: () => [CLOBER_VAULT_VENUE],
+    quoteMarkets: () => [...new Set(markets.map((m) => m.market))],
     // Full venue-lifetime volume + swap counts by replaying Take on-chain from
     // the vault books' first trading day — the same pattern as every other
     // venue. This REPLACED the old subgraph volume seed, which (a) started at

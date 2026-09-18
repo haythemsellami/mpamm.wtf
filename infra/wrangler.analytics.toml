@@ -1,0 +1,7 @@
+name = "mpamm-analytics-cache"
+main = "analytics-cache-worker.ts"
+compatibility_date = "2026-09-17"
+workers_dev = false
+
+# Attach only after the backend supports immutable aggregate revisions.
+routes = [{ pattern = "mpamm.wtf/api/analytics/*", zone_name = "mpamm.wtf" }]

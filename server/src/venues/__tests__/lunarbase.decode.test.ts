@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { QuoteRunner } from '../../quote-runner.js';
+import type { QuoteRow } from '@shared';
 import {
   LUNARBASE_POOLS,
   applyLunarbaseStateLogs,
@@ -225,6 +227,88 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     note: () => {},
   }) as any;
 
+  it.each([
+    { failure: 'size', expired: false }, { failure: 'size', expired: true },
+    { failure: 'leg', expired: false }, { failure: 'leg', expired: true },
+  ])('holds every sibling after a $failure rejection (expired: $expired)', async ({ failure, expired }) => {
+    vi.useFakeTimers();
+    const releases: Array<() => void> = [];
+    try {
+      const adapter = createLunarbaseAdapter();
+      await adapter.discover(stub(false));
+      const ctx = stub(false, ZERO_SLOT); ctx.note = vi.fn();
+      ctx.pricer.tokenForUsd = (_token: string, size: number) => {
+        if (failure === 'size' && size === 1000) throw new Error('sizing unavailable');
+        return size;
+      };
+      ctx.client.readContract = async ({ functionName, args }: any) => {
+        if (failure === 'leg' && functionName === 'quoteXToY' && args[0] === 100n * 10n ** 18n) {
+          return [100n, 0n, undefined]; // A malformed decoded fee rejects after the read.
+        }
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return [100n, 0n, 0n];
+      };
+      const runner = new QuoteRunner();
+      let task!: Promise<QuoteRow[]>, settled = false;
+      const result = runner.run('lunarbase', 10, (quoteSignal) => (task = adapter.quote!({ ...ctx, quoteSignal }, [100, 1000], 501n)), []);
+      const outcome = result.then((value) => { settled = true; return value; }, (error) => { settled = true; return error; });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(releases).toHaveLength(failure === 'size' ? 2 : 3);
+      expect(settled).toBe(false);
+      expect(ctx.note).not.toHaveBeenCalled();
+      const next = vi.fn(async () => []);
+      expect(await runner.run('lunarbase', 10, next, [])).toEqual([]);
+      expect(next).not.toHaveBeenCalled();
+      if (expired) { await vi.advanceTimersByTimeAsync(9); expect(await outcome).toEqual([]); }
+      releases[0](); await vi.advanceTimersByTimeAsync(0);
+      expect(await runner.run('lunarbase', 10, next, [])).toEqual([]);
+      expect(next).not.toHaveBeenCalled();
+      expect(ctx.note).not.toHaveBeenCalled();
+      for (const release of releases) release();
+      await expect(task).rejects.toMatchObject(expired ? { name: 'AbortError' } : failure === 'size' ? { message: 'sizing unavailable' } : { name: 'TypeError' });
+      await outcome;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
+      expect(ctx.note).not.toHaveBeenCalled();
+      await runner.run('lunarbase', 10, next, []);
+      expect(next).toHaveBeenCalledOnce();
+    } finally {
+      for (const release of releases) release();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['valid', 'invalid', 'failed'] as const)('discards canceled %s gate results without changing shared state or releasing unsettled legs', async (gate) => {
+    vi.useFakeTimers();
+    try {
+      const adapter = createLunarbaseAdapter();
+      await adapter.discover(stub(false));
+      const ctx = stub(false, gate === 'invalid' ? ZERO_SLOT : '0x' + '0'.repeat(24) + '2'.repeat(40));
+      ctx.note = vi.fn();
+      ctx.pricer.tokenForUsd = (_token: string, size: number) => size;
+      if (gate === 'failed') ctx.client.multicall = async () => { throw new Error('unavailable'); };
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      ctx.client.readContract = async () => { await held; return [100n, 0n, 0n]; };
+      const runner = new QuoteRunner();
+      let task!: Promise<QuoteRow[]>;
+      const result = runner.run('lunarbase', 10, (quoteSignal) => (task = adapter.quote!({ ...ctx, quoteSignal }, [100], 501n)), []);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await result).toEqual([]);
+      const next = vi.fn(async () => []);
+      expect(await runner.run('lunarbase', 10, next, [])).toEqual([]);
+      expect(next).not.toHaveBeenCalled();
+      expect(ctx.note).not.toHaveBeenCalled();
+      release();
+      await expect(task).rejects.toMatchObject({ name: 'AbortError' });
+      expect(ctx.note).not.toHaveBeenCalled();
+      expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
+      const healthy = stub(false); healthy.note = vi.fn();
+      await adapter.discover(healthy);
+      expect(healthy.note.mock.calls.map(([code]: [string]) => code)).toEqual(['venue.discovery']);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('keeps an unreadable pool in the tail set instead of quarantining it', async () => {
     const a = createLunarbaseAdapter();
     await a.discover(stub(false));                    // healthy: pool is known
@@ -237,6 +321,67 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     const after = a.logSources().find((s) => s.key === 'swap');
     expect(after).toBeDefined();                                    // still tailed…
     expect((after!.address as string[]).length).toBe(tailedBefore);  // …and not dropped
+  });
+
+  it('does not replace a newer cached implementation with an older snapshot', async () => {
+    const adapter = createLunarbaseAdapter();
+    const current = stub(false, '0x' + '0'.repeat(24) + '2'.repeat(40));
+    current.client.getBlockNumber = async () => 502n;
+    await adapter.discover(current);
+    const older = stub(false); older.note = vi.fn();
+    await adapter.discover(older);
+    expect(older.note.mock.calls.map(([code]: [string]) => code)).toEqual(['venue.discovery']);
+  });
+
+  it.each(['valid', 'invalid', 'failed', 'quarantined'] as const)('discards obsolete %s quote gates and legs after a newer discovery', async (gate) => {
+    const adapter = createLunarbaseAdapter();
+    const quoteContext = (block: bigint, slot = IMPL_SLOT) => {
+      const ctx = stub(false, slot);
+      ctx.note = vi.fn();
+      ctx.client.getBlockNumber = async () => block;
+      ctx.client.multicall = async ({ contracts }: any) => contracts.map((c: any) => ({ status: 'success',
+        result: c.functionName === 'state' ? [1_000_000n, 100, 100, block] : ok[c.functionName] }));
+      ctx.pricer.tokenForUsd = (_token: string, size: number) => size;
+      ctx.client.readContract = async ({ functionName }: any) => [functionName === 'quoteXToY' ? 100_000_000n : 100n * 10n ** 18n, 0n, 0n];
+      return ctx;
+    };
+    await adapter.discover(quoteContext(500n));
+    expect(await adapter.quote!(quoteContext(500n), [100], 500n)).toHaveLength(1);
+    const old = quoteContext(501n, gate === 'invalid' ? ZERO_SLOT : IMPL_SLOT);
+    if (gate === 'failed') old.client.multicall = async () => { throw new Error('old snapshot unavailable'); };
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const quoteLeg = old.client.readContract;
+    old.client.readContract = async (request: any) => { entered(); await held; return quoteLeg(request); };
+    const pending = adapter.quote!(old, [100], 501n);
+    await started;
+    const newer = quoteContext(502n, gate === 'quarantined' ? ZERO_SLOT : '0x' + '0'.repeat(24) + '2'.repeat(40));
+    await adapter.discover(newer);
+    release();
+    expect(await pending).toEqual([]);
+    expect(old.note).not.toHaveBeenCalled();
+    if (gate === 'quarantined') {
+      expect(adapter.logSources()).toEqual([]);
+      expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
+      await adapter.discover(quoteContext(501n));
+      expect(adapter.logSources()).toEqual([]);
+      expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
+      await adapter.discover(quoteContext(503n));
+    }
+    expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
+    expect(await adapter.quote!(quoteContext(503n), [100], 503n)).toHaveLength(1);
+  });
+
+  it.each(['invalid', 'failed'] as const)('ignores an obsolete %s rediscovery instead of quarantining a newer pool', async (gate) => {
+    const adapter = createLunarbaseAdapter();
+    const latest = stub(false); latest.client.getBlockNumber = async () => 502n;
+    await adapter.discover(latest);
+    const older = stub(gate === 'failed', gate === 'invalid' ? ZERO_SLOT : undefined);
+    older.note = vi.fn();
+    await adapter.discover(older);
+    expect(older.note.mock.calls.map(([code]: [string]) => code)).toEqual(['venue.discovery']);
+    expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
   });
 
   it('reports the outage as unreadable, not as a config mismatch', async () => {
@@ -263,6 +408,23 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     expect(a.logSources().find((s) => s.key === 'swap')).toBeUndefined();  // dropped, correctly
   });
 
+  it('retains only previously admitted markets through quarantine and recovery', async () => {
+    const adapter = createLunarbaseAdapter();
+    await adapter.discover(stub(false, ZERO_SLOT));
+    expect(adapter.quoteMarkets?.()).toEqual([]);
+    await adapter.discover(stub(false));
+    expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
+    await adapter.discover(stub(false, ZERO_SLOT));
+    expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
+    expect(adapter.logSources()).toEqual([]);
+    const ctx = stub(false); ctx.client.multicall = vi.fn();
+    expect(await adapter.quote!(ctx, [100], 501n, new Set([cfg.market]))).toEqual([]);
+    expect(ctx.client.multicall).not.toHaveBeenCalled();
+    await adapter.discover(stub(false));
+    expect(adapter.quoteMarkets?.()).toEqual([cfg.market]);
+    expect(adapter.logSources().find((source) => source.key === 'swap')?.address).toEqual([cfg.pool]);
+  });
+
   it('retracts the unreadable warning once the pool reads again', async () => {
     const notes: { code: string; msg: string }[] = [];
     const a = createLunarbaseAdapter();
@@ -276,4 +438,3 @@ describe('a failed read is not a misconfiguration (issue #61)', () => {
     expect(notes.some((n) => n.code === 'venue.quote.recovered' && /readable again/.test(n.msg))).toBe(true);
   });
 });
-

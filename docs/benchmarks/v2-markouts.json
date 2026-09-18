@@ -1,0 +1,84 @@
+{
+  "measuredAt": "2026-09-17T16:27:31.107Z",
+  "node": "v24.11.1",
+  "cpu": "Apple M4",
+  "method": "One warmup and three alternating trials per size; 1201 reference samples at 100ms; all five horizons due in a synthetic burst. Original synchronous linear scan vs actual LiveDataSource aging with binary lookup and 128-fill/2ms slices. 2ms event-loop probe; fixture construction and JSON hashing excluded; no RPC, persistence or socket fanout.",
+  "results": [
+    {
+      "count": 10000,
+      "exactResults": true,
+      "baseline": [
+        {
+          "elapsedMs": 60.82779199999999,
+          "cpuMs": 60.844,
+          "maxLoopDelayMs": 58.87908299999998
+        },
+        {
+          "elapsedMs": 59.67879199999999,
+          "cpuMs": 59.794,
+          "maxLoopDelayMs": 58.33166699999998
+        },
+        {
+          "elapsedMs": 59.8365,
+          "cpuMs": 59.853,
+          "maxLoopDelayMs": 58.50283300000001
+        }
+      ],
+      "bounded": [
+        {
+          "elapsedMs": 12.391500000000008,
+          "cpuMs": 21.512,
+          "maxLoopDelayMs": 0.477958000000001
+        },
+        {
+          "elapsedMs": 11.485416999999984,
+          "cpuMs": 12.91,
+          "maxLoopDelayMs": 0.6082079999999905
+        },
+        {
+          "elapsedMs": 13.568834000000038,
+          "cpuMs": 28.251,
+          "maxLoopDelayMs": 0.8970000000000482
+        }
+      ]
+    },
+    {
+      "count": 50000,
+      "exactResults": true,
+      "baseline": [
+        {
+          "elapsedMs": 308.0842910000001,
+          "cpuMs": 317.282,
+          "maxLoopDelayMs": 308.02658399999996
+        },
+        {
+          "elapsedMs": 305.31166699999994,
+          "cpuMs": 311.012,
+          "maxLoopDelayMs": 303.3549580000001
+        },
+        {
+          "elapsedMs": 308.939042,
+          "cpuMs": 307.189,
+          "maxLoopDelayMs": 307.044167
+        }
+      ],
+      "bounded": [
+        {
+          "elapsedMs": 61.29274999999984,
+          "cpuMs": 70.976,
+          "maxLoopDelayMs": 2.6807920000001104
+        },
+        {
+          "elapsedMs": 63.85254199999986,
+          "cpuMs": 85.674,
+          "maxLoopDelayMs": 1.5252080000000205
+        },
+        {
+          "elapsedMs": 63.82920800000011,
+          "cpuMs": 82.315,
+          "maxLoopDelayMs": 3.109125000000404
+        }
+      ]
+    }
+  ]
+}

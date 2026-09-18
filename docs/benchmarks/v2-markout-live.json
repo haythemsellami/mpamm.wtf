@@ -1,0 +1,884 @@
+{
+  "measuredAt": "2026-09-17T16:37:17.538Z",
+  "node": "v24.11.1",
+  "durationMs": 46442,
+  "configuration": {
+    "venues": [
+      "metric",
+      "lunarbase"
+    ],
+    "scopes": [
+      "BTC/USDC $1000",
+      "MON/USDC $1000"
+    ],
+    "quoteDeadlineMs": 250,
+    "historyBackfill": false
+  },
+  "quoteFrames": [
+    {
+      "block": 105654661,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 146,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654665,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654667,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654669,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 52,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654671,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654672,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654675,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654678,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654681,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 52,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654685,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 52,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654687,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 49,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654689,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654693,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 49,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654694,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 48,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654696,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654697,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654700,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654703,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 128,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654705,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654706,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654707,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654709,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654710,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 47,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654711,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 47,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654713,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 45,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654716,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654718,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654720,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 49,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654722,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 44,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654724,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654728,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654729,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654730,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 49,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654732,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 54,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654733,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 52,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654737,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 48,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654739,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 53,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654741,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654743,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654748,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654750,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654751,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654752,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654754,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654756,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654757,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 47,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654759,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 43,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654761,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 49,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654764,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 52,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654766,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 54,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654767,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 48,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654768,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654772,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 52,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654777,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 71,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654780,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 58,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654785,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654788,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654789,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 52,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654790,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654791,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654793,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 47,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654794,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 51,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654797,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 52,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654798,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 52,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654801,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 50,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654804,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 46,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    },
+    {
+      "block": 105654806,
+      "counts": {
+        "metric": 1,
+        "bybit": 1,
+        "binance": 1
+      },
+      "computeMs": 48,
+      "missingVenues": [
+        "lunarbase"
+      ]
+    }
+  ],
+  "lunarbaseGate": {
+    "block": 105654804,
+    "pool": "0x0000a8fd148694aE3E17c079Ce4BBF8187758888",
+    "paused": true,
+    "quoteRows": 0,
+    "stillTailed": true
+  },
+  "uniqueFills": 1,
+  "fillExample": {
+    "fill": {
+      "id": "metric-0x1e2daf0afe4beca464f3cda58d12d4a975006e5380b8bcd6110c18e3535bcee2-8",
+      "venueId": "metric",
+      "market": "BTC/USDC",
+      "side": "buy",
+      "category": "UNKNOWN",
+      "usd": 627.742813,
+      "baseAmount": 0.00819873,
+      "execPx": 76565.8599563591,
+      "txHash": "0x1e2daf0afe4beca464f3cda58d12d4a975006e5380b8bcd6110c18e3535bcee2",
+      "to": "0x3d5f…aa0c",
+      "pool": "metric 0x2d82ac",
+      "blockNumber": 105654798,
+      "ts": 1789663032000,
+      "markoutsBps": [
+        -1.308653205919219,
+        -3.2554232801496052,
+        null,
+        null,
+        null
+      ]
+    },
+    "horizonSeconds": 5,
+    "sample": {
+      "t": 1789663036972,
+      "mid": 76540.93452806244
+    },
+    "sampleDistanceMs": 28,
+    "recomputedBps": -3.2554232801496052,
+    "receiptCheck": {
+      "pool": "0x2d82ac42334b394a9a8d8f097d61dc1c6b065fd8",
+      "logIndex": 8,
+      "rawAmount0Delta": "-819873",
+      "rawAmount1Delta": "627742813",
+      "token0": "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+      "token1": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+      "baseDecimals": 8,
+      "quoteDecimals": 6,
+      "baseAmount": 0.00819873,
+      "quoteAmount": 627.742813,
+      "execPx": 76565.8599563591,
+      "exactMatch": true
+    }
+  },
+  "noteCodes": [
+    "metric:venue.discovery",
+    "metric:venue.gas.suspect",
+    "lunarbase:venue.discovery",
+    "core:tail.resume",
+    "lunarbase:venue.quote.unavailable"
+  ],
+  "limitations": "Bounded local live validation, not a block-coverage or production load benchmark. A paused Lunarbase pool validates the gate and retained fill sources, not executable live quotes."
+}
