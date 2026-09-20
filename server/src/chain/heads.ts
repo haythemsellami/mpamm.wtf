@@ -124,7 +124,9 @@ export class HotHeadWatcher {
         this.callbacks?.onReplaced?.(block);
       }
       if (!prior || replaced || !prior.commitState || !incoming.commitState || ranks[incoming.commitState] >= ranks[prior.commitState]) {
-        this.identities.set(block, incoming);
+        // Standard heads omit commitment metadata after a WS fallback. The
+        // same hash must retain its known finality; a replacement must not.
+        this.identities.set(block, replaced ? incoming : { ...prior, ...incoming, commitState: incoming.commitState ?? prior?.commitState });
       }
       for (const height of this.identities.keys()) if (height < this.last - 64n) this.identities.delete(height);
     }

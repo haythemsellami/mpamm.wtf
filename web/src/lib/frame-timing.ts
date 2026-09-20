@@ -4,6 +4,7 @@ import type { QuoteSnapshot, StreamEnvelope } from '@shared';
 export type ReceivedEnvelope = StreamEnvelope & { timing?: { receivedAt: number; decodedAt: number } };
 interface FrameTiming {
   block: number;
+  revision: number;
   ts: number;
   receivedAt: number;
   decodedAt: number;
@@ -18,7 +19,7 @@ const enabled = () => typeof window !== 'undefined' && new URLSearchParams(windo
 export function recordFrameDelivery(envelope: ReceivedEnvelope): void {
   if (!enabled() || envelope.snapshot || envelope.message.ch !== 'quotes' || !envelope.timing || document.hidden) return;
   const quote = envelope.message.data;
-  pending.set(quote, { block: quote.block, ts: quote.ts, ...envelope.timing });
+  pending.set(quote, { block: quote.block, revision: quote.revision ?? 0, ts: quote.ts, ...envelope.timing });
 }
 export function recordCanvasDraw(quote: QuoteSnapshot | null): void {
   if (!quote || !enabled() || document.hidden) return;

@@ -210,6 +210,37 @@ describe('HotHeadWatcher', () => {
     watcher.stop();
   });
 
+  it.each(['Finalized', 'Verified'] as const)('retains %s commitment after reconnecting to standard heads', async (commitState) => {
+    vi.useFakeTimers();
+    const native = new FakeSocket(), standard = new FakeSocket();
+    const sockets = [native, standard];
+    const seen = vi.fn(), replaced = vi.fn();
+    const watcher = new HotHeadWatcher({ getBlockNumber: vi.fn(async () => 99n) } as any,
+      { pollMs: 75, wsUrl: 'wss://example.invalid', openSocket: () => sockets.shift() as any });
+    const hash = `0x${'a'.repeat(64)}`, losingHash = `0x${'b'.repeat(64)}`;
+    watcher.start({ onBlock: seen, onReplaced: replaced });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      native.emit('open'); native.emit('message', JSON.stringify({ id: 1, result: '0x8f' }));
+      native.emit('message', JSON.stringify({ id: 2, result: 'native' }));
+      native.emit('message', JSON.stringify({ method: 'eth_subscription', params: { subscription: 'native',
+        result: { number: '0x64', hash, blockId: hash, commitState } } }));
+      native.close();
+      await vi.advanceTimersByTimeAsync(1_000);
+      standard.emit('open'); standard.emit('message', JSON.stringify({ id: 1, result: '0x8f' }));
+      standard.emit('message', JSON.stringify({ id: 2, error: { code: -32602 } }));
+      standard.emit('message', JSON.stringify({ id: 3, result: 'standard' }));
+      const head = (nextHash: string) => standard.emit('message', JSON.stringify({ method: 'eth_subscription',
+        params: { subscription: 'standard', result: { number: '0x64', hash: nextHash } } }));
+      head(hash);
+      expect(watcher.identity(100n)).toMatchObject({ hash, blockId: hash, commitState, revision: 0 });
+      head(losingHash);
+      expect(replaced).not.toHaveBeenCalled();
+      expect(watcher.identity(100n)).toMatchObject({ hash, commitState, revision: 0 });
+      expect(seen.mock.calls.map((call) => call[0])).toEqual([99n, 100n]);
+    } finally { watcher.stop(); }
+  });
+
   it('pairs the socket with the active HTTP generation and discards a late primary head', async () => {
     vi.useFakeTimers();
     const a = new FakeSocket(), b = new FakeSocket();

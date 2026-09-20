@@ -38,8 +38,8 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | `RPC_WARM_MS` | standby head-probe cadence, default 15000ms, minimum 5000ms; preserves configured provider order |
 | `RPC_DEPTH_URL` | dedicated tip-fresh node for high-resolution depth curves (recommended; unset ⇒ reuses `RPC_HTTP_URL`) |
 | `RPC_DEPTH_WS_URL` | optional depth-node WebSocket (unset ⇒ uses hot WS only when the depth HTTP URL equals the hot URL) |
-| `RPC_DEPTH_BACKUP_URLS` | ordered failover nodes for depth, comma-separated (default: none) |
-| `RPC_DEPTH_WS_BACKUP_URLS` | positional WS peers of `RPC_DEPTH_BACKUP_URLS`; empty entries use HTTP only |
+| `RPC_DEPTH_BACKUP_URLS` | ordered failover nodes for a configured `RPC_DEPTH_URL`, comma-separated (default: none); when `RPC_DEPTH_URL` is unset, the worker inherits `RPC_HTTP_BACKUP_URLS` instead |
+| `RPC_DEPTH_WS_BACKUP_URLS` | positional WS peers of `RPC_DEPTH_BACKUP_URLS`; empty entries use HTTP only; when `RPC_DEPTH_URL` is unset, the worker inherits `RPC_WS_BACKUP_URLS` instead |
 | `RPC_ARCHIVE_URL` | deep-history node — volume backfill, markout onboarding, gas, `blockAtOrAfter` (default: unset ⇒ same node as `RPC_HTTP_URL`). Choose for retention |
 | `RPC_ARCHIVE_BACKUP_URLS` | ordered failover nodes for the archive pool (default: **none** — the public endpoint serves headers/logs/receipts to block 0 but refuses historical `eth_getCode`, which the gas tracker needs). Rejected at boot without `RPC_ARCHIVE_URL` |
 | `GETLOGS_CHUNK` | getLogs span the tail attempts (default 900 — the devcore4 fleet serves 1000/call; the public endpoint caps at ~100) |

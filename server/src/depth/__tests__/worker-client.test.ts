@@ -2,19 +2,23 @@ import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { forkMock } = vi.hoisted(() => ({ forkMock: vi.fn() }));
-
-vi.mock('node:child_process', () => ({ fork: forkMock }));
-vi.mock('../../config.js', () => ({
-  config: {
+const { forkMock, rpcConfig } = vi.hoisted(() => ({
+  forkMock: vi.fn(),
+  rpcConfig: {
     depthEnabled: true,
     rpcDepth: 'https://depth.invalid',
     rpcHttp: 'https://hot.invalid',
+    rpcWs: 'wss://hot.invalid',
+    rpcBackups: ['https://hot-backup.invalid', 'https://http-only.invalid'],
+    rpcWsBackups: ['wss://hot-backup.invalid', ''],
     rpcDepthWs: '',
-    rpcDepthBackups: [],
-    rpcDepthWsBackups: [],
+    rpcDepthBackups: [] as string[],
+    rpcDepthWsBackups: [] as string[],
   },
 }));
+
+vi.mock('node:child_process', () => ({ fork: forkMock }));
+vi.mock('../../config.js', () => ({ config: rpcConfig }));
 
 import { DepthWorkerClient } from '../worker-client.js';
 
@@ -35,6 +39,30 @@ describe('DepthWorkerClient lifecycle', () => {
   afterEach(() => {
     vi.clearAllTimers();
     vi.useRealTimers();
+  });
+
+  it.each(['inherit', 'dedicated', 'explicit-shared', 'no-backups'] as const)('forwards paired backup lists for a %s depth pool', async (mode) => {
+    const original = { ...rpcConfig };
+    const child = new FakeChild();
+    forkMock.mockReturnValue(child as unknown as ChildProcess);
+    const client = new DepthWorkerClient(() => {});
+    try {
+      rpcConfig.rpcDepth = mode === 'inherit' ? '' : mode === 'explicit-shared' ? rpcConfig.rpcHttp : 'https://depth.invalid';
+      rpcConfig.rpcDepthBackups = mode === 'inherit' || mode === 'no-backups' ? [] : ['https://depth-backup.invalid'];
+      rpcConfig.rpcDepthWsBackups = mode === 'inherit' || mode === 'no-backups' ? [] : ['wss://depth-backup.invalid'];
+      client.setDemand('MON/USDC', true);
+      expect(forkMock).toHaveBeenCalledOnce();
+      expect(forkMock.mock.calls[0][2].env).toMatchObject({
+        RPC_HTTP_URL: rpcConfig.rpcDepth || rpcConfig.rpcHttp,
+        RPC_WS_URL: mode === 'inherit' || mode === 'explicit-shared' ? rpcConfig.rpcWs : '',
+        RPC_HTTP_BACKUP_URLS: mode === 'inherit' ? 'https://hot-backup.invalid,https://http-only.invalid' : rpcConfig.rpcDepthBackups.join(','),
+        RPC_WS_BACKUP_URLS: mode === 'inherit' ? 'wss://hot-backup.invalid,' : rpcConfig.rpcDepthWsBackups.join(','),
+      });
+    } finally {
+      Object.assign(rpcConfig, original);
+      child.exitCode = 0;
+      await client.stop();
+    }
   });
 
   it('force-kills a worker that does not stop after becoming idle', async () => {

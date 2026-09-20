@@ -354,8 +354,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // Bootstrap carries the head with empty rows, not an observed quote.
         // The latest completed frame can legitimately be one block behind it.
         const current = quotesRef.current;
+        if (current && (msg.data.revision ?? 0) < (current.revision ?? 0)) return;
         if (current && (current.frame || current.rows.length > 0) && msg.data.block < current.block
-          && (msg.data.revision ?? 0) <= (current.revision ?? 0)) return;
+          && (msg.data.revision ?? 0) === (current.revision ?? 0)) return;
         setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1);
       }
       else if (msg.ch === 'volume') { if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data)); }
