@@ -1,3 +1,4 @@
+import { recordCanvasDraw } from '../lib/frame-timing';
 import { useEffect, useRef } from 'react';
 import { type VenueMeta } from '@shared';
 import { useDashboard } from '../store';
@@ -175,7 +176,7 @@ export function QuoteCanvas() {
   };
 
   // repaint on the data cadence + on venue/pair/size/theme changes (survives remount)
-  useEffect(() => { paintRef.current(); }, [d.frame, d.venueToggles, d.venues, d.pair, d.size, d.series, d.theme]);
+  useEffect(() => { paintRef.current(); recordCanvasDraw(d.quotes); }, [d.frame, d.venueToggles, d.venues, d.pair, d.size, d.series, d.theme]);
 
   // mount: paint now + backups for late layout, and repaint on resize
   useEffect(() => {

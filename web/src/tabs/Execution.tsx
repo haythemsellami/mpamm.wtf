@@ -21,7 +21,7 @@ function LiveDepthCurve({ market, venues, refName }: { market: string; venues: D
     setSnapshot(null);
     return connectLiveDepth(market, (next) => setSnapshot((previous) => {
       if (next.market !== market) return previous;
-      if (previous && (next.asOfBlock < previous.asOfBlock
+      if (previous && (next.revision ?? 0) <= (previous.revision ?? 0) && (next.asOfBlock < previous.asOfBlock
         || (next.asOfBlock === previous.asOfBlock && next.ts <= previous.ts))) return previous;
       return next;
     }));
@@ -41,6 +41,11 @@ export function ExecutionTab() {
   const pair = d.pair, size = d.size;
   const realtime = d.state?.realtime;
   const frameTelemetry = d.quotes?.frame;
+  const displayedBlock = d.quotes?.block ?? 0;
+  const observedBlock = Math.max(displayedBlock, realtime?.headBlock ?? 0);
+  const lagBlocks = observedBlock - displayedBlock;
+  const frameMs = frameTelemetry?.durationMs ?? 0;
+  const headToFrameMs = frameTelemetry ? frameTelemetry.emittedAt - frameTelemetry.headObservedAt : 0;
   const slowestAdapters = frameTelemetry
     ? Object.entries(frameTelemetry.adapterMs).sort((a, b) => b[1] - a[1]).slice(0, 3)
     : [];
@@ -184,15 +189,15 @@ export function ExecutionTab() {
         {realtime && (
           <div title={slowestAdapters.length ? `Slowest adapters: ${slowestAdapters.map(([id, ms]) => `${id} ${ms.toFixed(1)}ms`).join(' · ')}` : undefined}
             style={{ display: 'flex', flexWrap: 'wrap', gap: '5px 13px', marginTop: 9, fontSize: 9.5, letterSpacing: '.04em', color: C.dim2 }}>
-            <span>HEAD <b style={{ color: C.text }}>{realtime.headBlock.toLocaleString()}</b></span>
-            <span>FRAME <b style={{ color: C.text }}>{realtime.quoteBlock.toLocaleString()}</b></span>
-            <span>LAG <b style={{ color: realtime.lagBlocks > 1 ? C.amber : C.green }}>{realtime.lagBlocks} blk</b></span>
-            <span>COMPUTE <b style={{ color: realtime.frameMs >= 300 ? C.amber : C.text }}>{realtime.frameMs}ms</b></span>
-            <span>HEAD→FRAME <b style={{ color: realtime.headToFrameMs >= 300 ? C.amber : C.text }}>{realtime.headToFrameMs}ms</b></span>
+            <span>HEAD <b style={{ color: C.text }}>{observedBlock.toLocaleString()}</b></span>
+            <span>FRAME <b style={{ color: C.text }}>{displayedBlock.toLocaleString()}</b></span>
+            <span>LAG <b style={{ color: lagBlocks > 1 ? C.amber : C.green }}>{lagBlocks} blk</b></span>
+            <span>COMPUTE <b style={{ color: frameMs >= 300 ? C.amber : C.text }}>{frameMs}ms</b></span>
+            <span>HEAD→FRAME <b style={{ color: headToFrameMs >= 300 ? C.amber : C.text }}>{headToFrameMs}ms</b></span>
             <span>LOOP <b style={{ color: realtime.eventLoopLagMs >= 50 ? C.amber : C.text }}>{realtime.eventLoopLagMs.toFixed(1)}ms</b></span>
             <span>COVERAGE 60s <b style={{ color: realtime.coveragePct60s < 99 ? C.amber : C.green }}>{realtime.coveragePct60s.toFixed(1)}%</b></span>
             <span>SKIPPED 60s <b style={{ color: realtime.coalescedBlocks60s ? C.amber : C.text }}>{realtime.coalescedBlocks60s}</b></span>
-            <span>SOURCE <b style={{ color: C.text }}>{realtime.headSource.toUpperCase()}</b></span>
+            <span>SOURCE <b style={{ color: C.text }}>{(frameTelemetry?.headSource ?? realtime.headSource).toUpperCase()}</b></span>
             <span>WS <b style={{ color: realtime.wsStatus === 'connected' ? C.green : realtime.wsStatus === 'disabled' ? C.faint2 : C.amber }}>{realtime.wsStatus.toUpperCase()}</b></span>
             {!!frameTelemetry?.missingVenues.length && <span>MISSING <b style={{ color: C.amber }}>{frameTelemetry.missingVenues.join(', ')}</b></span>}
           </div>

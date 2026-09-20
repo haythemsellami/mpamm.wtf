@@ -55,6 +55,8 @@ async function setup(failure: Failure, readDelayMs = 0) {
   };
   const primaryStatus = () => ({ active: degraded ? 'archive-backup-1' : 'archive', degraded, down: false });
   vi.doMock('../chain/rpc.js', () => ({
+    hotHeadEndpoint: () => ({ generation: 0 }),
+    resolveQuoteBlock: async (number: bigint, identity = {}) => ({ number, hash: `0x${number.toString(16).padStart(64, '0')}`, generation: 0, ...identity }),
     publicClient: {},
     quoteClient: {},
     headClient: { getBlockNumber: vi.fn(async () => 100n) },

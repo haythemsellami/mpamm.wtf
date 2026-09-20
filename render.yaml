@@ -38,12 +38,14 @@ services:
         value: --max-old-space-size=320
       - key: RPC_HTTP_URL    # hot node: isolated quote lane + fills/head lane
         sync: false
-      - key: RPC_WS_URL      # optional hot-node newHeads subscription; HTTP polling remains the watchdog
+      - key: RPC_WS_URL      # optional hot-node proposal subscription; HTTP polling remains the watchdog
         sync: false
       - key: RPC_DEPTH_URL # dedicated high-resolution curve node; keep separate from hot quotes
         sync: false
-      - key: RPC_DEPTH_WS_URL # optional depth-node newHeads subscription
+      - key: RPC_DEPTH_WS_URL # optional depth-node proposal subscription
         sync: false
+      - key: DEPTH_MIN_INTERVAL_MS
+        value: "1000"       # staged rollout; enable every-head depth after a capacity check
       - key: RPC_ARCHIVE_URL # deep-history node; unset ⇒ reuses RPC_HTTP_URL
         sync: false
     disk:

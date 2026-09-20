@@ -56,6 +56,8 @@ async function setup(adapters: ReturnType<typeof healthyAdapter>[]) {
   const getHead = vi.fn(async () => 100n);
   const getLogsChunked = vi.fn(async () => []);
   vi.doMock('../chain/rpc.js', () => ({
+    hotHeadEndpoint: () => ({ generation: 0 }),
+    resolveQuoteBlock: async (number: bigint, identity = {}) => ({ number, hash: `0x${number.toString(16).padStart(64, '0')}`, generation: 0, ...identity }),
     monad: { blockTime: 300 },
     publicClient: { getBlockNumber },
     quoteClient: {},

@@ -1,7 +1,9 @@
 import { createPublicClient, createTransport, defineChain, http, type PublicClient, type Transport } from 'viem';
+import { pinQuoteRequest, type QuoteBlock } from './quote-block.js';
+import type { HeadEndpoint, HeadIdentity } from './heads.js';
 import { config } from '../config.js';
 import { ADDR, MONAD_CHAIN_ID } from '@shared';
-import { RpcBreaker, guardRpcRead, isAvailabilityFailure, type RpcNote, type RpcRequestFn, type RpcStatusView, type RpcVerifyResult } from './failover.js';
+import { RpcBreaker, RpcReadUnavailableError, guardRpcRead, isAvailabilityFailure, type RpcNote, type RpcRequestFn, type RpcStatusView, type RpcVerifyResult } from './failover.js';
 
 export const monad = defineChain({
   id: MONAD_CHAIN_ID,
@@ -33,7 +35,8 @@ interface RpcPool {
   client: PublicClient;
   quoteClient: PublicClient;
   headClient: PublicClient;
-  scopedQuote: (key: string, signal: AbortSignal) => PublicClient;
+  scopedQuote: (key: string, signal: AbortSignal, block?: QuoteBlock, batch?: boolean) => PublicClient;
+  headEndpoint: () => HeadEndpoint;
   status: () => RpcStatusView;
   generation: () => number;
   onEvent: (cb: (n: RpcNote) => void) => void;
@@ -46,9 +49,10 @@ interface RpcPool {
  * transports keep their own retry/backoff (so the breaker only sees post-retry
  * failures); the outer transport must not retry again on top.
  */
-function createPool(primary: string, backups: readonly string[], pool: string, label: (i: number) => string): RpcPool {
+function createPool(primary: string, backups: readonly string[], pool: string, label: (i: number) => string, websockets: readonly string[] = []): RpcPool {
   // deduped — with no primary configured the default backup IS the primary.
-  const urls = [primary, ...backups.filter((u) => u !== primary)];
+  const peers = [{ url: primary, wsUrl: websockets[0] }, ...backups.map((url, i) => ({ url, wsUrl: websockets[i + 1] })).filter((peer) => peer.url !== primary)];
+  const urls = peers.map((peer) => peer.url);
   const breaker = new RpcBreaker({ pool });
   // Attach eagerly: either viem client can be initialized or invoked first,
   // and both must see the same complete endpoint set from request one.
@@ -74,18 +78,30 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
     return {
       label: `${label(i)}${url === PUBLIC_RPC && i > 0 ? ' (public)' : ''}`,
       request,
+      wsUrl: peers[i].wsUrl || undefined,
       lanes: { quote, head: http(url, { batch: false, retryCount: 0, timeout: 1_000 })({ chain: monad }).request as RpcRequestFn },
-      scopedQuote: (key: string, signal: AbortSignal) => {
+      scopedQuote: (key: string, signal: AbortSignal, batch = config.quoteHttpBatch) => {
         const scopedUrl = new URL(url);
         scopedUrl.hash = `quote-${key}`;
         return http(scopedUrl.toString(), {
-          batch: config.quoteHttpBatch ? { batchSize: config.quoteHttpBatchSize, wait: 0 } : false,
+          batch: batch ? { batchSize: config.quoteHttpBatchSize, wait: 0 } : false,
           retryCount: 0, timeout: config.quoteDeadlineMs,
           fetchOptions: { signal },
         })({ chain: monad }).request as RpcRequestFn;
       },
     };
   }));
+  let warmTimer: ReturnType<typeof setInterval> | undefined;
+  const startWarming = () => {
+    if (pool !== 'RPC' || peers.length < 2 || warmTimer) return;
+    let warming = false;
+    warmTimer = setInterval(() => {
+      if (warming) return;
+      warming = true;
+      void breaker.warmStandbys().finally(() => { warming = false; });
+    }, config.rpcWarmMs);
+    warmTimer.unref();
+  };
   const transport: Transport = () => createTransport({
     key: 'failover',
     name: 'Failover HTTP',
@@ -115,20 +131,26 @@ function createPool(primary: string, backups: readonly string[], pool: string, l
       key: 'failover-head', name: 'Unbatched head watchdog', type: 'http', retryCount: 0,
       request: (args) => breaker.request(args, 'head') as Promise<any>,
     }) }),
-    scopedQuote: (key, signal) => createPublicClient({ chain: monad, cacheTime: 0, transport: () => createTransport({
+    scopedQuote: (key, signal, block, batch) => createPublicClient({ chain: monad, cacheTime: 0, transport: () => createTransport({
       key: 'quote-deadline', name: 'Block-bounded quote', type: 'http', retryCount: 0,
-      request: (args) => breaker.request(args, 'quote', { signal, key }) as Promise<any>,
+      request: async (args) => {
+        if (block && block.generation !== breaker.generation()) throw new RpcReadUnavailableError();
+        const result = await breaker.request(block ? pinQuoteRequest(args, block) : args, 'quote', { signal, key, batch });
+        if (block && block.generation !== breaker.generation()) throw new RpcReadUnavailableError();
+        return result as any;
+      },
     }) }),
+    headEndpoint: () => breaker.headEndpoint(),
     status: () => breaker.status(),
     generation: () => breaker.generation(),
     onEvent: (cb) => breaker.subscribe(cb),
-    verify: () => breaker.verify(MONAD_CHAIN_ID),
+    verify: async () => { const result = await breaker.verify(MONAD_CHAIN_ID); if (result.ok) startWarming(); return result; },
   };
 }
 
 /** HOT endpoint pool — one failover state, with separate HTTP batch lanes for
  * block-pinned quotes and auxiliary head/fill/discovery traffic. */
-const hotPool = createPool(config.rpcHttp, config.rpcBackups, 'RPC', (i) => (i === 0 ? 'primary' : `backup-${i}`));
+const hotPool = createPool(config.rpcHttp, config.rpcBackups, 'RPC', (i) => (i === 0 ? 'primary' : `backup-${i}`), [config.rpcWs, ...config.rpcWsBackups]);
 
 /** True when a DEDICATED deep-history pool is configured. When false the
  *  archive client below is literally the hot client — same breaker, same
@@ -150,7 +172,32 @@ export const headClient: PublicClient = hotPool.headClient;
 /** Block-pinned adapter calls share the hot pool's failover state, but use a
  * zero-wait HTTP batch lane isolated from heads, logs and attribution. */
 export const quoteClient: PublicClient = hotPool.quoteClient;
-export const scopedQuoteClient = (key: string, signal: AbortSignal): PublicClient => hotPool.scopedQuote(key, signal);
+export const scopedQuoteClient = (key: string, signal: AbortSignal, block?: QuoteBlock, batch?: boolean): PublicClient => hotPool.scopedQuote(key, signal, block, batch);
+/** A depth pass needs every leg in its grid. Batch its own requests and avoid
+ * the 1KB Multicall default splitting a 25-point curve into dozens of fetches.
+ * Live single-size quotes keep their low-latency transport unchanged. */
+export function scopedDepthClient(key: string, signal: AbortSignal, block: QuoteBlock): PublicClient {
+  const client = scopedQuoteClient(key, signal, block, true);
+  const multicall = client.multicall;
+  return { ...client, multicall: ((args: any) => multicall({ ...args, batchSize: args.batchSize ?? 8_192 })) as PublicClient['multicall'] };
+}
+export const hotHeadEndpoint = (): HeadEndpoint => hotPool.headEndpoint();
+
+/** WS supplies the hash without another round trip. HTTP-only heads resolve
+ * it once per frame through the same deadline-bound lane as adapter reads. */
+export async function resolveQuoteBlock(number: bigint, identity: HeadIdentity = {}): Promise<QuoteBlock> {
+  const generation = hotPool.generation();
+  if (identity.generation !== undefined && identity.generation !== generation) throw new RpcReadUnavailableError();
+  let hash = identity.hash;
+  if (!hash) {
+    const client = scopedQuoteClient(`header-${number}`, AbortSignal.timeout(config.quoteDeadlineMs));
+    const header = await client.getBlock({ blockNumber: number });
+    if (header.number !== number || !header.hash) throw new RpcReadUnavailableError();
+    hash = header.hash;
+  }
+  if (generation !== hotPool.generation()) throw new RpcReadUnavailableError();
+  return { ...identity, number, hash, generation };
+}
 export const archiveClient: PublicClient = archivePool.client;
 
 /** Failover status for /api/markets (labels only) + event sink for state.notes

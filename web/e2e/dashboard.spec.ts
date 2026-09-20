@@ -108,3 +108,23 @@ test('mobile and browsers without SharedWorker retain live quotes and reconnect 
   await page.clock.runFor(1000);
   await page.screenshot({ path: test.info().outputPath('mobile.png'), fullPage: true });
 });
+
+test('Execution displays each quote block and records browser-local delivery and draw timings', async ({ page }) => {
+  const count = 20;
+  test.setTimeout(30_000);
+  await page.goto('/?timing=1');
+  await expect(page.locator('[data-quote-block]')).toBeVisible();
+  await expect.poll(async () => page.evaluate(() => (window as any).__mpammTiming?.filter((s: any) => s.paintOpportunityAt).length ?? 0), { timeout: 15_000 }).toBeGreaterThanOrEqual(count);
+  const samples = await page.evaluate(() => (window as any).__mpammTiming.filter((s: any) => s.paintOpportunityAt));
+  const blocks = samples.map((s: any) => s.block);
+  expect(new Set(blocks).size).toBe(samples.length);
+  expect(Math.max(...blocks) - Math.min(...blocks) + 1).toBe(samples.length);
+  for (const sample of samples) {
+    expect(sample.decodedAt).toBeGreaterThanOrEqual(sample.receivedAt);
+    expect(sample.drawnAt).toBeGreaterThanOrEqual(sample.decodedAt);
+    expect(sample.paintOpportunityAt).toBeGreaterThanOrEqual(sample.drawnAt);
+  }
+  const counter = Number(await page.locator('[data-quote-block]').getAttribute('data-quote-block'));
+  expect(counter).toBeGreaterThanOrEqual(blocks.at(-1));
+  expect(counter - blocks.at(-1)).toBeLessThanOrEqual(1);
+});

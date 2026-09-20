@@ -12,6 +12,7 @@ vi.mock('../../config.js', () => ({
     rpcHttp: 'https://hot.invalid',
     rpcDepthWs: '',
     rpcDepthBackups: [],
+    rpcDepthWsBackups: [],
   },
 }));
 

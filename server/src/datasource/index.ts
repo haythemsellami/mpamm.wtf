@@ -51,6 +51,10 @@ export interface DataSource {
 }
 
 export interface DepthPublication {
+  /** Internal worker timings; the public stream forwards only `json`. */
+  headObservedAt?: number;
+  computeMs?: number;
+  incompleteVenues?: string[];
   market: string;
   asOfBlock: number;
   ts: number;
@@ -178,11 +182,18 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
     return out;
   }
 
+  protected invalidateQuoteHistory(fromBlock: number): void {
+    this.quoteHist = this.quoteHist.filter((q) => q.block < fromBlock);
+  }
+
   protected emitMsg(m: StreamMessage): void {
     if (m.ch === 'quotes') {
       // live/sim both replace the matrix wholesale each poll (never mutate a
       // broadcast one), so retaining by reference is safe.
-      this.quoteHist.push(m.data);
+      // Requoting a replacement at the same height replaces its old sample.
+      const last = this.quoteHist.at(-1);
+      if (last?.block === m.data.block) this.quoteHist[this.quoteHist.length - 1] = m.data;
+      else this.quoteHist.push(m.data);
       const cutoff = m.data.ts - QUOTE_HISTORY_MS;
       while (this.quoteHist.length > 1 && this.quoteHist[0].ts < cutoff) this.quoteHist.shift();
       while (this.quoteHist.length > QUOTE_HISTORY_MAX) this.quoteHist.shift();

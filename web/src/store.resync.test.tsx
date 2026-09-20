@@ -140,6 +140,24 @@ describe('fill snapshot resynchronization', () => {
     expect(dashboard.quotes?.block).toBe(101);
   });
 
+  it('removes superseded proposal samples and rejects history that raced the replacement', async () => {
+    window.history.replaceState(null, '', '/');
+    const oldHistory = deferred<QuoteSnapshot[]>();
+    vi.mocked(api.fetchQuoteHistory).mockReturnValue(oldHistory.promise);
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.state.venues = [{ id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } }];
+    await mount();
+    const frame = (revision: number, bidPx: number): QuoteSnapshot => ({ block: 101, monUsd: 1, ts: Date.now(), revision,
+      rows: [{ venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000, bidPx, askPx: bidPx + 1,
+        bidBps: 0, askBps: 1, spreadBps: bidPx, filledFull: true, feeBps: 0, ts: Date.now() }] });
+    await act(async () => message({ ch: 'quotes', data: frame(0, 1) }));
+    await act(async () => message({ ch: 'quotes', data: frame(1, 2) }));
+    await act(async () => oldHistory.resolve([frame(0, 1)]));
+    expect(dashboard.series.venue.points.map((point) => point.bid)).toEqual([2]);
+    expect(dashboard.samples.venue).toEqual([2]);
+    expect(dashboard.quotes?.revision).toBe(1);
+  });
+
   it('retains fills arriving during the initial REST request', async () => {
     const initial = deferred<Fill[]>();
     vi.mocked(api.fetchFills).mockReturnValueOnce(initial.promise);

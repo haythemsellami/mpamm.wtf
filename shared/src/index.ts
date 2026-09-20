@@ -398,6 +398,10 @@ export interface RealtimeHealth {
 
 /** The full quote matrix for one block-triggered frame. */
 export interface QuoteSnapshot {
+  /** Exact proposal sampled; absent for simulation and older producers. */
+  blockHash?: string;
+  /** Increments when a replacement invalidates retained speculative samples. */
+  revision?: number;
   block: number;
   monUsd: number;
   /** Frame emission time. Older/synthetic producers may omit `frame`, so this
@@ -459,6 +463,10 @@ export interface DepthCurve {
 
 /** Every active venue's depth curve for one market at one block. */
 export interface DepthSnapshot {
+  blockHash?: string;
+  revision?: number;
+  /** Venues with no executable curve for this market in this pass. */
+  missingVenues?: string[];
   market: string;
   /** the Monad block every curve was read at (a synthetic block in sim). */
   asOfBlock: number;

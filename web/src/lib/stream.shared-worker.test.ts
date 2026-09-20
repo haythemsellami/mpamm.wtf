@@ -88,14 +88,14 @@ describe('SharedWorker consumer replay', () => {
     subscribe(second); await tick();
     const snapshots = second.messages().filter((message) => message.envelope).map((message) => message.envelope);
     expect(snapshots).toHaveLength(3);
-    expect(snapshots).toEqual(expect.arrayContaining(frames));
+    expect(snapshots).toEqual(expect.arrayContaining(frames.map((frame) => expect.objectContaining(frame))));
     expect(first.messages()).toEqual([]);
     first.receive({ type: 'close' }); await tick();
     expect(first.messages()).toEqual([{ type: 'closed' }]);
     expect(socket.readyState).toBe(Socket.OPEN);
     second.postMessage.mockClear();
     socket.emit({ ...frames[1], seq: 2 }); await tick();
-    expect(second.messages()).toEqual([{ ids: ['dashboard'], envelope: { ...frames[1], seq: 2 } }]);
+    expect(second.messages()).toEqual([{ ids: ['dashboard'], envelope: expect.objectContaining({ ...frames[1], seq: 2 }) }]);
     second.receive({ type: 'close' }); await tick();
     expect(socket.readyState).toBe(3);
   });
@@ -109,7 +109,7 @@ describe('SharedWorker consumer replay', () => {
     expect(other.messages()).toEqual([]);
     first.postMessage.mockClear();
     subscribe(first, [{ id: 'dashboard', topics: [stateTopic, quoteTopic] }]); await tick();
-    expect(first.messages()).toEqual([{ ids: ['dashboard'], envelope: frames[1] }]);
+    expect(first.messages()).toEqual([{ ids: ['dashboard'], envelope: expect.objectContaining(frames[1]) }]);
   });
 
   it('expires every consumer of a dead port without closing another active tab', async () => {

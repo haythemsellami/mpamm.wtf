@@ -80,6 +80,8 @@ async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?:
     validateRegistry: vi.fn(),
   }));
   vi.doMock('../chain/rpc.js', () => ({
+    hotHeadEndpoint: () => ({ generation: 0 }),
+    resolveQuoteBlock: async (number: bigint, identity = {}) => ({ number, hash: `0x${number.toString(16).padStart(64, '0')}`, generation: 0, ...identity }),
     monad: { blockTime: 300 },
     publicClient: { getBlockNumber: vi.fn(async () => 100n) },
     quoteClient: {},
@@ -101,6 +103,9 @@ async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?:
   const headWatcher = { start: vi.fn(), stop: vi.fn() };
   vi.doMock('../chain/heads.js', () => ({
     HotHeadWatcher: class {
+      identity() { return { generation: 0 }; }
+      isCurrent() { return true; }
+      rememberResolved() { return true; }
       start(...args: unknown[]) { return headWatcher.start(...args); }
       stop(...args: unknown[]) { return headWatcher.stop(...args); }
     },
@@ -406,6 +411,37 @@ describe('live startup archive gate', () => {
     await source.stop();
   });
 
+  it('retains the boot quote identity so the first matching watcher head does not requote', async () => {
+    const { source, archiveProbe, headWatcher, poll } = await setup({ withQuotes: true });
+    source.poll = vi.fn(poll);
+    archiveProbe.resolve({ ok: true, block: 100 });
+    await source.start();
+    try {
+      const hash = `0x${(100).toString(16).padStart(64, '0')}`;
+      expect(source.quotedIdentity).toMatchObject({ hash, generation: 0 });
+      const callbacks = headWatcher.start.mock.calls[0][0];
+      callbacks.onBlock(100n, 'http', Date.now(), { generation: 0 });
+      callbacks.onBlock(100n, 'ws', Date.now(), { hash, generation: 0 });
+      expect(source.poll).toHaveBeenCalledOnce();
+      callbacks.onBlock(101n, 'ws', Date.now(), { generation: 0 });
+      await vi.waitFor(() => expect(source.quotedBlock).toBe(101n));
+      expect(source.poll).toHaveBeenCalledTimes(2);
+    } finally { await source.stop(); }
+  });
+
+  it('retries the boot head when its initial quote failed', async () => {
+    const { source, archiveProbe, headWatcher } = await setup();
+    source.poll.mockRejectedValueOnce(new Error('unavailable'));
+    archiveProbe.resolve({ ok: true, block: 100 });
+    await source.start();
+    try {
+      expect(source.quotedBlock).not.toBe(100n);
+      headWatcher.start.mock.calls[0][0].onBlock(100n, 'http', Date.now(), { generation: 0 });
+      await vi.waitFor(() => expect(source.quotedBlock).toBe(100n));
+      expect(source.poll).toHaveBeenCalledTimes(2);
+    } finally { await source.stop(); }
+  });
+
   it('never starts deep workers when the archive primary is on the wrong chain', async () => {
     const { source, archiveProbe, headWatcher } = await setup();
     const outcome = source.start().then((): Error | undefined => undefined, (error: unknown) => error as Error);
@@ -464,6 +500,23 @@ describe('live startup archive gate', () => {
 
     await vi.waitFor(() => expect(source.poll).toHaveBeenCalledWith(103n, expect.objectContaining({ source: 'ws', coalescedBlocks: 1 })));
     expect(source.poll.mock.calls.map((args: unknown[]) => args[0])).toEqual([101n, 103n]);
+    await source.stop();
+  });
+
+  it('recomputes a same-height replacement without a duplicate commitment tick', async () => {
+    const { source, archiveProbe, headWatcher } = await setup();
+    archiveProbe.resolve({ ok: true, block: 100 }); await source.start();
+    const callbacks = headWatcher.start.mock.calls[0][0];
+    const old = { hash: `0x${'a'.repeat(64)}`, generation: 0, revision: 0 };
+    const next = { hash: `0x${'b'.repeat(64)}`, generation: 0, revision: 1 };
+    source.poll.mockClear();
+    callbacks.onBlock(101n, 'ws', Date.now(), old);
+    await vi.waitFor(() => expect(source.quotedBlock).toBe(101n));
+    callbacks.onReplaced(101n); callbacks.onBlock(101n, 'ws', Date.now(), next);
+    await vi.waitFor(() => expect(source.poll).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(source.quoteRunning).toBe(false));
+    callbacks.onBlock(101n, 'ws', Date.now(), next);
+    expect(source.poll).toHaveBeenCalledTimes(2);
     await source.stop();
   });
 
