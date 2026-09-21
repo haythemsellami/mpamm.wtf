@@ -18,8 +18,9 @@ let status: Parameters<typeof api.connectDashboardStream>[2];
 const fill = (id: string, usd = 100): Fill => ({ id, usd, ts: Date.now(), venueId: 'venue', market: 'MON/USDC', side: 'buy', category: 'DIRECT', baseAmount: 1000, execPx: .1, blockNumber: 1, txHash: '0x1', to: 'direct', pool: 'pool', markoutsBps: [1, null, null, null, null] });
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 function Probe() { dashboard = useDashboard(); return null; }
 async function mount() { await act(async () => root.render(<DashboardProvider><Probe /></DashboardProvider>)); }
@@ -347,6 +348,65 @@ describe('shared rolling statistics', () => {
     await act(async () => current.resolve([quote(2), quote(3)]));
     await act(async () => old.resolve([quote(1)]));
     expect(dashboard.series.venue.points.map((point) => point.block)).toEqual([2, 3]);
+  });
+
+  it.each(['resolve', 'reject'] as const)('reloads history on reconnect while the old same-selection request is pending (%s)', async (settlement) => {
+    window.history.replaceState(null, '', '/');
+    const old = deferred<QuoteSnapshot[]>(), current = deferred<QuoteSnapshot[]>();
+    vi.mocked(api.fetchQuoteHistory).mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.state.venues = [{ id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } }];
+    const quote = (block: number): QuoteSnapshot => ({ ...bootstrap.quotes, block });
+    await mount();
+    await reconnect();
+    expect(api.fetchQuoteHistory).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      if (settlement === 'reject') old.reject(new Error('dropped connection'));
+      else old.resolve([quote(1)]);
+    });
+    await act(async () => current.resolve([quote(2), quote(3)]));
+    expect(dashboard.series.venue.points.map((point) => point.block)).toEqual([2, 3]);
+  });
+
+  it('discards pre-reconnect live frames when the server replays a corrected history', async () => {
+    window.history.replaceState(null, '', '/');
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.state.venues = [{ id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } }];
+    const quote = (block: number): QuoteSnapshot => ({ ...bootstrap.quotes, block });
+    await mount();
+    await act(async () => message({ ch: 'quotes', data: quote(10) }));
+    vi.mocked(api.fetchQuoteHistory).mockResolvedValueOnce([quote(7), quote(8), quote(9)]);
+    await reconnect();
+    expect(dashboard.series.venue.points.map((point) => point.block)).toEqual([7, 8, 9]);
+  });
+
+  it.each([0, 2])('rejects a history response from revision %i when the stream is on revision 1', async (revision) => {
+    window.history.replaceState(null, '', '/');
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.state.venues = [{ id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } }];
+    const quote = (block: number, revision: number): QuoteSnapshot => ({ ...bootstrap.quotes, block, revision });
+    await mount();
+    const pending = deferred<QuoteSnapshot[]>();
+    vi.mocked(api.fetchQuoteHistory).mockReturnValueOnce(pending.promise);
+    await act(async () => message({ ch: 'quotes', data: quote(10, 1) }));
+    await act(async () => pending.resolve([quote(9, revision), quote(10, revision), quote(11, revision)]));
+    expect(dashboard.series.venue.points.map((point) => point.block)).toEqual([10]);
+  });
+
+  it('starts a new request when bootstrap advances the revision before the first stream frame', async () => {
+    window.history.replaceState(null, '', '/');
+    const snapshot = await vi.mocked(api.fetchMarkets)();
+    snapshot.state.venues = [{ id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } }];
+    const bootstrap = deferred<MarketsResponse>(), old = deferred<QuoteSnapshot[]>(), current = deferred<QuoteSnapshot[]>();
+    vi.mocked(api.fetchMarkets).mockReturnValue(bootstrap.promise);
+    vi.mocked(api.fetchQuoteHistory).mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+    await mount();
+    snapshot.quotes = { ...snapshot.quotes, block: 10, revision: 1 };
+    await act(async () => bootstrap.resolve(snapshot));
+    expect(api.fetchQuoteHistory).toHaveBeenCalledTimes(2);
+    await act(async () => current.resolve([{ ...snapshot.quotes, block: 8, revision: 0 }, { ...snapshot.quotes, block: 9 }]));
+    await act(async () => old.resolve([{ ...snapshot.quotes, block: 11, revision: 0 }]));
+    expect(dashboard.series.venue.points.map((point) => point.block)).toEqual([8, 9]);
   });
 
   it('reloads valid ancestors after a replacement and discards the previous revision request', async () => {

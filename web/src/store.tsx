@@ -160,7 +160,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // the reseed effect can never append new-pair prices onto old-pair samples
   // (the mixed-buffer scale flicker).
   const seedKeyRef = useRef('');
-  const seedFetchRef = useRef<{ key: string } | null>(null);
+  const seedFetchRef = useRef<{ key: string; revision: number } | null>(null);
   const recentQuotesRef = useRef<QuoteSnapshot[]>([]);
   const keyOf = () => `${selRef.current.pair}|${selRef.current.size}`;
   const pushSnapshot = (q: QuoteSnapshot) => {
@@ -212,15 +212,18 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // already left is discarded (seedKey moved on).
   const seedFromHistory = async (key: string) => {
     if (selRef.current.tab !== 'exec') return;
-    if (seedFetchRef.current?.key === key) return;
-    const request = { key };
+    const revision = quotesRef.current?.revision ?? 0;
+    if (seedFetchRef.current?.key === key && seedFetchRef.current.revision === revision) return;
+    const request = { key, revision };
     seedFetchRef.current = request;
     try {
-      const revision = quotesRef.current?.revision ?? 0;
       const [pair, sizeS] = key.split('|');
       const hist = await fetchQuoteHistory(pair, Number(sizeS));
       if (seedFetchRef.current !== request || selRef.current.tab !== 'exec' || seedKeyRef.current !== key || !hist.length
         || (quotesRef.current?.revision ?? 0) !== revision) return;
+      // REST can observe a replacement before the stream. Only merge a
+      // matching snapshot; its valid ancestors may carry earlier revisions.
+      if (hist.reduce((latest, q) => Math.max(latest, q.revision ?? 0), 0) !== revision) return;
       const S = seriesRef.current;
       for (const id of idsRef.current) { const s = (S[id] ??= { points: [] }); s.points.length = 0; }
       // Live frames can arrive while REST is in flight. Prefer those frames
@@ -346,7 +349,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setConn(s);
       // mount already fetched the snapshot; re-fetch only after a DROP (missed
       // WS deltas), not on the initial open racing that first fetch.
-      if (s === 'reconnecting') { wasDropped.v = true; quotesRef.current = null; }
+      if (s === 'reconnecting') {
+        wasDropped.v = true;
+        quotesRef.current = null;
+        // A new connection must request fresh history, even when the previous
+        // request is pending. Pre-drop frames may belong to a replaced branch.
+        seedFetchRef.current = null;
+        recentQuotesRef.current = [];
+      }
       if (s === 'live' && wasDropped.v) { wasDropped.v = false; loadSnapshot(); }
     });
 

@@ -208,7 +208,7 @@ test('Execution replays quotes collected on other pages and loads shared five-mi
   const freshContext = await context.browser()!.newContext();
   try {
     const newcomer = await freshContext.newPage();
-    await newcomer.goto('/');
+    await newcomer.goto(new URL('/', page.url()).href);
     await expect.poll(async () => Number(await newcomer.locator('[data-stats-venue="bybit"]').getAttribute('data-stats-n'))).toBeGreaterThanOrEqual(reference.n);
   } finally { await freshContext.close(); }
   await page.screenshot({ path: test.info().outputPath('shared-execution-history.png'), fullPage: true });
