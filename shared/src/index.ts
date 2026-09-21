@@ -374,7 +374,9 @@ export interface QuoteFrameTelemetry {
   durationMs: number;
   /** Primary venue id → wall time spent awaiting that adapter's quote(). */
   adapterMs: Record<string, number>;
-  /** Quote-capable venue/reference ids that emitted no row in this frame. */
+/** Quote-capable venue/reference ids that emitted no row in this frame and are
+   *  not covered by a venue-specific explanation; a generic backstop warning is
+   *  intentionally still listed so an unexplained outage remains visible. */
   missingVenues: string[];
   /** Intermediate block numbers superseded while an older frame was running. */
   coalescedBlocks: number;

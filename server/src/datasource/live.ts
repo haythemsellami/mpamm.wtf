@@ -313,6 +313,41 @@ export function checkQuoteOutage(
   }
 }
 
+/** Which quote-capable ids the Execution tab should flag as MISSING this frame.
+ *
+ * The frame's `missingVenues` used to be every expected id with no row, so a
+ * venue whose outage was already explained sat in amber forever: Lunarbase's
+ * paused pool was listed on every frame for six weeks (2026-09), indistinguishable
+ * from an adapter that broke. A venue that stopped quoting for a KNOWN reason
+ * has already left the grid on purpose, and the reason is on state.notes for
+ * whoever maintains it — the indicator exists for the outage nobody has
+ * explained, so it is what remains after the explained ones are removed.
+ *
+ * "Explained" is exactly checkQuoteOutage's test — a venue.quote.unavailable
+ * note for that venue raised since it was last seen quoting — with one
+ * exclusion: the id must not be one the backstop itself marked dark. The
+ * backstop's own warning is a venue.quote.unavailable note too, so without
+ * that exclusion an UNEXPLAINED outage would drop off the indicator ten
+ * seconds in, when the warning it raises about it started explaining it. The
+ * references are never in `empty` (they are not venues the checker drives), so
+ * they fall back to `since = 0`, and their own starvation code is not this one:
+ * a cold reference stays listed. */
+export function frameMissingVenues(
+  expected: Iterable<string>,
+  present: ReadonlySet<string>,
+  empty: ReadonlyMap<string, { since: number }>,
+  dark: ReadonlyMap<string, string>,
+  explained: (id: string, since: number) => boolean,
+): string[] {
+  const out: string[] = [];
+  for (const id of expected) {
+    if (present.has(id)) continue;
+    if (!dark.has(id) && explained(id, empty.get(id)?.since ?? 0)) continue;
+    out.push(id);
+  }
+  return out.sort();
+}
+
 /** Archive-pending lifecycle for the markout re-scan (family A of #6).
  *
  * A month's CEX price archive publishes days after the month closes, so the
@@ -2426,7 +2461,8 @@ export class LiveDataSource extends BaseSource {
       emittedAt,
       durationMs: Math.max(0, quoteCompletedAt - quoteStartedAt),
       adapterMs,
-      missingVenues: [...expected].filter((id) => !present.has(id)).sort(),
+      missingVenues: frameMissingVenues(expected, present, this.quoteEmptyRuns, this.quoteDark,
+        (id, since) => this.notes.holds('venue.quote.unavailable', id, since)),
       coalescedBlocks: trigger.coalescedBlocks,
     };
     this.quotes = { block: this.block, blockHash: pinned.hash, ...(pinned.revision ? { revision: pinned.revision } : {}), monUsd, ts: emittedAt, rows, frame };

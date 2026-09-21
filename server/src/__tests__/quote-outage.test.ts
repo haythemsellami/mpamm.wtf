@@ -6,7 +6,7 @@
 // must get right is: no false alarm on the normal empty cycles, no silence on
 // a real outage, and no duplicate of a note an adapter already raised.
 import { describe, expect, it } from 'vitest';
-import { QUOTE_DARK_CYCLES, checkQuoteOutage } from '../datasource/live.js';
+import { QUOTE_DARK_CYCLES, checkQuoteOutage, frameMissingVenues } from '../datasource/live.js';
 
 const VENUES = [{ id: 'metric', name: 'Metric' }, { id: 'hanji', name: 'Hanji' }];
 
@@ -90,5 +90,50 @@ describe('checkQuoteOutage', () => {
     s.explained.delete('metric'); // the adapter's note aged out of the window
     run(() => 0, 1, s);
     expect(s.notes.filter((n) => n.id === 'metric').map((n) => n.kind)).toEqual(['warn']);
+  });
+});
+
+// The frame's MISSING list (datasource/live.ts: frameMissingVenues) — what the
+// Execution tab flags in amber. It shares the backstop's notion of "explained"
+// so the two never disagree about a venue, with one asymmetry: the backstop's
+// OWN warning must not count as an explanation, or every unexplained outage
+// would leave the indicator the moment it was reported.
+describe('frameMissingVenues', () => {
+  const EXPECTED = ['metric', 'hanji', 'lunarbase', 'bybit'];
+  const present = new Set(['hanji', 'bybit']);
+  const seenAt = new Map([['metric', { since: 500 }], ['lunarbase', { since: 500 }]]);
+  const noNotes = () => false;
+
+  it('lists every expected id with no row when nothing explains the silence', () => {
+    expect(frameMissingVenues(EXPECTED, present, seenAt, new Map(), noNotes)).toEqual(['lunarbase', 'metric']);
+  });
+
+  it('drops a venue whose adapter explained the outage since it last quoted', () => {
+    // Lunarbase said "pool paused" from inside the quote() that returned nothing.
+    const explained = (id: string, since: number) => id === 'lunarbase' && since <= 600;
+    expect(frameMissingVenues(EXPECTED, present, seenAt, new Map(), explained)).toEqual(['metric']);
+  });
+
+  it('keeps a venue whose only explanation is the backstop\'s own dark warning', () => {
+    const dark = new Map([['metric', 'Metric is not quoting — …']]);
+    const explained = (id: string) => id === 'metric'; // the buffer now holds that very warning
+    expect(frameMissingVenues(EXPECTED, present, seenAt, dark, explained)).toEqual(['lunarbase', 'metric']);
+  });
+
+  it('passes the last-seen-quoting time through, so a stale note cannot excuse a new outage', () => {
+    const asked: Record<string, number> = {};
+    frameMissingVenues(EXPECTED, present, seenAt, new Map(), (id, since) => { asked[id] = since; return false; });
+    expect(asked).toEqual({ metric: 500, lunarbase: 500 });
+  });
+
+  it('a never-driven id (a cold reference) asks with since = 0 and stays listed without a venue note', () => {
+    const asked: Record<string, number> = {};
+    const out = frameMissingVenues(['binance', ...EXPECTED], present, seenAt, new Map(), (id, since) => { asked[id] = since; return false; });
+    expect(asked.binance).toBe(0);
+    expect(out).toEqual(['binance', 'lunarbase', 'metric']);
+  });
+
+  it('returns nothing when every expected id quoted', () => {
+    expect(frameMissingVenues(['hanji', 'bybit'], present, seenAt, new Map(), noNotes)).toEqual([]);
   });
 });
