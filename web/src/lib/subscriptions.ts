@@ -1,3 +1,4 @@
+import { recordFrameDelivery, type ReceivedEnvelope } from './frame-timing';
 import { topicKey, type StreamEnvelope, type StreamTopic, type TopicMessage } from '@shared';
 import { StreamHub, type HubListener, type StreamStatus } from './stream-hub';
 
@@ -53,7 +54,7 @@ function sync(): void {
       const worker = new SharedWorker(new URL('./stream.shared-worker.ts', import.meta.url), { type: 'module', name: 'mpamm-stream-v2' });
       shared = worker;
       worker.onerror = () => { if (shared === worker) fallback(); };
-      worker.port.onmessage = ({ data }: MessageEvent<{ id?: string; ids?: string[]; envelope?: StreamEnvelope; status?: StreamStatus; upstreamLive?: boolean }>) => {
+      worker.port.onmessage = ({ data }: MessageEvent<{ id?: string; ids?: string[]; envelope?: ReceivedEnvelope; status?: StreamStatus; upstreamLive?: boolean }>) => {
         if (shared !== worker) return;
         // Port readiness and ping replies do not prove the upstream socket is
         // usable. Keep the recovery deadline until a live stream is observed.
@@ -95,7 +96,7 @@ function scheduleSync(): void {
 
 export function subscribeTopics(topics: StreamTopic[], message: (message: TopicMessage) => void, status: (state: StreamStatus) => void = () => {}): () => void {
   const id = String(++nextId);
-  const listener: HubListener = { topics, message: (envelope) => message(envelope.message), status };
+  const listener: HubListener = { topics, message: (envelope) => { recordFrameDelivery(envelope); message(envelope.message); }, status };
   listeners.set(id, listener);
   direct?.set(id, listener);
   scheduleSync();

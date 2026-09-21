@@ -17,10 +17,10 @@ import { GasTracker } from '../gas.js';
 import { DepthWorkerClient } from '../depth/worker-client.js';
 import { config } from '../config.js';
 import {
-  monad, publicClient, headClient, quoteClient, scopedQuoteClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
+  monad, publicClient, headClient, hotHeadEndpoint, resolveQuoteBlock, quoteClient, scopedQuoteClient, archiveClient, getLogsChunked, probeChain, probeArchiveChain, blockAtOrAfter,
   onRpcEvent, onArchiveRpcEvent, rpcStatus, rpcGeneration, archiveRpcStatus, archiveRpcGeneration, hasDedicatedArchive,
 } from '../chain/rpc.js';
-import { HotHeadWatcher } from '../chain/heads.js';
+import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, type ResetDeletes } from '../db.js';
 import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
@@ -42,6 +42,7 @@ const REALTIME_WINDOW_MS = 60_000;
 const TAIL_WINDOW_BLOCKS = 1_000;
 
 interface QuoteTrigger {
+  identity?: HeadIdentity;
   blockNumber: bigint;
   source: Exclude<QuoteHeadSource, 'sim'>;
   observedAt: number;
@@ -830,8 +831,10 @@ export class LiveDataSource extends BaseSource {
   private postQuoteImmediate?: ReturnType<typeof setImmediate>;
   /** newHeads + HTTP-watchdog feed. Both paths are deduped before they reach the
    *  latest-only quote runner below. */
-  private headWatcher = new HotHeadWatcher(headClient, { wsUrl: config.rpcWs, pollMs: config.headPollMs });
+  private headWatcher = new HotHeadWatcher(headClient, { endpoint: hotHeadEndpoint, pollMs: config.headPollMs });
   private quotedBlock = 0n;
+  private quotedIdentity: HeadIdentity = {};
+  private runningIdentity: HeadIdentity = {};
   private pendingQuote?: QuoteTrigger;
   private runningQuoteBlock?: bigint;
   private quoteRunning = false;
@@ -934,12 +937,25 @@ export class LiveDataSource extends BaseSource {
     // watcher's immediate HTTP observation retries it (or a newer head).
     this.observedHead = this.bootHead;
     try {
-      await this.poll(this.bootHead, { blockNumber: this.bootHead, source: 'http', observedAt: Date.now(), coalescedBlocks: 0 });
+      const trigger: QuoteTrigger = { blockNumber: this.bootHead, source: 'http', observedAt: Date.now(), coalescedBlocks: 0,
+        identity: { ...this.headWatcher.identity(this.bootHead), generation: hotHeadEndpoint().generation } };
+      await this.poll(this.bootHead, trigger);
       this.quotedBlock = this.bootHead;
+      this.quotedIdentity = trigger.identity ?? {};
     }
     catch { /* the head watcher retries without advancing quotedBlock */ }
     this.headWatcher.start({
-      onBlock: (blockNumber, source, observedAt) => this.queueQuoteBlock(blockNumber, source, observedAt),
+      onBlock: (blockNumber, source, observedAt, identity) => this.queueQuoteBlock(blockNumber, source, observedAt, identity),
+      onReplaced: (fromBlock) => {
+        this.quoteRunner.stop();
+        this.observedHead = fromBlock - 1n;
+        if (this.quotedBlock >= fromBlock) this.quotedBlock = fromBlock - 1n;
+        this.pendingQuote = undefined;
+        this.quotesFull = false;
+        this.quotes = { ...this.quotes, rows: [], revision: this.headWatcher.identity(fromBlock).revision };
+        this.invalidateQuoteHistory(Number(fromBlock));
+        this.realtimeFrames = this.realtimeFrames.filter((frame) => frame.block < Number(fromBlock));
+      },
       onWsConnected: () => {
         this.wsStatus = 'connected';
         this.emitRealtimeState();
@@ -2150,17 +2166,21 @@ export class LiveDataSource extends BaseSource {
     blockNumber: bigint,
     source: Exclude<QuoteHeadSource, 'sim'> = 'http',
     observedAt = Date.now(),
+    identity: HeadIdentity = this.headWatcher.identity(blockNumber),
   ): void {
     if (this.loopsStopped || blockNumber < this.observedHead) return;
+    const matches = (previous: HeadIdentity) => (previous.revision ?? 0) === (identity.revision ?? 0)
+      && previous.generation === identity.generation
+      && (!previous.hash || !identity.hash || previous.hash === identity.hash);
     let headAdvanced = false;
     if (blockNumber > this.observedHead) {
       this.observedHead = blockNumber;
       this.lastHeadSource = source;
       headAdvanced = true;
-    } else if (blockNumber <= this.quotedBlock
-      || blockNumber === this.runningQuoteBlock
-      || blockNumber === this.pendingQuote?.blockNumber) return;
-    if (blockNumber <= this.quotedBlock) return;
+    } else if ((blockNumber === this.quotedBlock && matches(this.quotedIdentity))
+      || (blockNumber === this.runningQuoteBlock && matches(this.runningIdentity))
+      || (blockNumber === this.pendingQuote?.blockNumber && matches(this.pendingQuote.identity ?? {}))) return;
+    if (blockNumber < this.quotedBlock) return;
 
     // Publish the new head before its quote finishes. If frames begin to fall
     // behind, the dashboard can then show the growing lag instead of freezing
@@ -2172,6 +2192,7 @@ export class LiveDataSource extends BaseSource {
       this.pendingQuote = {
         blockNumber,
         source,
+        identity,
         observedAt,
         coalescedBlocks: this.pendingQuote.coalescedBlocks + Number(blockNumber - this.pendingQuote.blockNumber),
       };
@@ -2182,6 +2203,7 @@ export class LiveDataSource extends BaseSource {
       this.pendingQuote = {
         blockNumber,
         source,
+        identity,
         observedAt,
         coalescedBlocks: Math.max(0, Number(blockNumber - base - 1n)),
       };
@@ -2190,9 +2212,10 @@ export class LiveDataSource extends BaseSource {
   }
 
   private requeueFailedTrigger(trigger: QuoteTrigger): void {
+    if (trigger.identity && (trigger.identity.revision ?? 0) !== (this.headWatcher.identity(trigger.blockNumber).revision ?? 0)) return;
     const pending = this.pendingQuote;
     if (pending === undefined || trigger.blockNumber > pending.blockNumber) {
-      this.pendingQuote = trigger;
+      this.pendingQuote = { ...trigger, identity: this.headWatcher.identity(trigger.blockNumber) };
       return;
     }
     if (pending.blockNumber > trigger.blockNumber) {
@@ -2228,11 +2251,13 @@ export class LiveDataSource extends BaseSource {
         const trigger = this.pendingQuote;
         const blockNumber = trigger.blockNumber;
         this.pendingQuote = undefined;
-        if (blockNumber <= this.quotedBlock) continue;
+        if (blockNumber < this.quotedBlock) continue;
         this.runningQuoteBlock = blockNumber;
+        this.runningIdentity = trigger.identity ?? {};
         try {
           await this.poll(blockNumber, trigger);
           this.quotedBlock = blockNumber;
+          this.quotedIdentity = trigger.identity ?? {};
         } catch {
           // Retry this exact block unless a newer observed head has already
           // replaced it. The retry is delayed so a sick RPC cannot hot-loop.
@@ -2310,6 +2335,9 @@ export class LiveDataSource extends BaseSource {
       this.schedulePostQuoteMaintenance();
       return;
     }
+    const pinned = await resolveQuoteBlock(blockNumber, trigger.identity ?? this.headWatcher.identity(blockNumber));
+    trigger.identity = pinned;
+    if (!this.headWatcher.rememberResolved(blockNumber, pinned)) throw new Error('quote proposal superseded');
     const plansFor = (a: VenueAdapter) => plan.filter((p) => p.role === 'all' || (
       p.role === (a.venues().every((v) => v.role === 'baseline') ? 'baseline' : 'venue')
       && (!a.quoteMarkets || a.quoteMarkets().some((market) => p.markets!.has(market)))));
@@ -2326,7 +2354,7 @@ export class LiveDataSource extends BaseSource {
           const rows = await this.quoteRunner.run(this.vidOf(a) ?? 'unknown', config.quoteDeadlineMs, async (signal) => {
             quoteSignal = signal;
             const original = this.frameCtxFor(a, framePricer);
-            const ctx = { ...original, quoteSignal: signal, client: scopedQuoteClient(`${this.vidOf(a)}-${blockNumber}`, signal),
+            const ctx = { ...original, quoteSignal: signal, client: scopedQuoteClient(`${this.vidOf(a)}-${blockNumber}`, signal, pinned),
               note: (...args: Parameters<typeof original.note>) => { if (!signal.aborted) original.note(...args); } };
             const health = new QuoteHealthBatch(ctx);
             // A rejected plan must not release the adapter's slot while a
@@ -2336,6 +2364,7 @@ export class LiveDataSource extends BaseSource {
             signal.throwIfAborted();
             const failed = groups.find((group) => group.status === 'rejected');
             if (failed?.status === 'rejected') throw failed.reason;
+            if (!this.headWatcher.isCurrent(blockNumber, pinned)) throw new Error('quote proposal superseded');
             health.commit();
             completedAdapters.add(a);
             return groups.flatMap((group) => group.status === 'fulfilled' ? group.value : []);
@@ -2354,6 +2383,7 @@ export class LiveDataSource extends BaseSource {
           adapterMs[venue] = Math.round((performance.now() - adapterStarted) * 10) / 10;
         }
       }));
+    if (!this.headWatcher.isCurrent(blockNumber, pinned) || rpcGeneration() !== pinned.generation) throw new Error('quote proposal superseded');
     this.block = Number(blockNumber);
     const venueRows = venueRowsNested.flat();
     // A venue that stopped quoting vanishes from the grid silently otherwise
@@ -2399,7 +2429,7 @@ export class LiveDataSource extends BaseSource {
       missingVenues: [...expected].filter((id) => !present.has(id)).sort(),
       coalescedBlocks: trigger.coalescedBlocks,
     };
-    this.quotes = { block: this.block, monUsd, ts: emittedAt, rows, frame };
+    this.quotes = { block: this.block, blockHash: pinned.hash, ...(pinned.revision ? { revision: pinned.revision } : {}), monUsd, ts: emittedAt, rows, frame };
     this.quotesFull = plan.some((p) => !p.markets) && requestedAdapters.every((adapter) => completedAdapters.has(adapter));
     this.realtimeFrames.push({ block: this.block, emittedAt, coalescedBlocks: trigger.coalescedBlocks });
     this.realtimeFrames = this.realtimeFrames.filter((f) => f.emittedAt >= emittedAt - REALTIME_WINDOW_MS);

@@ -1,3 +1,4 @@
+import { useSnapshotStale } from '../lib/freshness';
 import { useEffect, useState } from 'react';
 import { C, SANS, LOGO_PURPLE } from '../theme';
 import { useDashboard, type Tab } from '../store';
@@ -20,8 +21,10 @@ export function TopBar() {
     return () => clearInterval(t);
   }, []);
 
-  const monPx = d.state ? d.state.monUsd.toFixed(5) : '—';
-  const block = d.state ? fmtInt(d.state.block) : '—';
+  const displayed = d.tab === 'exec' ? d.quotes : d.state;
+  const monPx = displayed ? displayed.monUsd.toFixed(5) : '—';
+  const block = displayed && displayed.block > 0 ? fmtInt(displayed.block) : '—';
+  const stale = useSnapshotStale(d.tab === 'exec' ? d.quotes?.ts : undefined);
   const liveColor = d.conn === 'live' ? C.green : d.conn === 'reconnecting' ? C.amber : C.faint;
 
   // RPC failover health (live source only — sim has no RPC, chip hidden).
@@ -86,7 +89,7 @@ export function TopBar() {
         )}
         {!mobile && !tablet && <span>MON <span style={{ color: C.text }}>${monPx}</span></span>}
         {/* on mobile the label words go — the block number and clock read as themselves */}
-        <span style={{ whiteSpace: 'nowrap' }}>{!mobile && 'BLOCK '}<span style={{ color: C.text }}>{block}</span></span>
+        <span title={d.tab === 'exec' ? 'Block of the displayed quotes' : 'Latest observed block'} style={{ whiteSpace: 'nowrap' }}>{!mobile && 'BLOCK '}<span data-quote-block={d.tab === 'exec' ? displayed?.block : undefined} style={{ color: stale ? C.amber : C.text }}>{block}</span>{stale && <span style={{ color: C.amber }}> · STALE</span>}</span>
         {(mobile || !tablet) && <span style={{ whiteSpace: 'nowrap' }}>{!mobile && 'UTC '}<span style={{ color: C.text }}>{clock}</span></span>}
       </div>
     </div>

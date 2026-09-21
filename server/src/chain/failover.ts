@@ -45,11 +45,12 @@ export type RpcRequestFn = (args: { method: string; params?: unknown }) => Promi
 
 export interface BreakerEndpoint {
   label: string;
+  wsUrl?: string;
   request: RpcRequestFn;
   /** Traffic-class transports for this same endpoint. They share active
    * endpoint selection and health, but not the default HTTP batch queue. */
   lanes?: Record<string, RpcRequestFn>;
-  scopedQuote?: (key: string, signal: AbortSignal) => RpcRequestFn;
+  scopedQuote?: (key: string, signal: AbortSignal, batch?: boolean) => RpcRequestFn;
 }
 
 /** Public shape served on /api/markets (shared MarketState.rpc). */
@@ -218,6 +219,20 @@ export class RpcBreaker {
     };
   }
 
+  headEndpoint(): { generation: number; wsUrl?: string } {
+    return { generation: this.stateGeneration, wsUrl: this.endpoints[this.active]?.wsUrl };
+  }
+
+  /** Keep standby connections warm without changing serving order or health. */
+  async warmStandbys(): Promise<void> {
+    await Promise.allSettled(this.endpoints.map(async (endpoint, index) => {
+      if (index === this.active || this.endpointHealth[index] === 'wrong-chain') return;
+      const request = endpoint.lanes?.head ?? endpoint.request;
+      await this.ensureChain(index, request);
+      await request({ method: 'eth_blockNumber' });
+    }));
+  }
+
   generation(): number {
     return this.stateGeneration;
   }
@@ -225,7 +240,7 @@ export class RpcBreaker {
   /** One request through the active endpoint; on a threshold-crossing failure
    *  the request transparently retries on the next endpoint(s), at most one
    *  full rotation. Non-transport errors pass through untouched. */
-  async request(args: { method: string; params?: unknown }, lane = 'default', scope?: { signal: AbortSignal; key: string }): Promise<unknown> {
+  async request(args: { method: string; params?: unknown }, lane = 'default', scope?: { signal: AbortSignal; key: string; batch?: boolean }): Promise<unknown> {
     let hops = 0;
     for (;;) {
       const idx = this.active;
@@ -233,7 +248,7 @@ export class RpcBreaker {
       try {
         scope?.signal.throwIfAborted();
         const endpoint = this.endpoints[idx];
-        const request = scope && endpoint.scopedQuote ? endpoint.scopedQuote(scope.key, scope.signal) : (endpoint.lanes?.[lane] ?? endpoint.request);
+        const request = scope && endpoint.scopedQuote ? endpoint.scopedQuote(scope.key, scope.signal, scope.batch) : (endpoint.lanes?.[lane] ?? endpoint.request);
         await this.ensureChain(idx, request, scope?.signal);
         scope?.signal.throwIfAborted();
         const res = await request(args);

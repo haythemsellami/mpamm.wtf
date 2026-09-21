@@ -168,6 +168,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const recentQuotesRef = useRef<QuoteSnapshot[]>([]);
   const keyOf = () => `${selRef.current.pair}|${selRef.current.size}`;
   const pushSnapshot = (q: QuoteSnapshot) => {
+    const previous = recentQuotesRef.current.at(-1);
+    if (previous && ((previous.revision ?? 0) !== (q.revision ?? 0)
+      || (previous.block === q.block && previous.blockHash && q.blockHash && previous.blockHash !== q.blockHash))) {
+      recentQuotesRef.current = [];
+      seriesRef.current = {};
+      samplesRef.current = {};
+    }
     quotesRef.current = q;
     if (selRef.current.tab !== 'exec') return;
     if (seedKeyRef.current !== keyOf()) reseed(); // sync re-key — mixed buffers impossible
@@ -224,15 +231,17 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     if (seedFetchRef.current === key) return; // already fetching this key
     seedFetchRef.current = key;
     try {
+      const revision = quotesRef.current?.revision ?? 0;
       const [pair, sizeS] = key.split('|');
       const hist = await fetchQuoteHistory(pair, Number(sizeS));
-      if (selRef.current.tab !== 'exec' || seedKeyRef.current !== key || !hist.length) return;
+      if (selRef.current.tab !== 'exec' || seedKeyRef.current !== key || !hist.length
+        || (quotesRef.current?.revision ?? 0) !== revision) return;
       const ids = new Set(idsRef.current);
       const S = seriesRef.current, SM = samplesRef.current;
       for (const id of idsRef.current) { const s = (S[id] ??= { points: [] }); s.points.length = 0; (SM[id] ??= []).length = 0; }
       // Live frames can arrive while REST is in flight. Prefer those frames
       // at the same block and retain every newer one when rebuilding buffers.
-      const merged = new Map(hist.map((q) => [q.block, q]));
+      const merged = new Map(hist.filter((q) => (q.revision ?? 0) === revision).map((q) => [q.block, q]));
       for (const q of recentQuotesRef.current) merged.set(q.block, q);
       for (const q of [...merged.values()].sort((a, b) => a.block - b.block)) {
         appendQuoteSnapshot(S, idsRef.current, q, pair, Number(sizeS), QUOTE_WINDOW_MS, QUOTE_SAMPLE_MAX);
@@ -345,7 +354,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // Bootstrap carries the head with empty rows, not an observed quote.
         // The latest completed frame can legitimately be one block behind it.
         const current = quotesRef.current;
-        if (current && (current.frame || current.rows.length > 0) && msg.data.block < current.block) return;
+        if (current && (msg.data.revision ?? 0) < (current.revision ?? 0)) return;
+        if (current && (current.frame || current.rows.length > 0) && msg.data.block < current.block
+          && (msg.data.revision ?? 0) === (current.revision ?? 0)) return;
         setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1);
       }
       else if (msg.ch === 'volume') { if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data)); }

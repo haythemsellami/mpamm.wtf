@@ -413,3 +413,32 @@ describe('RpcBreaker.verify (boot)', () => {
     expect(res.reason).toMatch(/no reachable RPC/);
   });
 });
+
+
+describe('standby warming and socket pairing', () => {
+  it('warms only standby head lanes and keeps serving preference unchanged', async () => {
+    const calls: string[] = [];
+    const breaker = new RpcBreaker(); cleanup.push(breaker);
+    breaker.attach(['primary', 'backup'].map((label) => ({ label, wsUrl: `wss://${label}.invalid`,
+      request: async ({ method }) => method === 'eth_chainId' ? '0x8f' : '0x100',
+      lanes: { head: async ({ method }) => { calls.push(`${label}:${method}`); return '0x100'; } },
+    })));
+    await breaker.verify(143);
+    await breaker.warmStandbys();
+    expect(calls).toEqual(['backup:eth_blockNumber']);
+    expect(breaker.headEndpoint()).toEqual({ generation: 0, wsUrl: 'wss://primary.invalid' });
+    expect(breaker.status().active).toBe('primary');
+  });
+  it('never pairs a primary socket with backup HTTP after a rotation', async () => {
+    const first = { mode: 'ok' as 'ok' | (() => Error) }, second = { mode: 'ok' as const };
+    const { breaker, endpoints } = track(build([first, second]));
+    Object.assign(endpoints[0], { wsUrl: 'wss://primary.invalid' });
+    Object.assign(endpoints[1], { wsUrl: 'wss://backup.invalid' });
+    await breaker.verify(143);
+    first.mode = http502;
+    await breaker.request({ method: 'eth_blockNumber' }).catch(() => {});
+    await breaker.request({ method: 'eth_blockNumber' }).catch(() => {});
+    await breaker.request({ method: 'eth_blockNumber' });
+    expect(breaker.headEndpoint()).toEqual({ generation: 1, wsUrl: 'wss://backup.invalid' });
+  });
+});

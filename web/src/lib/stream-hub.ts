@@ -1,9 +1,10 @@
+import { browserNow, type ReceivedEnvelope } from './frame-timing';
 import { STREAM_V2_GZIP, STREAM_V2_JSON, topicKey, type StreamEnvelope, type StreamTopic } from '@shared';
 
 export type StreamStatus = 'live' | 'reconnecting';
 export interface HubListener {
   topics: StreamTopic[];
-  message: (envelope: StreamEnvelope) => void;
+  message: (envelope: ReceivedEnvelope) => void;
   status: (status: StreamStatus) => void;
 }
 
@@ -36,7 +37,7 @@ export class StreamHub {
         const receivedAt = this.receivedAt.get(topicKey(topic)) ?? -Infinity;
         if (cached && topic.channel !== 'fill' && this.isLive() && Date.now() - receivedAt <= 5_000
           && (cached.message.ch !== 'quotes' || Date.now() - cached.message.data.ts <= 60_000)
-          && (cached.message.ch !== 'depth' || Date.now() - cached.message.data.ts <= 5_000)) listener.message(cached);
+          && (cached.message.ch !== 'depth' || Date.now() - cached.message.data.ts <= 5_000)) listener.message({ ...cached, timing: undefined });
       }
     } else this.listeners.delete(id);
     if (!this.scheduled) {
@@ -83,13 +84,15 @@ export class StreamHub {
     let pending = 0;
     socket.onopen = () => { if (this.socket !== socket) return; this.sync(); this.notify('live'); };
     socket.onmessage = (event) => {
+      const receivedAt = browserNow();
       if (++pending > 64) { socket.close(); return; }
       queue = queue.then(async () => {
         if (this.socket !== socket) return;
         const text = typeof event.data === 'string' ? event.data
           : await new Response(new Blob([event.data]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
         if (this.socket !== socket) return;
-        const envelope = JSON.parse(text) as StreamEnvelope;
+        const envelope = JSON.parse(text) as ReceivedEnvelope;
+        if (envelope.message?.ch === 'quotes') envelope.timing = { receivedAt, decodedAt: browserNow() };
         if (envelope.v !== 2 || !envelope.message || !Number.isSafeInteger(envelope.seq)) throw new Error('invalid stream frame');
         if (this.epoch && this.epoch !== envelope.epoch) {
           this.sequences.clear(); this.latest.clear(); this.receivedAt.clear();

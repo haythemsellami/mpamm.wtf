@@ -58,6 +58,19 @@ describe('RPC pool resolution', () => {
 });
 
 describe('RPC pool config', () => {
+  it.each([
+    ['RPC_HTTP_BACKUP_URLS', 'RPC_WS_BACKUP_URLS', 'rpcBackups', 'rpcWsBackups'],
+    ['RPC_BACKUP_URLS', 'RPC_WS_BACKUP_URLS', 'rpcBackups', 'rpcWsBackups'],
+    ['RPC_DEPTH_BACKUP_URLS', 'RPC_DEPTH_WS_BACKUP_URLS', 'rpcDepthBackups', 'rpcDepthWsBackups'],
+  ] as const)('keeps %s providers paired across empty HTTP and WS slots', async (http, ws, httpKey, wsKey) => {
+    vi.stubEnv(http, ' , https://one.example/rpc, , https://two.example/rpc, https://three.example/rpc, ');
+    vi.stubEnv(ws, 'wss://orphan.example, wss://one.example/ws, wss://discard.example, , wss://three.example/ws');
+    vi.resetModules();
+    const { config } = await import('../../config.js');
+    expect(config[httpKey]).toEqual(['https://one.example/rpc', 'https://two.example/rpc', 'https://three.example/rpc']);
+    expect(config[wsKey]).toEqual(['wss://one.example/ws', '', 'wss://three.example/ws']);
+  });
+
   it('honors RPC_BACKUP_URLS as the pre-split alias for RPC_HTTP_BACKUP_URLS', async () => {
     vi.stubEnv('RPC_HTTP_URL', HOT);
     vi.stubEnv('RPC_BACKUP_URLS', 'https://old-backup.example/rpc');

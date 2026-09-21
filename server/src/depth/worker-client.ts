@@ -102,9 +102,9 @@ export class DepthWorkerClient {
     const generation = ++this.generation;
     const entry = fileURLToPath(new URL('./worker-entry.ts', import.meta.url));
     const depthRpc = config.rpcDepth || config.rpcHttp;
-    if (!config.rpcDepth && !this.warnedSharedRpc) {
+    if (depthRpc === config.rpcHttp && !this.warnedSharedRpc) {
       this.warnedSharedRpc = true;
-      this.onStatus('warn', 'depth worker is process-isolated but RPC_DEPTH_URL is unset, so provider capacity is still shared with realtime quotes');
+      this.onStatus('warn', 'depth worker is process-isolated but its RPC matches the hot endpoint, so provider capacity is still shared with realtime quotes');
     }
     let child: ChildProcess;
     try {
@@ -116,8 +116,9 @@ export class DepthWorkerClient {
           ...process.env,
           NODE_OPTIONS: depthNodeOptions(),
           RPC_HTTP_URL: depthRpc,
-          RPC_WS_URL: config.rpcDepthWs,
-          RPC_HTTP_BACKUP_URLS: config.rpcDepthBackups.join(','),
+          RPC_WS_URL: config.rpcDepthWs || (depthRpc === config.rpcHttp ? config.rpcWs : ''),
+          RPC_WS_BACKUP_URLS: (config.rpcDepth ? config.rpcDepthWsBackups : config.rpcWsBackups).join(','),
+          RPC_HTTP_BACKUP_URLS: (config.rpcDepth ? config.rpcDepthBackups : config.rpcBackups).join(','),
           RPC_ARCHIVE_URL: '',
           RPC_ARCHIVE_BACKUP_URLS: '',
           BACKFILL: 'off',

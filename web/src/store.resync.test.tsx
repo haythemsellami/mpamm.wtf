@@ -140,6 +140,61 @@ describe('fill snapshot resynchronization', () => {
     expect(dashboard.quotes?.block).toBe(101);
   });
 
+  it('removes superseded proposal samples and rejects history that raced the replacement', async () => {
+    window.history.replaceState(null, '', '/');
+    const oldHistory = deferred<QuoteSnapshot[]>();
+    vi.mocked(api.fetchQuoteHistory).mockReturnValue(oldHistory.promise);
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.state.venues = [{ id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } }];
+    await mount();
+    const frame = (revision: number, bidPx: number): QuoteSnapshot => ({ block: 101, monUsd: 1, ts: Date.now(), revision,
+      rows: [{ venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000, bidPx, askPx: bidPx + 1,
+        bidBps: 0, askBps: 1, spreadBps: bidPx, filledFull: true, feeBps: 0, ts: Date.now() }] });
+    await act(async () => message({ ch: 'quotes', data: frame(0, 1) }));
+    await act(async () => message({ ch: 'quotes', data: frame(1, 2) }));
+    await act(async () => oldHistory.resolve([frame(0, 1)]));
+    expect(dashboard.series.venue.points.map((point) => point.bid)).toEqual([2]);
+    expect(dashboard.samples.venue).toEqual([2]);
+    expect(dashboard.quotes?.revision).toBe(1);
+  });
+
+  it('rejects older revisions at every height while accepting gaps and rollback revisions', async () => {
+    window.history.replaceState(null, '', '/');
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.state.venues = [{ id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } }];
+    await mount();
+    let ts = Date.now();
+    const frame = (block: number, revision: number | undefined, bidPx: number): QuoteSnapshot => ({ block, revision, monUsd: 1, ts: ++ts,
+      rows: [{ venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000, bidPx, askPx: bidPx + 1,
+        bidBps: 0, askBps: 1, spreadBps: bidPx, filledFull: true, feeBps: 0, ts }] });
+    await act(async () => message({ ch: 'quotes', data: frame(110, 0, 1) }));
+    await act(async () => message({ ch: 'quotes', data: frame(108, 1, 2) }));
+    for (const revision of [undefined, 0]) for (const block of [107, 108, 111]) {
+      await act(async () => message({ ch: 'quotes', data: frame(block, revision, 99) }));
+      expect(dashboard.quotes).toMatchObject({ block: 108, revision: 1 });
+      expect(dashboard.series.venue.points.map((point) => point.bid)).toEqual([2]);
+      expect(dashboard.samples.venue).toEqual([2]);
+    }
+    await act(async () => message({ ch: 'quotes', data: frame(112, 1, 3) }));
+    expect(dashboard.quotes).toMatchObject({ block: 112, revision: 1 });
+    expect(dashboard.samples.venue).toEqual([2, 3]);
+    await reconnect();
+    await act(async () => message({ ch: 'quotes', data: frame(113, 0, 4) }));
+    expect(dashboard.quotes).toMatchObject({ block: 113, revision: 0 });
+    expect(dashboard.samples.venue).toEqual([4]);
+  });
+
+  it('rejects an older revision even when bootstrap contains no completed quote', async () => {
+    window.history.replaceState(null, '', '/');
+    const bootstrap = await vi.mocked(api.fetchMarkets)();
+    bootstrap.quotes = { ...bootstrap.quotes, block: 100, revision: 1 };
+    await mount();
+    await act(async () => message({ ch: 'quotes', data: { ...bootstrap.quotes, block: 101, revision: 0 } }));
+    expect(dashboard.quotes).toMatchObject({ block: 100, revision: 1 });
+    await act(async () => message({ ch: 'quotes', data: { ...bootstrap.quotes, block: 99 } }));
+    expect(dashboard.quotes).toMatchObject({ block: 99, revision: 1 });
+  });
+
   it('retains fills arriving during the initial REST request', async () => {
     const initial = deferred<Fill[]>();
     vi.mocked(api.fetchFills).mockReturnValueOnce(initial.promise);

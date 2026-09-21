@@ -1,3 +1,4 @@
+import { useSnapshotStale } from '../lib/freshness';
 import { useMemo } from 'react';
 import type { DepthSnapshot } from '@shared';
 import { C, hexA } from '../theme';
@@ -42,6 +43,11 @@ export function DepthCurveChart({ snapshot, venues, refName }: {
   refName: string;
 }) {
   const { mobile } = useViewport();
+  const stale = useSnapshotStale(snapshot?.ts);
+  const unavailable = (snapshot?.missingVenues ?? []).flatMap((id) => {
+    const venue = venues.find((candidate) => candidate.id === id);
+    return venue ? [venue.label] : [];
+  });
   // Legs and legend are derived from ONE pass over the active set, so a venue
   // can never own a chip without a line or a line without a chip.
   const { legs, legend } = useMemo(() => {
@@ -74,6 +80,10 @@ export function DepthCurveChart({ snapshot, venues, refName }: {
 
   return (
     <div style={{ padding: mobile ? '14px 12px 10px' : '14px 20px 10px' }}>
+      <div data-depth-block={snapshot?.asOfBlock} style={{ fontSize: 9, color: stale ? C.amber : C.dim2, marginBottom: 10 }}>
+        {snapshot ? `BLOCK ${snapshot.asOfBlock.toLocaleString()}${stale ? ' · STALE' : ''}` : 'WAITING FOR DEPTH'}
+        {!!unavailable.length && ` · UNAVAILABLE ${unavailable.join(', ')}`}
+      </div>
       {/* One row on desktop, exactly as designed. On a phone the legend cannot
           share a row with BIDS/ASKS — eight chips wrap into eight lines and push
           the plot off-screen — so the labels drop onto their own row over the
@@ -121,7 +131,7 @@ export function DepthCurveChart({ snapshot, venues, refName }: {
             {legs.map((l) => (
               // non-scaling-stroke: the horizontal stretch would otherwise
               // thicken every line as the panel widens.
-              <path key={l.key} d={l.d} fill="none" stroke={l.stroke} strokeWidth={1.6}
+              <path key={l.key} d={l.d} fill="none" stroke={l.stroke} strokeWidth={1.6} opacity={stale ? 0.35 : 1}
                 strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
             ))}
           </svg>

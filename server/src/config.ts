@@ -7,6 +7,17 @@ function list(v: string): string[] {
   return v.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+/** Remove empty HTTP slots together with their WS peer so later nodes cannot
+ * inherit a different provider's subscription. */
+function pairedBackups(http: string, ws: string): { http: string[]; ws: string[] } {
+  const sockets = ws.split(',').map((s) => s.trim());
+  const peers = http.split(',').map((s, i) => ({ http: s.trim(), ws: sockets[i] ?? '' })).filter((p) => p.http);
+  return { http: peers.map((p) => p.http), ws: peers.map((p) => p.ws) };
+}
+
+const hotBackups = pairedBackups(env.RPC_HTTP_BACKUP_URLS ?? env.RPC_BACKUP_URLS ?? 'https://rpc.monad.xyz', env.RPC_WS_BACKUP_URLS ?? '');
+const depthBackups = pairedBackups(env.RPC_DEPTH_BACKUP_URLS ?? '', env.RPC_DEPTH_WS_BACKUP_URLS ?? '');
+
 function num(key: string, dflt: number): number {
   const v = env[key];
   if (v === undefined || v === '') return dflt;
@@ -56,16 +67,19 @@ export const config = {
   // an archive backup does not degrade onto the archive — every deep cursor
   // holds forever while the endpoint that could serve it sits idle.
   rpcHttp: env.RPC_HTTP_URL ?? 'https://rpc.monad.xyz',
-  /** Optional hot-node WebSocket. When configured, newHeads drives quote
+  /** Optional hot-node WebSocket. Monad proposal heads drive quote
    *  evaluation immediately; the HTTP head poll remains active as a watchdog
    *  and as the fallback while the subscription reconnects. */
   rpcWs: env.RPC_WS_URL ?? '',
+  /** Positional peers of RPC_HTTP_BACKUP_URLS; an empty slot means HTTP only. */
+  rpcWsBackups: hotBackups.ws,
+  rpcWarmMs: Math.max(5_000, num('RPC_WARM_MS', 15_000)),
   /** Ordered failover RPCs behind the hot primary (comma-separated). Default:
    *  the public RPC, so every deployment survives a provider outage with zero
    *  config. Set to "" to opt out (single-endpoint behavior). RPC_BACKUP_URLS
    *  is the pre-split name, still honored so a live deploy keeps its backups
    *  through the rollout. */
-  rpcBackups: list(env.RPC_HTTP_BACKUP_URLS ?? env.RPC_BACKUP_URLS ?? 'https://rpc.monad.xyz'),
+  rpcBackups: hotBackups.http,
   /** Dedicated endpoint for the high-resolution depth worker. The worker is a
    *  separate process either way (so ABI decoding cannot pause the quote event
    *  loop); setting this to a separately-provisioned endpoint also isolates RPC
@@ -73,7 +87,8 @@ export const config = {
    *  for local/dev compatibility and is called out at boot. */
   rpcDepth: env.RPC_DEPTH_URL ?? '',
   rpcDepthWs: env.RPC_DEPTH_WS_URL ?? '',
-  rpcDepthBackups: list(env.RPC_DEPTH_BACKUP_URLS ?? ''),
+  rpcDepthBackups: depthBackups.http,
+  rpcDepthWsBackups: depthBackups.ws,
   /** Deep-history primary. UNSET (the default) means the archive pool IS the hot
    *  pool — exactly the single-client behavior that predates the split, so an
    *  unconfigured deployment is unaffected. Set it only when the hot primary
@@ -140,9 +155,9 @@ export const config = {
   /** Samples across the grid — see @shared DEPTH_SAMPLES for why 25 is the
    *  value that makes the curve reconcile with the SIZE pills exactly. */
   depthSamples: num('DEPTH_SAMPLES', DEPTH_SAMPLES),
-  /** Fastest start-to-start cadence per demanded market. New heads coalesce to
-   *  the newest block while a pass runs, so slow RPC can never build a queue. */
-  depthMinIntervalMs: num('DEPTH_MIN_INTERVAL_MS', 300),
+  /** Zero follows each observed head. Positive values explicitly cap starts;
+   * pending heads coalesce while a bounded pass handles all demanded markets. */
+  depthMinIntervalMs: Math.max(0, num('DEPTH_MIN_INTERVAL_MS', 0)),
 
   /** getLogs span the tail ATTEMPTS. Measured caps: the devcore4 fleet serves
    *  1000 blocks per call, the public endpoint 413s above ~100. Sized for the
