@@ -125,9 +125,8 @@ describe('subscription transport', () => {
     await expect(once(ws, 'open')).rejects.toThrow('Server sent no subprotocol');
   });
 
-  it('filters before encoding, shares quote demand and compression, and works without extension negotiation', async () => {
+  it('filters before encoding, shares compression, and works without extension negotiation', async () => {
     const { source, port } = await boot();
-    const watch = vi.spyOn(source, 'watchQuotes');
     const topic = { channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false } as const;
     const a = await connect(port, [topic]);
     const b = await connect(port, [topic]);
@@ -138,7 +137,6 @@ describe('subscription transport', () => {
     expect(before.stream.encodes).toBe(1);
     const historical = await connect(port, [{ channel: 'state' }]);
     const initialMetrics = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
-    expect(watch).toHaveBeenCalledTimes(1);
     const initial = a.frames[0].message;
     expect(initial.ch).toBe('quotes');
     if (initial.ch === 'quotes') expect(initial.data.rows).toEqual([row]);
@@ -156,9 +154,10 @@ describe('subscription transport', () => {
 
   it('keeps a small live update behind its compressed initial snapshot', async () => {
     const source = new Source();
-    vi.spyOn(source, 'watchQuotes').mockImplementation(() => {
+    const original = source.getQuotes.bind(source);
+    vi.spyOn(source, 'getQuotes').mockImplementationOnce(() => {
       queueMicrotask(() => source.push({ ch: 'quotes', data: { block: 2, ts: 101, monUsd: .024, rows: [] } }));
-      return () => {};
+      return original();
     });
     const { port } = await boot(source);
     const client = await connect(port, [{ channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false }]);
@@ -420,10 +419,56 @@ describe('legacy snapshot and idle history', () => {
     let now = 1_800_000_000_000;
     vi.spyOn(Date, 'now').mockImplementation(() => now);
     const source = new Source();
-    source.push({ ch: 'quotes', data: { ...source.getQuotes(), ts: now } });
-    now += 60_000;
+    source.push({ ch: 'quotes', data: { ...source.getQuotes(), ts: now, frame: undefined } });
+    now += 59_999;
     expect(source.quoteHistory('MON/USDC', 1000)).toHaveLength(1);
     now++;
     expect(source.quoteHistory('MON/USDC', 1000)).toEqual([]);
+  });
+});
+
+describe('execution history delivery', () => {
+  it('retains unseen quotes through zero subscribers and serves the same aggregate to every viewer', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const { source, port } = await boot();
+    const push = (block: number) => { now += 300; source.push({ ch: 'quotes', data: { ...source.getQuotes(), block, ts: now, frame: undefined } }); };
+    push(1); // collected before the first viewer arrived
+    const topic = { channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false } as const;
+    const a = await connect(port, [topic], STREAM_V2_JSON), b = await connect(port, [topic], STREAM_V2_JSON);
+    push(2);
+    await waitFor(() => a.frames.length === 2 && b.frames.length === 2);
+    a.ws.send(JSON.stringify({ type: 'subscribe', topics: [{ channel: 'state' }] }));
+    b.ws.close(); await once(b.ws, 'close');
+    await waitFor(() => a.frames.some((f) => f.message.ch === 'state'));
+    const delivered = a.frames.filter((f) => f.message.ch === 'quotes').length;
+    for (const block of [3, 4, 5]) push(block);
+    const api = `http://127.0.0.1:${port}/api/quotes`;
+    const history = await fetch(`${api}/history?market=MON%2FUSDC&size=1000`).then((r) => r.json()) as QuoteSnapshot[];
+    expect(history.map((q) => q.block)).toEqual([1, 2, 3, 4, 5]);
+    expect(a.frames.filter((f) => f.message.ch === 'quotes')).toHaveLength(delivered);
+    const statsUrl = `${api}/stats?market=MON%2FUSDC&size=1000`;
+    const [first, second] = await Promise.all([fetch(statsUrl).then((r) => r.json()), fetch(statsUrl).then((r) => r.json())]);
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({ market: 'MON/USDC', sizeUsd: 1000, windowMs: 300_000, rows: [{ venueId: 'venue', n: 5 }] });
+    expect(JSON.stringify(first)).not.toContain('bidPx');
+    a.ws.send(JSON.stringify({ type: 'subscribe', topics: [topic] }));
+    await waitFor(() => a.frames.filter((f) => f.message.ch === 'quotes').length > delivered);
+    push(6);
+    await waitFor(() => a.frames.some((f) => f.message.ch === 'quotes' && f.message.data.block === 6));
+    expect(a.frames.some((f) => 'stats' in f.message.data)).toBe(false);
+  });
+
+  it('validates the stats selection, returns empty cold windows, and does not open quote work', async () => {
+    const { port } = await boot();
+    const base = `http://127.0.0.1:${port}/api/quotes/stats`;
+    for (const query of ['', '?market=unknown&size=1000', '?market=MON%2FUSDC&size=0', '?market=MON%2FUSDC&size=123', '?market=MON%2FUSDC&size=NaN']) {
+      expect((await fetch(base + query)).status).toBe(400);
+    }
+    const response = await fetch(base + '?market=MON%2FUSDC&size=1000');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toMatchObject({ rows: [], windowMs: 300_000 });
+    const metrics = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json()) as any;
+    expect(metrics.stream).toMatchObject({ connections: 0, topics: 0, encodes: 0 });
   });
 });

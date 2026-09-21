@@ -83,7 +83,6 @@ export class SubscriptionGateway {
       if (!group) {
         group = { topic, peers: new Set(), seq: this.sequences.get(key) ?? 0, encoding: false, lastAt: 0 };
         this.groups.set(key, group);
-        if (topic.channel === 'quotes') group.stop = this.source.watchQuotes?.(topic);
         if (topic.channel === 'depth') {
           const g = group;
           group.stop = this.source.watchDepth(topic.market, (publication) => {

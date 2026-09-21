@@ -24,6 +24,16 @@ function snapshot(block: number, ts: number, venues: string[]): QuoteSnapshot {
 }
 
 describe('quote chart series', () => {
+  it('retains the full minute when frames arrive faster than the former 400-point cap', () => {
+    const series: Record<string, QuoteSeries> = {};
+    for (let block = 0; block <= 1200; block++) {
+      appendQuoteSnapshot(series, ['a'], snapshot(block, block * 100, ['a']), 'MON/USDC', 100);
+    }
+    expect(series.a.points).toHaveLength(601);
+    expect(series.a.points[0].ts).toBe(60_000);
+    expect(series.a.points.at(-1)?.ts).toBe(120_000);
+  });
+
   it('advances every venue on the same frame and records missing rows as gaps', () => {
     const series: Record<string, QuoteSeries> = {};
     appendQuoteSnapshot(series, ['a', 'b'], snapshot(10, 1_000, ['a']), 'MON/USDC', 100);

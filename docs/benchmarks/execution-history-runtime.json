@@ -1,0 +1,43 @@
+{
+  "recordedAt": "2026-09-21T11:14:26.263Z",
+  "node": "v24.11.1",
+  "cpu": "Apple M4",
+  "method": "Replay the recorded quote-matrix fixture for one synthetic hour at 300ms cadence. Each frame owns new row objects. Timings exclude fixture copying and cover record/aggregate calls only; first six minutes excluded from record timing. Read each selection once uncached, then 100 times within one cache bucket; never-collected selections return empty without scanning. Numeric payload bytes exclude JS object overhead and are not process RSS or a production memory estimate.",
+  "fixtureRows": 213,
+  "cadenceMs": 300,
+  "selections": 100,
+  "checkpoints": [
+    {
+      "elapsedMinutes": 6,
+      "chartFrames": 200,
+      "chartRows": 42600,
+      "spreadFrames": 1200,
+      "numericSpreadBytes": 3052800
+    },
+    {
+      "elapsedMinutes": 12,
+      "chartFrames": 200,
+      "chartRows": 42600,
+      "spreadFrames": 1200,
+      "numericSpreadBytes": 3052800
+    },
+    {
+      "elapsedMinutes": 60,
+      "chartFrames": 200,
+      "chartRows": 42600,
+      "spreadFrames": 1200,
+      "numericSpreadBytes": 3052800
+    }
+  ],
+  "record": {
+    "p50Ms": 0.028541000000018357,
+    "p95Ms": 0.03283300000001077
+  },
+  "aggregate": {
+    "uncachedP50Ms": 0.787040999999931,
+    "uncachedP95Ms": 1.4405000000000427,
+    "repeatedP50Ms": 0.006250000000022737,
+    "repeatedP95Ms": 0.014750000000049113,
+    "allSelectionsSummaryBytes": 41981
+  }
+}

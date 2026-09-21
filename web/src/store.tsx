@@ -1,9 +1,9 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { MarketState, StreamState, QuoteSnapshot, QuoteRow, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse } from '@shared';
-import { pairOf, cexForBase } from '@shared';
-import { fetchMarkets, fetchFills, fetchLeaderboard, fetchGas, fetchQuoteHistory, connectDashboardStream } from './lib/api';
+import type { MarketState, StreamState, QuoteSnapshot, QuoteStatsResponse, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse } from '@shared';
+import { pairOf, cexForBase, QUOTE_CHART_WINDOW_MS, QUOTE_STATS_REFRESH_MS } from '@shared';
+import { fetchMarkets, fetchFills, fetchLeaderboard, fetchGas, fetchQuoteHistory, fetchQuoteStats, connectDashboardStream } from './lib/api';
 import { pathForTab, tabFromPath, urlForTab, type Tab } from './lib/tab-route';
-import { appendQuoteSnapshot, type QuoteSeries } from './lib/quote-series';
+import { appendQuoteSnapshot, quoteFrameTime, type QuoteSeries } from './lib/quote-series';
 import type { Theme } from './theme';
 
 export type { Tab } from './lib/tab-route';
@@ -13,8 +13,8 @@ export type { Tab } from './lib/tab-route';
 const initialTheme = (): Theme => {
   try { return localStorage.getItem('pamm-theme') === 'dark' ? 'dark' : 'light'; } catch { return 'light'; }
 };
-const QUOTE_WINDOW_MS = 60_000;
-const QUOTE_SAMPLE_MAX = 400;
+const QUOTE_WINDOW_MS = QUOTE_CHART_WINDOW_MS;
+const QUOTE_SAMPLE_MAX = 4096; // emergency bound, well above a minute at block cadence
 
 const initialTab = (): Tab => tabFromPath(window.location.pathname) ?? 'exec';
 
@@ -73,7 +73,7 @@ interface Dashboard extends UiState {
   referenceFor: (market: string) => VenueMeta | undefined;
   venuesById: Record<string, VenueMeta>;
   series: Record<string, Series>;
-  samples: Record<string, number[]>;
+  quoteStats: QuoteStatsResponse | null;
   // setters
   set: <K extends keyof UiState>(k: K, v: UiState[K]) => void;
   toggleVenue: (id: string) => void;
@@ -101,10 +101,6 @@ const mergeState = (prev: MarketState | null, next: StreamState): MarketState | 
   return venues ? { ...next, venues, quoteMarkets: next.quoteMarkets ?? prev?.quoteMarkets } : prev;
 };
 
-function rowFor(q: QuoteSnapshot | null, venueId: string, market: string, size: number): QuoteRow | undefined {
-  return q?.rows.find((r) => r.venueId === venueId && r.market === market && r.sizeUsd === size);
-}
-
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const [ui, setUi] = useState<UiState>(() => ({
     // size: the opening notional for QUOTE + ROLLING_STATS ($1k, one of SIZES_USD).
@@ -120,6 +116,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<MarketState | null>(null);
   const stateBlockRef = useRef(0);
   const [quotes, setQuotes] = useState<QuoteSnapshot | null>(null);
+  const [quoteStats, setQuoteStats] = useState<QuoteStatsResponse | null>(null);
   const [volume, setVolume] = useState<DailyVolume[]>([]);
   const [fills, setFills] = useState<Fill[]>([]);
   const [lb, setLb] = useState<LeaderboardResponse | null>(null);
@@ -152,7 +149,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [ui.tab]);
 
   const seriesRef = useRef<Record<string, Series>>({});
-  const samplesRef = useRef<Record<string, number[]>>({});
   const quotesRef = useRef<QuoteSnapshot | null>(null);
   // the venue ids the buffers are keyed by — read inside the (stable) stream
   // callback so we never close over a stale registry.
@@ -164,7 +160,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // the reseed effect can never append new-pair prices onto old-pair samples
   // (the mixed-buffer scale flicker).
   const seedKeyRef = useRef('');
-  const seedFetchRef = useRef(''); // key with a history fetch in flight (dedupe)
+  const seedFetchRef = useRef<{ key: string } | null>(null);
   const recentQuotesRef = useRef<QuoteSnapshot[]>([]);
   const keyOf = () => `${selRef.current.pair}|${selRef.current.size}`;
   const pushSnapshot = (q: QuoteSnapshot) => {
@@ -173,7 +169,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       || (previous.block === q.block && previous.blockHash && q.blockHash && previous.blockHash !== q.blockHash))) {
       recentQuotesRef.current = [];
       seriesRef.current = {};
-      samplesRef.current = {};
+      seedFetchRef.current = null;
     }
     quotesRef.current = q;
     if (selRef.current.tab !== 'exec') return;
@@ -182,22 +178,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const duplicate = recent.at(-1)?.block === q.block;
     if (duplicate) recent[recent.length - 1] = q;
     else recent.push(q);
+    const cutoff = quoteFrameTime(q) - QUOTE_WINDOW_MS;
+    while (recent.length && quoteFrameTime(recent[0]) <= cutoff) recent.shift();
     if (recent.length > QUOTE_SAMPLE_MAX) recent.shift();
     const { pair, size } = selRef.current;
     appendQuoteSnapshot(seriesRef.current, idsRef.current, q, pair, size, QUOTE_WINDOW_MS, QUOTE_SAMPLE_MAX);
-    if (duplicate) return;
-    for (const id of idsRef.current) {
-      const r = rowFor(q, id, pair, size);
-      if (!r) continue;
-      // only a real, full-size two-sided quote feeds the spread distribution —
-      // a partial (size-exhausted, filledFull=false) or one-sided quote is not
-      // executable at the requested notional, so it must not skew the stats.
-      if (!r.oneSided && r.filledFull && r.bidPx > 0 && r.askPx > 0) {
-        const smp = (samplesRef.current[id] ??= []);
-        smp.push(r.spreadBps);
-        if (smp.length > 600) smp.shift();
-      }
-    }
   };
 
   // Re-key the canvas buffers to the selected pair/size. Seed only the one real
@@ -209,13 +194,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const ids = idsRef.current;
     if (seedKeyRef.current !== keyOf()) recentQuotesRef.current = [];
     seedKeyRef.current = keyOf();
-    // Mutate the buffers IN PLACE (keep the seriesRef/samplesRef object references
+    // Mutate the buffers IN PLACE (keep the seriesRef object references
     // stable) so `d.series` — captured in the api memo — can never point at a stale
     // pre-reseed object. Clear every buffer, drop de-registered venues, then refill.
-    const S = seriesRef.current, SM = samplesRef.current;
-    for (const id of ids) { const s = (S[id] ??= { points: [] }); s.points.length = 0; (SM[id] ??= []).length = 0; }
+    const S = seriesRef.current;
+    for (const id of ids) { const s = (S[id] ??= { points: [] }); s.points.length = 0; }
     for (const id of Object.keys(S)) if (!ids.includes(id)) delete S[id];
-    for (const id of Object.keys(SM)) if (!ids.includes(id)) delete SM[id];
     if (q) {
       const { pair, size } = selRef.current;
       appendQuoteSnapshot(S, ids, q, pair, size, QUOTE_WINDOW_MS, QUOTE_SAMPLE_MAX);
@@ -228,35 +212,29 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   // already left is discarded (seedKey moved on).
   const seedFromHistory = async (key: string) => {
     if (selRef.current.tab !== 'exec') return;
-    if (seedFetchRef.current === key) return; // already fetching this key
-    seedFetchRef.current = key;
+    if (seedFetchRef.current?.key === key) return;
+    const request = { key };
+    seedFetchRef.current = request;
     try {
       const revision = quotesRef.current?.revision ?? 0;
       const [pair, sizeS] = key.split('|');
       const hist = await fetchQuoteHistory(pair, Number(sizeS));
-      if (selRef.current.tab !== 'exec' || seedKeyRef.current !== key || !hist.length
+      if (seedFetchRef.current !== request || selRef.current.tab !== 'exec' || seedKeyRef.current !== key || !hist.length
         || (quotesRef.current?.revision ?? 0) !== revision) return;
-      const ids = new Set(idsRef.current);
-      const S = seriesRef.current, SM = samplesRef.current;
-      for (const id of idsRef.current) { const s = (S[id] ??= { points: [] }); s.points.length = 0; (SM[id] ??= []).length = 0; }
+      const S = seriesRef.current;
+      for (const id of idsRef.current) { const s = (S[id] ??= { points: [] }); s.points.length = 0; }
       // Live frames can arrive while REST is in flight. Prefer those frames
       // at the same block and retain every newer one when rebuilding buffers.
-      const merged = new Map(hist.filter((q) => (q.revision ?? 0) === revision).map((q) => [q.block, q]));
+      // Server invalidation already removed replaced descendants. Older
+      // revisions may still contain valid ancestors within the chart window.
+      const merged = new Map(hist.map((q) => [q.block, q]));
       for (const q of recentQuotesRef.current) merged.set(q.block, q);
       for (const q of [...merged.values()].sort((a, b) => a.block - b.block)) {
         appendQuoteSnapshot(S, idsRef.current, q, pair, Number(sizeS), QUOTE_WINDOW_MS, QUOTE_SAMPLE_MAX);
-        for (const r of q.rows) {
-          if (!ids.has(r.venueId)) continue;
-          if (!r.oneSided && r.filledFull && r.bidPx > 0 && r.askPx > 0) {
-            const smp = (SM[r.venueId] ??= []);
-            smp.push(r.spreadBps);
-            if (smp.length > 600) smp.shift();
-          }
-        }
       }
       setFrame((f) => f + 1);
     } catch { /* the current real frame stays — the stream continues live */ }
-    finally { if (seedFetchRef.current === key) seedFetchRef.current = ''; }
+    finally { if (seedFetchRef.current === request) seedFetchRef.current = null; }
   };
 
   // adopt a fresh registry: re-key the per-venue buffers and default a toggle for
@@ -372,9 +350,34 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       if (s === 'live' && wasDropped.v) { wasDropped.v = false; loadSnapshot(); }
     });
 
-    return () => { mounted.v = false; if (snapshotRetry) clearTimeout(snapshotRetry); dispose(); };
+    return () => { mounted.v = false; seedFetchRef.current = null; if (snapshotRetry) clearTimeout(snapshotRetry); dispose(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ui.tab, ui.pair, ui.size, baselineOn]);
+
+  // Five-minute statistics belong to the collector, so page visits never
+  // reset the window. Poll only the visible selection; a slow response cannot
+  // replace a newer selection, reconnect, or proposal revision.
+  const quoteRevision = quotes?.revision ?? 0;
+  useEffect(() => {
+    setQuoteStats(null);
+    if (ui.tab !== 'exec') return;
+    let active = true;
+    let loading = false;
+    const load = async () => {
+      if (document.hidden || loading) return;
+      loading = true;
+      try {
+        const stats = await fetchQuoteStats(ui.pair, ui.size);
+        if (active) setQuoteStats(stats.market === ui.pair && stats.sizeUsd === ui.size
+          && stats.revision === (quotesRef.current?.revision ?? 0) ? stats : null);
+      } catch { if (active) setQuoteStats(null); }
+      finally { loading = false; }
+    };
+    void load();
+    const id = setInterval(() => { void load(); }, QUOTE_STATS_REFRESH_MS);
+    document.addEventListener('visibilitychange', load);
+    return () => { active = false; clearInterval(id); document.removeEventListener('visibilitychange', load); };
+  }, [ui.tab, ui.pair, ui.size, conn, quoteRevision]);
 
   // server-side leaderboard aggregates: fetch on tab entry + window change, then
   // poll every 30s while the tab is open (fills stream live, aggregates don't).
@@ -416,7 +419,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     if (ui.tab !== 'exec') return;
     reseed(); setFrame((f) => f + 1);
     /* eslint-disable-next-line */
-  }, [ui.tab, ui.pair, ui.size, venueIds(state).join(',')]);
+  }, [ui.tab, ui.pair, ui.size, quoteRevision, venueIds(state).join(',')]);
 
   const venues = state?.venues ?? [];
   const { displayVenues, baselines, references, reference, venuesById } = useMemo(() => {
@@ -440,7 +443,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const api = useMemo<Dashboard>(() => ({
     ...ui, conn, state, quotes, volume, fills, lb, lbDay, gas, frame,
     venues, displayVenues, baselines, reference, references, referenceFor, venuesById,
-    series: seriesRef.current, samples: samplesRef.current,
+    series: seriesRef.current, quoteStats,
     set: (k, v) => setUi((s) => ({ ...s, [k]: v })),
     toggleVenue: (id) => setUi((s) => ({ ...s, venueToggles: { ...s.venueToggles, [id]: !s.venueToggles[id] } })),
     toggleTheme: () => {
@@ -455,7 +458,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setFrame((f) => f + 1);
     },
     resetLb: () => setUi((s) => ({ ...s, lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbWinners: true, lbTop: 25 })),
-  }), [ui, conn, state, quotes, volume, fills, lb, lbDay, gas, frame, venues, displayVenues, baselines, reference, references, referenceFor, venuesById]);
+  }), [ui, conn, state, quotes, quoteStats, volume, fills, lb, lbDay, gas, frame, venues, displayVenues, baselines, reference, references, referenceFor, venuesById]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

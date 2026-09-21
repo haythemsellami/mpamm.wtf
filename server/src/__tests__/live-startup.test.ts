@@ -8,7 +8,6 @@ import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { MARKETS, SIZES_USD, type Fill, type QuoteRow } from '@shared';
 import type { VenueAdapter } from '../venues/adapter.js';
-import { createQuoteOutageReporter, type MulticallOutcome } from '../venues/quote-health.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -138,7 +137,6 @@ describe('live startup archive gate', () => {
         const body = await response.json() as any;
         expect((path === '/api/markets' ? body.quotes : body).rows).toEqual([]);
       }
-      expect(source.quoteScopes.size).toBe(0);
       expect(source.fullSnapshotPending).toBeUndefined();
       for (const path of ['/api/bootstrap?volume=1', '/api/fills']) {
         const response = await fetch(origin + path);
@@ -168,8 +166,6 @@ describe('live startup archive gate', () => {
     const { QUOTE_DARK_CYCLES } = await import('../datasource/live.js');
     source.bootMs = Date.now() - 65_000;
     source.schedulePostQuoteMaintenance = vi.fn();
-    source.manageQuoteDemand();
-    source.watchQuotes({ market: 'MON/USDC', sizeUsd: 100, baseline: false });
     const healthy = adapters[0].quote!;
     const notes = vi.spyOn(source, 'noteOnce'), recoveries = vi.spyOn(source, 'note');
     const held = deferred<QuoteRow[]>();
@@ -191,12 +187,12 @@ describe('live startup archive gate', () => {
       for (let i = 0; i < QUOTE_DARK_CYCLES + 1; i++) await poll(block++);
       expect(adapters[0].quote).toHaveBeenCalledTimes(1);
       expect(source.getQuotes().frame.missingVenues).toContain('venue');
-      expect(source.quoteEmptyRuns).toEqual(before);
+      expect(source.quoteEmptyRuns.get('venue')).toEqual(before.get('venue'));
       expect(source.quoteDark).toEqual(dark);
       expect(notes).not.toHaveBeenCalled(); expect(recoveries).not.toHaveBeenCalled();
       held.resolve([]);
       await vi.advanceTimersByTimeAsync(0);
-      expect(source.quoteEmptyRuns).toEqual(before);
+      expect(source.quoteEmptyRuns.get('venue')).toEqual(before.get('venue'));
       adapters[0].quote = healthy;
       await poll(block++);
       expect(source.quoteEmptyRuns.get('venue').runs).toBe(0);
@@ -205,58 +201,6 @@ describe('live startup archive gate', () => {
       adapters[0].quote = vi.fn(async () => []);
       for (let i = 0; i < QUOTE_DARK_CYCLES; i++) await poll(block++);
       expect(source.quoteDark.has('venue')).toBe(true);
-    } finally { held.resolve([]); vi.useRealTimers(); source.store.close(); }
-  });
-
-  it.each([false, true])('keeps a partially quoting venue healthy across concurrent demand (failure first: %s)', async (failureFirst) => {
-    const { source, adapters, poll } = await setup({ withQuotes: true });
-    source.schedulePostQuoteMaintenance = vi.fn();
-    source.manageQuoteDemand();
-    source.watchQuotes({ market: 'MON/USDC', sizeUsd: 100, baseline: false });
-    source.watchQuotes({ market: 'BTC/USDC', sizeUsd: 1000, baseline: false });
-    const failed = deferred<MulticallOutcome[]>(), healthy = deferred<MulticallOutcome[]>();
-    const original = adapters[0].quote!;
-    const report = createQuoteOutageReporter('Venue');
-    adapters[0].quote = vi.fn(async (ctx, sizes, block, markets) => {
-      const result = await (markets!.has('MON/USDC') ? failed.promise : healthy.promise);
-      return report(ctx, result) ? [] : original(ctx, sizes, block, markets);
-    });
-    const notes = vi.spyOn(source, 'noteOnce');
-    try {
-      const work = poll(100n);
-      await vi.waitFor(() => expect(adapters[0].quote).toHaveBeenCalledTimes(2));
-      const fail = () => failed.resolve([{ status: 'failure', error: new Error('unavailable') }]);
-      const recover = () => healthy.resolve([{ status: 'success' }]);
-      (failureFirst ? fail : recover)();
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(notes).not.toHaveBeenCalled();
-      (failureFirst ? recover : fail)();
-      await work;
-      expect(notes).not.toHaveBeenCalled();
-      expect(source.getQuotes().rows.filter((row: QuoteRow) => row.venueId === 'venue').map((row: QuoteRow) => row.market)).toEqual(['BTC/USDC']);
-    } finally { source.store.close(); }
-  });
-
-  it('retains an adapter slot when one demand plan rejects before its sibling settles', async () => {
-    const { source, adapters, poll } = await setup({ withQuotes: true });
-    source.schedulePostQuoteMaintenance = vi.fn();
-    source.manageQuoteDemand();
-    source.watchQuotes({ market: 'MON/USDC', sizeUsd: 100, baseline: false });
-    source.watchQuotes({ market: 'BTC/USDC', sizeUsd: 1000, baseline: false });
-    const held = deferred<QuoteRow[]>();
-    adapters[0].quote = vi.fn(async (_ctx, _sizes, _block, markets) => {
-      if (markets!.has('MON/USDC')) throw new Error('unavailable');
-      return held.promise;
-    });
-    vi.useFakeTimers();
-    try {
-      const first = poll(100n);
-      await vi.advanceTimersByTimeAsync(250);
-      await first;
-      await poll(101n);
-      expect(adapters[0].quote).toHaveBeenCalledTimes(2);
-      held.resolve([]);
-      await vi.advanceTimersByTimeAsync(0);
     } finally { held.resolve([]); vi.useRealTimers(); source.store.close(); }
   });
 
@@ -300,70 +244,63 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
-  it('full demand includes regular venues, baselines and reference rows without duplicating adapter calls', async () => {
+  it('collects every market, size and venue role once per block with zero viewers', async () => {
     const { source, adapters, poll } = await setup({ withQuotes: true });
     source.schedulePostQuoteMaintenance = vi.fn();
-    source.manageQuoteDemand();
-    const release = source.watchQuotes({ market: 'MON/USDC', sizeUsd: 1000, baseline: false });
     try {
-      await poll(100n);
-      expect(new Set(source.getQuotes().rows.map((row: QuoteRow) => row.venueId))).toEqual(new Set(['venue', 'bybit']));
-      const snapshot = source.fullQuoteSnapshot();
-      await poll(101n);
-      const full = await snapshot;
+      for (const block of [100n, 101n, 102n]) await poll(block);
+      const full = source.getQuotes();
       for (const venueId of ['venue', 'baseline', 'bybit']) {
         expect(full.rows.filter((row: QuoteRow) => row.venueId === venueId)).toHaveLength(MARKETS.length * SIZES_USD.length);
       }
-      expect(adapters[0].quote).toHaveBeenCalledTimes(2);
-      expect(adapters[1].quote).toHaveBeenCalledTimes(1);
-    } finally { release(); source.store.close(); }
+      for (const adapter of adapters) {
+        expect(adapter.quote).toHaveBeenCalledTimes(3);
+        for (const call of vi.mocked(adapter.quote!).mock.calls) {
+          expect(call[1]).toEqual(SIZES_USD);
+          expect(call[3]).toBeUndefined();
+        }
+      }
+      expect(source.quoteHistory('MON/USDC', 1000).map((q: { block: number }) => q.block)).toEqual([100, 101, 102]);
+      expect(source.quoteStats('BTC/USDC', 100).rows.every((row: { n: number }) => row.n === 3)).toBe(true);
+    } finally { source.clearExecutionHistory(); source.store.close(); }
   });
 
-  it('clears idle quotes and never serves a snapshot older than the history window', async () => {
+  it('expires stalled quotes but resumes collection without requiring a viewer', async () => {
     const { source, poll } = await setup({ withQuotes: true });
     source.schedulePostQuoteMaintenance = vi.fn();
-    source.manageQuoteDemand();
-    const release = source.watchQuotes();
     try {
       await poll(100n);
-      expect(source.getQuotes().rows.length).toBeGreaterThan(0);
       const ts = source.getQuotes().ts;
       vi.spyOn(Date, 'now').mockReturnValue(ts + 60_001);
       expect(source.getQuotes().rows).toEqual([]);
       expect(source.quoteHistory('MON/USDC', 1000)).toEqual([]);
-      vi.restoreAllMocks();
-      release();
+      expect(source.quoteStats('MON/USDC', 1000).rows.length).toBeGreaterThan(0);
       await poll(101n);
-      expect(source.getQuotes().rows).toEqual([]);
-      expect(source.quotesFull).toBe(false);
-    } finally { release(); source.store.close(); }
+      expect(source.getQuotes().rows.length).toBeGreaterThan(0);
+      expect(source.quotesFull).toBe(true);
+    } finally { source.clearExecutionHistory(); source.store.close(); }
   });
 
-  it('waits past an in-flight scoped frame when a fresh full snapshot is requested', async () => {
+  it('shares concurrent complete-snapshot requests with the running collector', async () => {
     const { source, adapters, poll } = await setup({ withQuotes: true });
     source.schedulePostQuoteMaintenance = vi.fn();
-    source.manageQuoteDemand();
-    const first = source.fullQuoteSnapshot();
-    await poll(100n);
-    await first;
-    const release = source.watchQuotes({ market: 'MON/USDC', sizeUsd: 1000, baseline: false });
     try {
-      const partial = deferred<QuoteRow[]>();
-      vi.mocked(adapters[0].quote!).mockImplementationOnce(() => partial.promise);
+      await poll(100n);
+      const held = deferred<QuoteRow[]>();
+      vi.mocked(adapters[0].quote!).mockImplementationOnce(() => held.promise);
       const running = poll(101n);
-      let completed = false;
-      const fresh = source.fullQuoteSnapshot(true).then((snapshot: { block: number }) => { completed = true; return snapshot; });
-      partial.resolve([]);
+      const a = source.fullQuoteSnapshot(true), b = source.fullQuoteSnapshot(true);
+      expect(a).toBe(b);
+      held.resolve([]);
       await running;
-      expect(completed).toBe(false);
-      await poll(102n);
-      expect((await fresh).block).toBe(102);
-    } finally { release(); source.store.close(); }
+      expect((await a).block).toBe(101);
+      for (const adapter of adapters) expect(adapter.quote).toHaveBeenCalledTimes(2);
+    } finally { source.clearExecutionHistory(); source.store.close(); }
   });
 
   it.each(['recovery', 'timeout'] as const)('holds an incomplete full matrix through deadlines and busy slots until %s', async (mode) => {
     const { source, adapters, poll } = await setup({ withQuotes: true });
-    source.schedulePostQuoteMaintenance = vi.fn(); source.manageQuoteDemand();
+    source.schedulePostQuoteMaintenance = vi.fn();
     const held = deferred<QuoteRow[]>();
     const healthy = adapters[0].quote!;
     vi.useFakeTimers();

@@ -1,6 +1,6 @@
 import { subscribeTopics } from './subscriptions';
 import type { StreamTopic } from '@shared';
-import type { MarketsResponse, StreamMessage, DepthSnapshot, Fill, QuoteSnapshot, LeaderboardResponse, GasResponse } from '@shared';
+import type { MarketsResponse, StreamMessage, DepthSnapshot, Fill, QuoteSnapshot, QuoteStatsResponse, LeaderboardResponse, GasResponse } from '@shared';
 
 export async function fetchMarkets(volume = false): Promise<MarketsResponse> {
   const r = await fetch(`/api/bootstrap${volume ? '?volume=1' : ''}`);
@@ -13,6 +13,13 @@ export async function fetchMarkets(volume = false): Promise<MarketsResponse> {
 export async function fetchQuoteHistory(market: string, size: number): Promise<QuoteSnapshot[]> {
   const r = await fetch(`/api/quotes/history?market=${encodeURIComponent(market)}&size=${size}`);
   if (!r.ok) throw new Error(`/api/quotes/history ${r.status}`);
+  return r.json();
+}
+
+/** Shared, timestamp-windowed aggregates; no raw five-minute samples cross the wire. */
+export async function fetchQuoteStats(market: string, size: number): Promise<QuoteStatsResponse> {
+  const r = await fetch(`/api/quotes/stats?market=${encodeURIComponent(market)}&size=${size}`);
+  if (!r.ok) throw new Error(`/api/quotes/stats ${r.status}`);
   return r.json();
 }
 

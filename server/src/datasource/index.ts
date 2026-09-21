@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events';
 import type {
   DataSourceMode, DepthSnapshot, MarketState, QuoteSnapshot, Fill, DailyVolume, StreamMessage,
-  LeaderboardResponse, GasResponse, QuoteScope,
+  LeaderboardResponse, GasResponse, QuoteStatsResponse,
 } from '@shared';
-import { planQuotes, type QuotePlan } from '../quote-demand.js';
+import { QUOTE_CHART_WINDOW_MS } from '@shared';
+import { ExecutionHistory } from '../execution-history.js';
 import { computeLeaderboard } from '../analytics.js';
 
 /**
@@ -18,11 +19,8 @@ export interface DataSource {
   getState(): MarketState;
   /** False until persisted history is available to dashboard snapshots. */
   isReady?(): boolean;
-  manageQuoteDemand?(): void;
-  watchQuotes?(scope?: QuoteScope): () => void;
   getQuotes(): QuoteSnapshot;
-  /** Complete matrix on demand. Fresh stream handoffs bypass cached results
-   * so an in-flight scoped frame cannot follow the initial full snapshot. */
+  /** Wait for a complete collected matrix; never opens additional RPC work. */
   fullQuoteSnapshot?(fresh?: boolean): Promise<QuoteSnapshot>;
   /** Whether the current frame completed every requested adapter. */
   quoteSnapshotComplete?(): boolean;
@@ -38,6 +36,7 @@ export interface DataSource {
   /** The last ~60s of REAL quote ticks for one (market, size) — seeds the
    *  Execution chart so it never fabricates history (flat pre-fill). */
   quoteHistory(market: string, size: number): QuoteSnapshot[];
+  quoteStats(market: string, size: number): QuoteStatsResponse;
   /** QUOTE_UPDATE_BURN: per-venue quote-update gas per UTC day (Volume tab). */
   gasSeries(): GasResponse;
   /** Last completed high-resolution depth snapshot, already serialized so an
@@ -63,8 +62,7 @@ export interface DepthPublication {
 
 /** Quote history is retained by wall time, not sample count: live quotes now
  *  arrive per block (~300ms) while the simulator still ticks at 500ms. */
-export const QUOTE_HISTORY_MS = 60_000;
-const QUOTE_HISTORY_MAX = 400; // safety cap if timestamps regress or cadence changes
+export const QUOTE_HISTORY_MS = QUOTE_CHART_WINDOW_MS;
 
 export abstract class BaseSource extends EventEmitter implements DataSource {
   abstract readonly mode: DataSourceMode;
@@ -75,23 +73,7 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
   abstract getFills(): Fill[];
   abstract getVolume(): DailyVolume[];
 
-  /** Rolling wall-time ring of broadcast quote matrices — recorded at the
-   *  emitMsg choke point so live + sim get it identically for free. */
-  private quoteHist: QuoteSnapshot[] = [];
-  private quoteManaged = false;
-  private quoteScopes = new Map<symbol, QuoteScope | undefined>();
-
-  manageQuoteDemand(): void { this.quoteManaged = true; }
-  watchQuotes(scope?: QuoteScope): () => void {
-    const id = Symbol();
-    this.quoteScopes.set(id, scope);
-    return () => { this.quoteScopes.delete(id); };
-  }
-  protected quotePlan(sizes: readonly number[]): QuotePlan[] {
-    const scopes = [...this.quoteScopes.values()];
-    return planQuotes(scopes.filter((s): s is QuoteScope => !!s), sizes,
-      !this.quoteManaged || scopes.some((s) => !s));
-  }
+  private readonly executionHistory = new ExecutionHistory();
 
   private depthLatest = new Map<string, DepthPublication>();
   private depthWatchers = new Map<string, Set<(publication: DepthPublication) => void>>();
@@ -166,38 +148,23 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
     return [...fills].sort((a, b) => b.ts - a.ts).slice(0, limit);
   }
 
-  /** The retained ticks filtered to one (market, size) — oldest first, ready to
-   *  replay into the chart buffer. Empty until the first poll after boot. */
+  /** Collection is continuous; history and aggregates are shared by all readers. */
   quoteHistory(market: string, size: number): QuoteSnapshot[] {
-    const cutoff = Date.now() - QUOTE_HISTORY_MS;
-    this.quoteHist = this.quoteHist.filter((q) => q.ts >= cutoff);
-    const out: QuoteSnapshot[] = [];
-    for (const q of this.quoteHist) {
-      const rows = q.rows.filter((r) => r.market === market && r.sizeUsd === size);
-      // Keep the frame even when every selected row is absent. Its block/time
-      // is the evidence of a real quote cycle, and lets the chart draw a gap
-      // instead of compressing the missing interval out of history.
-      out.push({ ...q, rows });
-    }
-    return out;
+    return this.executionHistory.history(market, size);
   }
 
-  protected invalidateQuoteHistory(fromBlock: number): void {
-    this.quoteHist = this.quoteHist.filter((q) => q.block < fromBlock);
+  quoteStats(market: string, size: number): QuoteStatsResponse {
+    return this.executionHistory.stats(market, size);
   }
+
+  protected invalidateQuoteHistory(fromBlock: number, revision?: number): void {
+    this.executionHistory.invalidate(fromBlock, revision);
+  }
+
+  protected clearExecutionHistory(): void { this.executionHistory.clear(); }
 
   protected emitMsg(m: StreamMessage): void {
-    if (m.ch === 'quotes') {
-      // live/sim both replace the matrix wholesale each poll (never mutate a
-      // broadcast one), so retaining by reference is safe.
-      // Requoting a replacement at the same height replaces its old sample.
-      const last = this.quoteHist.at(-1);
-      if (last?.block === m.data.block) this.quoteHist[this.quoteHist.length - 1] = m.data;
-      else this.quoteHist.push(m.data);
-      const cutoff = m.data.ts - QUOTE_HISTORY_MS;
-      while (this.quoteHist.length > 1 && this.quoteHist[0].ts < cutoff) this.quoteHist.shift();
-      while (this.quoteHist.length > QUOTE_HISTORY_MAX) this.quoteHist.shift();
-    }
+    if (m.ch === 'quotes') this.executionHistory.record(m.data);
     this.emit('message', m);
   }
 }
