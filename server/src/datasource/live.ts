@@ -434,6 +434,73 @@ export function checkGapFill(
 }
 
 /**
+ * Day-stamp the fills of one replay chunk with the fewest block reads that
+ * still put every fill on the right UTC day.
+ *
+ * The replay used to take ONE timestamp per chunk: a chunk spans ≤ 800 blocks
+ * (≈ 4 min), so for daily bucketing any block's time was good enough — except
+ * for the one chunk per day that straddles midnight, whose fills all landed on
+ * the day of its anchor block. That put up to a chunk's worth of swaps on the
+ * wrong day (68 Metric swaps at the 09-18→19 boundary when Sep 17–20 were
+ * replayed on 2026-09-21), and it made a replayed day disagree with the same
+ * day as the live tail had counted it — the tail stamps every fill's own block.
+ * Totals were conserved; the days were not.
+ *
+ * So: read the first and last log blocks. Same day (every chunk but one per
+ * day) → one stamp for all, as before. Different days → bisect the distinct
+ * log blocks for the first one on the later day, O(log n) reads, and stamp
+ * each side with its own end. A chunk cannot straddle two midnights (that
+ * would be a 24h chain stall inside 800 blocks), so two days are enough.
+ *
+ * `tsOf` is the caller's retried block-time read (ms). A block it cannot
+ * resolve is stepped over — the anchor walks forward, the tail walks back, a
+ * bisect probe walks toward the tail — because a range-cap RPC can return a
+ * log for a block it momentarily 404s, and one such block must never abort a
+ * multi-million-block replay. An AVAILABILITY failure (breaker open, mixed
+ * providers) is rethrown untouched: the chunk must be held intact and
+ * re-fetched, never stamped from a partial provider view. Returns null only
+ * when no block at all resolves (the caller skips the chunk, loudly).
+ */
+export async function stampChunkDays(
+  blocks: readonly bigint[], // distinct, ascending
+  tsOf: (bn: bigint) => Promise<number>,
+  dayOf: (ms: number) => string = utcDay,
+): Promise<((bn: bigint) => number) | null> {
+  const known = new Map<bigint, number>();
+  const read = async (bn: bigint): Promise<number | undefined> => {
+    const hit = known.get(bn);
+    if (hit !== undefined) return hit;
+    try { const ms = await tsOf(bn); known.set(bn, ms); return ms; }
+    catch (e) { if (isAvailabilityFailure(e)) throw e; return undefined; }
+  };
+  // anchor: the first block that resolves, walking forward.
+  let lo = 0, loMs: number | undefined;
+  for (; lo < blocks.length; lo++) { loMs = await read(blocks[lo]); if (loMs !== undefined) break; }
+  if (loMs === undefined) return null;
+  // tail: the last block that resolves, walking back (stopping at the anchor).
+  let hi = blocks.length - 1, hiMs: number | undefined;
+  for (; hi > lo; hi--) { hiMs = await read(blocks[hi]); if (hiMs !== undefined) break; }
+  const anchorMs = loMs;
+  if (hi <= lo || hiMs === undefined || dayOf(hiMs) === dayOf(anchorMs)) return () => anchorMs;
+  // straddles midnight: find the first block on the later day.
+  const day0 = dayOf(anchorMs);
+  // Invariant: blocks[lo] is on day0 and blocks[hi] on the later day; the
+  // resolved probe becomes the new bound on its own side.
+  while (hi - lo > 1) {
+    let probe = (lo + hi) >> 1;
+    let ms = await read(blocks[probe]);
+    // an unresolvable probe steps toward the tail; if every block between is
+    // unresolvable the bracket stands and those blocks stamp with the anchor,
+    // exactly what the one-stamp replay did for them.
+    while (ms === undefined && probe + 1 < hi) ms = await read(blocks[++probe]);
+    if (ms === undefined) break;
+    if (dayOf(ms) === day0) lo = probe; else hi = probe;
+  }
+  const boundary = blocks[hi], laterMs = hiMs;
+  return (bn) => (bn >= boundary ? laterMs : anchorMs);
+}
+
+/**
  * The first UTC day the fills onboarding scan covers for a venue: its rolling
  * window, floored at the venue's own first day. Shared with the scan itself so
  * the reset's delete boundary and the scan's start can never drift apart —
@@ -1785,29 +1852,28 @@ export class LiveDataSource extends BaseSource {
 
       const all = batches.flat();
       if (all.length) {
-        // ONE timestamp per chunk is enough for DAILY bucketing (a chunk spans
-        // ≤ chunk blocks ≈ a few minutes) and keeps a high-volume venue's full
-        // backfill to ~1 getBlock/chunk instead of one per fill. Anchor on any log
-        // block that resolves (retry + try siblings) so a flaky/missing getBlock —
-        // a range-cap RPC can return a log for a block it momentarily 404s — never
-        // aborts a multi-million-block backfill.
-        let anchorMs = NaN;
-        let timestampUnavailable = false;
-        for (const bn of new Set<bigint>(all.map((l) => l.blockNumber as bigint))) {
-          for (let i = 0; i < 3 && !Number.isFinite(anchorMs); i++) {
-            try { anchorMs = Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: bn }))).timestamp) * 1000; }
+        // Day-stamping reads only the chunk's first and last log blocks, plus a
+        // bisect when they fall on different days — see stampChunkDays for why
+        // one stamp per chunk was not enough. Each block read is retried on a
+        // transient error; an availability failure holds the chunk intact.
+        const readBlockMs = async (bn: bigint): Promise<number> => {
+          for (let i = 0; ; i++) {
+            try { return Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: bn }))).timestamp) * 1000; }
             catch (e) {
-              if (isAvailabilityFailure(e)) { timestampUnavailable = true; break; }
+              if (isAvailabilityFailure(e) || i >= 2) throw e;
               await sleep(config.backfillPaceMs * 5 * (i + 1));
             }
           }
-          if (Number.isFinite(anchorMs) || timestampUnavailable) break;
-        }
+        };
+        const blocks = [...new Set<bigint>(all.map((l) => BigInt(l.blockNumber)))].sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+        let tsOf: ((bn: bigint) => number) | null = null;
+        let timestampUnavailable = false;
+        try { tsOf = await stampChunkDays(blocks, readBlockMs); }
+        catch (e) { if (!isAvailabilityFailure(e)) throw e; timestampUnavailable = true; }
         // getLogs succeeded, but without a timestamp the whole chunk is unknown.
         // Hold it intact on an outage/429; the next pass re-fetches idempotently.
         if (timestampUnavailable) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
-        if (Number.isFinite(anchorMs)) {
-          const tsOf = () => anchorMs; // chunk-level ts — daily bucketing only
+        if (tsOf) {
           const bundle: LogBundle = {};
           sources.forEach((s, i) => { bundle[s.key] = batches![i]; });
           const fills = this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, new Set()), 'backfill fill');
