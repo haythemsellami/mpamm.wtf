@@ -1,4 +1,4 @@
-import type { QuoteSnapshot } from '@shared';
+import { QUOTE_CHART_WINDOW_MS, type QuoteSnapshot } from '@shared';
 
 export interface QuotePoint {
   block: number;
@@ -21,8 +21,8 @@ export function appendQuoteSnapshot(
   q: QuoteSnapshot,
   market: string,
   size: number,
-  windowMs = 60_000,
-  maxPoints = 400,
+  windowMs = QUOTE_CHART_WINDOW_MS,
+  maxPoints = 4096,
 ): void {
   const ts = quoteFrameTime(q);
   const rows = new Map(q.rows

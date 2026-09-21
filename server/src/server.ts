@@ -1,7 +1,7 @@
 import express from 'express';
 import { AnalyticsPublications } from './analytics-publications.js';
 import { SubscriptionGateway } from './stream-v2.js';
-import { STREAM_V2_GZIP, STREAM_V2_JSON } from '@shared';
+import { STREAM_V2_GZIP, STREAM_V2_JSON, SIZES_USD } from '@shared';
 import cors from 'cors';
 import { createServer, type Server } from 'node:http';
 import { existsSync } from 'node:fs';
@@ -109,7 +109,6 @@ export function trySseWrite(response: SseWriter, chunk: string): boolean {
  */
 export function startServer(source: DataSource): Server {
   const app = express();
-  source.manageQuoteDemand?.();
   const gateway = new SubscriptionGateway(source);
   const publications = new AnalyticsPublications();
   app.use(cors());
@@ -167,6 +166,15 @@ export function startServer(source: DataSource): Server {
     const size = positiveNumberParam(req.query.size);
     if (!market || size === undefined) return res.status(400).json({ error: 'market and size query params required' });
     res.json(source.quoteHistory(market, size));
+  });
+  app.get('/api/quotes/stats', (req, res) => {
+    const market = depthMarketParam(req.query.market);
+    const size = positiveNumberParam(req.query.size);
+    if (!market || size === undefined || !(SIZES_USD as readonly number[]).includes(size)) {
+      return res.status(400).json({ error: 'registered market and size required' });
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(source.quoteStats(market, size));
   });
   // Depth computation is owned by an isolated worker. REST is a cache read only;
   // it can never open RPC work on this event loop.
@@ -304,12 +312,10 @@ export function startServer(source: DataSource): Server {
   wss.on('connection', (ws) => {
     clients.add(ws);
     const v2 = ws.protocol === STREAM_V2_GZIP || ws.protocol === STREAM_V2_JSON;
-    const release = v2 ? undefined : source.watchQuotes?.();
     if (v2) gateway.accept(ws);
     else {
-      // The matrix left by scoped viewers is not a full legacy snapshot.
-      // Hold quote broadcasts until a complete plan has finished, including
-      // any scoped frame already running when this connection arrived.
+      // A legacy consumer requires every adapter to have completed. Wait for
+      // the shared collector instead of handing it a partial deadline frame.
       safeSend(ws, { ch: 'state', data: helloFrame(source.getState()) });
       if (source.fullQuoteSnapshot) {
         void source.fullQuoteSnapshot(true).then((quotes) => {
@@ -322,7 +328,6 @@ export function startServer(source: DataSource): Server {
         legacyReady.add(ws);
       }
     }
-    ws.once('close', () => release?.());
     ws.on('pong', () => awaitingPong.delete(ws));
     ws.on('close', () => drop(ws));
     ws.on('error', () => drop(ws));

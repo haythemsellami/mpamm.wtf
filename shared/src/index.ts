@@ -413,6 +413,27 @@ export interface QuoteSnapshot {
   frame?: QuoteFrameTelemetry;
 }
 
+export const QUOTE_CHART_WINDOW_MS = 60_000;
+export const QUOTE_STATS_WINDOW_MS = 300_000;
+export const QUOTE_STATS_REFRESH_MS = 5_000;
+
+/** Equal-weight observations of executable, full-size, two-sided spreads. */
+export interface QuoteStatsRow {
+  venueId: string;
+  p5: number; p25: number; p50: number; p75: number; p95: number;
+  avg: number; sd: number; n: number;
+}
+
+export interface QuoteStatsResponse {
+  market: string;
+  sizeUsd: number;
+  /** Statistics cover (asOf - windowMs, asOf], irrespective of quote cadence. */
+  asOf: number;
+  windowMs: number;
+  revision: number;
+  rows: QuoteStatsRow[];
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Depth curves (Execution tab: BID_ASK_DEPTH)
 // ──────────────────────────────────────────────────────────────────────────

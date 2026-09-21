@@ -8,7 +8,7 @@ import { Panel, PanelHead, Field } from '../components/ui';
 import { QuoteCanvas } from '../components/QuoteCanvas';
 import { SizeAvailabilityHint } from '../components/SizeAvailabilityHint';
 import { DepthCurveChart, type DepthVenue } from '../components/DepthCurve';
-import { sgn, sizeLabel, percentile, stdev } from '../lib/format';
+import { sgn, sizeLabel } from '../lib/format';
 
 const DEFAULT_MARKETS = ['MON/USDC', 'BTC/USDC', 'ETH/USDC'];
 
@@ -141,22 +141,23 @@ export function ExecutionTab() {
     [d.quotes, d.venueToggles, d.venues, pair, d.frame, d.theme],
   );
 
-  // rolling stats — percentiles of the spread sample buffer per venue
+  // Shared five-minute aggregates arrive independently of quote rendering.
   const stats = useMemo(() => {
     const rows = active.map((v) => {
-      const a = d.samples[v.id] ?? [];
+      const summary = d.quoteStats?.market === pair && d.quoteStats.sizeUsd === size
+        ? d.quoteStats.rows.find((row) => row.venueId === v.id) : undefined;
       return {
         id: v.id, name: displayName(v), color: venueColor(v, d.theme), baseline: v.role === 'baseline',
-        p5: percentile(a, .05), p25: percentile(a, .25), p50: percentile(a, .5),
-        p75: percentile(a, .75), p95: percentile(a, .95),
-        avg: a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0, sd: stdev(a), n: a.length,
+        p5: summary?.p5 ?? 0, p25: summary?.p25 ?? 0, p50: summary?.p50 ?? 0,
+        p75: summary?.p75 ?? 0, p95: summary?.p95 ?? 0,
+        avg: summary?.avg ?? 0, sd: summary?.sd ?? 0, n: summary?.n ?? 0,
       };
     });
     const eligible = rows.filter((r) => !r.baseline && r.n > 0);
     const tightest = eligible.length ? eligible.reduce((m, r) => (r.p50 < m.p50 ? r : m), eligible[0]).id : null;
     return { rows, tightest };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d.frame, d.venueToggles, d.venues, d.theme]);
+  }, [d.quoteStats, d.venueToggles, d.venues, d.theme, pair, size]);
 
   // ⚠ unit-conversion notes for the selected pair (pamm.wtf-style): the CEX
   // reference is shown in the pair's OWN terms — wrapped basis + stable cross —
@@ -316,19 +317,19 @@ export function ExecutionTab() {
             <div>VENUE</div><div style={{ textAlign: 'right' }}>P5</div><div style={{ textAlign: 'right' }}>P25</div><div style={{ textAlign: 'right' }}>P50</div><div style={{ textAlign: 'right' }}>P75</div><div style={{ textAlign: 'right' }}>P95</div><div style={{ textAlign: 'right' }}>AVG</div><div style={{ textAlign: 'right' }}>σ</div><div style={{ textAlign: 'right' }}>N</div>
           </div>
           {stats.rows.map((r) => (
-            <div key={r.id} style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(7, 1fr) 0.8fr', gap: 6, padding: '8px 6px', fontSize: 11.5, borderBottom: `1px solid ${C.line3}`, alignItems: 'center' }}>
+            <div key={r.id} data-stats-venue={r.id} data-stats-n={r.n} style={{ display: 'grid', gridTemplateColumns: '1.4fr repeat(7, 1fr) 0.8fr', gap: 6, padding: '8px 6px', fontSize: 11.5, borderBottom: `1px solid ${C.line3}`, alignItems: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
                 <span style={{ width: 8, height: 8, borderRadius: 2, background: r.color, flex: 'none' }} />
                 <span style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{r.name}</span>
                 {r.id === stats.tightest ? <span style={{ flex: 'none', fontSize: 9, color: C.green }}>★</span> : null}
               </div>
-              <div style={{ textAlign: 'right', color: C.dim }}>{r.p5.toFixed(3)}</div>
-              <div style={{ textAlign: 'right', color: C.dim }}>{r.p25.toFixed(3)}</div>
-              <div style={{ textAlign: 'right', color: r.id === stats.tightest ? C.green : C.text, fontWeight: 600 }}>{r.p50.toFixed(3)}</div>
-              <div style={{ textAlign: 'right', color: C.dim }}>{r.p75.toFixed(3)}</div>
-              <div style={{ textAlign: 'right', color: C.dim }}>{r.p95.toFixed(3)}</div>
-              <div style={{ textAlign: 'right', color: C.dim3 }}>{r.avg.toFixed(3)}</div>
-              <div style={{ textAlign: 'right', color: C.dim3 }}>{r.sd.toFixed(4)}</div>
+              <div style={{ textAlign: 'right', color: C.dim }}>{r.n ? r.p5.toFixed(3) : '—'}</div>
+              <div style={{ textAlign: 'right', color: C.dim }}>{r.n ? r.p25.toFixed(3) : '—'}</div>
+              <div style={{ textAlign: 'right', color: r.id === stats.tightest ? C.green : C.text, fontWeight: 600 }}>{r.n ? r.p50.toFixed(3) : '—'}</div>
+              <div style={{ textAlign: 'right', color: C.dim }}>{r.n ? r.p75.toFixed(3) : '—'}</div>
+              <div style={{ textAlign: 'right', color: C.dim }}>{r.n ? r.p95.toFixed(3) : '—'}</div>
+              <div style={{ textAlign: 'right', color: C.dim3 }}>{r.n ? r.avg.toFixed(3) : '—'}</div>
+              <div style={{ textAlign: 'right', color: C.dim3 }}>{r.n ? r.sd.toFixed(4) : '—'}</div>
               <div style={{ textAlign: 'right', color: C.faint2 }}>{r.n}</div>
             </div>
           ))}

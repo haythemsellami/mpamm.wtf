@@ -1,0 +1,95 @@
+{
+  "recordedAt": "2026-09-21T11:15:42.689Z",
+  "node": "v26.9.0",
+  "durationMs": 310490,
+  "method": "Local live service with Metric and CEX references, no WebSocket subscribers, backfills/depth/gas disabled. Recorded REST chart observations every five seconds for over five minutes; independently recomputed the final rolling summaries. Uses the configured HTTP head feed; this is an integration check, not a production capacity or complete-block-coverage benchmark.",
+  "startBlock": 106733806,
+  "endBlock": 106734834,
+  "connections": 0,
+  "realtime": {
+    "headBlock": 106734834,
+    "quoteBlock": 106734834,
+    "lagBlocks": 0,
+    "frameMs": 460,
+    "headToFrameMs": 460,
+    "eventLoopLagMs": 24.3,
+    "coveragePct60s": 19.19191919191919,
+    "coalescedBlocks60s": 162,
+    "headSource": "http",
+    "wsStatus": "disabled"
+  },
+  "checks": [
+    {
+      "selection": {
+        "market": "BTC/USDC",
+        "size": 1000
+      },
+      "asOf": 1789989342675,
+      "windowMs": 300000,
+      "observedFrames": 276,
+      "chartFrames": 38,
+      "chartSpanMs": 58883,
+      "rows": [
+        {
+          "venueId": "metric",
+          "n": 171,
+          "p5": 3.384781322894881,
+          "p25": 3.3857289554839465,
+          "p50": 3.3874173972203714,
+          "p75": 3.390798566232922,
+          "p95": 3.3924263427209667,
+          "avg": 3.3882188984245554,
+          "sd": 0.002710533409770328
+        },
+        {
+          "venueId": "binance",
+          "n": 276,
+          "p5": 4.501181516287346,
+          "p25": 4.501181664139579,
+          "p50": 4.501181913158596,
+          "p75": 4.5011823274938,
+          "p95": 4.501192421093686,
+          "avg": 4.504012674025811,
+          "sd": 0.019549700770346252
+        }
+      ],
+      "maxIndependentCalculationError": 2.6645352591003757e-15
+    },
+    {
+      "selection": {
+        "market": "ETH/USDC",
+        "size": 10000
+      },
+      "asOf": 1789989342684,
+      "windowMs": 300000,
+      "observedFrames": 276,
+      "chartFrames": 38,
+      "chartSpanMs": 58883,
+      "rows": [
+        {
+          "venueId": "metric",
+          "n": 171,
+          "p5": 4.049963143357149,
+          "p25": 4.063614590312237,
+          "p50": 4.06954212054389,
+          "p75": 4.079998053476697,
+          "p95": 4.085492509424693,
+          "avg": 4.0705185593895,
+          "sd": 0.011626723429515118
+        },
+        {
+          "venueId": "binance",
+          "n": 269,
+          "p5": 4.536731957719323,
+          "p25": 4.536742079782501,
+          "p50": 4.536747075389796,
+          "p75": 4.536776671820297,
+          "p95": 4.984707478411823,
+          "avg": 4.597274108372171,
+          "sd": 0.1756497284704677
+        }
+      ],
+      "maxIndependentCalculationError": 2.6645352591003757e-15
+    }
+  ]
+}

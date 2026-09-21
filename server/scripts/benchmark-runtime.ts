@@ -34,14 +34,12 @@ const { hash: __, ...workerMetrics } = isolated;
 rmSync(dir, { recursive: true, force: true });
 
 const source = new SimDataSource();
-source.manageQuoteDemand();
-const quoteCases: unknown[] = [];
-for (const mode of ['idle', 'selected', 'full'] as const) {
-  const stop = mode === 'full' ? source.watchQuotes() : mode === 'selected' ? source.watchQuotes({ market: 'MON/USDC', sizeUsd: 10000, baseline: false }) : () => {};
-  const times: number[] = []; let rows = 0;
-  for (let i = 0; i < 1100; i++) { const at = performance.now(); rows = source.getQuotes().rows.length; if (i >= 100) times.push(performance.now() - at); }
-  quoteCases.push({ mode, rows, p50Ms: percentile(times, .5), p95Ms: percentile(times, .95) }); stop();
+const quoteTimes: number[] = []; let quoteRows = 0;
+for (let i = 0; i < 1100; i++) {
+  const at = performance.now(); quoteRows = source.getQuotes().rows.length;
+  if (i >= 100) quoteTimes.push(performance.now() - at);
 }
+const quoteCases = [{ mode: 'continuous', rows: quoteRows, p50Ms: percentile(quoteTimes, .5), p95Ms: percentile(quoteTimes, .95) }];
 
 let requests = 0;
 const rpc = createServer(async (req, res) => {
@@ -67,7 +65,7 @@ for (const mode of ['shared-8ms', 'shared-0ms', 'per-adapter-0ms', 'no-http-batc
 await new Promise<void>((resolve) => rpc.close(() => resolve()));
 const report = { measuredAt: new Date().toISOString(), node: process.version, cpu: cpus()[0].model,
   analytics: { count, exactResults: true, workerHeapMb: Number(process.env.ANALYTICS_WORKER_HEAP_MB ?? 128), method: 'Deterministic persisted fills, warmed; original 25k-page scan on main vs 25k-page consistent read-only worker. Fresh child per scenario, fixture construction excluded; one warmup, parent GC before measurement. CPU/RSS include worker, RSS is not a production sizing estimate; 5ms loop probe.', direct: directMetrics, worker: workerMetrics },
-  quoteDemand: { method: 'Simulator arithmetic only; 100 warmups + 1000 samples. Row counts measure avoided combinations, not live RPC latency.', results: quoteCases },
+  quoteCollection: { method: 'Continuous full-matrix simulator arithmetic; 100 warmups + 1000 samples, independent of viewers. Does not measure live RPC latency.', results: quoteCases },
   rpcBatching: { method: 'Loopback JSON-RPC server returns batch after all members; 5ms fast call and 80ms slow call; 1 warmup + 20 trials.', results: batches } };
 writeFileSync(process.argv[2] ?? '/tmp/mpamm-v2-runtime.json', JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify(report));

@@ -174,3 +174,42 @@ test('Execution renders coalesced gaps, same-height replacements and ancestor ro
     expect(sample.paintOpportunityAt).toBeGreaterThanOrEqual(sample.drawnAt);
   }
 });
+
+test('Execution replays quotes collected on other pages and loads shared five-minute statistics', async ({ page, context }) => {
+  const quoteRequests: string[] = [];
+  page.on('request', (request) => {
+    if (/\/api\/quotes\/(history|stats)$/.test(new URL(request.url()).pathname)) quoteRequests.push(request.url());
+  });
+  await page.goto('/volume');
+  await expect.poll(async () => (await health(page)).topics).toBe(2);
+  const historyUrl = '/api/quotes/history?market=MON%2FUSDC&size=1000';
+  const initial = await (await page.request.get(historyUrl)).json();
+  const firstBlock = initial.at(-1).block;
+  await expect.poll(async () => {
+    const quotes = await (await page.request.get(historyUrl)).json();
+    return quotes.at(-1)?.block ?? 0;
+  }).toBeGreaterThanOrEqual(firstBlock + 8);
+  expect(quoteRequests).toEqual([]);
+  const replayResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/quotes/history' && response.ok());
+  const statsResponse = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/quotes/stats' && response.ok());
+  await page.getByRole('button', { name: /EXECUTION$/ }).click();
+  const replay = await (await replayResponse).json();
+  const stats = await (await statsResponse).json();
+  const duringAbsence = replay.filter((q: { block: number }) => q.block > firstBlock && q.block <= firstBlock + 8);
+  expect(duringAbsence.map((q: { block: number }) => q.block)).toEqual(Array.from({ length: 8 }, (_, i) => firstBlock + i + 1));
+  expect(stats.windowMs).toBe(300_000);
+  const reference = stats.rows.find((row: { venueId: string }) => row.venueId === 'bybit');
+  expect(reference.n).toBeGreaterThanOrEqual(8);
+  await expect.poll(async () => Number(await page.locator('[data-stats-venue="bybit"]').getAttribute('data-stats-n'))).toBeGreaterThanOrEqual(reference.n);
+  await expect(page.locator('canvas[data-quote]')).toBeVisible();
+
+  // A new browser context has no local samples or shared worker. It must see
+  // the existing server window immediately, rather than start its own count.
+  const freshContext = await context.browser()!.newContext();
+  try {
+    const newcomer = await freshContext.newPage();
+    await newcomer.goto(new URL('/', page.url()).href);
+    await expect.poll(async () => Number(await newcomer.locator('[data-stats-venue="bybit"]').getAttribute('data-stats-n'))).toBeGreaterThanOrEqual(reference.n);
+  } finally { await freshContext.close(); }
+  await page.screenshot({ path: test.info().outputPath('shared-execution-history.png'), fullPage: true });
+});

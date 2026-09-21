@@ -1,11 +1,11 @@
 import { recordCanvasDraw } from '../lib/frame-timing';
 import { useEffect, useRef } from 'react';
-import { type VenueMeta } from '@shared';
+import { QUOTE_CHART_WINDOW_MS, type VenueMeta } from '@shared';
 import { useDashboard } from '../store';
 import { hexA, venueColor, CH } from '../theme';
 import { continuousQuoteRuns, quoteFrameTime, type QuotePoint } from '../lib/quote-series';
 
-const QUOTE_WINDOW_MS = 60_000;
+const QUOTE_WINDOW_MS = QUOTE_CHART_WINDOW_MS;
 
 /**
  * Streaming bid/ask QUOTE chart — a STEP (staircase) chart, because quotes are

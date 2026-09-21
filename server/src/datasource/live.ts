@@ -988,7 +988,7 @@ export class LiveDataSource extends BaseSource {
         this.pendingQuote = undefined;
         this.quotesFull = false;
         this.quotes = { ...this.quotes, rows: [], revision: this.headWatcher.identity(fromBlock).revision };
-        this.invalidateQuoteHistory(Number(fromBlock));
+        this.invalidateQuoteHistory(Number(fromBlock), this.quotes.revision);
         this.realtimeFrames = this.realtimeFrames.filter((frame) => frame.block < Number(fromBlock));
       },
       onWsConnected: () => {
@@ -1161,6 +1161,7 @@ export class LiveDataSource extends BaseSource {
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
     this.loopsStopped = true;
+    this.clearExecutionHistory();
     this.headWatcher.stop();
     this.quoteRunner.stop();
     if (this.referenceTimer) clearInterval(this.referenceTimer);
@@ -1260,9 +1261,8 @@ export class LiveDataSource extends BaseSource {
     if (!fresh && !this.quotePollingStarted) return Promise.resolve(this.getQuotes());
     if (!fresh && this.quotesFull && Date.now() - this.quotes.ts < 300) return Promise.resolve(this.quotes);
     if (this.fullSnapshotPending) return this.fullSnapshotPending;
-    const release = this.watchQuotes();
     this.fullSnapshotPending = new Promise<QuoteSnapshot>((resolve, reject) => {
-      const finish = () => { clearTimeout(timer); this.off('message', receive); release(); };
+      const finish = () => { clearTimeout(timer); this.off('message', receive); };
       const receive = (message: import('@shared').StreamMessage) => {
         if (message.ch !== 'quotes' || !this.quotesFull) return;
         finish(); resolve(message.data);
@@ -2345,9 +2345,9 @@ export class LiveDataSource extends BaseSource {
     // One synchronous turn captures every mutable CEX input before adapters
     // start awaiting RPC. The chain reads below are pinned to `blockNumber`; the
     // frame pricer makes their USD sizing and bps anchors equally immutable.
-    const plan = this.quotePlan(config.sizesUsd);
-    const requestedMarkets = plan.some((p) => !p.markets) ? undefined : new Set(plan.flatMap((p) => [...p.markets!]));
-    const referenceFrame = captureReferenceFrame(REFERENCES, [...new Set(plan.flatMap((p) => [...p.sizes]))], requestedMarkets);
+    // Every registered pair/size is sampled once per block, even with no
+    // viewers. Subscriptions control delivery only, never the retained dataset.
+    const referenceFrame = captureReferenceFrame(REFERENCES, config.sizesUsd);
     const { pricer: framePricer, monUsd, rows: refRows, assetPrices, pairMids } = referenceFrame;
     // Surface a starving reference feed LOUDLY (state.notes): with no base mid
     // there are no reference rows, no venue bps anchors and no markouts for that
@@ -2362,21 +2362,10 @@ export class LiveDataSource extends BaseSource {
         announce: (m) => this.note('reference.recovered', m),
       });
     }
-    if (!plan.length) {
-      this.realtimeFrames = [];
-      this.block = Number(blockNumber);
-      this.quotes = { block: this.block, monUsd, ts: quoteStartedAt, rows: [] };
-      this.quotesFull = false;
-      this.schedulePostQuoteMaintenance();
-      return;
-    }
     const pinned = await resolveQuoteBlock(blockNumber, trigger.identity ?? this.headWatcher.identity(blockNumber));
     trigger.identity = pinned;
     if (!this.headWatcher.rememberResolved(blockNumber, pinned)) throw new Error('quote proposal superseded');
-    const plansFor = (a: VenueAdapter) => plan.filter((p) => p.role === 'all' || (
-      p.role === (a.venues().every((v) => v.role === 'baseline') ? 'baseline' : 'venue')
-      && (!a.quoteMarkets || a.quoteMarkets().some((market) => p.markets!.has(market)))));
-    const requestedAdapters = ADAPTERS.filter((a) => a.quote && plansFor(a).length);
+    const requestedAdapters = ADAPTERS.filter((a) => a.quote);
     const adapterMs: Record<string, number> = {};
     const completedAdapters = new Set<VenueAdapter>();
     const venueRowsNested = await Promise.all(requestedAdapters.map(async (a) => {
@@ -2392,17 +2381,12 @@ export class LiveDataSource extends BaseSource {
             const ctx = { ...original, quoteSignal: signal, client: scopedQuoteClient(`${this.vidOf(a)}-${blockNumber}`, signal, pinned),
               note: (...args: Parameters<typeof original.note>) => { if (!signal.aborted) original.note(...args); } };
             const health = new QuoteHealthBatch(ctx);
-            // A rejected plan must not release the adapter's slot while a
-            // sibling still reads or mutates its state.
-            const groups = await Promise.allSettled(plansFor(a).map((p, i) =>
-              a.quote!({ ...ctx, quoteHealth: health.forPlan(i) }, p.sizes, blockNumber, p.markets)));
+            const rows = await a.quote!({ ...ctx, quoteHealth: health.forPlan(0) }, config.sizesUsd, blockNumber);
             signal.throwIfAborted();
-            const failed = groups.find((group) => group.status === 'rejected');
-            if (failed?.status === 'rejected') throw failed.reason;
             if (!this.headWatcher.isCurrent(blockNumber, pinned)) throw new Error('quote proposal superseded');
             health.commit();
             completedAdapters.add(a);
-            return groups.flatMap((group) => group.status === 'fulfilled' ? group.value : []);
+            return rows;
           }, [] as QuoteRow[]).catch((e) => {
             if (quoteSignal?.aborted) return [] as QuoteRow[];
             // a rejection is not necessarily an Error — a bare string or an
@@ -2441,12 +2425,11 @@ export class LiveDataSource extends BaseSource {
       });
     }
     annotateCex(venueRows, refRows); // docs/architecture.md: fill stream — matched per market, so each venue row hits its pair's CEX
-    const requestedRefs = refRows.filter((r) => plan.some((p) => !p.markets || (p.markets.has(r.market) && p.sizes.includes(r.sizeUsd))));
-    const rows = [...venueRows, ...requestedRefs];
+    const rows = [...venueRows, ...refRows];
     const present = new Set(rows.map((row) => row.venueId));
     const expected = new Set([
       ...requestedAdapters.flatMap((a) => a.venues().map((v) => v.id)),
-      ...PAIRS.filter((pair) => plan.some((p) => !p.markets || p.markets.has(pair.symbol))).map((pair) => cexForBase(pair.base)),
+      ...PAIRS.map((pair) => cexForBase(pair.base)),
     ]);
     const quoteCompletedAt = Date.now();
     const loopMaxNs = this.eventLoopDelay.max;
@@ -2466,7 +2449,7 @@ export class LiveDataSource extends BaseSource {
       coalescedBlocks: trigger.coalescedBlocks,
     };
     this.quotes = { block: this.block, blockHash: pinned.hash, ...(pinned.revision ? { revision: pinned.revision } : {}), monUsd, ts: emittedAt, rows, frame };
-    this.quotesFull = plan.some((p) => !p.markets) && requestedAdapters.every((adapter) => completedAdapters.has(adapter));
+    this.quotesFull = requestedAdapters.every((adapter) => completedAdapters.has(adapter));
     this.realtimeFrames.push({ block: this.block, emittedAt, coalescedBlocks: trigger.coalescedBlocks });
     this.realtimeFrames = this.realtimeFrames.filter((f) => f.emittedAt >= emittedAt - REALTIME_WINDOW_MS);
     this.emitMsg({ ch: 'quotes', data: this.quotes });

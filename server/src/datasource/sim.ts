@@ -115,7 +115,7 @@ export class SimDataSource extends BaseSource {
     this.seedFills();
     this.timer = setInterval(() => this.tick(), config.quoteIntervalMs);
   }
-  stop(): void { if (this.timer) clearInterval(this.timer); }
+  stop(): void { if (this.timer) clearInterval(this.timer); this.clearExecutionHistory(); }
 
   // ── reads ─────────────────────────────────────────────────────────────────
   getState(): MarketState {
@@ -133,7 +133,7 @@ export class SimDataSource extends BaseSource {
   }
   getQuotes(): QuoteSnapshot {
     const ts = Date.now();
-    const rows = this.quotePlan(SIZES_USD).flatMap((p) => this.buildMatrix(p.sizes, p.markets, p.role === 'all' ? undefined : p.role === 'baseline'));
+    const rows = this.buildMatrix(SIZES_USD);
     annotateCex(rows, rows.filter((r) => this.references.some((v) => v.id === r.venueId)));
     return {
       block: this.block,
@@ -148,8 +148,7 @@ export class SimDataSource extends BaseSource {
   }
   getFills(): Fill[] { return this.fills.map(stripFill); }
   async fullQuoteSnapshot(): Promise<QuoteSnapshot> {
-    const release = this.watchQuotes();
-    try { return this.getQuotes(); } finally { release(); }
+    return this.getQuotes();
   }
   getVolume(): DailyVolume[] { return this.days.map((d) => ({ ...d, byVenue: { ...d.byVenue } })); }
 
