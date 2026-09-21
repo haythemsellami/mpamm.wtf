@@ -72,10 +72,26 @@ describe('stampChunkDays', () => {
 
   it('steps over blocks the archive momentarily cannot serve, at the anchor, the tail and a probe', async () => {
     const blocks = range(1000, 1199);
-    const mid = (1000 + 1199) >> 1;
-    const a = archive({ failing: new Set([1000, 1001, 1199, mid]) });
+    // anchor 1000–1001 and tail 1199 refuse, and so does every block the first
+    // bisect probe can land on: indices (2+198)>>1 = 100 → block 1100 and its
+    // forward steps up to 1110. The probe must walk to 1111 and carry on.
+    const failing = new Set([1000, 1001, 1199, ...Array.from({ length: 11 }, (_, i) => 1100 + i)]);
+    const a = archive({ failing });
     const stamp = (await stampChunkDays(blocks, a.tsOf))!;
     for (const bn of blocks) expect(utcDay(stamp(bn))).toBe(bn < 1137n ? '2026-09-18' : '2026-09-19');
+    // the refused probes were actually asked for, then stepped past
+    expect(a.reads).toEqual(expect.arrayContaining([1100n, 1101n, 1111n]));
+    expect(a.reads.filter((bn) => failing.has(Number(bn))).length).toBeGreaterThanOrEqual(13);
+  });
+
+  it('when nothing between anchor and tail resolves, the bracket stands and the middle stamps with the anchor', async () => {
+    // the one-stamp behaviour this replaces, kept for exactly this degraded case
+    const blocks = range(1130, 1145);
+    const failing = new Set(range(1131, 1144).map(Number));
+    const stamp = (await stampChunkDays(blocks, archive({ failing }).tsOf))!;
+    expect(utcDay(stamp(1130n))).toBe('2026-09-18');
+    expect(utcDay(stamp(1140n))).toBe('2026-09-18'); // truly 09-19, but unresolvable: anchor's day, as before
+    expect(utcDay(stamp(1145n))).toBe('2026-09-19');
   });
 
   it('gives up (null) only when no block in the chunk resolves — the caller skips it loudly', async () => {

@@ -484,14 +484,17 @@ export async function stampChunkDays(
   if (hi <= lo || hiMs === undefined || dayOf(hiMs) === dayOf(anchorMs)) return () => anchorMs;
   // straddles midnight: find the first block on the later day.
   const day0 = dayOf(anchorMs);
+  // Invariant: blocks[lo] is on day0 and blocks[hi] on the later day; the
+  // resolved probe becomes the new bound on its own side.
   while (hi - lo > 1) {
-    let mid = (lo + hi) >> 1, ms: number | undefined;
+    let probe = (lo + hi) >> 1;
+    let ms = await read(blocks[probe]);
     // an unresolvable probe steps toward the tail; if every block between is
     // unresolvable the bracket stands and those blocks stamp with the anchor,
     // exactly what the one-stamp replay did for them.
-    for (; mid < hi && ms === undefined; mid++) ms = await read(blocks[mid]);
+    while (ms === undefined && probe + 1 < hi) ms = await read(blocks[++probe]);
     if (ms === undefined) break;
-    if (dayOf(ms) === day0) lo = mid - 1; else hi = mid - 1;
+    if (dayOf(ms) === day0) lo = probe; else hi = probe;
   }
   const boundary = blocks[hi], laterMs = hiMs;
   return (bn) => (bn >= boundary ? laterMs : anchorMs);
