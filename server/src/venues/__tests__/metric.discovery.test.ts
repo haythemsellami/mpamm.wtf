@@ -355,4 +355,36 @@ describe('liveness carries a REASON, not just a verdict (issue #58)', () => {
     expect(seen.some((n) => n.code === 'venue.quote.unavailable')).toBe(false);
     expect(seen.some((n) => /unfunded/.test(n.msg))).toBe(true);
   });
+
+  it('announces recovery when the oracle answers again, then stays quiet', async () => {
+    // The live condition since 2026-08-14, exercised against a scripted
+    // getBidAndAskPrice (revert → answer) rather than asserted in the abstract.
+    const seen: { code: string; msg: string }[] = [];
+    const failCtx = stub([], { priceFails: true });
+    failCtx.note = (code: string, msg: string) => seen.push({ code, msg });
+    const okCtx = stub([], {});
+    okCtx.note = (code: string, msg: string) => seen.push({ code, msg });
+    const a = createMetricAdapter();
+    await a.discover(failCtx);
+    expect(seen.filter((n) => n.code === 'venue.quote.unavailable')).toHaveLength(1);
+    await a.discover(okCtx);
+    const recovered = seen.filter((n) => n.code === 'venue.quote.recovered');
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].msg).toMatch(/quoting again/);
+    // A second healthy pass with nothing raised in between stays silent — the
+    // recovered() guard. Without it every 10-minute rediscover would re-announce.
+    await a.discover(okCtx);
+    expect(seen.filter((n) => n.code === 'venue.quote.recovered')).toHaveLength(1);
+  });
+
+  it('stays silent when healthy all along — no warning, no recovery', async () => {
+    const seen: { code: string; msg: string }[] = [];
+    const ctx = stub([], {});
+    ctx.note = (code: string, msg: string) => seen.push({ code, msg });
+    const a = createMetricAdapter();
+    await a.discover(ctx);
+    await a.discover(ctx);
+    expect(seen.some((n) => n.code === 'venue.quote.unavailable')).toBe(false);
+    expect(seen.some((n) => n.code === 'venue.quote.recovered')).toBe(false);
+  });
 });

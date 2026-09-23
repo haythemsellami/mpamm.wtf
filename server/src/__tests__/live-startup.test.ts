@@ -204,6 +204,50 @@ describe('live startup archive gate', () => {
     } finally { held.resolve([]); vi.useRealTimers(); source.store.close(); }
   });
 
+  it('announces recovery when a thrown quote succeeds again, then stays quiet', async () => {
+    // The core's half of venue.quote.unavailable (poll's catch): a rejection is
+    // noted once per distinct reason and the heal is announced — otherwise the
+    // warning stands until the window rolls it off. Mirrors
+    // createQuoteOutageReporter, including the re-arm + stay-quiet guards.
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.bootMs = Date.now() - 65_000;
+    source.schedulePostQuoteMaintenance = vi.fn();
+    const healthy = adapters[0].quote!;
+    const notes = vi.spyOn(source, 'noteOnce'), recoveries = vi.spyOn(source, 'note');
+    let block = 200n;
+    try {
+      await poll(block++);
+      notes.mockClear(); recoveries.mockClear();
+      adapters[0].quote = vi.fn(async () => { throw new Error('rpc boom'); });
+      await poll(block++);
+      expect(notes.mock.calls.filter(([code]) => code === 'venue.quote.unavailable')).toHaveLength(1);
+      expect(source.quoteFailed.get('venue')).toBe('rpc boom');
+      // Same failure again: the latch dedupes, no second note.
+      notes.mockClear(); recoveries.mockClear();
+      await poll(block++);
+      expect(notes).not.toHaveBeenCalled();
+      expect(recoveries).not.toHaveBeenCalled();
+      // A CHANGED reason is a new event and earns its own note.
+      adapters[0].quote = vi.fn(async () => { throw new Error('different'); });
+      await poll(block++);
+      expect(notes.mock.calls.filter(([code]) => code === 'venue.quote.unavailable')).toHaveLength(1);
+      expect(source.quoteFailed.get('venue')).toBe('different');
+      // Heal: exactly one recovery, quoting the prior reason, latch cleared.
+      adapters[0].quote = healthy;
+      await poll(block++);
+      const rec = recoveries.mock.calls.filter(([code]) => code === 'venue.quote.recovered');
+      expect(rec).toHaveLength(1);
+      expect(rec[0][1]).toMatch(/quoting again/);
+      expect(rec[0][1]).toMatch(/different/);
+      expect(source.quoteFailed.has('venue')).toBe(false);
+      // A second healthy poll with nothing raised in between stays silent.
+      recoveries.mockClear(); notes.mockClear();
+      await poll(block++);
+      expect(recoveries.mock.calls.filter(([code]) => code === 'venue.quote.recovered')).toHaveLength(0);
+      expect(notes).not.toHaveBeenCalled();
+    } finally { source.store.close(); }
+  });
+
   it('ages fills in yielding passes with identical buy/sell signs and persistence updates', async () => {
     const { source } = await setup();
     const now = Date.now();
