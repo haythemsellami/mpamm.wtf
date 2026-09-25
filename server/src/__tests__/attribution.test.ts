@@ -121,6 +121,18 @@ describe('FillAttributor', () => {
     expect(f.router).toBe('ERC-4337');
   });
 
+  it('labels Moose Trade user-ops (tx.to = MooseEntryPoint proxy) as routed flow', async () => {
+    // shape of real Moose fills, e.g. tx 0x5585a42d… (ThogAMM MON/USDT0): a user
+    // EOA sends handleOps straight to the entry point proxy
+    const MOOSE_ENTRYPOINT = '0xbd267094d3b410b33f49e8f6ba8b106672746490';
+    const a = new FillAttributor(clientFor({ '0x3f': MOOSE_ENTRYPOINT }) as any, [fakeAdapter()]);
+    const f = fill('0x3f');
+    await a.attribute([f]);
+    expect(f.category).toBe('ROUTER');
+    expect(f.router).toBe('Moose Trade');
+    expect(f.to).toContain(TAKER.slice(2, 6)); // the user, not the entry point
+  });
+
   it('leaves unidentified intermediaries UNKNOWN (but still shows the real initiator)', async () => {
     const a = new FillAttributor(clientFor({ '0x4': BOT }) as any, [fakeAdapter()]);
     const f = fill('0x4');
