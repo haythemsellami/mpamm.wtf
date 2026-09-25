@@ -121,16 +121,19 @@ describe('FillAttributor', () => {
     expect(f.router).toBe('ERC-4337');
   });
 
-  it('labels Moose Trade user-ops (tx.to = MooseEntryPoint proxy) as routed flow', async () => {
-    // shape of real Moose fills, e.g. tx 0x5585a42d… (ThogAMM MON/USDT0): a user
-    // EOA sends handleOps straight to the entry point proxy
-    const MOOSE_ENTRYPOINT = '0xbd267094d3b410b33f49e8f6ba8b106672746490';
-    const a = new FillAttributor(clientFor({ '0x3f': MOOSE_ENTRYPOINT }) as any, [fakeAdapter()]);
+  // Addresses from Moose's deployment manifest. Real Moose fills (e.g. tx
+  // 0x5585a42d…, ThogAMM MON/USDT0) are user EOAs sending handleOps straight to
+  // the entry point; a direct aggregator call must label the same way.
+  it.each([
+    ['MooseEntryPoint proxy', '0xbd267094d3b410b33f49e8f6ba8b106672746490'],
+    ['MooseAggregator proxy', '0xd1b844a2443704bcb2f737a7434513437438b65e'],
+  ])('labels Moose Trade flow entering via the %s as routed flow', async (_name, entry) => {
+    const a = new FillAttributor(clientFor({ '0x3f': entry }) as any, [fakeAdapter()]);
     const f = fill('0x3f');
     await a.attribute([f]);
     expect(f.category).toBe('ROUTER');
     expect(f.router).toBe('Moose Trade');
-    expect(f.to).toContain(TAKER.slice(2, 6)); // the user, not the entry point
+    expect(f.to).toContain(TAKER.slice(2, 6)); // the user, not the Moose contract
   });
 
   it('leaves unidentified intermediaries UNKNOWN (but still shows the real initiator)', async () => {
