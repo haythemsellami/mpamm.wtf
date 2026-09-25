@@ -55,6 +55,18 @@ export const KNOWN_ROUTERS: ReadonlyMap<string, string> = new Map([
   // signatures (RescueFundsLib, FulfilExec/fulfil). Observed filling through
   // the Metric pAMM.
   ['0x97caca78ac2a94c67643d07843f85afaa44a3ea5', 'Bungee'],
+  // Moose Trade — on-chain aggregator for Nexus smart accounts (deployed
+  // 2026-09-15, block ~105.02M; addresses from the protocol's own deployment
+  // manifest). Users' swaps are `handleOps` user-ops sent straight to the
+  // MooseEntryPoint proxy (tx.to), mostly self-submitted: 243 distinct
+  // senders over its first 2,122 handleOps. The entry point executes the
+  // Nexus account → MooseAggregator proxy → venue adapters, so the entry
+  // point is what attribution sees. The aggregator proxy has had no direct
+  // txs, but it is Moose's own swap contract, so a direct call labels
+  // correctly too. Both are ERC-1967 proxies; the implementations
+  // (MooseEntryPoint 0xce8eb3c1…, MooseAggregator 0xdc93abae…) are never tx.to.
+  ['0xbd267094d3b410b33f49e8f6ba8b106672746490', 'Moose Trade'], // MooseEntryPoint proxy
+  ['0xd1b844a2443704bcb2f737a7434513437438b65e', 'Moose Trade'], // MooseAggregator proxy
 ]);
 
 /** MEV auction/bundle infrastructure → brand. These are NOT routers: the
