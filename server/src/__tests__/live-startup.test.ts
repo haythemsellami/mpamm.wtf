@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
-import { MARKETS, SIZES_USD, type Fill, type QuoteRow } from '@shared';
+import { MARKETS, SIZES_USD, type Fill, type QuoteRow, type StateNote } from '@shared';
 import type { VenueAdapter } from '../venues/adapter.js';
 
 function deferred<T>() {
@@ -209,42 +209,42 @@ describe('live startup archive gate', () => {
     // noted once per distinct reason and the heal is announced — otherwise the
     // warning stands until the window rolls it off. Mirrors
     // createQuoteOutageReporter, including the re-arm + stay-quiet guards.
+    // Asserted on the served window itself, since that is what a maintainer reads.
     const { source, adapters, poll } = await setup({ withQuotes: true });
     source.bootMs = Date.now() - 65_000;
     source.schedulePostQuoteMaintenance = vi.fn();
     const healthy = adapters[0].quote!;
-    const notes = vi.spyOn(source, 'noteOnce'), recoveries = vi.spyOn(source, 'note');
+    const fail = (why: string) => { adapters[0].quote = vi.fn(async () => { throw new Error(why); }); };
+    const window = () => source.notes.list()
+      .filter((n: StateNote) => n.venue === 'venue' && n.code.startsWith('venue.quote.'))
+      .map((n: StateNote) => `${n.code.slice('venue.quote.'.length)}: ${n.msg}`);
     let block = 200n;
     try {
       await poll(block++);
-      notes.mockClear(); recoveries.mockClear();
-      adapters[0].quote = vi.fn(async () => { throw new Error('rpc boom'); });
+      fail('rpc boom');
       await poll(block++);
-      expect(notes.mock.calls.filter(([code]) => code === 'venue.quote.unavailable')).toHaveLength(1);
-      expect(source.quoteFailed.get('venue')).toBe('rpc boom');
       // Same failure again: the latch dedupes, no second note.
-      notes.mockClear(); recoveries.mockClear();
       await poll(block++);
-      expect(notes).not.toHaveBeenCalled();
-      expect(recoveries).not.toHaveBeenCalled();
       // A CHANGED reason is a new event and earns its own note.
-      adapters[0].quote = vi.fn(async () => { throw new Error('different'); });
+      fail('different');
       await poll(block++);
-      expect(notes.mock.calls.filter(([code]) => code === 'venue.quote.unavailable')).toHaveLength(1);
-      expect(source.quoteFailed.get('venue')).toBe('different');
       // Heal: exactly one recovery, quoting the prior reason, latch cleared.
       adapters[0].quote = healthy;
       await poll(block++);
-      const rec = recoveries.mock.calls.filter(([code]) => code === 'venue.quote.recovered');
-      expect(rec).toHaveLength(1);
-      expect(rec[0][1]).toMatch(/quoting again/);
-      expect(rec[0][1]).toMatch(/different/);
       expect(source.quoteFailed.has('venue')).toBe(false);
       // A second healthy poll with nothing raised in between stays silent.
-      recoveries.mockClear(); notes.mockClear();
       await poll(block++);
-      expect(recoveries.mock.calls.filter(([code]) => code === 'venue.quote.recovered')).toHaveLength(0);
-      expect(notes).not.toHaveBeenCalled();
+      expect(window()).toEqual([
+        expect.stringMatching(/^unavailable: .*quote failed: rpc boom$/),
+        expect.stringMatching(/^unavailable: .*quote failed: different$/),
+        expect.stringMatching(/^recovered: .*quoting again \(was "different"\)$/),
+      ]);
+      // The SAME failure as an earlier episode must be visible again after a
+      // recovery: the window must never end on "quoting again" while down.
+      fail('rpc boom');
+      await poll(block++);
+      expect(window().at(-1)).toMatch(/^unavailable: .*quote failed: rpc boom$/);
+      expect(source.quoteFailed.get('venue')).toBe('rpc boom');
     } finally { source.store.close(); }
   });
 

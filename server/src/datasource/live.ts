@@ -2480,12 +2480,14 @@ export class LiveDataSource extends BaseSource {
             // undefined", which is worse than useless to whoever reads it.
             const why = (e instanceof Error && e.message) || String(e ?? '') || 'no reason given';
             // One event, one note: a changed reason is a new event, a repeat is
-            // deduped by the latch (noteOnce would also dedupe verbatim text,
-            // but the latch is what lets recovery re-arm correctly).
+            // deduped by the latch. Plain note(), NOT noteOnce(): noteOnce
+            // dedupes against the whole window, so after a recovery the SAME
+            // failure again would be swallowed and the window would end on
+            // "quoting again" while the venue is down.
             const vid = this.vidOf(a) ?? 'unknown';
             if (this.quoteFailed.get(vid) !== why) {
               this.quoteFailed.set(vid, why);
-              this.noteOnce('venue.quote.unavailable', `${a.venues()[0]?.name ?? 'venue'} quote failed: ${why}`, this.vidOf(a));
+              this.note('venue.quote.unavailable', `${a.venues()[0]?.name ?? 'venue'} quote failed: ${why}`, this.vidOf(a));
             }
             return [] as QuoteRow[];
           });
