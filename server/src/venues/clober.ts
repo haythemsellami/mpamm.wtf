@@ -279,7 +279,8 @@ export function cloberLegFilledFull(reqIn: bigint, spentIn: bigint, takenOut: bi
   if (spentIn >= reqIn) return true;
   if (takenOut <= 0n) return false;
   const unitDust = (2n * unitSize * spentIn + takenOut - 1n) / takenOut; // ceil(2 units in input raw)
-  const relDust = reqIn / 1_000_000_000n;
+  // ceil: exactly the old `spent ≥ ⌊req·(1 − 1e-9)⌋` boundary, so no leg it accepted regresses
+  const relDust = (reqIn + 999_999_999n) / 1_000_000_000n;
   return reqIn - spentIn <= (unitDust > relDust ? unitDust : relDust);
 }
 

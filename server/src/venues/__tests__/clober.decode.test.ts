@@ -110,6 +110,15 @@ describe('cloberLegFilledFull (unit-size rounding)', () => {
     // $10k sell: 386,772 MON requested, 337,510 spent
     expect(cloberLegFilledFull(386772384451750083826482n, 337510314431399524539628n, 496331042n, 1n)).toBe(false);
   });
+  it('accepts every leg the old 1e-9 relative check accepted', () => {
+    const old = (req: bigint, spent: bigint) => spent >= (req * 999_999_999n) / 1_000_000_000n;
+    for (const req of [1n, 999n, 100000000n, 1_000_000_001n, 3867723844517501220253n]) {
+      const floor = (req * 999_999_999n) / 1_000_000_000n; // old acceptance boundary
+      // unitSize 0 zeroes the unit-dust bound, isolating the relative one
+      expect(old(req, floor)).toBe(true);
+      expect(cloberLegFilledFull(req, floor, 1n, 0n)).toBe(true);
+    }
+  });
   it('nothing taken is never full', () => {
     expect(cloberLegFilledFull(100n, 99n, 0n, 1n)).toBe(false);
   });
