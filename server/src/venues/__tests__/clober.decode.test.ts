@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { decodeCloberTake, cloberTickToPrice, type CloberBook } from '../clober.js';
+import { decodeCloberTake, cloberTickToPrice, cloberLegFilledFull, assembleCloberMarkets, type CloberBook } from '../clober.js';
+import { TOKENS } from '@shared';
 
 /**
  * Fixture-based decode tests — the pattern every adapter PR should follow
@@ -88,5 +89,62 @@ describe('cloberTickToPrice', () => {
   it('generic over base decimals (WBTC = 8, not 18)', () => {
     // same tick, 8-decimal base: scale shrinks by 10^10
     expect(cloberTickToPrice(-313882, true, 6, 8)).toBeCloseTo(0.023386190540000906e-10, 20);
+  });
+});
+
+/**
+ * getExpectedOutput legs recorded from the live MON/USDC vault book pair
+ * (block ~107,844,301). Expected verdicts are from the raw numbers alone.
+ */
+describe('cloberLegFilledFull (unit-size rounding)', () => {
+  it('a $100 sell that leaves sub-unit dust is a full fill', () => {
+    // 3867.72 MON in → 99.883739 USDC out; 1.876e-5 MON (< one 1e-6 USDC unit) unspent
+    expect(cloberLegFilledFull(3867723844517501220253n, 3867723825756573480247n, 99883739n, 1n)).toBe(true);
+  });
+  it('an exact fill is full', () => {
+    expect(cloberLegFilledFull(100000000n, 100000000n, 3862171404234000000000n, 1000000000000n)).toBe(true);
+  });
+  it('a real partial on a thin book is not', () => {
+    // $1000 buy: only 698.37 USDC of 1000 could be spent
+    expect(cloberLegFilledFull(1000000000n, 698370382n, 24415081308693900000000n, 1000000000000n)).toBe(false);
+    // $10k sell: 386,772 MON requested, 337,510 spent
+    expect(cloberLegFilledFull(386772384451750083826482n, 337510314431399524539628n, 496331042n, 1n)).toBe(false);
+  });
+  it('nothing taken is never full', () => {
+    expect(cloberLegFilledFull(100n, 99n, 0n, 1n)).toBe(false);
+  });
+});
+
+describe('Clober wrapper-specific pairs (cbBTC ≠ WBTC)', () => {
+  const usdc = TOKENS.USDC.address.toLowerCase();
+  const book = (id: bigint, base: string, quote: string, baseSym: string, quoteSym: string): CloberBook =>
+    ({ bookId: id, base: base.toLowerCase(), quote: quote.toLowerCase(), unitSize: 1n, baseSym, quoteSym, isVault: true });
+  const wbtcSell = book(1n, TOKENS.WBTC.address, usdc, 'WBTC', 'USDC');
+  const wbtcBuy = book(2n, usdc, TOKENS.WBTC.address, 'USDC', 'WBTC');
+  const cbbtcSell = book(3n, TOKENS.CBBTC.address, usdc, 'cbBTC', 'USDC');
+
+  it('WBTC books assemble into BTC/USDC only, never cbBTC/USDC', () => {
+    const markets = assembleCloberMarkets(new Map([['1', wbtcSell], ['2', wbtcBuy]]));
+    expect(markets.map((m) => m.market)).toEqual(['BTC/USDC']);
+    expect(markets[0].baseToken).toBe('WBTC');
+  });
+  it('a cbBTC book assembles into cbBTC/USDC, sized as cbBTC', () => {
+    const markets = assembleCloberMarkets(new Map([['3', cbbtcSell]]));
+    expect(markets.map((m) => m.market)).toEqual(['cbBTC/USDC']);
+    expect(markets[0].baseToken).toBe('CBBTC');
+    expect(markets[0].baseBook).toBe(cbbtcSell);
+  });
+  it('a Take on a cbBTC book decodes to cbBTC/USDC, a WBTC book to BTC/USDC', () => {
+    const take = (bookId: bigint) => ({ ...TAKE_LOG, args: { ...TAKE_LOG.args, bookId, tick: 0, unit: 1_000_000n } });
+    const books = new Map([['1', wbtcSell], ['3', cbbtcSell]]);
+    expect(decodeCloberTake(take(3n), books, TS)?.market).toBe('cbBTC/USDC');
+    expect(decodeCloberTake(take(1n), books, TS)?.market).toBe('BTC/USDC');
+  });
+  it('MON books (native quote side) still resolve to the canonical pair', () => {
+    const monBuy = book(4n, usdc, '0x0000000000000000000000000000000000000000', 'USDC', 'MON');
+    const markets = assembleCloberMarkets(new Map([['0', BOOK], ['4', monBuy]]));
+    expect(markets.map((m) => m.market)).toEqual(['MON/USDC']);
+    expect(markets[0].baseToken).toBe('WMON');
+    expect(markets[0].stableBook).toBe(monBuy);
   });
 });
