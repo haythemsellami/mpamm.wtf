@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
-import { MARKETS, SIZES_USD, type Fill, type QuoteRow } from '@shared';
+import { MARKETS, SIZES_USD, type Fill, type QuoteRow, type StateNote } from '@shared';
 import type { VenueAdapter } from '../venues/adapter.js';
 
 function deferred<T>() {
@@ -202,6 +202,50 @@ describe('live startup archive gate', () => {
       for (let i = 0; i < QUOTE_DARK_CYCLES; i++) await poll(block++);
       expect(source.quoteDark.has('venue')).toBe(true);
     } finally { held.resolve([]); vi.useRealTimers(); source.store.close(); }
+  });
+
+  it('announces recovery when a thrown quote succeeds again, then stays quiet', async () => {
+    // The core's half of venue.quote.unavailable (poll's catch): a rejection is
+    // noted once per distinct reason and the heal is announced — otherwise the
+    // warning stands until the window rolls it off. Mirrors
+    // createQuoteOutageReporter, including the re-arm + stay-quiet guards.
+    // Asserted on the served window itself, since that is what a maintainer reads.
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.bootMs = Date.now() - 65_000;
+    source.schedulePostQuoteMaintenance = vi.fn();
+    const healthy = adapters[0].quote!;
+    const fail = (why: string) => { adapters[0].quote = vi.fn(async () => { throw new Error(why); }); };
+    const window = () => source.notes.list()
+      .filter((n: StateNote) => n.venue === 'venue' && n.code.startsWith('venue.quote.'))
+      .map((n: StateNote) => `${n.code.slice('venue.quote.'.length)}: ${n.msg}`);
+    let block = 200n;
+    try {
+      await poll(block++);
+      fail('rpc boom');
+      await poll(block++);
+      // Same failure again: the latch dedupes, no second note.
+      await poll(block++);
+      // A CHANGED reason is a new event and earns its own note.
+      fail('different');
+      await poll(block++);
+      // Heal: exactly one recovery, quoting the prior reason, latch cleared.
+      adapters[0].quote = healthy;
+      await poll(block++);
+      expect(source.quoteFailed.has('venue')).toBe(false);
+      // A second healthy poll with nothing raised in between stays silent.
+      await poll(block++);
+      expect(window()).toEqual([
+        expect.stringMatching(/^unavailable: .*quote failed: rpc boom$/),
+        expect.stringMatching(/^unavailable: .*quote failed: different$/),
+        expect.stringMatching(/^recovered: .*quoting again \(was "different"\)$/),
+      ]);
+      // The SAME failure as an earlier episode must be visible again after a
+      // recovery: the window must never end on "quoting again" while down.
+      fail('rpc boom');
+      await poll(block++);
+      expect(window().at(-1)).toMatch(/^unavailable: .*quote failed: rpc boom$/);
+      expect(source.quoteFailed.get('venue')).toBe('rpc boom');
+    } finally { source.store.close(); }
   });
 
   it('ages fills in yielding passes with identical buy/sell signs and persistence updates', async () => {

@@ -238,6 +238,12 @@ export function createMetricAdapter(): VenueAdapter {
   let pools: MetricPool[] = [];                       // live: quoted
   let byAddr = new Map<string, MetricPool>();         // MONOTONIC decode map
   let discovered = false;
+  /** whether the funded-but-unpriceable warning is currently on the record.
+   *  discover() recomputes liveness fresh every pass, so the clear condition
+   *  is right here: announce recovery on the first pass with no no-price pool.
+   *  Quiet when nothing was ever raised — most passes are healthy. Mirrors
+   *  Lunarbase's recovered() helper (lunarbase.ts). */
+  let noPriceWarned = false;
   /** every pool address the factory has told us about (seeds + discovered). */
   const candidates = new Set<string>(SEED_POOLS.map((p) => p.toLowerCase()));
   /** factory scan progress; null until the first discovery. */
@@ -341,7 +347,14 @@ export function createMetricAdapter(): VenueAdapter {
       // the venue is reported as "offline, or its adapter no longer matches the
       // contract" — a guess, when the adapter knows exactly what happened.
       if (notLive['no-price']) {
+        noPriceWarned = true;
         ctx.note('venue.quote.unavailable', `Metric: ${notLive['no-price']} funded pool(s) have no oracle price — their PriceProvider is not answering, so they cannot be quoted (they can still trade, and their fills are still tailed)`);
+      } else if (noPriceWarned) {
+        // The oracle is answering again — announce the heal, or the warning
+        // above stands until the served window rolls it off. An adapter can
+        // only append, so recovery is a new note, never a retraction.
+        noPriceWarned = false;
+        ctx.note('venue.quote.recovered', `Metric quoting again — oracle price back for funded pool(s)`);
       }
 
       // ── 4. gas destinations: EVERY oracle Metric's providers read ──────────

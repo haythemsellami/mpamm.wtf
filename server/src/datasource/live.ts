@@ -986,6 +986,14 @@ export class LiveDataSource extends BaseSource {
    *  venue re-earns its run. */
   private quoteEmptyRuns = new Map<string, { runs: number; since: number }>();
   private quoteDark = new Map<string, string>();
+  /** venue id → reason currently on the record for a THROWN quote() — the core's
+   *  half of venue.quote.unavailable (the catch in poll()). A rejection is noted
+   *  once per distinct reason and recovery is ANNOUNCED when a later quote()
+   *  succeeds, exactly like createQuoteOutageReporter (venues/quote-health.ts):
+   *  silence on heal would leave the warning standing until the window rolls it
+   *  off. In memory for the same reason as the two maps above: a still-failing
+   *  venue re-earns its note after a restart. */
+  private quoteFailed = new Map<string, string>();
   private block = 0;
   /** all registered venue ids — a fill/quote carrying an unknown id is dropped
    *  (a plugin bug must not silently store data the UI can't render). */
@@ -2452,6 +2460,18 @@ export class LiveDataSource extends BaseSource {
             if (!this.headWatcher.isCurrent(blockNumber, pinned)) throw new Error('quote proposal superseded');
             health.commit();
             completedAdapters.add(a);
+            // The catch below only runs on rejection, so the "it succeeded"
+            // branch lives here: announce the heal, mirroring
+            // createQuoteOutageReporter. Returning [] still counts — emptiness
+            // is checkQuoteOutage's job, not this latch's.
+            {
+              const vid = this.vidOf(a) ?? 'unknown';
+              const prev = this.quoteFailed.get(vid);
+              if (prev !== undefined) {
+                this.quoteFailed.delete(vid);
+                this.note('venue.quote.recovered', `${a.venues()[0]?.name ?? 'venue'} quoting again (was "${prev}")`, this.vidOf(a));
+              }
+            }
             return rows;
           }, [] as QuoteRow[]).catch((e) => {
             if (quoteSignal?.aborted) return [] as QuoteRow[];
@@ -2459,7 +2479,16 @@ export class LiveDataSource extends BaseSource {
             // Error with an empty message would otherwise note "quote failed:
             // undefined", which is worse than useless to whoever reads it.
             const why = (e instanceof Error && e.message) || String(e ?? '') || 'no reason given';
-            this.noteOnce('venue.quote.unavailable', `${a.venues()[0]?.name ?? 'venue'} quote failed: ${why}`, this.vidOf(a));
+            // One event, one note: a changed reason is a new event, a repeat is
+            // deduped by the latch. Plain note(), NOT noteOnce(): noteOnce
+            // dedupes against the whole window, so after a recovery the SAME
+            // failure again would be swallowed and the window would end on
+            // "quoting again" while the venue is down.
+            const vid = this.vidOf(a) ?? 'unknown';
+            if (this.quoteFailed.get(vid) !== why) {
+              this.quoteFailed.set(vid, why);
+              this.note('venue.quote.unavailable', `${a.venues()[0]?.name ?? 'venue'} quote failed: ${why}`, this.vidOf(a));
+            }
             return [] as QuoteRow[];
           });
           return this.ownVenues(a, rows, 'quote'); // drop rows for ids the adapter didn't declare
