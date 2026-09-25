@@ -109,34 +109,39 @@ const dumpDir = () => {
   return d;
 };
 
-const bybitDumpUrl = (symbol: string, month: string) => `https://public.bybit.com/spot/${symbol}/${symbol}-${month}.csv.gz`;
+/** Bybit publishes each spot trade archive twice: a DAILY file the next day
+ *  (`SYM_YYYY-MM-DD`) and a MONTHLY dump only after the month closes
+ *  (`SYM-YYYY-MM`), same columns (daily adds a trailing `rpi`, unused here).
+ *  Reading monthly dumps alone deferred every unmarked fill of the running
+ *  month until the next month's dump landed — up to ~5 weeks of null markouts. */
+const bybitDumpUrl = (symbol: string, name: string) => `https://public.bybit.com/spot/${symbol}/${name}.csv.gz`;
 
-/** true when the month's dump is published (HEAD, no body) — lets a multi-month
+/** true when the archive is published (HEAD, no body) — lets a multi-file
  *  request fail fast BEFORE downloading any dump: without this, every boot
  *  re-downloaded a full month (~10²MB, tmp cache is wiped per deploy) only to
- *  defer on the NEXT month's 404. Non-404 probe failures return true (the GET
+ *  defer on the NEXT file's 404. Non-404 probe failures return true (the GET
  *  decides — a flaky HEAD must not fabricate an "unpublished" verdict). */
-async function bybitDumpExists(symbol: string, month: string): Promise<boolean> {
-  if (existsSync(join(dumpDir(), `${symbol}-${month}.csv.gz`))) return true;
+async function bybitDumpExists(symbol: string, name: string): Promise<boolean> {
+  if (existsSync(join(dumpDir(), `${name}.csv.gz`))) return true;
   try {
-    const r = await fetch(bybitDumpUrl(symbol, month), { method: 'HEAD', signal: AbortSignal.timeout(15_000) });
+    const r = await fetch(bybitDumpUrl(symbol, name), { method: 'HEAD', signal: AbortSignal.timeout(15_000) });
     return r.status !== 404;
   } catch {
     return true;
   }
 }
 
-/** Download (once) a Bybit monthly spot trade dump; returns local path or null (404 = month not published). */
-async function bybitDumpFile(symbol: string, month: string /* YYYY-MM */): Promise<string | null> {
-  const path = join(dumpDir(), `${symbol}-${month}.csv.gz`);
+/** Download (once) a Bybit spot trade archive; returns local path or null (404 = not published). */
+async function bybitDumpFile(symbol: string, name: string /* SYM-YYYY-MM | SYM_YYYY-MM-DD */): Promise<string | null> {
+  const path = join(dumpDir(), `${name}.csv.gz`);
   if (existsSync(path)) return path;
-  const url = bybitDumpUrl(symbol, month);
+  const url = bybitDumpUrl(symbol, name);
   // generous timeout: it covers the WHOLE body stream (a ~12MB file on a slow
   // link can exceed 2min), and pipeline() propagates every stream error into
   // the awaited promise (a bare .pipe() left source errors unhandled → crash).
   const r = await fetch(url, { signal: AbortSignal.timeout(600_000) });
   if (r.status === 404) return null;
-  if (!r.ok || !r.body) throw new Error(`bybit dump ${r.status} for ${symbol} ${month}`);
+  if (!r.ok || !r.body) throw new Error(`bybit dump ${r.status} for ${name}`);
   const { pipeline } = await import('node:stream/promises');
   const { renameSync, rmSync } = await import('node:fs');
   try {
@@ -149,21 +154,27 @@ async function bybitDumpFile(symbol: string, month: string /* YYYY-MM */): Promi
   return path;
 }
 
-/** Per-second last-trade series for [fromMs, toMs) from Bybit monthly dumps
- *  (spans up to two months). Returns null when a needed month isn't published
- *  yet — the caller defers those days to a later run rather than fabricating. */
+/** Per-second last-trade series for [fromMs, toMs) from Bybit trade archives:
+ *  each month's dump when published, else that month's daily files for exactly
+ *  the days in range. Returns null when a needed day isn't published yet — the
+ *  caller defers those days to a later run rather than fabricating. */
 export async function bybitTradeSeries(symbol: string, fromMs: number, toMs: number): Promise<StepSeries | null> {
-  const months = new Set<string>();
-  for (let t = fromMs; t < toMs + 86_400_000; t += 86_400_000) months.add(new Date(t).toISOString().slice(0, 7));
-  months.add(new Date(toMs).toISOString().slice(0, 7));
-  // fail fast: probe every needed month before downloading ANY of them.
-  for (const month of [...months].sort()) {
-    if (!(await bybitDumpExists(symbol, month))) return null;
+  const days: string[] = [];
+  for (let t = Math.floor(fromMs / 86_400_000) * 86_400_000; t < toMs; t += 86_400_000) days.push(new Date(t).toISOString().slice(0, 10));
+  // fail fast: resolve (probe) every needed file before downloading ANY of them.
+  // Chronological order matters — makeSeries binary-searches the concatenation.
+  const names: string[] = [];
+  for (const month of [...new Set(days.map((d) => d.slice(0, 7)))]) {
+    if (await bybitDumpExists(symbol, `${symbol}-${month}`)) { names.push(`${symbol}-${month}`); continue; }
+    for (const day of days.filter((d) => d.startsWith(month))) {
+      if (!(await bybitDumpExists(symbol, `${symbol}_${day}`))) return null;
+      names.push(`${symbol}_${day}`);
+    }
   }
   const ts: number[] = [], px: number[] = [];
-  for (const month of [...months].sort()) {
-    const file = await bybitDumpFile(symbol, month);
-    if (!file) return null; // month not published yet
+  for (const name of names) {
+    const file = await bybitDumpFile(symbol, name);
+    if (!file) return null; // not published yet
     await new Promise<void>((resolve, reject) => {
       // wire EVERY stage's error into the promise — readline does not forward
       // input-stream errors, and an unhandled 'error' event kills the process.
