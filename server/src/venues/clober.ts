@@ -1,6 +1,6 @@
 import type { PublicClient } from 'viem';
 import type { QuoteRow, Fill, Side, FillCategory, VenueMeta, Pair } from '@shared';
-import { ADDR, TOKENS, ASSETS, PAIRS, pairFor, assetForToken, baseTokenOf } from '@shared';
+import { ADDR, TOKENS, ASSETS, PAIRS, pairFor, assetForToken } from '@shared';
 import { bookViewerAbi, bookManagerAbi, liquidityVaultAbi, routerGatewayAbi, simpleOracleStrategyAbi, CLOBER_MIN_PRICE } from '../chain/abis.js';
 import { fromUnits, toUnits, shortHex } from '../util.js';
 import { KNOWN_ROUTERS } from '../attribution.js';
@@ -66,6 +66,25 @@ const symByAddr = (addr: string): string | undefined =>
 
 type CloberSubgraphBookRow = { id: string; unitSize: string; base: { id: string }; quote: { id: string }; pool: { id: string } | null };
 
+/**
+ * The registered pair a book's base-asset token trades against `stableSym`.
+ * Resolving by asset alone is wrong for alternative wrappers: cbBTC and WBTC
+ * are both asset BTC, and `pairFor` returns the canonical 'BTC/USDC' — so a
+ * WBTC book would also be assembled into 'cbBTC/USDC' (and a cbBTC book
+ * decoded as 'BTC/USDC'), each marked against the other wrapper's basis. An
+ * alternative wrapper (TokenInfo.baseAsset) maps to its token-specific pair;
+ * the canonical wrapper / native MON maps to the canonical pair.
+ */
+export function cloberPairForToken(addr: string, stableSym: string): { pair: Pair; tokenKey: string } | undefined {
+  const asset = assetForToken(addr);
+  if (!asset) return undefined;
+  const alt = Object.entries(TOKENS).find(([, t]) => t.baseAsset && t.address.toLowerCase() === addr.toLowerCase());
+  const pair = alt
+    ? PAIRS.find((p) => p.symbol === `${alt[1].symbol}/${stableSym}` && p.base === asset.key && p.quote === stableSym)
+    : pairFor(asset.key, stableSym);
+  return pair ? { pair, tokenKey: alt ? alt[0] : asset.token } : undefined;
+}
+
 /** Assemble markets from a book cache for exactly the REGISTERED pairs (@shared
  *  PAIRS — the tracked universe), preferring the vault book per direction so
  *  venue attribution + quoting are consistent across every discovery path and
@@ -75,17 +94,22 @@ export function assembleCloberMarkets(books: Map<string, CloberBook>): CloberMar
   const markets: CloberMarket[] = [];
   for (const pair of PAIRS) {
     const asset = ASSETS[pair.base];
-    const baseTok = baseTokenOf(pair.base);
     const t = TOKENS[pair.quote];
-    if (!asset || !baseTok || !t?.stable) continue;
+    if (!asset || !t?.stable) continue;
     const st = t.address.toLowerCase();
-    let baseBook: CloberBook | undefined, stableBook: CloberBook | undefined;
+    let baseBook: CloberBook | undefined, stableBook: CloberBook | undefined, tokenKey: string | undefined;
     for (const b of books.values()) {
-      const bBase = assetForToken(b.base), bQuote = assetForToken(b.quote);
-      if (bBase?.key === asset.key && b.quote === st && (!baseBook || (b.isVault && !baseBook.isVault))) baseBook = b;
-      if (b.base === st && bQuote?.key === asset.key && (!stableBook || (b.isVault && !stableBook.isVault))) stableBook = b;
+      if (b.quote === st) {
+        const hit = cloberPairForToken(b.base, t.symbol);
+        if (hit?.pair === pair && (!baseBook || (b.isVault && !baseBook.isVault))) { baseBook = b; tokenKey = hit.tokenKey; }
+      }
+      if (b.base === st) {
+        const hit = cloberPairForToken(b.quote, t.symbol);
+        if (hit?.pair === pair && (!stableBook || (b.isVault && !stableBook.isVault))) { stableBook = b; tokenKey ??= hit.tokenKey; }
+      }
     }
-    if (baseBook || stableBook) markets.push({ market: pair.symbol, stable: t.symbol, baseAsset: asset.key, baseToken: asset.token, baseDec: baseTok.decimals, baseBook, stableBook });
+    const baseTok = tokenKey ? TOKENS[tokenKey] : undefined;
+    if ((baseBook || stableBook) && tokenKey && baseTok) markets.push({ market: pair.symbol, stable: t.symbol, baseAsset: asset.key, baseToken: tokenKey, baseDec: baseTok.decimals, baseBook, stableBook });
   }
   return markets;
 }
@@ -241,6 +265,25 @@ function parseSubgraphBook(r: CloberSubgraphBookRow): { id: string; book: Clober
   };
 }
 
+/**
+ * Did getExpectedOutput consume the whole requested input? A book pays out in
+ * whole quote units (`unitSize` raw), so a full fill can leave up to one
+ * unit's worth of input unspent: on the MON/USDC vault book (unit = 1e-6 USDC)
+ * a $100 sell returns ~1.9e-5 MON (~5e-9 of the input). The old fixed 1e-9
+ * relative tolerance was tighter than that, so healthy legs were read as
+ * partial and dropped (the venue flapped one-sided/dark). Allow two units of
+ * rounding at the leg's own realized rate; a genuine partial on a thin book
+ * leaves orders of magnitude more unspent and still fails.
+ */
+export function cloberLegFilledFull(reqIn: bigint, spentIn: bigint, takenOut: bigint, unitSize: bigint): boolean {
+  if (spentIn >= reqIn) return true;
+  if (takenOut <= 0n) return false;
+  const unitDust = (2n * unitSize * spentIn + takenOut - 1n) / takenOut; // ceil(2 units in input raw)
+  // ceil: exactly the old `spent ≥ ⌊req·(1 − 1e-9)⌋` boundary, so no leg it accepted regresses
+  const relDust = (reqIn + 999_999_999n) / 1_000_000_000n;
+  return reqIn - spentIn <= (unitDust > relDust ? unitDust : relDust);
+}
+
 /** Quote Clober for each market × size via BookViewer.getExpectedOutput. */
 export async function quoteClober(
   client: PublicClient, markets: CloberMarket[], sizesUsd: readonly number[], pricer: UsdPricer,
@@ -291,7 +334,7 @@ export async function quoteClober(
     // sanity check below catches that (and partial fills via filledFull, B3).
     const px = l.side === 'sell' ? takenH / spentH : spentH / takenH;
     const bps = (px / l.basePx - 1) * 1e4;
-    const legFilledFull = spentBase >= (l.reqBase * 999_999_999n) / 1_000_000_000n;
+    const legFilledFull = cloberLegFilledFull(l.reqBase, spentBase, takenQuote, l.book.unitSize);
     const key = `${l.market}|${l.size}`;
     let row = rowByKey.get(key);
     if (!row) {
@@ -354,14 +397,12 @@ function registeredBookPair(book: CloberBook): { pair: Pair; baseIsBookBase: boo
   const quoteSideAsset = assetForToken(book.quote);
   if (!!baseSideAsset === !!quoteSideAsset) return null;
   const baseIsBookBase = !!baseSideAsset;
-  const asset = (baseIsBookBase ? baseSideAsset : quoteSideAsset)!;
-  const baseTok = baseTokenOf(asset.key);
-  if (!baseTok) return null;
   const stableSym = baseIsBookBase ? book.quoteSym : book.baseSym;
   if (!stableSym || !TOKENS[stableSym]?.stable) return null;
-  const pair = pairFor(asset.key, stableSym);
-  if (!pair) return null;
-  return { pair, baseIsBookBase, baseDec: baseTok.decimals, stableSym, stableDec: TOKENS[stableSym].decimals };
+  const hit = cloberPairForToken(baseIsBookBase ? book.base : book.quote, stableSym);
+  const baseTok = hit && TOKENS[hit.tokenKey];
+  if (!hit || !baseTok) return null;
+  return { pair: hit.pair, baseIsBookBase, baseDec: baseTok.decimals, stableSym, stableDec: TOKENS[stableSym].decimals };
 }
 
 /**
