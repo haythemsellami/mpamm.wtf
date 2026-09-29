@@ -193,8 +193,14 @@ export const config = {
    *  raises as "fills were lost" (recoverable via BACKFILL_RESET). */
   gapFillMaxBlocks: num('GAPFILL_MAX_BLOCKS', Number.MAX_SAFE_INTEGER),
   /** Decoded fills are persisted; rows older than this are pruned. The
-   *  leaderboard's widest window is 30d, so keep a little more. */
-  fillsRetentionDays: num('FILLS_RETENTION_DAYS', 35),
+   *  leaderboard's widest window is 30d (and the markout onboarding scans
+   *  30d back), so 31 full UTC days is the floor — the cutoff is aligned to
+   *  a UTC day start (see retentionCutoffMs). */
+  fillsRetentionDays: num('FILLS_RETENTION_DAYS', 31),
+  /** how often the rolling retention sweep runs (ms); each sweep deletes at
+   *  most PRUNE_MAX_BATCHES × 1k rows so it never monopolises the writer. */
+  pruneIntervalMs: num('PRUNE_INTERVAL_MS', 10 * 60_000),
+  pruneMaxBatches: num('PRUNE_MAX_BATCHES', 50),
 
   // ── on-chain backfill (background) ──────────────────────────────────────────
   /** Replay each opted-in adapter's Swap logs from its `backfillFromUtc` to seed

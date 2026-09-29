@@ -531,7 +531,7 @@ describe('live startup archive gate', () => {
 
     await source.persist();
 
-    expect(persistSnapshot).toHaveBeenCalledWith([changed], expect.any(Object), [], expect.any(Array));
+    expect(persistSnapshot).toHaveBeenCalledWith([changed], expect.any(Object), []);
     expect(source.dirtyDays.size).toBe(0);
     source.store.close();
   });

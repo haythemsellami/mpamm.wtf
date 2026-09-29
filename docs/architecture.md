@@ -115,11 +115,10 @@ meta(key, value)                               -- schema/model versions + every 
 daily_volume(utc_day, venue_id, usd, swaps)    -- PK (utc_day, venue_id)
 day_meta(utc_day, partial)
 fills(id, venue_id, …, markouts_bps)           -- upsert-by-id; rolling retention
-mid_history(market, ts, mid)                   -- per-pair reference-mid curve (markout-model replays)
 daily_gas(utc_day, venue_id, mon, txs)         -- QUOTE_UPDATE_BURN; additive, atomic with its cursor
 ```
 
-`markout_model_version` gates a markout-model migration: retained fills keep volume/tape data and their markouts are replayed from `mid_history` (when the stored curve is still a valid mark) or nulled — old-model and new-model bps never mix.
+`markout_model_version` gates a markout-model migration: retained fills keep volume/tape data and their markouts are nulled — old-model and new-model bps never mix. Fills are retained 31 full UTC days (the leaderboard's widest window is 30d), pruned in small batches at boot and every 10 min; volume/gas/meta rows are kept forever.
 
 REST + WS contract (the frontend renders purely off these):
 

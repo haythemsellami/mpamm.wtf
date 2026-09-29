@@ -4,6 +4,8 @@ import { QuoteHealthBatch } from '../venues/quote-health.js';
 import { agePendingMarkouts, nearestReferenceSample } from '../markout-aging.js';
 import { BaseSource, QUOTE_HISTORY_MS } from './index.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { statfsSync } from 'node:fs';
+import { dirname } from 'node:path';
 import {
   MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase,
   type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
@@ -22,7 +24,10 @@ import {
 } from '../chain/rpc.js';
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
-import { VolumeStore, type ResetDeletes } from '../db.js';
+import { VolumeStore, retentionCutoffMs, type ResetDeletes } from '../db.js';
+
+/** free pages worth a VACUUM rewrite (below this, SQLite's own reuse is enough). */
+const VACUUM_MIN_FREE_BYTES = 64 * 1024 * 1024;
 import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
 import { NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
@@ -949,6 +954,7 @@ export class LiveDataSource extends BaseSource {
   private loopsStopped = false;
   private stopPromise?: Promise<void>;
   private persistTimer?: ReturnType<typeof setInterval>;
+  private pruneTimer?: ReturnType<typeof setInterval>;
   private snapshotWriter?: SnapshotWriter;
   private storeWriter: StoreWriter = directStoreWriter(this.store);
   private rediscoverTimer?: ReturnType<typeof setInterval>;
@@ -1086,6 +1092,9 @@ export class LiveDataSource extends BaseSource {
     // finality-margin range reads never decide which block a quote represents.
     this.scheduleTail();
     this.persistTimer = setInterval(() => { void this.persist(); }, config.persistMs);
+    // rolling retention: without it fills only aged out at boot, so uptime
+    // alone grew the table past its window.
+    this.pruneTimer = setInterval(() => { void this.pruneSweep(); }, config.pruneIntervalMs);
     this.rediscoverTimer = setInterval(() => { void this.rediscover(); }, config.rediscoverMs);
 
     // The archive pool is NOT fatal for an outage. Deep crawls hold their
@@ -1246,6 +1255,7 @@ export class LiveDataSource extends BaseSource {
     if (this.quoteRetryTimer) clearTimeout(this.quoteRetryTimer);
     if (this.postQuoteImmediate) clearImmediate(this.postQuoteImmediate);
     if (this.persistTimer) clearInterval(this.persistTimer);
+    if (this.pruneTimer) clearInterval(this.pruneTimer);
     if (this.rediscoverTimer) clearInterval(this.rediscoverTimer);
     if (this.remarkTimer) clearInterval(this.remarkTimer);
     this.gas.stop();
@@ -1378,11 +1388,12 @@ export class LiveDataSource extends BaseSource {
     }
     // 1. authoritative persisted history
     this.days = this.store.all();
-    // load recent fills for live serving; drop rows past the retention window
-    // (the persisted mid curve shares the fills' retention — it only exists to
-    // replay THEM on a markout-model bump).
-    this.store.pruneFills(Date.now() - config.fillsRetentionDays * 86_400_000);
-    this.store.pruneMids(Date.now() - config.fillsRetentionDays * 86_400_000);
+    // drop rows past the retention window (batched — see pruneFills), then
+    // reclaim the file's free pages if the disk can afford the rewrite.
+    const aged = this.store.pruneFillsBefore(retentionCutoffMs(Date.now(), config.fillsRetentionDays));
+    if (aged.removed) console.log(`[mpamm] retention: pruned ${aged.removed} fill(s) older than ${config.fillsRetentionDays}d`);
+    this.maybeVacuum();
+    // load recent fills for live serving
     this.fills = this.store.recentFills(400);
     // seed the dedup guard with the persisted window so a gap-fill re-decode of
     // already-counted fills won't re-count them.
@@ -1478,6 +1489,36 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
+  /** One bounded retention sweep on the writer worker. */
+  private async pruneSweep(): Promise<void> {
+    try { await this.storeWriter.pruneFills(retentionCutoffMs(Date.now(), config.fillsRetentionDays), config.pruneMaxBatches); }
+    catch (e) { this.noteOnce('store.persist.failed', `retention sweep failed (${(e as Error).message}); retried next interval`); }
+  }
+
+  /** VACUUM once the file carries a lot of free pages (a retention drop or a
+   *  retired table), but ONLY when the disk has room for the rewrite — it
+   *  copies the live data first, and running out mid-VACUUM on a full disk is
+   *  exactly the failure this avoids. Skipped → retried on the next boot;
+   *  meanwhile SQLite reuses the free pages, so the file stops growing. */
+  private maybeVacuum(): void {
+    try {
+      const free = this.store.freeBytes();
+      if (free < VACUUM_MIN_FREE_BYTES) return;
+      const live = this.store.fileBytes() - free;
+      const fs = statfsSync(dirname(config.dbPath));
+      const avail = Number(fs.bavail) * Number(fs.bsize);
+      if (avail < live * 1.2 + VACUUM_MIN_FREE_BYTES) {
+        console.log(`[mpamm] vacuum deferred: ${(free / 1e6).toFixed(0)} MB reclaimable, but only ${(avail / 1e6).toFixed(0)} MB free for a ${(live / 1e6).toFixed(0)} MB rewrite`);
+        return;
+      }
+      const t0 = Date.now();
+      this.store.vacuum();
+      console.log(`[mpamm] vacuum: reclaimed ${(free / 1e6).toFixed(0)} MB in ${Date.now() - t0}ms`);
+    } catch (e) {
+      console.log(`[mpamm] vacuum skipped (${(e as Error).message})`);
+    }
+  }
+
   private persist(reportFailure = false): Promise<void> {
     // Swap the dirty sets synchronously. New fills/day mutations land in fresh
     // sets while this immutable snapshot waits for the worker ACK; a failure
@@ -1486,18 +1527,12 @@ export class LiveDataSource extends BaseSource {
     const dirtyDays = this.dirtyDays;
     this.dirty = new Set();
     this.dirtyDays = new Set();
-    const now = Date.now();
     const snapshot: SnapshotWrite = {
       days: this.days
         .filter((d) => dirtyDays.has(d.utcDay))
         .map((d) => ({ ...d, byVenue: Object.fromEntries(Object.entries(d.byVenue).map(([id, v]) => [id, { ...v }])) })),
       meta: { lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
       fills: [...dirtyFills].map((f) => ({ ...f, markoutsBps: [...f.markoutsBps] })),
-      // Each pass samples every pair's CURRENT reference mid into mid_history
-      // (~PERSIST_MS cadence), for future markout-model replay.
-      mids: PAIRS
-        .map((p) => ({ ts: now, market: p.symbol, mid: REFERENCES.midForPair(p.symbol) }))
-        .filter((m) => m.mid > 0),
     };
 
     return this.writeSnapshot(snapshot)
@@ -1900,7 +1935,7 @@ export class LiveDataSource extends BaseSource {
       cursor = to + 1n;
       if (++sinceMerge >= config.backfillMergeEvery || cursor > end) {
         const changed = this.mergeBackfill(vid, acc, flushed);
-        await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(cursor) }, fills: [], mids: [] });
+        await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(cursor) }, fills: [] });
         for (const d of changed) flushed.set(d.utcDay, { ...acc.get(d.utcDay)! });
         sinceMerge = 0;
       }
@@ -1908,7 +1943,7 @@ export class LiveDataSource extends BaseSource {
     }
 
     const changed = this.mergeBackfill(vid, acc, flushed);
-    await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(end + 1n) }, fills: [], mids: [] });
+    await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(end + 1n) }, fills: [] });
     if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
     // done even when ranges were skipped — re-running every boot can't fix an RPC
     // archive hole. To re-attempt after the provider repairs it: delete the
