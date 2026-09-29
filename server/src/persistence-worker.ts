@@ -21,6 +21,7 @@ function apply(mutation: StoreMutation): unknown {
     case 'insertFillsIfAbsent': return store.insertFillsIfAbsent(mutation.fills);
     case 'applyRemarks': return store.applyRemarks(mutation.rows);
     case 'pruneFills': return store.pruneFillsBefore(mutation.beforeMs, mutation.maxBatches);
+    case 'vacuumIfRoom': return store.vacuumIfRoom(mutation.availBytes);
     default: {
       const kind = (mutation as { kind?: unknown }).kind;
       throw new Error(`unknown persistence mutation '${String(kind)}'`);

@@ -99,13 +99,30 @@ describe('busy checkpoint', () => {
     const reader = new DatabaseSync(path, { readOnly: true });
     reader.exec('BEGIN');
     reader.prepare('SELECT count(*) FROM fills').get();
-    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: PRUNE_BATCH_ROWS, done: false });
+    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: PRUNE_BATCH_ROWS, done: false, blocked: true });
     expect(store.checkpointWal()).toBe(false);
     reader.exec('ROLLBACK');
     reader.close();
     // reader gone → checkpoints succeed and the next sweep finishes the backlog
     expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: 4 * PRUNE_BATCH_ROWS, done: true });
     expect(store.checkpointWal()).toBe(true);
+    store.close();
+  });
+});
+
+describe('busy checkpoint on the final batch', () => {
+  it('a backlog smaller than one batch under a held reader reports blocked, not a silent not-done', () => {
+    const path = fresh();
+    const store = new VolumeStore(path);
+    store.persistSnapshot([], {}, Array.from({ length: 10 }, (_, i) => fill(i, i + 1)));
+    store.checkpointWal();
+    const reader = new DatabaseSync(path, { readOnly: true });
+    reader.exec('BEGIN');
+    reader.prepare('SELECT count(*) FROM fills').get();
+    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: 10, done: false, blocked: true });
+    reader.exec('ROLLBACK');
+    reader.close();
+    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: 0, done: true });
     store.close();
   });
 });

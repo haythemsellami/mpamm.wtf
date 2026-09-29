@@ -552,12 +552,17 @@ export class VolumeStore {
   }
 
   /** Exact retained fill counts by UTC day and venue, with no API/query cap. */
-  fillCountsByDayVenue(): Array<{ utcDay: string; venueId: string; swaps: number }> {
+  /** Per-(day, venue) fill counts for fills at or after `sinceMs`. Callers
+   *  pass the retention cutoff: rows before it may be mid-deletion (the boot
+   *  prune is capped; the worker drains the rest later), so counting them
+   *  would under-report a partially pruned day. */
+  fillCountsByDayVenue(sinceMs = 0): Array<{ utcDay: string; venueId: string; swaps: number }> {
     const rows = this.db.prepare(`
       SELECT date(ts / 1000, 'unixepoch') AS utc_day, venue_id, COUNT(*) AS swaps
       FROM fills
+      WHERE ts >= ?
       GROUP BY utc_day, venue_id
-    `).all() as Array<Record<string, any>>;
+    `).all(sinceMs) as Array<Record<string, any>>;
     return rows.map((r) => ({ utcDay: r.utc_day, venueId: r.venue_id, swaps: Number(r.swaps) }));
   }
 
@@ -673,8 +678,8 @@ export class VolumeStore {
    *  moves the batch into the main file's FREE pages and hands the WAL's bytes
    *  back, so the sweep needs disk for one batch, never for the backlog. A
    *  checkpoint blocked by a reader ends the sweep early (done: false). */
-  pruneFillsBefore(beforeMs: number, maxBatches = Number.POSITIVE_INFINITY): { removed: number; done: boolean } {
-    let removed = 0, done = false, batch = PRUNE_BATCH_ROWS;
+  pruneFillsBefore(beforeMs: number, maxBatches = Number.POSITIVE_INFINITY): { removed: number; done: boolean; blocked?: true } {
+    let removed = 0, done = false, blocked = false, batch = PRUNE_BATCH_ROWS;
     for (let i = 0; i < maxBatches; i++) {
       let n: number;
       try { n = this.pruneFills(beforeMs, batch); }
@@ -684,18 +689,23 @@ export class VolumeStore {
         // the sweep digs itself out; at the floor, give up loudly.
         if (!isDiskFull(e) || batch <= PRUNE_MIN_BATCH_ROWS) throw e;
         batch = Math.max(PRUNE_MIN_BATCH_ROWS, Math.floor(batch / 2));
-        if (!this.checkpointWal()) break; // a reader pins the WAL — retrying would only grow it
+        if (!this.checkpointWal()) { blocked = true; break; } // a reader pins the WAL — retrying would only grow it
         continue;
       }
       removed += n;
-      if (n < batch) { done = this.checkpointWal(); break; }
+      if (n < batch) {
+        // backlog exhausted — but a pinned checkpoint leaves this batch in the
+        // WAL, so report it like any other pin (the caller waits, not spins).
+        if (this.checkpointWal()) done = true; else blocked = true;
+        break;
+      }
       // a busy checkpoint means this batch is still IN the WAL: stop, so one
       // sweep never stacks more than one batch there (the leaderboard worker
       // holds a snapshot across its passes). The next sweep carries on.
-      if (!this.checkpointWal()) break;
+      if (!this.checkpointWal()) { blocked = true; break; }
       if (batch < PRUNE_BATCH_ROWS) batch = Math.min(PRUNE_BATCH_ROWS, batch * 2); // space freed — grow back
     }
-    return { removed, done };
+    return blocked ? { removed, done, blocked: true } : { removed, done };
   }
 
   /** Checkpoint and TRUNCATE the WAL, returning its bytes to the filesystem.

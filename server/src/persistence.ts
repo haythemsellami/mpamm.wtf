@@ -8,6 +8,8 @@ export interface SnapshotWrite {
   fills: Fill[];
 }
 
+export type PruneResult = ReturnType<VolumeStore['pruneFillsBefore']>;
+export type VacuumResult = ReturnType<VolumeStore['vacuumIfRoom']>;
 export type GasWrite = { utcDay: string; venueId: string; mon: number; txs: number };
 export type RemarkWrite = { id: string; markoutsBps: (number | null)[] };
 
@@ -21,7 +23,8 @@ export type StoreMutation =
   | { kind: 'resetGasFrom'; venueId: string; fromDay: string }
   | { kind: 'insertFillsIfAbsent'; fills: Fill[] }
   | { kind: 'applyRemarks'; rows: RemarkWrite[] }
-  | { kind: 'pruneFills'; beforeMs: number; maxBatches: number };
+  | { kind: 'pruneFills'; beforeMs: number; maxBatches: number }
+  | { kind: 'vacuumIfRoom'; availBytes: number };
 
 /** The one post-boot SQLite mutation lane. Production implements it in a
  * worker; tests may use the direct adapter before realtime loops exist. */
@@ -36,7 +39,9 @@ export interface StoreWriter {
   insertFillsIfAbsent(fills: Fill[]): Promise<number>;
   applyRemarks(rows: RemarkWrite[]): Promise<void>;
   /** retention sweep — see VolumeStore.pruneFillsBefore */
-  pruneFills(beforeMs: number, maxBatches: number): Promise<{ removed: number; done: boolean }>;
+  pruneFills(beforeMs: number, maxBatches: number): Promise<PruneResult>;
+  /** gated VACUUM — see VolumeStore.vacuumIfRoom */
+  vacuumIfRoom(availBytes: number): Promise<VacuumResult>;
 }
 
 export function directStoreWriter(store: VolumeStore): StoreWriter {
@@ -51,6 +56,7 @@ export function directStoreWriter(store: VolumeStore): StoreWriter {
     insertFillsIfAbsent: async (fills) => store.insertFillsIfAbsent(fills),
     applyRemarks: async (rows) => store.applyRemarks(rows),
     pruneFills: async (beforeMs, maxBatches) => store.pruneFillsBefore(beforeMs, maxBatches),
+    vacuumIfRoom: async (availBytes) => store.vacuumIfRoom(availBytes),
   };
 }
 
@@ -110,9 +116,10 @@ export class SnapshotWriter implements StoreWriter {
   resetGasFrom(venueId: string, fromDay: string): Promise<void> { return this.request({ kind: 'resetGasFrom', venueId, fromDay }); }
   insertFillsIfAbsent(fills: Fill[]): Promise<number> { return this.request({ kind: 'insertFillsIfAbsent', fills }); }
   applyRemarks(rows: RemarkWrite[]): Promise<void> { return this.request({ kind: 'applyRemarks', rows }); }
-  pruneFills(beforeMs: number, maxBatches: number): Promise<{ removed: number; done: boolean }> {
+  pruneFills(beforeMs: number, maxBatches: number): Promise<PruneResult> {
     return this.request({ kind: 'pruneFills', beforeMs, maxBatches });
   }
+  vacuumIfRoom(availBytes: number): Promise<VacuumResult> { return this.request({ kind: 'vacuumIfRoom', availBytes }); }
 
   private request<T>(mutation: StoreMutation): Promise<T> {
     if (this.failed) return Promise.reject(this.failed);
