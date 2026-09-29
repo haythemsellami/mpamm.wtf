@@ -54,15 +54,15 @@ const FAST_QUOTER_HELPER = '0x237dB58fea34A35A8543b44C217d221606cE7788' as const
  *
  *  GENERATIONS: Hanji redeploys the FastQuoter every week or two and cuts the
  *  fleet over to it; the old contract simply stops receiving pushes. The one
- *  invariant across all eight is `owner() == 0xA24D2aF7…` — so that, plus the
+ *  invariant across all nine is `owner() == 0xA24D2aF7…` — so that, plus the
  *  updatePrices(uint256) packed-word calldata, is what confirms a candidate is
  *  theirs. Do NOT identify them by gas limit: gen1+ push at a flat 45,000 but
  *  gen0 used 100,000, and the limit is a keeper setting, not an identity.
  *  Every generation is listed so the burn series spans the cutovers — a
  *  missing one doesn't error, it silently flatlines the venue's burn while the
  *  venue itself trades on (gen3 went untracked for 11 days that way, gen5 for
- *  3 days, gen6+gen7 for 14 days; each was noticed only because burn hit
- *  null against live volume).
+ *  3 days, gen6+gen7 for 14 days, gen8 for 8 days; each was noticed only
+ *  because burn hit null against live volume).
  *
  *  NOT OURS: 0xc1ff9fefdd86735bb14286caa796f72d90f4b0fc pushes the very same
  *  selector from its own rotating fleet, but `owner()` is 0x6792e60a… and it
@@ -87,8 +87,27 @@ const FAST_QUOTERS = [
   '0xeae24c729ee1a38554037e4ad25ef1e3c9e30be0', // gen4 — deployed 2026-08-08 23:36:31 UTC
   '0x103de0b5226a2a6d8b918d8192dc23248825bb55', // gen5 — deployed 2026-08-14 15:02:12 UTC → 2026-08-22 04:41 UTC
   '0xbb3f3cb75f3a652a3ee47c5cacceef794874e046', // gen6 — deployed 2026-08-21 12:49:27 UTC → ~2026-08-25 09:00 UTC
-  '0xf5b5f7f8ef84419c030dfc44771734810ea36d70', // gen7 — deployed 2026-08-25 10:58:54 UTC, active
+  '0xf5b5f7f8ef84419c030dfc44771734810ea36d70', // gen7 — deployed 2026-08-25 10:58:54 UTC → ~2026-09-21 18:10 UTC
+  '0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b', // gen8 — deployed 2026-09-21 17:57:30 UTC (block 106814526), active
 ] as const;
+
+/** FASTLANE ROUTE (gen8+): from ~2026-09-22 the keeper also pushes through
+ *  FastLane's AuctionHandler — `flashExecutionBid(bidAmount, txHashes,
+ *  targetBlockNumber, executeOnLoss, payBidOnFail, searcherToAddress,
+ *  searcherCallData)` (sel 0x0c7abd22, verified ABI) with a 2-wei bid and
+ *  searcherToAddress = the quoter, whose fastLaneCall (0xb3839cec) applies
+ *  the prices. That is ~2/3 of pushes at a 226,000 limit vs 45,000 direct —
+ *  most of the burn — and tx.to is the handler, so destination-keying alone
+ *  misses them. The handler is SHARED (28 searchers in a 600-block sample,
+ *  quoter ~11% of its txs), so it is matched on calldata word 5, never by
+ *  tx.to; receipts can't do it either — no log names the searcher and ~30%
+ *  of these bids revert log-less (still paying the full limit, and still
+ *  Hanji's: sent from the same rotating keeper fleet). Only gen8+ carry the
+ *  fastLaneCall selector (gen0–7 bytecode lacks it), so the route is scoped
+ *  to FASTLANE_QUOTERS: adding it rebuilds from gen8's creation day, not
+ *  the lifetime. Example: tx 0x644e6bbe…7a13. */
+const FASTLANE_AUCTION_HANDLER = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58' as const;
+const FASTLANE_QUOTERS = ['0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b'] as const;
 
 /** Hanji markets (team-provided, tokens verified on-chain via getConfig).
  *  `market` is the @shared pair symbol; base/quote are TOKENS registry keys. */
@@ -267,8 +286,17 @@ export function createHanjiAdapter(): VenueAdapter {
     // remains taker-paid and is deliberately not counted. NB: an earlier
     // build tracked 0x0000a8fd…8888 — another protocol's pool (mistaken
     // trace inference, since replaced by this team-confirmed destination).
+    // gen8+ pushes also arrive via the FastLane relay — see FASTLANE_AUCTION_HANDLER.
     gasSources() {
-      return [{ mode: 'blocks' as const, address: [...FAST_QUOTERS] }];
+      const fastLane = new Set<string>(FASTLANE_QUOTERS);
+      return [
+        { mode: 'blocks' as const, address: FAST_QUOTERS.filter((q) => !fastLane.has(q)) as `0x${string}`[] },
+        {
+          mode: 'blocks' as const,
+          address: [...FASTLANE_QUOTERS],
+          relays: [{ address: FASTLANE_AUCTION_HANDLER, selector: '0x0c7abd22', targetWord: 5 }],
+        },
+      ];
     },
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
