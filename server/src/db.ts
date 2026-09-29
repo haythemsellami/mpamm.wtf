@@ -671,7 +671,8 @@ export class VolumeStore {
    *  ran). Each batch commits alone (a crash mid-sweep loses nothing — the
    *  next sweep carries on) and is followed by a truncating checkpoint: that
    *  moves the batch into the main file's FREE pages and hands the WAL's bytes
-   *  back, so the sweep needs disk for one batch, never for the backlog. */
+   *  back, so the sweep needs disk for one batch, never for the backlog. A
+   *  checkpoint blocked by a reader ends the sweep early (done: false). */
   pruneFillsBefore(beforeMs: number, maxBatches = Number.POSITIVE_INFINITY): { removed: number; done: boolean } {
     let removed = 0, done = false, batch = PRUNE_BATCH_ROWS;
     for (let i = 0; i < maxBatches; i++) {
@@ -683,22 +684,27 @@ export class VolumeStore {
         // the sweep digs itself out; at the floor, give up loudly.
         if (!isDiskFull(e) || batch <= PRUNE_MIN_BATCH_ROWS) throw e;
         batch = Math.max(PRUNE_MIN_BATCH_ROWS, Math.floor(batch / 2));
-        this.checkpointWal();
+        if (!this.checkpointWal()) break; // a reader pins the WAL — retrying would only grow it
         continue;
       }
       removed += n;
-      if (n > 0) this.checkpointWal();
-      if (n < batch) { done = true; break; }
+      if (n < batch) { done = true; if (n > 0) this.checkpointWal(); break; }
+      // a busy checkpoint means this batch is still IN the WAL: stop, so one
+      // sweep never stacks more than one batch there (the leaderboard worker
+      // holds a snapshot across its passes). The next sweep carries on.
+      if (!this.checkpointWal()) break;
       if (batch < PRUNE_BATCH_ROWS) batch = Math.min(PRUNE_BATCH_ROWS, batch * 2); // space freed — grow back
     }
     return { removed, done };
   }
 
   /** Checkpoint and TRUNCATE the WAL, returning its bytes to the filesystem.
-   *  Best-effort: a reader on an old snapshot makes it partial (SQLite reports
-   *  busy rather than throwing) — the next call finishes the job. */
-  checkpointWal(): void {
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+   *  Returns false when a reader on an old snapshot blocked it — SQLite
+   *  reports that as `busy: 1`, it does NOT throw, and the WAL keeps every
+   *  frame (measured: 5 batches under a held read grew it 0.5 → 2.7 MB). */
+  checkpointWal(): boolean {
+    const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number } | undefined;
+    return !r?.busy;
   }
 
   /** Bytes held by free pages — space the file keeps after deletes/drops

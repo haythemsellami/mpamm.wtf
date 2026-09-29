@@ -89,6 +89,27 @@ describe('batched retention prune', () => {
   });
 });
 
+describe('busy checkpoint', () => {
+  it('a reader holding a snapshot stops the sweep after ONE batch — it never stacks deletes in the WAL', () => {
+    const path = fresh();
+    const store = new VolumeStore(path);
+    store.persistSnapshot([], {}, Array.from({ length: 5 * PRUNE_BATCH_ROWS }, (_, i) => fill(i, i + 1)));
+    store.checkpointWal();
+    // the leaderboard worker's shape: a read-only connection inside one transaction
+    const reader = new DatabaseSync(path, { readOnly: true });
+    reader.exec('BEGIN');
+    reader.prepare('SELECT count(*) FROM fills').get();
+    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: PRUNE_BATCH_ROWS, done: false });
+    expect(store.checkpointWal()).toBe(false);
+    reader.exec('ROLLBACK');
+    reader.close();
+    // reader gone → checkpoints succeed and the next sweep finishes the backlog
+    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: 4 * PRUNE_BATCH_ROWS, done: true });
+    expect(store.checkpointWal()).toBe(true);
+    store.close();
+  });
+});
+
 describe('disk-full back-off', () => {
   const full = () => Object.assign(new Error('database or disk is full'), { errcode: 13 });
 
