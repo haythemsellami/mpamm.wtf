@@ -688,7 +688,7 @@ export class VolumeStore {
         continue;
       }
       removed += n;
-      if (n < batch) { done = true; if (n > 0) this.checkpointWal(); break; }
+      if (n < batch) { done = this.checkpointWal(); break; }
       // a busy checkpoint means this batch is still IN the WAL: stop, so one
       // sweep never stacks more than one batch there (the leaderboard worker
       // holds a snapshot across its passes). The next sweep carries on.
