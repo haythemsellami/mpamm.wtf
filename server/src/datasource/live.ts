@@ -1095,7 +1095,7 @@ export class LiveDataSource extends BaseSource {
     this.persistTimer = setInterval(() => { void this.persist(); }, config.persistMs);
     // rolling retention: without it fills only aged out at boot, so uptime
     // alone grew the table past its window.
-    this.pruneTimer = setInterval(() => { void this.pruneSweep(); }, config.pruneIntervalMs);
+    this.pruneTimer = setInterval(() => this.kickMaintenance(), config.pruneIntervalMs);
     this.rediscoverTimer = setInterval(() => { void this.rediscover(); }, config.rediscoverMs);
 
     // The archive pool is NOT fatal for an outage. Deep crawls hold their
@@ -1492,9 +1492,11 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
-  /** Post-boot storage maintenance, all on the persistence worker so the
-   *  event loop (quotes, /api/health) keeps serving: drain the retention
-   *  backlog in bounded sweeps, then VACUUM once if the disk allows it. */
+  /** Storage maintenance, all on the persistence worker so the event loop
+   *  (quotes, /api/health) keeps serving: drain the retention backlog in
+   *  bounded sweeps, then VACUUM once if the disk allows it. Run after boot
+   *  AND by the retention timer — a boot sweep a reader blocked is finished
+   *  by a later tick, which must still reach the VACUUM. */
   private kickMaintenance(): void {
     void this.pruneSweep().then((drained) => { if (drained) return this.vacuumOnce(); });
   }

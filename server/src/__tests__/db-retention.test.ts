@@ -110,6 +110,23 @@ describe('busy checkpoint', () => {
   });
 });
 
+describe('busy checkpoint on the final batch', () => {
+  it('a backlog smaller than one batch under a held reader reports blocked, not a silent not-done', () => {
+    const path = fresh();
+    const store = new VolumeStore(path);
+    store.persistSnapshot([], {}, Array.from({ length: 10 }, (_, i) => fill(i, i + 1)));
+    store.checkpointWal();
+    const reader = new DatabaseSync(path, { readOnly: true });
+    reader.exec('BEGIN');
+    reader.prepare('SELECT count(*) FROM fills').get();
+    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: 10, done: false, blocked: true });
+    reader.exec('ROLLBACK');
+    reader.close();
+    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: 0, done: true });
+    store.close();
+  });
+});
+
 describe('disk-full back-off', () => {
   const full = () => Object.assign(new Error('database or disk is full'), { errcode: 13 });
 

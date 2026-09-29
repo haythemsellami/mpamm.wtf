@@ -547,18 +547,27 @@ describe('live startup archive gate', () => {
     source.store.close();
   });
 
-  it('a sweep blocked by a reader stops and does not VACUUM', async () => {
+  it('a sweep blocked by a reader stops without VACUUM; the timer tick that drains it still VACUUMs', async () => {
+    vi.useFakeTimers();
     const { source } = await setup();
+    const sweeps: Array<{ removed: number; done: boolean; blocked?: true }> = [{ removed: 1_000, done: false, blocked: true }];
     const writer = {
-      pruneFills: vi.fn(async () => ({ removed: 1_000, done: false, blocked: true as const })),
-      vacuumIfRoom: vi.fn(),
+      pruneFills: vi.fn(async () => sweeps.shift()!),
+      vacuumIfRoom: vi.fn(async () => ({ plan: 'defer' as const, freeBytes: 0, liveBytes: 0, availBytes: 0, ms: 0 })),
     };
     source.storeWriter = writer;
-    expect(await source.pruneSweep()).toBe(false);
+    source.kickMaintenance(); // boot: pinned → stops at once, no retry spin
+    await vi.runAllTimersAsync();
     expect(writer.pruneFills).toHaveBeenCalledTimes(1);
-    source.kickMaintenance();
-    await new Promise((r) => setTimeout(r, 0));
     expect(writer.vacuumIfRoom).not.toHaveBeenCalled();
+    // the retention timer fires (the same entry point) with the reader gone
+    source.pruneTimer = setInterval(() => source.kickMaintenance(), 60_000);
+    sweeps.push({ removed: 500, done: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    clearInterval(source.pruneTimer);
+    expect(writer.pruneFills).toHaveBeenCalledTimes(2);
+    expect(writer.vacuumIfRoom).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
     source.store.close();
   });
 

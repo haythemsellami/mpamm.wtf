@@ -688,7 +688,12 @@ export class VolumeStore {
         continue;
       }
       removed += n;
-      if (n < batch) { done = this.checkpointWal(); break; }
+      if (n < batch) {
+        // backlog exhausted — but a pinned checkpoint leaves this batch in the
+        // WAL, so report it like any other pin (the caller waits, not spins).
+        if (this.checkpointWal()) done = true; else blocked = true;
+        break;
+      }
       // a busy checkpoint means this batch is still IN the WAL: stop, so one
       // sweep never stacks more than one batch there (the leaderboard worker
       // holds a snapshot across its passes). The next sweep carries on.
