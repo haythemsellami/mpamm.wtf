@@ -7,7 +7,7 @@ import { unlinkSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PRUNE_BATCH_ROWS, VolumeStore, retentionCutoffMs } from '../db.js';
+import { PRUNE_BATCH_ROWS, VACUUM_MIN_FREE_BYTES, VolumeStore, retentionCutoffMs, vacuumPlan } from '../db.js';
 
 const paths: string[] = [];
 const fresh = () => {
@@ -133,5 +133,44 @@ describe('retentionCutoffMs', () => {
   it('keeps at least the 30-day leaderboard window at the default 31', () => {
     const now = Date.parse('2026-09-29T23:59:59Z');
     expect(retentionCutoffMs(now, 31)).toBeLessThanOrEqual(now - 30 * 86_400_000);
+  });
+});
+
+describe('boot VACUUM capacity gate', () => {
+  const MB = 1024 * 1024;
+  const MIN = VACUUM_MIN_FREE_BYTES;
+
+  it('skips when too little is reclaimable, whatever the disk', () => {
+    expect(vacuumPlan(MIN - 1, 500 * MB, 100_000 * MB)).toBe('skip');
+  });
+
+  it('defers when the disk cannot hold a rewrite of the LIVE data plus slack', () => {
+    // 1 GB file, 600 MB free pages → 424 MB live; needs 424×1.2 + 64 ≈ 573 MB
+    const file = 1024 * MB, free = 600 * MB, live = file - free;
+    const need = live * 1.2 + MIN;
+    expect(vacuumPlan(free, file, need - 1)).toBe('defer');
+    expect(vacuumPlan(free, file, 0)).toBe('defer'); // the prod crash state
+  });
+
+  it('runs at exactly enough room, and with plenty', () => {
+    const file = 1024 * MB, free = 600 * MB;
+    const need = (file - free) * 1.2 + MIN;
+    expect(vacuumPlan(free, file, need)).toBe('run');
+    expect(vacuumPlan(free, file, 5000 * MB)).toBe('run');
+  });
+
+  it('vacuumIfRoom calls VACUUM only on a run plan', () => {
+    const path = fresh();
+    const store = new VolumeStore(path);
+    const spy = vi.spyOn(store, 'vacuum');
+    // stub the page accounting: 100 MB file, 80 MB of it free pages (20 MB live)
+    vi.spyOn(store, 'freeBytes').mockReturnValue(80 * MB);
+    vi.spyOn(store, 'fileBytes').mockReturnValue(100 * MB);
+    expect(store.vacuumIfRoom(10 * MB)).toMatchObject({ plan: 'defer', liveBytes: 20 * MB });
+    expect(spy).not.toHaveBeenCalled();
+    expect(store.vacuumIfRoom(1000 * MB).plan).toBe('run');
+    expect(spy).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+    store.close();
   });
 });

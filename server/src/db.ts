@@ -46,6 +46,21 @@ export function retentionCutoffMs(nowMs: number, days: number): number {
   return t - (t % 86_400_000);
 }
 
+/** free pages worth a VACUUM rewrite (below this, SQLite's own reuse is enough). */
+export const VACUUM_MIN_FREE_BYTES = 64 * 1024 * 1024;
+
+/** Whether a boot may VACUUM. VACUUM writes a full copy of the LIVE data
+ *  before swapping it in, so it needs that much free disk plus slack —
+ *  running out mid-rewrite on a nearly full disk is exactly the failure the
+ *  retention work exists to avoid. 'skip': too little to reclaim (SQLite's
+ *  own page reuse suffices); 'defer': worth it, but the disk can't hold the
+ *  rewrite yet (retried next boot; the file stops growing meanwhile). */
+export function vacuumPlan(freeBytes: number, fileBytes: number, availBytes: number): 'skip' | 'defer' | 'run' {
+  if (freeBytes < VACUUM_MIN_FREE_BYTES) return 'skip';
+  const liveBytes = fileBytes - freeBytes;
+  return availBytes < liveBytes * 1.2 + VACUUM_MIN_FREE_BYTES ? 'defer' : 'run';
+}
+
 /** idle-WAL cap: a checkpoint truncates the WAL file back to this size. */
 const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
 /** rows per retention-prune transaction (see pruneFills). Sized for a FULL
@@ -692,6 +707,16 @@ export class VolumeStore {
     const pages = (this.db.prepare('PRAGMA page_count').get() as { page_count: number }).page_count;
     const size = (this.db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size;
     return pages * size;
+  }
+
+  /** VACUUM only when vacuumPlan allows it for `availBytes` of free disk. */
+  vacuumIfRoom(availBytes: number): { plan: 'skip' | 'defer' | 'run'; freeBytes: number; liveBytes: number; availBytes: number; ms: number } {
+    const freeBytes = this.freeBytes();
+    const fileBytes = this.fileBytes();
+    const plan = vacuumPlan(freeBytes, fileBytes, availBytes);
+    const t0 = Date.now();
+    if (plan === 'run') this.vacuum();
+    return { plan, freeBytes, liveBytes: fileBytes - freeBytes, availBytes, ms: Date.now() - t0 };
   }
 
   /** Rewrite the file without its free pages. Writes a full copy of the live

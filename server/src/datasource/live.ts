@@ -25,9 +25,6 @@ import {
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, retentionCutoffMs, type ResetDeletes } from '../db.js';
-
-/** free pages worth a VACUUM rewrite (below this, SQLite's own reuse is enough). */
-const VACUUM_MIN_FREE_BYTES = 64 * 1024 * 1024;
 import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
 import { NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
@@ -1495,25 +1492,14 @@ export class LiveDataSource extends BaseSource {
     catch (e) { this.noteOnce('store.persist.failed', `retention sweep failed (${(e as Error).message}); retried next interval`); }
   }
 
-  /** VACUUM once the file carries a lot of free pages (a retention drop or a
-   *  retired table), but ONLY when the disk has room for the rewrite — it
-   *  copies the live data first, and running out mid-VACUUM on a full disk is
-   *  exactly the failure this avoids. Skipped → retried on the next boot;
-   *  meanwhile SQLite reuses the free pages, so the file stops growing. */
+  /** Boot-time VACUUM behind the disk-capacity gate (VolumeStore.vacuumIfRoom). */
   private maybeVacuum(): void {
     try {
-      const free = this.store.freeBytes();
-      if (free < VACUUM_MIN_FREE_BYTES) return;
-      const live = this.store.fileBytes() - free;
       const fs = statfsSync(dirname(config.dbPath));
-      const avail = Number(fs.bavail) * Number(fs.bsize);
-      if (avail < live * 1.2 + VACUUM_MIN_FREE_BYTES) {
-        console.log(`[mpamm] vacuum deferred: ${(free / 1e6).toFixed(0)} MB reclaimable, but only ${(avail / 1e6).toFixed(0)} MB free for a ${(live / 1e6).toFixed(0)} MB rewrite`);
-        return;
-      }
-      const t0 = Date.now();
-      this.store.vacuum();
-      console.log(`[mpamm] vacuum: reclaimed ${(free / 1e6).toFixed(0)} MB in ${Date.now() - t0}ms`);
+      const r = this.store.vacuumIfRoom(Number(fs.bavail) * Number(fs.bsize));
+      const mb = (b: number) => (b / 1e6).toFixed(0);
+      if (r.plan === 'defer') console.log(`[mpamm] vacuum deferred: ${mb(r.freeBytes)} MB reclaimable, but only ${mb(r.availBytes)} MB free for a ${mb(r.liveBytes)} MB rewrite`);
+      if (r.plan === 'run') console.log(`[mpamm] vacuum: reclaimed ${mb(r.freeBytes)} MB in ${r.ms}ms`);
     } catch (e) {
       console.log(`[mpamm] vacuum skipped (${(e as Error).message})`);
     }
