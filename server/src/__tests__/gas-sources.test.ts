@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bootstrapRebuildDay, classifyGasSourceChange, coverageEvidenceWindow, gasSourcesSignature, hasCoverageEvidence } from '../gas.js';
+import { bootstrapRebuildDay, classifyGasSourceChange, coverageEvidenceWindow, gasSourcesSignature, hasCoverageEvidence, sigAddresses } from '../gas.js';
 import { VolumeStore } from '../db.js';
 import type { GasSource } from '../venues/adapter.js';
 
@@ -27,6 +27,35 @@ describe('gasSourcesSignature', () => {
     const a: GasSource[] = [{ mode: 'blocks', address: [A, B] }];
     const b: GasSource[] = [{ mode: 'blocks', address: ['0x48CBA27861983367C3FB063877B144A628E2B48B', A, A] }];
     expect(gasSourcesSignature(a)).toBe(gasSourcesSignature(b));
+  });
+});
+
+describe('relay routes in the signature', () => {
+  const R = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58' as const;
+  const relay = { address: '0xD32EdF6642D917DbBE7B8BF8e5d6F5df6a9FFF58' as const, selector: '0x0C7ABD22' as const, targetWord: 5 };
+
+  it('adds one target@relay token per target, canonicalised', () => {
+    const sig = gasSourcesSignature([{ mode: 'blocks', address: [A, B], relays: [relay] }]);
+    expect(sig).toBe([A, B, `${A}@${R}:0x0c7abd22:5`, `${B}@${R}:0x0c7abd22:5`].sort().join(','));
+    expect(sigAddresses(sig.split(','))).toEqual(expect.arrayContaining([A, B]));
+    expect(sigAddresses(sig.split(','))).toHaveLength(2);
+  });
+
+  it('a relay binds only to its OWN source\'s targets', () => {
+    const sig = gasSourcesSignature([{ mode: 'blocks', address: A }, { mode: 'blocks', address: B, relays: [relay] }]);
+    expect(sig).not.toContain(`${A}@`);
+    expect(sig).toContain(`${B}@${R}`);
+  });
+
+  it('adding a relay to an existing target → partial, bounded by that TARGET (not the shared relay)', () => {
+    const before = gasSourcesSignature([{ mode: 'blocks', address: [A, B] }]);
+    const after = gasSourcesSignature([{ mode: 'blocks', address: A }, { mode: 'blocks', address: B, relays: [relay] }]);
+    expect(classifyGasSourceChange(before, after)).toEqual({ kind: 'partial', added: [B] });
+  });
+
+  it('dropping a relay → full (its routed share cannot be unmixed)', () => {
+    const withRelay = gasSourcesSignature([{ mode: 'blocks', address: B, relays: [relay] }]);
+    expect(classifyGasSourceChange(withRelay, B).kind).toBe('full');
   });
 });
 

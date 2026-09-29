@@ -14,12 +14,28 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** Bump to re-run the one-time bootstrap coverage verification (see pass()). */
 const GAS_COVERAGE_EPOCH = '2';
 
+const sourceAddrs = (s: GasSource) => (Array.isArray(s.address) ? s.address : [s.address]).map((x) => x.toLowerCase());
+
 /** Canonical fingerprint of a venue's declared gas destinations: lowercased,
  *  deduped, sorted, comma-joined — so reordering, checksum-casing, or listing
- *  an address twice is NOT a change. */
+ *  an address twice is NOT a change. A relay route contributes one
+ *  `target@relay:selector:word` token per target it covers: the token names
+ *  its target, so adding a relay dates like adding a destination (no routed
+ *  tx can predate the target's creation) — see sigAddresses. */
 export function gasSourcesSignature(sources: GasSource[]): string {
-  const addrs = sources.flatMap((s) => (Array.isArray(s.address) ? s.address : [s.address]));
-  return [...new Set(addrs.map((x) => x.toLowerCase()))].sort().join(',');
+  const tokens = sources.flatMap((s) => {
+    const addrs = sourceAddrs(s);
+    const relays = s.mode === 'blocks' ? s.relays ?? [] : [];
+    return [...addrs, ...relays.flatMap((r) =>
+      addrs.map((a) => `${a}@${r.address.toLowerCase()}:${r.selector.toLowerCase()}:${r.targetWord}`))];
+  });
+  return [...new Set(tokens)].sort().join(',');
+}
+
+/** The distinct destination contracts named by signature tokens (a relay
+ *  token `target@…` names its target). */
+export function sigAddresses(tokens: string[]): `0x${string}`[] {
+  return [...new Set(tokens.map((t) => t.split('@')[0]).filter(Boolean))] as `0x${string}`[];
 }
 
 /** How a destination-set change invalidates the accrued series.
@@ -32,11 +48,12 @@ export function gasSourcesSignature(sources: GasSource[]): string {
 export function classifyGasSourceChange(prevSig: string, sig: string): { kind: 'none' | 'partial' | 'full'; added: `0x${string}`[] } {
   const prev = new Set(prevSig.split(',').filter(Boolean));
   const next = new Set(sig.split(',').filter(Boolean));
-  const added = [...next].filter((x) => !prev.has(x)) as `0x${string}`[];
+  const added = [...next].filter((x) => !prev.has(x));
   const removed = [...prev].filter((x) => !next.has(x));
   if (!added.length && !removed.length) return { kind: 'none', added: [] };
   if (removed.length || !added.length) return { kind: 'full', added: [] };
-  return { kind: 'partial', added };
+  // an added relay token is bounded by its TARGET's creation (sigAddresses)
+  return { kind: 'partial', added: sigAddresses(added) };
 }
 
 /** Bootstrap boundary for a series that predates destination fingerprinting:
@@ -74,6 +91,30 @@ export function hasCoverageEvidence(window: string[], nonzeroDays: Set<string>):
   return window.length > 0 && window.every((d) => nonzeroDays.has(d));
 }
 
+/** A GasRelay normalised for matching: lowercased, bound to its source's targets. */
+interface BlockRelay { to: string; selector: string; word: number; targets: ReadonlySet<string> }
+
+/** Hashes of the block's txs that reach a target THROUGH a relay: tx.to is the
+ *  relay, calldata opens with its selector, and head word `word` is a clean
+ *  address (upper 12 bytes zero) among the relay's targets. */
+export function relayedTxHashes(txs: readonly any[], relays: readonly BlockRelay[]): Set<string> {
+  const out = new Set<string>();
+  for (const tx of txs) {
+    const to = String(tx?.to ?? '').toLowerCase();
+    const input = String(tx?.input ?? '').toLowerCase();
+    for (const r of relays) {
+      if (to !== r.to || !input.startsWith(r.selector)) continue;
+      const at = r.selector.length + 64 * r.word;
+      const w = input.slice(at, at + 64);
+      if (w.length === 64 && /^0{24}$/.test(w.slice(0, 24)) && r.targets.has(`0x${w.slice(24)}`)) {
+        out.add(String(tx.hash).toLowerCase());
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * GasTracker — QUOTE_UPDATE_BURN accrual: the MON each venue's own keeper
  * spends keeping its quotes fresh, bucketed per (UTC day, venue) into
@@ -95,7 +136,9 @@ export function hasCoverageEvidence(window: string[], nonzeroDays: Set<string>):
  *              a flat-fee keeper would give.
  *  - 'blocks': no events (POE setData) → sampled eth_getBlockReceipts scaled
  *              by stride; counts AND cost estimated. Only sound for a
- *              near-constant-cadence keeper.
+ *              near-constant-cadence keeper. Updates routed through a shared
+ *              relay (GasRelay) are matched on the sample block's calldata,
+ *              fetched only for venues that declare one.
  * Every venue with resolved sources is therefore an `approx` venue (UI shows
  * ≈ on the MON figure; logs-mode tx counts stay exact and unmarked).
  *
@@ -287,8 +330,8 @@ export class GasTracker {
       try {
         const anchor = this.store.getMeta(fromKey) ?? sinceDay;
         const days: string[] = [];
-        for (const addr of sig.split(',').filter(Boolean)) {
-          const cb = await this.creationBlock(addr as `0x${string}`, head);
+        for (const addr of sigAddresses(sig.split(','))) {
+          const cb = await this.creationBlock(addr, head);
           if (cb === null) continue; // undeployed → contributes no txs
           const blk = await this.rpc(() => this.client.getBlock({ blockNumber: cb }));
           days.push(utcDay(Number(blk.timestamp) * 1000));
@@ -303,7 +346,7 @@ export class GasTracker {
           // this gate the epoch would wipe its whole series for nothing).
           // Multi-destination venues always rebuild: an older destination's
           // burn would mask the newer one's hole (the Hanji v1/v2 trap).
-          const single = sig.split(',').filter(Boolean).length === 1;
+          const single = sigAddresses(sig.split(',')).length === 1;
           const window = coverageEvidenceWindow(day, utcDay());
           const covered = single && window.length > 0
             && hasCoverageEvidence(window, this.store.gasNonzeroDays(vid, window[0], window[window.length - 1]));
@@ -342,10 +385,11 @@ export class GasTracker {
     else {
       // one cursor, N destinations: a migrating venue lists old + new update
       // contracts and the single block walk counts txs to any of them.
-      const addrs = new Set(sources
-        .flatMap((s) => (Array.isArray(s.address) ? s.address : [s.address]))
-        .map((x) => x.toLowerCase()));
-      await this.tailBlocks(vid, addrs, cursor, head, cursorKey);
+      const addrs = new Set(sources.flatMap(sourceAddrs));
+      // a relay only ever routes to the targets of the source declaring it
+      const relays: BlockRelay[] = sources.flatMap((s) => (s.mode === 'blocks' ? s.relays ?? [] : [])
+        .map((r) => ({ to: r.address.toLowerCase(), selector: r.selector.toLowerCase(), word: r.targetWord, targets: new Set(sourceAddrs(s)) })));
+      await this.tailBlocks(vid, addrs, relays, cursor, head, cursorKey);
     }
   }
 
@@ -550,7 +594,7 @@ export class GasTracker {
   }
 
   // ── blocks mode: no events — sample block receipts, scale by stride ────────
-  private async tailBlocks(vid: string, targets: ReadonlySet<string>, cursor: bigint, head: bigint, cursorKey: string): Promise<void> {
+  private async tailBlocks(vid: string, targets: ReadonlySet<string>, relays: readonly BlockRelay[], cursor: bigint, head: bigint, cursorKey: string): Promise<void> {
     const stride = BigInt(Math.max(1, config.gasSampleStrideBlocks));
     const acc = new Map<string, { mon: number; txs: number }>();
     let sinceCommit = 0;
@@ -570,10 +614,13 @@ export class GasTracker {
         try {
           const [receipts, block] = await allPreferAvailability<any>([
             this.rpc(() => this.client.request({ method: 'eth_getBlockReceipts', params: [`0x${cursor.toString(16)}`] }) as Promise<any>),
-            this.rpc(() => this.client.getBlock({ blockNumber: cursor }) as Promise<any>),
+            // full txs only when a relay needs calldata — otherwise just the header
+            this.rpc(() => this.client.getBlock({ blockNumber: cursor, includeTransactions: relays.length > 0 }) as Promise<any>),
           ]);
+          const relayed = relays.length ? relayedTxHashes(block.transactions ?? [], relays) : new Set<string>();
           // includes reverted txs on purpose — Monad charges their full limit too.
-          const mine = ((receipts ?? []) as any[]).filter((rc: any) => targets.has(String(rc.to ?? '').toLowerCase()));
+          const mine = ((receipts ?? []) as any[]).filter((rc: any) => targets.has(String(rc.to ?? '').toLowerCase())
+            || relayed.has(String(rc.transactionHash).toLowerCase()));
           const mon = mine.reduce((a: number, rc: any) => a + Number(BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice)) / 1e18, 0);
           const day = utcDay(Number(block.timestamp) * 1000);
           const e = acc.get(day) ?? { mon: 0, txs: 0 };

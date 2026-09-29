@@ -145,7 +145,7 @@ if (meta.role === 'baseline') {
 if (adapter.gasSources) {
   try {
     const gs = adapter.gasSources();
-    pass(`gasSources(): ${gs.map((g) => `${g.mode}@${Array.isArray(g.address) ? g.address.length + ' addrs' : g.address.slice(0, 10)}…`).join(', ')}`);
+    pass(`gasSources(): ${gs.map((g) => `${g.mode}@${Array.isArray(g.address) ? g.address.length + ' addrs' : g.address.slice(0, 10)}…${g.mode === 'blocks' && g.relays?.length ? ` +${g.relays.length} relay` : ''}`).join(', ')}`);
   } catch {
     warn('gasSources() threw (destination not resolved yet?) — the gas tracker will retry after discovery');
   }

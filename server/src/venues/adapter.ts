@@ -90,13 +90,33 @@ export interface EntryPoint {
  *              only sound for a near-constant-cadence keeper (POE pushes
  *              every block).
  *
+ *              `relays` additionally counts updates that reach `address`
+ *              THROUGH a shared forwarder (see GasRelay).
+ *
  * A venue whose quoting cost is NOT self-funded (external oracle, taker-paid
  * JIT repricing) simply doesn't implement gasSources — absence is the honest
  * value, not zero.
  */
 export type GasSource =
   | { mode: 'logs'; address: `0x${string}` | `0x${string}`[]; events?: readonly unknown[]; topic0?: `0x${string}` }
-  | { mode: 'blocks'; address: `0x${string}` | `0x${string}`[] };
+  | { mode: 'blocks'; address: `0x${string}` | `0x${string}`[]; relays?: readonly GasRelay[] };
+
+/**
+ * A SHARED contract some of a venue's update txs are sent to instead of the
+ * update contract itself (e.g. an MEV auction handler that forwards the call
+ * to a named searcher). tx.to alone can't attribute these — other searchers
+ * use the same relay — and the receipt may carry nothing naming the target
+ * (reverted bids have no logs, yet still pay gas_limit). So the match is on
+ * CALLDATA: tx.to == `address`, the 4-byte `selector`, and the static head
+ * word `targetWord` (0-based, after the selector) holding one of the
+ * source's own `address` entries. The relay is never an owned destination —
+ * it is not claimed in the cross-venue ownership check.
+ */
+export interface GasRelay {
+  address: `0x${string}`;
+  selector: `0x${string}`;
+  targetWord: number;
+}
 
 /** Optional historical seed returned by `backfill()`. */
 export interface AdapterBackfill {
