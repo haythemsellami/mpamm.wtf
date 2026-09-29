@@ -26,35 +26,64 @@ const SCHEMA_VERSION = '3';
  * Version of the MARKOUT MODEL — what a fill's `markouts_bps` were marked
  * against. Bump when the benchmark itself changes meaning (not on schema
  * changes). On mismatch, persisted fills keep their volume/tape data and their
- * markouts are either REPLAYED from the persisted `mid_history` curve (when the
- * stored mids remain a valid mark under the new model — set
- * `REMARK_FROM_MID_HISTORY`) or reset to nulls (when the mid definition itself
- * changed, so the stored curve is old-model too). Either way old-model bps are
- * never mixed with new-model bps in the markout/leaderboard stats, and fills
- * young enough re-age naturally against the live mids.
+ * markouts are reset to nulls, so old-model bps are never mixed with new-model
+ * bps in the markout/leaderboard stats; fills young enough re-age naturally
+ * against the live mids. (A persisted every-5s per-pair mid curve used to
+ * allow replaying them instead — ~half the prod DB for a path never taken; it
+ * filled the 1 GB disk and crash-looped boot on 2026-09-29, so it is gone.)
  *
  *  'pair-mid-1' — markouts vs the PAIR-terms CEX mid (wrap basis + stable
  *                 cross), replacing raw USDT mids (~10bps different on USDC
  *                 pairs — old and new values are not comparable).
  */
 const MARKOUT_MODEL_VERSION = 'pair-mid-1';
-/**
- * Set true when bumping MARKOUT_MODEL_VERSION IF the persisted `mid_history`
- * rows (pair-terms mids recorded every ~PERSIST_MS) are still a valid mark
- * under the NEW model — e.g. the markout formula/horizons changed but the mid
- * didn't. Retained fills are then RECOMPUTED per horizon from the stored curve
- * (nearest sample within ±MID_REPLAY_TOL_MS; null when no sample is close
- * enough) instead of nulled. Leave false when the mid definition itself changes.
- */
-const REMARK_FROM_MID_HISTORY = false; // 'pair-mid-1' changed the mid definition — no valid history predates it
-/** how far a persisted mid sample may sit from a horizon's mark time and still
- *  be used in a replay (persist cadence is ~5s → one interval + slack). */
-const MID_REPLAY_TOL_MS = 6_000;
+/** Retention cutoff: the UTC day start `days` days back. Day-aligned so the
+ *  oldest retained day is always COMPLETE — reconcileSwapCounts rewrites a
+ *  day's swap count from its retained fills, and a mid-day cutoff made the
+ *  boundary day's count shrink on every restart. */
+export function retentionCutoffMs(nowMs: number, days: number): number {
+  const t = nowMs - days * 86_400_000;
+  return t - (t % 86_400_000);
+}
+
+/** free pages worth a VACUUM rewrite (below this, SQLite's own reuse is enough). */
+export const VACUUM_MIN_FREE_BYTES = 64 * 1024 * 1024;
+
+/** Free disk a WAL-mode VACUUM needs, per byte of LIVE data: it builds a
+ *  temp copy of the live data, then writes the rebuilt pages through the WAL
+ *  — TWO copies at peak when the temp file shares the DB's disk (measured on
+ *  a 20.6 MB-live DB: failed at 34 MB free, passed at 42 MB; ~1× when temp
+ *  lives elsewhere). Where SQLite puts its temp file on the host isn't ours
+ *  to know, so assume the worst: both copies + 10% slack each. */
+export const VACUUM_SPACE_FACTOR = 2.2;
+
+/** Whether a boot may VACUUM — running out mid-rewrite on a nearly full disk
+ *  is exactly the failure the retention work exists to avoid. 'skip': too
+ *  little to reclaim (SQLite's own page reuse suffices); 'defer': worth it,
+ *  but the disk can't hold the rewrite yet (retried next boot; the file stops
+ *  growing meanwhile). */
+export function vacuumPlan(freeBytes: number, fileBytes: number, availBytes: number): 'skip' | 'defer' | 'run' {
+  if (freeBytes < VACUUM_MIN_FREE_BYTES) return 'skip';
+  const liveBytes = fileBytes - freeBytes;
+  return availBytes < liveBytes * VACUUM_SPACE_FACTOR + VACUUM_MIN_FREE_BYTES ? 'defer' : 'run';
+}
+
+/** idle-WAL cap: a checkpoint truncates the WAL file back to this size. */
+const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
+/** rows per retention-prune transaction (see pruneFills). Sized for a FULL
+ *  disk: one batch's WAL must fit in whatever slack is left (measured: a
+ *  5k-row batch needed >4 MB of WAL and failed at 4 MB free). */
+export const PRUNE_BATCH_ROWS = 1_000;
+/** smallest batch the disk-full back-off shrinks to before giving up. */
+const PRUNE_MIN_BATCH_ROWS = 25;
+/** SQLITE_FULL, or an IOERR from failing to grow the WAL/-shm (errcode 4874
+ *  = IOERR_SHMSIZE was the second prod crash signature). */
+const isDiskFull = (e: unknown): boolean => {
+  const code = Number((e as { errcode?: unknown })?.errcode) & 0xff;
+  return code === 13 || code === 10;
+};
 const NULL_MARKOUTS_JSON = JSON.stringify(MARKOUT_HORIZONS.map(() => null));
 const nullMarkouts = (): (number | null)[] => MARKOUT_HORIZONS.map(() => null);
-
-/** one persisted point of a pair's CEX mid curve (pair terms). */
-export interface MidPoint { ts: number; market: string; mid: number }
 
 /**
  * Which rows a venue reset may delete. An omitted key leaves that table
@@ -83,7 +112,6 @@ export class VolumeStore {
   private dayMetaStmt!: Stmt;
   private metaStmt!: Stmt;
   private fillStmt!: Stmt;
-  private midStmt!: Stmt;
   private gasStmt!: Stmt;
 
   constructor(path = 'data/mpamm.db', readOnly = false) {
@@ -98,6 +126,19 @@ export class VolumeStore {
     // move to the persistence worker. WAL lets those readers proceed while the
     // sole writer commits, without adding a main-thread busy wait.
     this.db.exec('PRAGMA journal_mode = WAL');
+    // Disk-space hygiene FIRST, before any other write — so a build can boot
+    // on a disk with almost no slack left (prod, 2026-09-29: crash-looped at
+    // 1 GB). The RESTART checkpoint rewinds the WAL a crashed process left
+    // behind, so the DROP rewrites bytes that file already owns instead of
+    // needing new ones; dropping only relinks the table's pages onto the
+    // freelist (a few pages of WAL); the truncating checkpoint then hands the
+    // WAL back to the filesystem. journal_size_limit stops an idle WAL from
+    // sitting at its high-water mark forever. mid_history is retired
+    // (MARKOUT_MODEL_VERSION).
+    this.db.exec(`PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES}`);
+    this.db.exec('PRAGMA wal_checkpoint(RESTART)');
+    this.db.exec('DROP TABLE IF EXISTS mid_history');
+    this.checkpointWal();
 
     // meta first (holds the schema version + the indexer cursor)
     this.db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);`);
@@ -107,7 +148,7 @@ export class VolumeStore {
       // so the indexer cold-starts (the venue registry defines the new shape).
       // daily_gas included: clearing meta clears the gas cursors, and additive
       // accrual over surviving rows would double-count on the re-scan.
-      this.db.exec(`DROP TABLE IF EXISTS daily_volume; DROP TABLE IF EXISTS fills; DROP TABLE IF EXISTS day_meta; DROP TABLE IF EXISTS mid_history; DROP TABLE IF EXISTS daily_gas; DELETE FROM meta;`);
+      this.db.exec(`DROP TABLE IF EXISTS daily_volume; DROP TABLE IF EXISTS fills; DROP TABLE IF EXISTS day_meta; DROP TABLE IF EXISTS daily_gas; DELETE FROM meta;`);
     }
 
     this.db.exec(`
@@ -143,15 +184,6 @@ export class VolumeStore {
       CREATE INDEX IF NOT EXISTS fills_ts ON fills (ts);
       CREATE INDEX IF NOT EXISTS fills_venue_block ON fills (venue_id, block_number);
       CREATE INDEX IF NOT EXISTS fills_venue_ts ON fills (venue_id, ts);
-      -- per-pair CEX mid curve (pair terms), sampled every ~PERSIST_MS: lets a
-      -- future markout-model bump REPLAY retained fills' markouts instead of
-      -- nulling them (see REMARK_FROM_MID_HISTORY). Same retention as fills.
-      CREATE TABLE IF NOT EXISTS mid_history (
-        market TEXT    NOT NULL,
-        ts     INTEGER NOT NULL,
-        mid    REAL    NOT NULL,
-        PRIMARY KEY (market, ts)
-      ) WITHOUT ROWID;
       -- QUOTE_UPDATE_BURN: per-venue quote-update gas per UTC day. mon is the
       -- MON actually charged (Monad charges gas_limit; receipts report
       -- gasUsed == limit, so gasUsed × effectiveGasPrice is exact). Additive
@@ -186,18 +218,12 @@ export class VolumeStore {
     this.db.prepare(`INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(SCHEMA_VERSION);
 
     // markout-model migration: retained fills marked under an older model keep
-    // their volume/tape data, but their markouts are REPLAYED from the persisted
-    // mid curve (when the curve is still a valid mark — REMARK_FROM_MID_HISTORY)
-    // or nulled — old-model bps must never mix with new-model bps in the stats.
+    // their volume/tape data, but their markouts are nulled — old-model bps
+    // must never mix with new-model bps in the stats.
     const mkVer = (this.db.prepare(`SELECT value FROM meta WHERE key = 'markout_model_version'`).get() as { value: string } | undefined)?.value;
     if (mkVer !== MARKOUT_MODEL_VERSION) {
-      if (REMARK_FROM_MID_HISTORY) {
-        const { remarked, nulled } = this.remarkRetainedFills();
-        console.log(`[mpamm] markout model → ${MARKOUT_MODEL_VERSION}: replayed ${remarked} fill(s) from mid_history, nulled ${nulled}`);
-      } else {
-        const info = this.db.prepare(`UPDATE fills SET markouts_bps = ? WHERE markouts_bps != ?`).run(NULL_MARKOUTS_JSON, NULL_MARKOUTS_JSON);
-        if (Number(info.changes) > 0) console.log(`[mpamm] markout model → ${MARKOUT_MODEL_VERSION}: reset markouts on ${info.changes} retained fill(s)`);
-      }
+      const info = this.db.prepare(`UPDATE fills SET markouts_bps = ? WHERE markouts_bps != ?`).run(NULL_MARKOUTS_JSON, NULL_MARKOUTS_JSON);
+      if (Number(info.changes) > 0) console.log(`[mpamm] markout model → ${MARKOUT_MODEL_VERSION}: reset markouts on ${info.changes} retained fill(s)`);
       this.db.prepare(`INSERT INTO meta (key, value) VALUES ('markout_model_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(MARKOUT_MODEL_VERSION);
     }
 
@@ -212,9 +238,6 @@ export class VolumeStore {
       INSERT INTO fills (id, ts, block_number, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label, pool, markouts_bps, router)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET markouts_bps = excluded.markouts_bps, px_approx = excluded.px_approx`);
-    this.midStmt = this.db.prepare(`
-      INSERT INTO mid_history (market, ts, mid) VALUES (?, ?, ?)
-      ON CONFLICT(market, ts) DO UPDATE SET mid = excluded.mid`);
     this.gasStmt = this.db.prepare(`
       INSERT INTO daily_gas (utc_day, venue_id, mon, txs) VALUES (?, ?, ?, ?)
       ON CONFLICT(utc_day, venue_id) DO UPDATE SET mon = mon + excluded.mon, txs = txs + excluded.txs`);
@@ -450,14 +473,13 @@ export class VolumeStore {
    * cursor, which a gap-fill on the next boot would otherwise re-count (fills
    * dedupe by their deterministic txHash:logIndex id).
    */
-  persistSnapshot(days: DailyVolume[], meta: Record<string, string>, fills: Fill[], mids: MidPoint[] = []): void {
+  persistSnapshot(days: DailyVolume[], meta: Record<string, string>, fills: Fill[]): void {
     this.assertWritable();
     this.db.exec('BEGIN');
     try {
       for (const d of days) this.runDay(d);
       for (const [k, v] of Object.entries(meta)) this.metaStmt.run(k, v);
       for (const f of fills) this.runFill(f);
-      for (const m of mids) this.midStmt.run(m.market, m.ts, m.mid);
       this.db.exec('COMMIT');
     } catch (e) {
       this.db.exec('ROLLBACK');
@@ -632,63 +654,92 @@ export class VolumeStore {
     }
   }
 
-  /** Drop fills older than `beforeMs` (retention). Returns rows removed. */
-  pruneFills(beforeMs: number): number {
+  /** Drop up to `limit` fills older than `beforeMs` (retention), oldest
+   *  first. Batched on purpose: one small transaction per call keeps the WAL
+   *  small, where the old single boot-time DELETE of the whole backlog needed
+   *  WAL room a full disk no longer had — and crash-looped prod. Returns rows
+   *  removed; callers loop until it returns < limit. */
+  pruneFills(beforeMs: number, limit: number = PRUNE_BATCH_ROWS): number {
     this.assertWritable();
-    const info = this.db.prepare(`DELETE FROM fills WHERE ts < ?`).run(beforeMs);
+    const info = this.db.prepare(`
+      DELETE FROM fills WHERE rowid IN (SELECT rowid FROM fills WHERE ts < ? ORDER BY ts LIMIT ?)
+    `).run(beforeMs, limit);
     return Number(info.changes);
   }
 
-  /** Drop mid-history samples older than `beforeMs` (same retention as fills —
-   *  the curve only exists to replay retained fills). Returns rows removed. */
-  pruneMids(beforeMs: number): number {
-    this.assertWritable();
-    const info = this.db.prepare(`DELETE FROM mid_history WHERE ts < ?`).run(beforeMs);
-    return Number(info.changes);
-  }
-
-  /** Nearest persisted mid for (market, t) within ±MID_REPLAY_TOL_MS, or null. */
-  private midNearPersisted(market: string, t: number): number | null {
-    const row = this.db.prepare(`
-      SELECT mid FROM mid_history
-      WHERE market = ? AND ts BETWEEN ? AND ?
-      ORDER BY ABS(ts - ?) LIMIT 1
-    `).get(market, t - MID_REPLAY_TOL_MS, t + MID_REPLAY_TOL_MS, t) as { mid: number } | undefined;
-    return row ? row.mid : null;
-  }
-
-  /**
-   * Recompute every retained fill's markouts from the persisted mid curve —
-   * used by a markout-model bump whose stored mids remain valid
-   * (REMARK_FROM_MID_HISTORY). A horizon with no sample within tolerance stays
-   * null (excluded, never fabricated). Returns how many fills got ≥1 replayed
-   * horizon vs none.
-   */
-  remarkRetainedFills(): { remarked: number; nulled: number } {
-    this.assertWritable();
-    const rows = this.db.prepare(`SELECT id, ts, market, side, exec_px, px_approx FROM fills`).all() as Array<Record<string, any>>;
-    const upd = this.db.prepare(`UPDATE fills SET markouts_bps = ? WHERE id = ?`);
-    let remarked = 0, nulled = 0;
-    this.db.exec('BEGIN');
-    try {
-      for (const r of rows) {
-        // an approximate-price fill has no true execPx — replaying mid/execPx
-        // would fabricate the very markouts the pxApprox contract excludes.
-        if (r.px_approx) { upd.run(NULL_MARKOUTS_JSON, r.id); nulled++; continue; }
-        const ss = r.side === 'buy' ? 1 : -1;
-        const marks: (number | null)[] = MARKOUT_HORIZONS.map((h) => {
-          const mid = this.midNearPersisted(r.market, r.ts + h * 1000);
-          return mid == null || mid <= 0 || r.exec_px <= 0 ? null : ss * (mid / r.exec_px - 1) * 1e4;
-        });
-        upd.run(JSON.stringify(marks), r.id);
-        if (marks.some((m) => m != null)) remarked++; else nulled++;
+  /** Retention sweep: prune batches until none are left (or `maxBatches`
+   *  ran). Each batch commits alone (a crash mid-sweep loses nothing — the
+   *  next sweep carries on) and is followed by a truncating checkpoint: that
+   *  moves the batch into the main file's FREE pages and hands the WAL's bytes
+   *  back, so the sweep needs disk for one batch, never for the backlog. A
+   *  checkpoint blocked by a reader ends the sweep early (done: false). */
+  pruneFillsBefore(beforeMs: number, maxBatches = Number.POSITIVE_INFINITY): { removed: number; done: boolean } {
+    let removed = 0, done = false, batch = PRUNE_BATCH_ROWS;
+    for (let i = 0; i < maxBatches; i++) {
+      let n: number;
+      try { n = this.pruneFills(beforeMs, batch); }
+      catch (e) {
+        // disk full: the batch's WAL didn't fit — shrink it and retry. Every
+        // batch that lands frees pages (and, after the checkpoint, disk), so
+        // the sweep digs itself out; at the floor, give up loudly.
+        if (!isDiskFull(e) || batch <= PRUNE_MIN_BATCH_ROWS) throw e;
+        batch = Math.max(PRUNE_MIN_BATCH_ROWS, Math.floor(batch / 2));
+        if (!this.checkpointWal()) break; // a reader pins the WAL — retrying would only grow it
+        continue;
       }
-      this.db.exec('COMMIT');
-    } catch (e) {
-      this.db.exec('ROLLBACK');
-      throw e;
+      removed += n;
+      if (n < batch) { done = this.checkpointWal(); break; }
+      // a busy checkpoint means this batch is still IN the WAL: stop, so one
+      // sweep never stacks more than one batch there (the leaderboard worker
+      // holds a snapshot across its passes). The next sweep carries on.
+      if (!this.checkpointWal()) break;
+      if (batch < PRUNE_BATCH_ROWS) batch = Math.min(PRUNE_BATCH_ROWS, batch * 2); // space freed — grow back
     }
-    return { remarked, nulled };
+    return { removed, done };
+  }
+
+  /** Checkpoint and TRUNCATE the WAL, returning its bytes to the filesystem.
+   *  Returns false when a reader on an old snapshot blocked it — SQLite
+   *  reports that as `busy: 1`, it does NOT throw, and the WAL keeps every
+   *  frame (measured: 5 batches under a held read grew it 0.5 → 2.7 MB). */
+  checkpointWal(): boolean {
+    const r = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number } | undefined;
+    return !r?.busy;
+  }
+
+  /** Bytes held by free pages — space the file keeps after deletes/drops
+   *  (reused by later writes, but never returned to the disk without VACUUM). */
+  freeBytes(): number {
+    const pages = (this.db.prepare('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count;
+    const size = (this.db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size;
+    return pages * size;
+  }
+
+  /** Total file size in bytes (live + free pages). */
+  fileBytes(): number {
+    const pages = (this.db.prepare('PRAGMA page_count').get() as { page_count: number }).page_count;
+    const size = (this.db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size;
+    return pages * size;
+  }
+
+  /** VACUUM only when vacuumPlan allows it for `availBytes` of free disk. */
+  vacuumIfRoom(availBytes: number): { plan: 'skip' | 'defer' | 'run'; freeBytes: number; liveBytes: number; availBytes: number; ms: number } {
+    const freeBytes = this.freeBytes();
+    const fileBytes = this.fileBytes();
+    const plan = vacuumPlan(freeBytes, fileBytes, availBytes);
+    const t0 = Date.now();
+    if (plan === 'run') this.vacuum();
+    return { plan, freeBytes, liveBytes: fileBytes - freeBytes, availBytes, ms: Date.now() - t0 };
+  }
+
+  /** Rewrite the file without its free pages. Writes a full copy of the live
+   *  data first, so it needs about that much free disk — callers gate it. */
+  vacuum(): void {
+    this.assertWritable();
+    // an aborted VACUUM rolls back but leaves the WAL it grew — hand those
+    // bytes back before rethrowing, so a failed attempt never nets less disk.
+    try { this.db.exec('VACUUM'); }
+    finally { this.checkpointWal(); }
   }
 
   close(): void { this.db.close(); }

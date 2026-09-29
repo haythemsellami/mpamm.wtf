@@ -1,12 +1,11 @@
 import { Worker } from 'node:worker_threads';
 import type { DailyVolume, Fill } from '@shared';
-import type { MidPoint, ResetDeletes, VolumeStore } from './db.js';
+import type { ResetDeletes, VolumeStore } from './db.js';
 
 export interface SnapshotWrite {
   days: DailyVolume[];
   meta: Record<string, string>;
   fills: Fill[];
-  mids: MidPoint[];
 }
 
 export type GasWrite = { utcDay: string; venueId: string; mon: number; txs: number };
@@ -21,7 +20,8 @@ export type StoreMutation =
   | { kind: 'resetGas'; venueId: string }
   | { kind: 'resetGasFrom'; venueId: string; fromDay: string }
   | { kind: 'insertFillsIfAbsent'; fills: Fill[] }
-  | { kind: 'applyRemarks'; rows: RemarkWrite[] };
+  | { kind: 'applyRemarks'; rows: RemarkWrite[] }
+  | { kind: 'pruneFills'; beforeMs: number; maxBatches: number };
 
 /** The one post-boot SQLite mutation lane. Production implements it in a
  * worker; tests may use the direct adapter before realtime loops exist. */
@@ -35,11 +35,13 @@ export interface StoreWriter {
   resetGasFrom(venueId: string, fromDay: string): Promise<void>;
   insertFillsIfAbsent(fills: Fill[]): Promise<number>;
   applyRemarks(rows: RemarkWrite[]): Promise<void>;
+  /** retention sweep — see VolumeStore.pruneFillsBefore */
+  pruneFills(beforeMs: number, maxBatches: number): Promise<{ removed: number; done: boolean }>;
 }
 
 export function directStoreWriter(store: VolumeStore): StoreWriter {
   return {
-    persist: async (snapshot) => store.persistSnapshot(snapshot.days, snapshot.meta, snapshot.fills, snapshot.mids),
+    persist: async (snapshot) => store.persistSnapshot(snapshot.days, snapshot.meta, snapshot.fills),
     setMeta: async (key, value) => store.setMeta(key, value),
     deleteMetaPrefix: async (prefix) => store.deleteMetaPrefix(prefix),
     resetVenueHistory: async (venueId, deletes, fromBlock) => store.resetVenueHistory(venueId, deletes, fromBlock),
@@ -48,6 +50,7 @@ export function directStoreWriter(store: VolumeStore): StoreWriter {
     resetGasFrom: async (venueId, fromDay) => store.resetGasFrom(venueId, fromDay),
     insertFillsIfAbsent: async (fills) => store.insertFillsIfAbsent(fills),
     applyRemarks: async (rows) => store.applyRemarks(rows),
+    pruneFills: async (beforeMs, maxBatches) => store.pruneFillsBefore(beforeMs, maxBatches),
   };
 }
 
@@ -107,6 +110,9 @@ export class SnapshotWriter implements StoreWriter {
   resetGasFrom(venueId: string, fromDay: string): Promise<void> { return this.request({ kind: 'resetGasFrom', venueId, fromDay }); }
   insertFillsIfAbsent(fills: Fill[]): Promise<number> { return this.request({ kind: 'insertFillsIfAbsent', fills }); }
   applyRemarks(rows: RemarkWrite[]): Promise<void> { return this.request({ kind: 'applyRemarks', rows }); }
+  pruneFills(beforeMs: number, maxBatches: number): Promise<{ removed: number; done: boolean }> {
+    return this.request({ kind: 'pruneFills', beforeMs, maxBatches });
+  }
 
   private request<T>(mutation: StoreMutation): Promise<T> {
     if (this.failed) return Promise.reject(this.failed);

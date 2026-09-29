@@ -136,11 +136,10 @@ meta(key, value)                               -- schema/model versions + every 
 daily_volume(utc_day, venue_id, usd, swaps)    -- PK (utc_day, venue_id)
 day_meta(utc_day, partial)
 fills(id, venue_id, …, markouts_bps)           -- upsert-by-id; rolling retention
-mid_history(market, ts, mid)                   -- per-pair reference-mid curve
 daily_gas(utc_day, venue_id, mon, txs)         -- additive; atomic with its cursor
 ```
 
-`markout_model_version` gates a markout-model migration: retained fills keep volume/tape data; markouts are replayed from `mid_history` (when the stored curve is still a valid mark) or nulled — old-model and new-model bps never mix. A venue leaving the registry is pruned **non-destructively** on boot; only a true structural `schema_version` bump resets (venues re-backfill on-chain).
+`markout_model_version` gates a markout-model migration: retained fills keep volume/tape data; markouts are nulled — old-model and new-model bps never mix. Fills are retained 31 full UTC days, pruned in small batches at boot and every 10 min. A venue leaving the registry is pruned **non-destructively** on boot; only a true structural `schema_version` bump resets (venues re-backfill on-chain).
 
 ```
 GET /api/venues                    the venue registry (VenueMeta[])

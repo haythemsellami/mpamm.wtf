@@ -9,8 +9,8 @@ const store = new VolumeStore((workerData as { dbPath: string }).dbPath);
 function apply(mutation: StoreMutation): unknown {
   switch (mutation.kind) {
     case 'snapshot': {
-      const { days, meta, fills, mids } = mutation.snapshot;
-      return store.persistSnapshot(days, meta, fills, mids);
+      const { days, meta, fills } = mutation.snapshot;
+      return store.persistSnapshot(days, meta, fills);
     }
     case 'setMeta': return store.setMeta(mutation.key, mutation.value);
     case 'deleteMetaPrefix': return store.deleteMetaPrefix(mutation.prefix);
@@ -20,6 +20,7 @@ function apply(mutation: StoreMutation): unknown {
     case 'resetGasFrom': return store.resetGasFrom(mutation.venueId, mutation.fromDay);
     case 'insertFillsIfAbsent': return store.insertFillsIfAbsent(mutation.fills);
     case 'applyRemarks': return store.applyRemarks(mutation.rows);
+    case 'pruneFills': return store.pruneFillsBefore(mutation.beforeMs, mutation.maxBatches);
     default: {
       const kind = (mutation as { kind?: unknown }).kind;
       throw new Error(`unknown persistence mutation '${String(kind)}'`);
