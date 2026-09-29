@@ -99,7 +99,7 @@ describe('busy checkpoint', () => {
     const reader = new DatabaseSync(path, { readOnly: true });
     reader.exec('BEGIN');
     reader.prepare('SELECT count(*) FROM fills').get();
-    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: PRUNE_BATCH_ROWS, done: false });
+    expect(store.pruneFillsBefore(1e12, 50)).toEqual({ removed: PRUNE_BATCH_ROWS, done: false, blocked: true });
     expect(store.checkpointWal()).toBe(false);
     reader.exec('ROLLBACK');
     reader.close();

@@ -521,6 +521,47 @@ describe('live startup archive gate', () => {
     await source.stop();
   });
 
+  it('drains a retention backlog on the WRITER in sweeps, then VACUUMs once there — never on the main thread', async () => {
+    vi.useFakeTimers();
+    const { source } = await setup();
+    const mainPrune = vi.spyOn(source.store, 'pruneFillsBefore');
+    const mainVacuum = vi.spyOn(source.store, 'vacuumIfRoom');
+    const sweeps = [{ removed: 50_000, done: false }, { removed: 50_000, done: false }, { removed: 12, done: true }];
+    const writer = {
+      pruneFills: vi.fn(async () => sweeps.shift()!),
+      vacuumIfRoom: vi.fn(async () => ({ plan: 'defer' as const, freeBytes: 0, liveBytes: 0, availBytes: 0, ms: 0 })),
+    };
+    source.storeWriter = writer;
+    source.kickMaintenance();
+    await vi.runAllTimersAsync();
+    expect(writer.pruneFills).toHaveBeenCalledTimes(3);
+    expect(writer.vacuumIfRoom).toHaveBeenCalledTimes(1);
+    expect(mainPrune).not.toHaveBeenCalled();
+    expect(mainVacuum).not.toHaveBeenCalled();
+    // a second kick (e.g. the 10-min timer) sweeps again but never re-VACUUMs
+    sweeps.push({ removed: 0, done: true });
+    source.kickMaintenance();
+    await vi.runAllTimersAsync();
+    expect(writer.vacuumIfRoom).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+    source.store.close();
+  });
+
+  it('a sweep blocked by a reader stops and does not VACUUM', async () => {
+    const { source } = await setup();
+    const writer = {
+      pruneFills: vi.fn(async () => ({ removed: 1_000, done: false, blocked: true as const })),
+      vacuumIfRoom: vi.fn(),
+    };
+    source.storeWriter = writer;
+    expect(await source.pruneSweep()).toBe(false);
+    expect(writer.pruneFills).toHaveBeenCalledTimes(1);
+    source.kickMaintenance();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(writer.vacuumIfRoom).not.toHaveBeenCalled();
+    source.store.close();
+  });
+
   it('persists only volume days changed since the prior snapshot', async () => {
     const { source } = await setup();
     const historical = { utcDay: '2026-01-01', partial: false, byVenue: { old: { usd: 1, swaps: 1 } } };

@@ -25,6 +25,9 @@ import {
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { VolumeStore, retentionCutoffMs, type ResetDeletes } from '../db.js';
+
+/** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
+const PRUNE_LOG_MIN_ROWS = 1_000;
 import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
 import { NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
@@ -1044,6 +1047,7 @@ export class LiveDataSource extends BaseSource {
     this.storeWriter = this.snapshotWriter;
     this.gas.setWriter(this.snapshotWriter);
     this.store.sealWrites();
+    this.kickMaintenance();
 
     // The boot head was captured by initHistory. Quote that exact state once,
     // then let newHeads drive every later matrix. If boot quoting fails, the
@@ -1385,11 +1389,13 @@ export class LiveDataSource extends BaseSource {
     }
     // 1. authoritative persisted history
     this.days = this.store.all();
-    // drop rows past the retention window (batched — see pruneFills), then
-    // reclaim the file's free pages if the disk can afford the rewrite.
-    const aged = this.store.pruneFillsBefore(retentionCutoffMs(Date.now(), config.fillsRetentionDays));
-    if (aged.removed) console.log(`[mpamm] retention: pruned ${aged.removed} fill(s) older than ${config.fillsRetentionDays}d`);
-    this.maybeVacuum();
+    // drop a FEW batches past the retention window now (so recentFills and
+    // swap counts below never see expired rows at the head of the table);
+    // any larger backlog, and the VACUUM, run on the persistence worker once
+    // it starts (kickMaintenance) — boot blocks the event loop, and Render
+    // kills a process whose health check doesn't answer.
+    const aged = this.store.pruneFillsBefore(retentionCutoffMs(Date.now(), config.fillsRetentionDays), config.pruneBootMaxBatches);
+    if (aged.removed) console.log(`[mpamm] retention: pruned ${aged.removed} fill(s) at boot${aged.done ? '' : ' — backlog continues on the worker'}`);
     // load recent fills for live serving
     this.fills = this.store.recentFills(400);
     // seed the dedup guard with the persisted window so a gap-fill re-decode of
@@ -1486,17 +1492,49 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
-  /** One bounded retention sweep on the writer worker. */
-  private async pruneSweep(): Promise<void> {
-    try { await this.storeWriter.pruneFills(retentionCutoffMs(Date.now(), config.fillsRetentionDays), config.pruneMaxBatches); }
-    catch (e) { this.noteOnce('store.persist.failed', `retention sweep failed (${(e as Error).message}); retried next interval`); }
+  /** Post-boot storage maintenance, all on the persistence worker so the
+   *  event loop (quotes, /api/health) keeps serving: drain the retention
+   *  backlog in bounded sweeps, then VACUUM once if the disk allows it. */
+  private kickMaintenance(): void {
+    void this.pruneSweep().then((drained) => { if (drained) return this.vacuumOnce(); });
   }
 
-  /** Boot-time VACUUM behind the disk-capacity gate (VolumeStore.vacuumIfRoom). */
-  private maybeVacuum(): void {
+  private pruning = false;
+  /** Retention on the writer worker: bounded sweeps back to back until the
+   *  backlog is gone (a short pause between them lets snapshot writes
+   *  interleave), stopping early when a reader pins the WAL. Resolves true
+   *  when the backlog is fully drained. */
+  private async pruneSweep(): Promise<boolean> {
+    if (this.pruning) return false;
+    this.pruning = true;
+    let total = 0;
+    try {
+      while (!this.loopsStopped) {
+        const r = await this.storeWriter.pruneFills(retentionCutoffMs(Date.now(), config.fillsRetentionDays), config.pruneMaxBatches);
+        total += r.removed;
+        if (r.done || r.blocked) {
+          if (total > PRUNE_LOG_MIN_ROWS) console.log(`[mpamm] retention: pruned ${total} fill(s)${r.done ? ' — backlog clear' : ' — paused (reader holds the WAL)'}`);
+          return r.done;
+        }
+        await sleep(1_000);
+      }
+      return false;
+    } catch (e) {
+      this.noteOnce('store.persist.failed', `retention sweep failed (${(e as Error).message}); retried next interval`);
+      return false;
+    } finally {
+      this.pruning = false;
+    }
+  }
+
+  private vacuumed = false;
+  /** One VACUUM per process, behind the disk-capacity gate, on the worker. */
+  private async vacuumOnce(): Promise<void> {
+    if (this.vacuumed) return;
+    this.vacuumed = true;
     try {
       const fs = statfsSync(dirname(config.dbPath));
-      const r = this.store.vacuumIfRoom(Number(fs.bavail) * Number(fs.bsize));
+      const r = await this.storeWriter.vacuumIfRoom(Number(fs.bavail) * Number(fs.bsize));
       const mb = (b: number) => (b / 1e6).toFixed(0);
       if (r.plan === 'defer') console.log(`[mpamm] vacuum deferred: ${mb(r.freeBytes)} MB reclaimable, but only ${mb(r.availBytes)} MB free for a ${mb(r.liveBytes)} MB rewrite`);
       if (r.plan === 'run') console.log(`[mpamm] vacuum: reclaimed ${mb(r.freeBytes)} MB in ${r.ms}ms`);
