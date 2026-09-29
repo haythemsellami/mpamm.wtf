@@ -7,7 +7,7 @@ import { unlinkSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PRUNE_BATCH_ROWS, VACUUM_MIN_FREE_BYTES, VolumeStore, retentionCutoffMs, vacuumPlan } from '../db.js';
+import { PRUNE_BATCH_ROWS, VACUUM_MIN_FREE_BYTES, VACUUM_SPACE_FACTOR, VolumeStore, retentionCutoffMs, vacuumPlan } from '../db.js';
 
 const paths: string[] = [];
 const fresh = () => {
@@ -144,19 +144,39 @@ describe('boot VACUUM capacity gate', () => {
     expect(vacuumPlan(MIN - 1, 500 * MB, 100_000 * MB)).toBe('skip');
   });
 
-  it('defers when the disk cannot hold a rewrite of the LIVE data plus slack', () => {
-    // 1 GB file, 600 MB free pages → 424 MB live; needs 424×1.2 + 64 ≈ 573 MB
+  it('requires room for BOTH WAL-mode copies (temp + WAL), not one', () => {
+    expect(VACUUM_SPACE_FACTOR).toBeGreaterThanOrEqual(2);
+    // 300 MB live — the review's case: ~603 MB peak; a 1.2× gate allowed 428 MB
+    const file = 900 * MB, free = 600 * MB;
+    expect(vacuumPlan(free, file, 428 * MB)).toBe('defer');
+    expect(vacuumPlan(free, file, 603 * MB)).toBe('defer'); // no slack left yet
+    expect(vacuumPlan(free, file, 300 * MB * VACUUM_SPACE_FACTOR + MIN)).toBe('run');
+  });
+
+  it('defers when the disk cannot hold the rewrite plus slack', () => {
+    // 1 GB file, 600 MB free pages → 424 MB live
     const file = 1024 * MB, free = 600 * MB, live = file - free;
-    const need = live * 1.2 + MIN;
+    const need = live * VACUUM_SPACE_FACTOR + MIN;
     expect(vacuumPlan(free, file, need - 1)).toBe('defer');
     expect(vacuumPlan(free, file, 0)).toBe('defer'); // the prod crash state
   });
 
   it('runs at exactly enough room, and with plenty', () => {
     const file = 1024 * MB, free = 600 * MB;
-    const need = (file - free) * 1.2 + MIN;
+    const need = (file - free) * VACUUM_SPACE_FACTOR + MIN;
     expect(vacuumPlan(free, file, need)).toBe('run');
     expect(vacuumPlan(free, file, 5000 * MB)).toBe('run');
+  });
+
+  it('a failed VACUUM still truncates the WAL it grew, then rethrows', () => {
+    const path = fresh();
+    const store = new VolumeStore(path);
+    const cp = vi.spyOn(store, 'checkpointWal');
+    vi.spyOn((store as any).db, 'exec').mockImplementationOnce(() => { throw Object.assign(new Error('database or disk is full'), { errcode: 13 }); });
+    expect(() => store.vacuum()).toThrow('disk is full');
+    expect(cp).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+    store.close();
   });
 
   it('vacuumIfRoom calls VACUUM only on a run plan', () => {

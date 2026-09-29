@@ -49,16 +49,23 @@ export function retentionCutoffMs(nowMs: number, days: number): number {
 /** free pages worth a VACUUM rewrite (below this, SQLite's own reuse is enough). */
 export const VACUUM_MIN_FREE_BYTES = 64 * 1024 * 1024;
 
-/** Whether a boot may VACUUM. VACUUM writes a full copy of the LIVE data
- *  before swapping it in, so it needs that much free disk plus slack —
- *  running out mid-rewrite on a nearly full disk is exactly the failure the
- *  retention work exists to avoid. 'skip': too little to reclaim (SQLite's
- *  own page reuse suffices); 'defer': worth it, but the disk can't hold the
- *  rewrite yet (retried next boot; the file stops growing meanwhile). */
+/** Free disk a WAL-mode VACUUM needs, per byte of LIVE data: it builds a
+ *  temp copy of the live data, then writes the rebuilt pages through the WAL
+ *  — TWO copies at peak when the temp file shares the DB's disk (measured on
+ *  a 20.6 MB-live DB: failed at 34 MB free, passed at 42 MB; ~1× when temp
+ *  lives elsewhere). Where SQLite puts its temp file on the host isn't ours
+ *  to know, so assume the worst: both copies + 10% slack each. */
+export const VACUUM_SPACE_FACTOR = 2.2;
+
+/** Whether a boot may VACUUM — running out mid-rewrite on a nearly full disk
+ *  is exactly the failure the retention work exists to avoid. 'skip': too
+ *  little to reclaim (SQLite's own page reuse suffices); 'defer': worth it,
+ *  but the disk can't hold the rewrite yet (retried next boot; the file stops
+ *  growing meanwhile). */
 export function vacuumPlan(freeBytes: number, fileBytes: number, availBytes: number): 'skip' | 'defer' | 'run' {
   if (freeBytes < VACUUM_MIN_FREE_BYTES) return 'skip';
   const liveBytes = fileBytes - freeBytes;
-  return availBytes < liveBytes * 1.2 + VACUUM_MIN_FREE_BYTES ? 'defer' : 'run';
+  return availBytes < liveBytes * VACUUM_SPACE_FACTOR + VACUUM_MIN_FREE_BYTES ? 'defer' : 'run';
 }
 
 /** idle-WAL cap: a checkpoint truncates the WAL file back to this size. */
@@ -723,8 +730,10 @@ export class VolumeStore {
    *  data first, so it needs about that much free disk — callers gate it. */
   vacuum(): void {
     this.assertWritable();
-    this.db.exec('VACUUM');
-    this.checkpointWal();
+    // an aborted VACUUM rolls back but leaves the WAL it grew — hand those
+    // bytes back before rethrowing, so a failed attempt never nets less disk.
+    try { this.db.exec('VACUUM'); }
+    finally { this.checkpointWal(); }
   }
 
   close(): void { this.db.close(); }
