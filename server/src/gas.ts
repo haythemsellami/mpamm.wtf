@@ -38,6 +38,15 @@ export function sigAddresses(tokens: string[]): `0x${string}`[] {
   return [...new Set(tokens.map((t) => t.split('@')[0]).filter(Boolean))] as `0x${string}`[];
 }
 
+/** True when the signature is exactly ONE route — one destination, no relay.
+ *  Gates the bootstrap coverage-evidence skip: a relay token names the same
+ *  target, so counting addresses would call target+relay "single", and the
+ *  target's direct burn would then pass as proof the relayed route was
+ *  covered — which a receipt-only scan never could be. */
+export function isSingleRouteSig(sig: string): boolean {
+  return sig.split(',').filter(Boolean).length === 1;
+}
+
 /** How a destination-set change invalidates the accrued series.
  *  - additions only → the past was merely INCOMPLETE: before the added
  *    contract EXISTED no tx could target it, so rows up to its creation day
@@ -346,7 +355,7 @@ export class GasTracker {
           // this gate the epoch would wipe its whole series for nothing).
           // Multi-destination venues always rebuild: an older destination's
           // burn would mask the newer one's hole (the Hanji v1/v2 trap).
-          const single = sigAddresses(sig.split(',')).length === 1;
+          const single = isSingleRouteSig(sig);
           const window = coverageEvidenceWindow(day, utcDay());
           const covered = single && window.length > 0
             && hasCoverageEvidence(window, this.store.gasNonzeroDays(vid, window[0], window[window.length - 1]));

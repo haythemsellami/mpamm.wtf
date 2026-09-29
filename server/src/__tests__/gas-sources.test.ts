@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bootstrapRebuildDay, classifyGasSourceChange, coverageEvidenceWindow, gasSourcesSignature, hasCoverageEvidence, sigAddresses } from '../gas.js';
+import { bootstrapRebuildDay, classifyGasSourceChange, coverageEvidenceWindow, gasSourcesSignature, hasCoverageEvidence, isSingleRouteSig, sigAddresses } from '../gas.js';
 import { VolumeStore } from '../db.js';
 import type { GasSource } from '../venues/adapter.js';
 
@@ -51,6 +51,14 @@ describe('relay routes in the signature', () => {
     const before = gasSourcesSignature([{ mode: 'blocks', address: [A, B] }]);
     const after = gasSourcesSignature([{ mode: 'blocks', address: A }, { mode: 'blocks', address: B, relays: [relay] }]);
     expect(classifyGasSourceChange(before, after)).toEqual({ kind: 'partial', added: [B] });
+  });
+
+  it('target + relay is NOT single-route — the bootstrap evidence skip must not apply', () => {
+    // direct burn on the target would otherwise "prove" coverage of relayed
+    // txs that the old receipt-only scan could never have counted.
+    expect(isSingleRouteSig(gasSourcesSignature([{ mode: 'blocks', address: A }]))).toBe(true);
+    expect(isSingleRouteSig(gasSourcesSignature([{ mode: 'blocks', address: A, relays: [relay] }]))).toBe(false);
+    expect(isSingleRouteSig(`${A},${B}`)).toBe(false);
   });
 
   it('dropping a relay → full (its routed share cannot be unmixed)', () => {
