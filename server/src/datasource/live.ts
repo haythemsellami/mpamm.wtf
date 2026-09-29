@@ -1612,7 +1612,11 @@ export class LiveDataSource extends BaseSource {
    */
   private reconcileSwapCounts(): void {
     const byDay = new Map<string, Map<string, number>>();
-    for (const c of this.store.fillCountsByDayVenue()) {
+    // only days inside retention: the cutoff is day-aligned and nothing at or
+    // after it is ever pruned, so those days are complete — while an expired
+    // day may be half-deleted (boot prune capped at PRUNE_BOOT_MAX_BATCHES),
+    // and overwriting its persisted swaps with the remainder would corrupt it.
+    for (const c of this.store.fillCountsByDayVenue(retentionCutoffMs(Date.now(), config.fillsRetentionDays))) {
       let m = byDay.get(c.utcDay); if (!m) { m = new Map(); byDay.set(c.utcDay, m); }
       m.set(c.venueId, c.swaps);
     }

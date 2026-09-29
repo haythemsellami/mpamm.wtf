@@ -552,12 +552,17 @@ export class VolumeStore {
   }
 
   /** Exact retained fill counts by UTC day and venue, with no API/query cap. */
-  fillCountsByDayVenue(): Array<{ utcDay: string; venueId: string; swaps: number }> {
+  /** Per-(day, venue) fill counts for fills at or after `sinceMs`. Callers
+   *  pass the retention cutoff: rows before it may be mid-deletion (the boot
+   *  prune is capped; the worker drains the rest later), so counting them
+   *  would under-report a partially pruned day. */
+  fillCountsByDayVenue(sinceMs = 0): Array<{ utcDay: string; venueId: string; swaps: number }> {
     const rows = this.db.prepare(`
       SELECT date(ts / 1000, 'unixepoch') AS utc_day, venue_id, COUNT(*) AS swaps
       FROM fills
+      WHERE ts >= ?
       GROUP BY utc_day, venue_id
-    `).all() as Array<Record<string, any>>;
+    `).all(sinceMs) as Array<Record<string, any>>;
     return rows.map((r) => ({ utcDay: r.utc_day, venueId: r.venue_id, swaps: Number(r.swaps) }));
   }
 

@@ -521,6 +521,36 @@ describe('live startup archive gate', () => {
     await source.stop();
   });
 
+  it('a capped boot prune that stops mid-day never lets swap reconciliation rewrite that expired day', async () => {
+    const { source } = await setup();
+    const { retentionCutoffMs, PRUNE_BATCH_ROWS } = await import('../db.js');
+    const { config } = await import('../config.js');
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const cutoff = retentionCutoffMs(Date.now(), config.fillsRetentionDays);
+    const expiredTs = cutoff - 12 * 3_600_000; // midday of the last expired day
+    const retainedTs = cutoff + 36 * 3_600_000; // well inside retention
+    const expiredCount = (config.pruneBootMaxBatches + 2) * PRUNE_BATCH_ROWS; // more than the boot cap drains
+    const mk = (i: number, ts: number): Fill => ({
+      id: `test-venue-0x${i.toString(16)}-0`, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'ROUTER',
+      usd: 1, baseAmount: 1, execPx: 1, txHash: '0x1', to: 'x', pool: 'p', blockNumber: i, ts, markoutsBps: [null, null, null, null, null],
+    });
+    source.store.persistSnapshot([
+      { utcDay: day(expiredTs), partial: false, byVenue: { 'test-venue': { usd: 1, swaps: expiredCount } } },
+      { utcDay: day(retainedTs), partial: false, byVenue: { 'test-venue': { usd: 1, swaps: 0 } } },
+    ], {}, [
+      ...Array.from({ length: expiredCount }, (_, i) => mk(i, expiredTs + i)),
+      mk(expiredCount, retainedTs), mk(expiredCount + 1, retainedTs + 1), mk(expiredCount + 2, retainedTs + 2),
+    ]);
+    // the capped boot prune: stops with part of the expired day still on disk
+    expect(source.store.pruneFillsBefore(cutoff, config.pruneBootMaxBatches).done).toBe(false);
+    source.days = source.store.all();
+    source.reconcileSwapCounts();
+    const swaps = (d: string) => source.days.find((x: any) => x.utcDay === d)?.byVenue['test-venue']?.swaps;
+    expect(swaps(day(expiredTs))).toBe(expiredCount); // persisted total kept, not the 2k remainder
+    expect(swaps(day(retainedTs))).toBe(3);           // retained days still reconcile from fills
+    source.store.close();
+  });
+
   it('drains a retention backlog on the WRITER in sweeps, then VACUUMs once there — never on the main thread', async () => {
     vi.useFakeTimers();
     const { source } = await setup();
