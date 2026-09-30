@@ -90,6 +90,8 @@ if (reportOutage(ctx, res)) return [];                            // notes: all 
 
 The core stands down once your note is on the record, so the venue is explained exactly once. Recovery is **announced**, never retracted — an adapter can only append, so a heal that said nothing would leave the warning standing until the served window rolled it off.
 
+If your venue can go dark **without** a revert — a book that answers every leg but is too thin or too far from mid to fill any size — no leg failed, so the reporter stays quiet. Hand the adapter's own verdict to `createQuoteOutageLatch` instead (Clober does: `cloberOutage` in [`clober.ts`](../server/src/venues/clober.ts)). If you latch a transition yourself, raise it with `ctx.note(code, msg, { repeatable: true })`: `ctx.note` otherwise drops a verbatim repeat of any note still in the window, which swallows the same outage coming back after a recovery, and the core then lists the venue as MISSING.
+
 ## Verifying your adapter (what review checks)
 
 Run the live checklist — it exercises discovery, quoting, log decoding and unit math against the real chain and prints a report:

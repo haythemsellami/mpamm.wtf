@@ -450,7 +450,8 @@ export function createLunarbaseAdapter(): VenueAdapter {
   const noteOnce = (ctx: AdapterContext, key: string, code: NoteCode, message: string) => {
     if (noted.has(key)) return;
     noted.add(key);
-    ctx.note(code, message);
+    // repeatable: `noted` is the latch, and recovered() re-arms it
+    ctx.note(code, message, { repeatable: true });
   };
   /** Clear a raised note AND say so. Dropping the dedupe key alone only re-arms
    *  the warning for next time — the one already served stands until the window
@@ -458,7 +459,7 @@ export function createLunarbaseAdapter(): VenueAdapter {
    *  An adapter cannot retract, so recovery has to be announced (6c3cf5b). */
   const recovered = (ctx: AdapterContext, key: string, msg: string) => {
     if (!noted.delete(key)) return; // nothing was ever raised — stay quiet
-    ctx.note('venue.quote.recovered', msg);
+    ctx.note('venue.quote.recovered', msg, { repeatable: true });
   };
   /** Transient read failure: say so, but keep the pool tailed and decodable. */
   const unreadable = (ctx: AdapterContext, config: LunarbasePoolConfig, reason: string) => {

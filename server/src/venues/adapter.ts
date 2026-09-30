@@ -37,8 +37,15 @@ export interface AdapterContext {
    *  what a consumer filters and alerts on, and it also decides the note's
    *  level (@shared: NOTE_LEVEL), so nothing downstream has to read your
    *  wording. The core stamps the timestamp and your venue id, and drops a
-   *  repeat of a note it already holds (discovery re-runs every 10 minutes). */
-  note: (code: NoteCode, msg: string) => void;
+   *  repeat of a note it already holds (discovery re-runs every 10 minutes).
+   *
+   *  Pass `{ repeatable: true }` for a STATE TRANSITION you already latch
+   *  (outage → recovery → the same outage again). Window-wide dedupe would
+   *  swallow the second outage as a repeat of the first, still in the window,
+   *  and the core's went-dark backstop would then report the venue as
+   *  unexplained. That is how ThogAMM's second "maker: stale" outage reached
+   *  the dashboard as MISSING (2026-09-30). */
+  note: (code: NoteCode, msg: string, opts?: { repeatable?: boolean }) => void;
 }
 
 /** A group of on-chain logs the core fetches each cycle for this adapter and

@@ -6,6 +6,7 @@ import { fromUnits, toUnits, shortHex } from '../util.js';
 import { KNOWN_ROUTERS } from '../attribution.js';
 import type { UsdPricer } from '../pricer.js';
 import type { VenueAdapter, AdapterContext, LogBundle } from './adapter.js';
+import { createQuoteOutageLatch, quoteOutageReason, type MulticallOutcome, type QuoteOutage } from './quote-health.js';
 
 /** Clober display venue — the ONE venue this adapter surfaces. Its per-theme
  *  color is the single source of truth for the frontend. Displayed as plain
@@ -284,12 +285,15 @@ export function cloberLegFilledFull(reqIn: bigint, spentIn: bigint, takenOut: bi
   return reqIn - spentIn <= (unitDust > relDust ? unitDust : relDust);
 }
 
-/** Quote Clober for each market × size via BookViewer.getExpectedOutput. */
+/** Quote Clober for each market × size via BookViewer.getExpectedOutput.
+ *  `outage` is the venue-wide verdict for the latch: set when legs were asked
+ *  and none survived, `null` when rows came back, `undefined` when no leg
+ *  could be priced (cold references say nothing about the vault). */
 export async function quoteClober(
   client: PublicClient, markets: CloberMarket[], sizesUsd: readonly number[], pricer: UsdPricer,
   blockNumber: bigint,
-): Promise<QuoteRow[]> {
-  if (!markets.length) return [];
+): Promise<{ rows: QuoteRow[]; outage: QuoteOutage | null | undefined }> {
+  if (!markets.length) return { rows: [], outage: undefined };
   type Leg = { market: string; size: number; side: Side; book: CloberBook; inDec: number; outDec: number; reqBase: bigint; basePx: number };
   const legs: Leg[] = [];
   for (const m of markets) {
@@ -309,7 +313,7 @@ export async function quoteClober(
       }
     }
   }
-  if (!legs.length) return [];
+  if (!legs.length) return { rows: [], outage: undefined };
 
   const contracts = legs.map((l) => ({
     address: ADDR.bookViewer as `0x${string}`,
@@ -322,6 +326,9 @@ export async function quoteClober(
   const rowByKey = new Map<string, QuoteRow>();
   const fullByKey = new Map<string, { bid: boolean; ask: boolean }>();
   const ts = Date.now();
+  // the smallest size's most executable leg — what the outage note reports
+  const minUsd = Math.min(...sizesUsd);
+  let best: CloberBestLeg | undefined;
   for (let i = 0; i < legs.length; i++) {
     const l = legs[i]; const r = res[i];
     if (r.status !== 'success') continue;
@@ -335,6 +342,10 @@ export async function quoteClober(
     const px = l.side === 'sell' ? takenH / spentH : spentH / takenH;
     const bps = (px / l.basePx - 1) * 1e4;
     const legFilledFull = cloberLegFilledFull(l.reqBase, spentBase, takenQuote, l.book.unitSize);
+    if (l.size === minUsd) {
+      const leg = { market: l.market, side: l.side, bps, filledUsd: l.side === 'sell' ? spentH * l.basePx : spentH, full: legFilledFull };
+      if (!best || cloberLegBeats(leg, best)) best = leg;
+    }
     const key = `${l.market}|${l.size}`;
     let row = rowByKey.get(key);
     if (!row) {
@@ -369,7 +380,34 @@ export async function quoteClober(
       out.push(row);
     }
   }
-  return out;
+  return { rows: out, outage: out.length ? null : cloberOutage(res, minUsd, best) };
+}
+
+/** The smallest-size leg closest to executable in a round that produced no row. */
+export interface CloberBestLeg { market: string; side: Side; bps: number; filledUsd: number; full: boolean }
+
+/** A full fill beats a partial one; full fills rank by distance from mid,
+ *  partials by how much they filled. A dust leg can sit right at mid, and
+ *  ranking on bps alone reported it as the nearest side. */
+function cloberLegBeats(a: CloberBestLeg, b: CloberBestLeg): boolean {
+  if (a.full !== b.full) return a.full;
+  return a.full ? Math.abs(a.bps) < Math.abs(b.bps) : a.filledUsd > b.filledUsd;
+}
+
+/** Why a round with legs produced no row. Every leg reverting is the
+ *  multicall reporter's case, worded the same way. Otherwise the books
+ *  answered but no side is executable. The vault had pulled its depth
+ *  (2026-09-30): at $100 the MON/USDC books swept to −7500 / +58000 bps.
+ *  `reason` stays fixed while the vault stays in that state, so a drifting
+ *  price in `msg` never re-raises it. */
+export function cloberOutage(res: readonly MulticallOutcome[], minUsd: number, best: CloberBestLeg | undefined): QuoteOutage {
+  const why = quoteOutageReason(res);
+  if (why) return { reason: why, msg: `${CLOBER_VAULT_VENUE.name} quotes unavailable — all ${res.length} legs failed with "${why}" (venue disabled, or the ABI drifted from the contract)` };
+  const reason = `no vault book side fills $${minUsd} within ±${PER_SIDE_BAND_BPS} bps of mid`;
+  const bps = (b: number) => `${b >= 0 ? '+' : '−'}${Math.round(Math.abs(b))} bps`;
+  const detail = !best ? `every $${minUsd} leg returned nothing`
+    : `nearest: ${best.market} ${best.side} at ${bps(best.bps)}${best.full ? '' : `, ~$${best.filledUsd.toFixed(2)} of $${minUsd} filled`}`;
+  return { reason, msg: `${CLOBER_VAULT_VENUE.name} quotes unavailable — ${reason} (${detail}): the vault's books are empty or priced away from mid, not an adapter fault` };
 }
 
 /** routed-flow attribution for a Take (its tx also emitted a RouterGateway.Swap). */
@@ -486,6 +524,7 @@ export function createCloberVaultAdapter(): VenueAdapter {
   let ignoredVaultBooks = new Set<string>();   // vault books known to be outside base/stable scope
   let markets: CloberMarket[] = [];
   let authoritativeDiscovery = false;
+  const reportOutage = createQuoteOutageLatch(CLOBER_VAULT_VENUE.name);
 
   const mergeVaultBooks = (vaultOpens: any[], bmOpens: any[]): void => {
     for (const l of vaultOpens) {
@@ -536,9 +575,12 @@ export function createCloberVaultAdapter(): VenueAdapter {
         ctx.note('venue.discovery.degraded', 'Clober: authoritative discovery unavailable; holding Take ranges until rediscovery succeeds');
       }
     },
-    quote(ctx, sizesUsd, blockNumber, requestedMarkets) {
+    async quote(ctx, sizesUsd, blockNumber, requestedMarkets) {
       const selected = requestedMarkets ? markets.filter((m) => requestedMarkets.has(m.market)) : markets;
-      return quoteClober(ctx.client, selected, sizesUsd, ctx.pricer, blockNumber);
+      const { rows, outage } = await quoteClober(ctx.client, selected, sizesUsd, ctx.pricer, blockNumber);
+      // a requested subset going quiet says nothing about the whole vault
+      reportOutage(ctx, requestedMarkets ? undefined : outage);
+      return rows;
     },
     // QUOTE_UPDATE_BURN: the vault's quotes live on the books, and every
     // repricing is one keeper tx through the operator contract that emits

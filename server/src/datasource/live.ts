@@ -883,8 +883,9 @@ export class LiveDataSource extends BaseSource {
         pricer: this.pricer,
         config,
         // deduped: discovery notes repeat verbatim on every 10-min rediscover
-        // and were accumulating unbounded ("Metric: 3 pool(s)" × N).
-        note: (code, msg) => this.noteOnce(code, msg, venue),
+        // and were accumulating unbounded ("Metric: 3 pool(s)" × N). A
+        // `repeatable` note is a transition the adapter latches itself.
+        note: (code, msg, opts) => opts?.repeatable ? this.note(code, msg, venue) : this.noteOnce(code, msg, venue),
       };
       this.ctxCache.set(a, ctx);
     }
