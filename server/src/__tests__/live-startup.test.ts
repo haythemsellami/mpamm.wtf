@@ -248,6 +248,69 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
+  it('keeps an adapter-explained outage off MISSING when the same reason returns after a recovery', async () => {
+    // ThogAMM, 2026-09-30: "maker: stale" → healed → "maker: stale". The
+    // adapter's second note was a verbatim repeat of the first, still in the
+    // window, so ctx.note's dedupe dropped it. The backstop then found no
+    // explanation for this outage, raised its own, and the frame listed the
+    // venue MISSING while the reason sat one episode back in the window.
+    const { createQuoteOutageReporter } = await import('../venues/quote-health.js');
+    const { QUOTE_DARK_CYCLES } = await import('../datasource/live.js');
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.bootMs = Date.now() - 65_000;
+    source.schedulePostQuoteMaintenance = vi.fn();
+    const healthy = adapters[0].quote!;
+    const report = createQuoteOutageReporter('Test Venue');
+    const stale = { status: 'failure' as const, error: Object.assign(new Error('x'), { reason: 'maker: stale' }) };
+    const fail = () => { adapters[0].quote = vi.fn(async (ctx) => { report(ctx, [stale]); return []; }); };
+    const heal = () => { adapters[0].quote = vi.fn(async (ctx, sizes, block, markets) => { report(ctx, [{ status: 'success' }]); return healthy(ctx, sizes, block, markets); }); };
+    const window = () => source.notes.list()
+      .filter((n: StateNote) => n.venue === 'venue' && n.code.startsWith('venue.quote.'))
+      .map((n: StateNote) => n.code.slice('venue.quote.'.length));
+    let block = 300n;
+    try {
+      await poll(block++);
+      fail();
+      for (let i = 0; i <= QUOTE_DARK_CYCLES; i++) await poll(block++);
+      heal();
+      await poll(block++);
+      fail();
+      for (let i = 0; i <= QUOTE_DARK_CYCLES; i++) await poll(block++);
+      expect(window()).toEqual(['unavailable', 'recovered', 'unavailable']);
+      expect(source.quoteDark.has('venue')).toBe(false);
+      expect(source.getQuotes().frame.missingVenues).not.toContain('venue');
+    } finally { source.store.close(); }
+  });
+
+  it('drops a dark venue from MISSING once its adapter explains the outage late', async () => {
+    // Clober can only name empty books once it has legs to price. If the
+    // backstop marked it dark first, a later explanation must still win.
+    const { createQuoteOutageLatch } = await import('../venues/quote-health.js');
+    const { QUOTE_DARK_CYCLES } = await import('../datasource/live.js');
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.bootMs = Date.now() - 65_000;
+    source.schedulePostQuoteMaintenance = vi.fn();
+    const report = createQuoteOutageLatch('Test Venue');
+    let canPrice = false;
+    adapters[0].quote = vi.fn(async (ctx) => {
+      report(ctx, canPrice ? { reason: 'books empty', msg: 'Test Venue quotes unavailable — books empty' } : undefined);
+      return [];
+    });
+    const window = () => source.notes.list()
+      .filter((n: StateNote) => n.venue === 'venue' && n.code.startsWith('venue.quote.')).map((n: StateNote) => n.msg);
+    let block = 400n;
+    try {
+      for (let i = 0; i <= QUOTE_DARK_CYCLES; i++) await poll(block++);
+      expect(source.quoteDark.has('venue')).toBe(true);
+      expect(source.getQuotes().frame.missingVenues).toContain('venue');
+      canPrice = true;
+      await poll(block++);
+      expect(source.quoteDark.has('venue')).toBe(false);
+      expect(source.getQuotes().frame.missingVenues).not.toContain('venue');
+      expect(window()).toEqual(['Test Venue quotes unavailable — books empty']);
+    } finally { source.store.close(); }
+  });
+
   it('ages fills in yielding passes with identical buy/sell signs and persistence updates', async () => {
     const { source } = await setup();
     const now = Date.now();

@@ -2,7 +2,7 @@
 // revert reason out of an allowFailure multicall so a venue that leaves the
 // grid says WHY, instead of reading as an adapter we broke.
 import { describe, expect, it } from 'vitest';
-import { createQuoteOutageReporter, QuoteHealthBatch, quoteOutageReason } from '../quote-health.js';
+import { createQuoteOutageLatch, createQuoteOutageReporter, QuoteHealthBatch, quoteOutageReason } from '../quote-health.js';
 
 /**
  * The real viem error a reverted leg carries, recorded live from ThogAMM while
@@ -150,6 +150,71 @@ describe('createQuoteOutageReporter', () => {
     expect(() => batch.commit()).toThrow();
     expect(notes).toEqual([]);
     report(ctx, [failed(PAUSED_ERROR)]);
+    expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable']);
+  });
+});
+
+describe('outage notes bypass the window-wide dedupe', () => {
+  const stub = () => {
+    const notes: { code: string; msg: string; repeatable?: boolean }[] = [];
+    return { notes, ctx: { note: (code: string, msg: string, opts?: { repeatable?: boolean }) => { notes.push({ code, msg, repeatable: opts?.repeatable }); } } as any };
+  };
+
+  it('marks both transitions repeatable, so the same outage after a recovery is not swallowed', () => {
+    // The core dedupes adapter notes against the whole window. ThogAMM went
+    // "maker: stale" → healed → "maker: stale" (2026-09-30) and the second
+    // note was dropped as a repeat of the first, so the backstop called it
+    // unexplained and the dashboard listed it MISSING.
+    const { notes, ctx } = stub();
+    const report = createQuoteOutageReporter('ThogAMM');
+    report(ctx, [failed(PAUSED_ERROR)]);
+    report(ctx, [ok]);
+    report(ctx, [failed(PAUSED_ERROR)]);
+    expect(notes.map((n) => [n.code, n.repeatable])).toEqual([
+      ['venue.quote.unavailable', true], ['venue.quote.recovered', true], ['venue.quote.unavailable', true],
+    ]);
+    expect(notes[0].msg).toBe(notes[2].msg);
+  });
+});
+
+describe('createQuoteOutageLatch', () => {
+  const stub = () => {
+    const notes: { code: string; msg: string }[] = [];
+    return { notes, ctx: { note: (code: string, msg: string) => { notes.push({ code, msg }); } } as any };
+  };
+  const THIN = { reason: 'no side fills $100', msg: 'Clober quotes unavailable — no side fills $100 (nearest −7484 bps)' };
+
+  it('keys on the reason, not the drifting message, and announces the heal', () => {
+    const { notes, ctx } = stub();
+    const report = createQuoteOutageLatch('Clober');
+    report(ctx, THIN);
+    report(ctx, { ...THIN, msg: 'Clober quotes unavailable — no side fills $100 (nearest −7390 bps)' });
+    expect(notes.map((n) => n.msg)).toEqual([THIN.msg]);
+    report(ctx, null);
+    expect(notes.at(-1)).toEqual({ code: 'venue.quote.recovered', msg: 'Clober quoting again (was "no side fills $100")' });
+    report(ctx, null);
+    expect(notes).toHaveLength(2);
+  });
+
+  it('treats `undefined` as no verdict: it neither explains nor heals', () => {
+    const { notes, ctx } = stub();
+    const report = createQuoteOutageLatch('Clober');
+    report(ctx, undefined);
+    expect(notes).toEqual([]);
+    report(ctx, THIN);
+    report(ctx, undefined); // references went cold: the outage stays on the record
+    expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable']);
+  });
+
+  it('stages through the core batch, so a discarded frame never moves it', () => {
+    const { notes, ctx } = stub();
+    const report = createQuoteOutageLatch('Clober');
+    const discarded = new QuoteHealthBatch(ctx);
+    report({ ...ctx, quoteHealth: discarded.forPlan(0) }, THIN);
+    expect(notes).toEqual([]); // never committed: superseded frame
+    const kept = new QuoteHealthBatch(ctx);
+    report({ ...ctx, quoteHealth: kept.forPlan(0) }, THIN);
+    kept.commit();
     expect(notes.map((n) => n.code)).toEqual(['venue.quote.unavailable']);
   });
 });

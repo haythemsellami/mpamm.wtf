@@ -190,7 +190,7 @@ describe('a real call site: the went-dark backstop', () => {
       warn: (id: string, m: string) => b.noteOnce('venue.quote.unavailable', m, id),
       announce: (id: string, m: string) => b.note('venue.quote.recovered', m, id),
       clear: (id: string, m: string) => b.drop('venue.quote.unavailable', m, id),
-      explained: (id: string, since: number) => b.holds('venue.quote.unavailable', id, since),
+      explained: (id: string, since: number, except?: string) => b.holds('venue.quote.unavailable', id, since, except),
     };
     return {
       b,
@@ -222,6 +222,20 @@ describe('a real call site: the went-dark backstop', () => {
     w.cycle(0, QUOTE_DARK_CYCLES + 20);
     expect(w.warns()).toBe(1);           // the adapter's, not a second generic one
     expect(w.dark.has('metric')).toBe(false);
+  });
+
+  it('hands a dark venue back once the adapter explains it later — never on its own warning', () => {
+    const w = wired();
+    w.cycle(4, 1);
+    w.cycle(0, QUOTE_DARK_CYCLES + 5);   // backstop fired; its own note must not count
+    expect(w.dark.has('metric')).toBe(true);
+    w.adapterSaid('Metric quotes unavailable — books empty');
+    w.cycle(0, 1);
+    expect(w.dark.has('metric')).toBe(false);
+    // the generic warning is retracted, not announced over: still not quoting
+    expect(w.b.list().map((n) => n.msg)).toEqual(['Metric quotes unavailable — books empty']);
+    w.cycle(0, QUOTE_DARK_CYCLES);       // and it stays stood down
+    expect(w.warns()).toBe(1);
   });
 
   it('is NOT stood down by a note from an outage that already ended', () => {

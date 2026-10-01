@@ -82,41 +82,83 @@ export function quoteOutageReason(results: readonly MulticallOutcome[]): string 
   return top;
 }
 
+/** A venue-wide outage as an adapter states it. `reason` is its identity
+ *  (a changed reason is a new event); `msg` is the note text, free to carry
+ *  figures that drift between frames without re-raising. */
+export interface QuoteOutage { reason: string; msg: string }
+
+/**
+ * The one-outage-on-the-record latch both reporters share. Holds the reason
+ * currently on the record so block-triggered quoting notes it once, but a
+ * CHANGED reason is a new event and gets its own note. Recovery is ANNOUNCED
+ * rather than retracted: an adapter can only append, so a heal that said
+ * nothing would leave the warning standing until the served window rolled it
+ * off (the stale scare-warning lesson, 6c3cf5b).
+ *
+ * Both notes are `repeatable`: this latch already dedupes, and the core's
+ * window-wide dedupe would swallow the SAME outage coming back after a
+ * recovery while the first episode's note is still in the window.
+ */
+function outageLatch(venueName: string): (ctx: AdapterContext, outage: QuoteOutage | null) => void {
+  let current: string | null = null;
+  return (ctx, outage) => {
+    ctx.quoteSignal?.throwIfAborted();
+    if (outage) {
+      if (current !== outage.reason) {
+        current = outage.reason;
+        ctx.note('venue.quote.unavailable', outage.msg, { repeatable: true });
+      }
+      return;
+    }
+    if (current) {
+      ctx.note('venue.quote.recovered', `${venueName} quoting again (was "${current}")`, { repeatable: true });
+      current = null;
+    }
+  };
+}
+
 /**
  * Per-adapter outage reporter. Call it with the quote multicall's results;
  * it returns true when the venue is dark (the caller then returns `[]`).
- *
- * Holds the reason currently on the record so block-triggered quoting notes it
- * once — but a CHANGED reason is a new event and gets its own note. Recovery
- * is ANNOUNCED rather than retracted: an adapter can only append, so a heal
- * that said nothing would leave the warning standing until the served window
- * rolled it off (the stale scare-warning lesson, 6c3cf5b).
  */
 export function createQuoteOutageReporter(venueName: string): (ctx: AdapterContext, results: readonly MulticallOutcome[]) => boolean {
-  let current: string | null = null;
+  const latch = outageLatch(venueName);
   const apply: QuoteHealthReport = (ctx, results) => {
-    ctx.quoteSignal?.throwIfAborted();
     const reason = quoteOutageReason(results);
-    if (reason) {
-      if (current !== reason) {
-        current = reason;
-        // "failed", not "reverted": a leg can fail without reverting (transport
-        // error, decode failure), and `reason` falls back to a generic string
-        // in that case — `reverted "call failed"` would be a lie.
-        ctx.note('venue.quote.unavailable', `${venueName} quotes unavailable — all ${results.length} legs failed with "${reason}" (venue disabled, or the ABI drifted from the contract)`);
-      }
-      return true;
-    }
-    if (current) {
-      ctx.note('venue.quote.recovered', `${venueName} quoting again (was "${current}")`);
-      current = null;
-    }
-    return false;
+    // "failed", not "reverted": a leg can fail without reverting (transport
+    // error, decode failure), and `reason` falls back to a generic string in
+    // that case — `reverted "call failed"` would be a lie.
+    latch(ctx, reason === null ? null : { reason, msg: `${venueName} quotes unavailable — all ${results.length} legs failed with "${reason}" (venue disabled, or the ABI drifted from the contract)` });
+    return reason !== null;
   };
   return (ctx, results) => {
     ctx.quoteSignal?.throwIfAborted();
     if (!ctx.quoteHealth) return apply(ctx, results);
     ctx.quoteHealth(apply, results);
     return quoteOutageReason(results) !== null;
+  };
+}
+
+/**
+ * The same latch for a venue whose outage is not a revert. A book venue can
+ * answer every leg and still quote nothing: an unfunded book fills a few
+ * dollars, a far-priced one fills outside the band, and both are dropped at
+ * every size. No leg
+ * failed, so `createQuoteOutageReporter` stays quiet, and the core's backstop
+ * reports the venue as unexplained. Clober's vault showed as MISSING for a
+ * day this way (2026-09-30). The adapter hands over its own verdict:
+ * an outage, `null` once it quotes again, or `undefined` when this frame
+ * cannot tell (cold references, a market subset).
+ *
+ * Staged through `ctx.quoteHealth` like the multicall reporter, so a frame
+ * the core throws away never moves the latch.
+ */
+export function createQuoteOutageLatch(venueName: string): (ctx: AdapterContext, outage: QuoteOutage | null | undefined) => void {
+  const latch = outageLatch(venueName);
+  return (ctx, outage) => {
+    ctx.quoteSignal?.throwIfAborted();
+    if (outage === undefined) return;
+    if (!ctx.quoteHealth) return latch(ctx, outage);
+    ctx.quoteHealth((c) => { latch(c, outage); return outage !== null; }, []);
   };
 }

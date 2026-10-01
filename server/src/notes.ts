@@ -69,10 +69,13 @@ export class NoteBuffer {
    *  checkQuoteOutage vs an adapter's own venue.quote.unavailable). Pass the
    *  moment the condition being reported STARTED: notes are an append log that
    *  is rarely retracted, so an unscoped read answers "has anyone ever said
-   *  this", which stays true long after the event it described ended. */
-  holds(code: NoteCode, venue?: string, since = 0): boolean {
+   *  this", which stays true long after the event it described ended.
+   *  `except` skips one message: the backstop's own warning shares the code,
+   *  and it must never count as the explanation it is waiting for. */
+  holds(code: NoteCode, venue?: string, since = 0, except?: string): boolean {
     const v = venue || undefined;
-    return this.items.some((n) => n.code === code && n.venue === v && n.ts >= since);
+    const skip = except === undefined ? undefined : scrubNote(except);
+    return this.items.some((n) => n.code === code && n.venue === v && n.ts >= since && n.msg !== skip);
   }
 
   /** raise a note. */
