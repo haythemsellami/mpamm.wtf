@@ -7,6 +7,7 @@ import { fmtUsd, fmtInt, fmtPx, pnlFmt, sparkPath, humanAge, shortHex } from '..
 import { avgMarkoutBps } from '../lib/markout';
 import { fillLegs } from '../lib/fill-legs';
 import { poolLeaderboardLabel } from '../lib/leaderboard-pool';
+import { MarkoutCurvePanel } from '../components/MarkoutCurve';
 
 const HZ_IDX: Record<string, number> = { 'T+0S': 0, 'T+10S': 2, 'T+30S': 3, 'T+60S': 4 };
 const GROUP_ID: Record<string, LeaderboardGrouping> = {
@@ -200,6 +201,9 @@ export function LeaderboardTab() {
           })}
         </div>
       </div>
+
+      {/* MARKOUT_CURVE — the pre-/post-fill shape the fixed horizons can't show */}
+      <MarkoutCurvePanel />
 
       {/* TOP_SWAPS */}
       <div style={{ position: 'relative', border: `1px solid ${C.line}`, background: C.panel, margin: '0 18px 14px' }}>

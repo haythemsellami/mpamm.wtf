@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
-import { MARKETS, SIZES_USD, type Fill, type QuoteRow, type StateNote } from '@shared';
+import { CURVE_OFFSETS_S, MARKETS, SIZES_USD, type Fill, type QuoteRow, type StateNote } from '@shared';
 import type { VenueAdapter } from '../venues/adapter.js';
 
 function deferred<T>() {
@@ -351,6 +351,33 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
+  it('takes a markout curve once from the ring, persists it with the snapshot and never streams it', async () => {
+    const { source } = await setup();
+    const now = Date.now();
+    const fill = (id: string, ts: number): Fill => ({
+      id, ts, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'DIRECT', usd: 100, baseAmount: 100,
+      execPx: 1, blockNumber: 1, txHash: '0x1', to: 'direct', pool: 'pool', markoutsBps: [null, null, null, null, null],
+    });
+    // covered: every point lands on a ring sample. gapped: a one-second feed gap swallows its −5s point.
+    const covered = fill('covered', now - 35_000), late = fill('gapped', now - 18_000);
+    source.pending = new Set([covered, late]);
+    source.midHist.set('MON/USDC', Array.from({ length: 451 }, (_, i) => ({ t: now - 40_000 + i * 100, mid: 2 }))
+      .filter((s) => s.t >= now - 40_000 && !(s.t > now - 23_000 && s.t < now - 22_000)));
+    const frames: Fill[] = [];
+    source.on('message', (m: { ch: string; data: Fill }) => { if (m.ch === 'fill') frames.push(m.data); });
+    const persistSnapshot = vi.spyOn(source.store, 'persistSnapshot').mockImplementation(() => undefined);
+    try {
+      await source.ageMarkouts();
+      await source.ageMarkouts(); // taken once: a second pass never re-derives it
+      expect([...source.dirtyCurves.keys()]).toEqual(['covered']);
+      expect(source.dirtyCurves.get('covered')).toEqual(Array(CURVE_OFFSETS_S.length).fill(10_000));
+      expect(frames.every((f) => !('curveBps' in f))).toBe(true);
+      await source.persist();
+      expect(persistSnapshot.mock.calls[0][3]).toEqual([{ id: 'covered', curveBps: Array(CURVE_OFFSETS_S.length).fill(10_000) }]);
+      expect(source.dirtyCurves.size).toBe(0);
+    } finally { source.store.close(); }
+  });
+
   it('collects every market, size and venue role once per block with zero viewers', async () => {
     const { source, adapters, poll } = await setup({ withQuotes: true });
     source.schedulePostQuoteMaintenance = vi.fn();
@@ -674,7 +701,7 @@ describe('live startup archive gate', () => {
 
     await source.persist();
 
-    expect(persistSnapshot).toHaveBeenCalledWith([changed], expect.any(Object), []);
+    expect(persistSnapshot).toHaveBeenCalledWith([changed], expect.any(Object), [], []);
     expect(source.dirtyDays.size).toBe(0);
     source.store.close();
   });

@@ -12,6 +12,7 @@ vi.mock('./lib/api', () => {
     fetchMarkets: vi.fn(pending),
     fetchFills: vi.fn(pending),
     fetchLeaderboard: vi.fn(pending),
+    fetchMarkoutCurves: vi.fn(pending),
     fetchGas: vi.fn(pending),
     fetchQuoteHistory: vi.fn(pending),
     fetchQuoteStats: vi.fn(pending),

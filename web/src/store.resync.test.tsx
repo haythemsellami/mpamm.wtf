@@ -7,7 +7,7 @@ import * as api from './lib/api';
 import { DashboardProvider, useDashboard } from './store';
 
 vi.mock('./lib/api', () => ({
-  fetchMarkets: vi.fn(), fetchFills: vi.fn(), fetchLeaderboard: vi.fn(), fetchGas: vi.fn(),
+  fetchMarkets: vi.fn(), fetchFills: vi.fn(), fetchLeaderboard: vi.fn(), fetchMarkoutCurves: vi.fn(), fetchGas: vi.fn(),
   fetchQuoteHistory: vi.fn(), fetchQuoteStats: vi.fn(), connectDashboardStream: vi.fn(),
 }));
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -38,6 +38,7 @@ beforeEach(() => {
   vi.mocked(api.fetchMarkets).mockResolvedValue(snapshot);
   vi.mocked(api.fetchFills).mockResolvedValue([fill('old')]);
   vi.mocked(api.fetchLeaderboard).mockReturnValue(new Promise(() => {}));
+  vi.mocked(api.fetchMarkoutCurves).mockReturnValue(new Promise(() => {}));
   vi.mocked(api.fetchGas).mockResolvedValue({ days: [], approx: [] });
   vi.mocked(api.fetchQuoteHistory).mockResolvedValue([]);
   vi.mocked(api.fetchQuoteStats).mockImplementation(async (market, sizeUsd) => ({ market, sizeUsd, asOf: Date.now(), windowMs: 300_000, revision: 0, rows: [] }));
