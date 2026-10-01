@@ -7,7 +7,7 @@ import { HttpRequestError } from 'viem';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GasTracker } from '../gas.js';
+import { GasTracker, gasSourcesSignature } from '../gas.js';
 import { VolumeStore } from '../db.js';
 import type { VenueAdapter } from '../venues/adapter.js';
 
@@ -320,5 +320,66 @@ describe('archive availability cursor holds', () => {
     expect(store.getMeta(`gas_cursor_${vid}`)).toBe(String(START + 800n));
     expect(store.gasDays('2099-01-01').some((d) => d.byVenue[vid])).toBe(true);
     unlinkSync(path);
+  });
+});
+
+describe('blocks-mode relay route', () => {
+  const TARGET = '0x00000000000000000000000000000000000000aa';
+  const RELAY = '0x00000000000000000000000000000000000000ee';
+  const SEL = '0x0c7abd22';
+  const START = 3_000_000n;
+  const word = (hex: string) => hex.replace(/^0x/, '').padStart(64, '0');
+  // selector + 5 filler words + the searcher word (targetWord 5)
+  const bid = (searcher: string) => SEL + word('2').repeat(5) + word(searcher);
+  const txs = [
+    { hash: '0x01', to: TARGET, input: '0xae7e8d81' + word('1') },   // direct push
+    { hash: '0x02', to: RELAY, input: bid(TARGET) },                // routed push (reverted below)
+    { hash: '0x03', to: RELAY, input: bid('0x00000000000000000000000000000000000000bb') }, // another searcher
+    { hash: '0x04', to: RELAY, input: '0xdeadbeef' + word('0').repeat(5) + word(TARGET) },  // wrong selector
+  ];
+  const receipts = [
+    { transactionHash: '0x01', to: TARGET, status: '0x1', gasUsed: '0xafc8', effectiveGasPrice: '0x3b9aca00' },  // 45000
+    { transactionHash: '0x02', to: RELAY, status: '0x0', gasUsed: '0x372d0', effectiveGasPrice: '0x3b9aca00' },  // 226000
+    { transactionHash: '0x03', to: RELAY, status: '0x1', gasUsed: '0x372d0', effectiveGasPrice: '0x3b9aca00' },
+    { transactionHash: '0x04', to: RELAY, status: '0x1', gasUsed: '0x372d0', effectiveGasPrice: '0x3b9aca00' },
+  ];
+
+  const run = async (withRelay: boolean) => {
+    const { store, path } = freshStore();
+    const sources = [{ mode: 'blocks' as const, address: TARGET as `0x${string}`, ...(withRelay ? { relays: [{ address: RELAY as `0x${string}`, selector: SEL as `0x${string}`, targetWord: 5 }] } : {}) }];
+    seed(store, 'relayed', gasSourcesSignature(sources), START);
+    const fullBlockReads: boolean[] = [];
+    const client: any = {
+      getBlockNumber: async () => START + 1_000n + 5n, // head = START+1000 → 2 samples
+      getBlock: async ({ includeTransactions }: { includeTransactions?: boolean }) => {
+        fullBlockReads.push(!!includeTransactions);
+        return { timestamp: BigInt(DAY0), ...(includeTransactions ? { transactions: txs } : {}) };
+      },
+      request: async () => receipts,
+    };
+    const adapter = {
+      venues: () => [venueMeta('relayed')], discover: async () => {}, logSources: () => [], decode: () => [],
+      gasSources: () => sources,
+    } as unknown as VenueAdapter;
+    const tracker = new GasTracker(client, store, [adapter], () => {}, () => false, 9_999);
+    await (tracker as any).pass();
+    tracker.stop();
+    const day = store.gasDays('2099-01-01').find((d) => d.byVenue['relayed'])?.byVenue['relayed'];
+    unlinkSync(path);
+    return { day, fullBlockReads };
+  };
+
+  it('counts the direct push AND the reverted routed bid naming the target — nothing else on the relay', async () => {
+    const { day, fullBlockReads } = await run(true);
+    // 2 sampled blocks (a full stride + head's 1-block remainder): 1000 + 1 blocks scaled
+    expect(day?.txs).toBe(2 * 1001);
+    expect(day?.mon).toBeCloseTo((45_000 + 226_000) * 1e-9 * 1001, 9);
+    expect(fullBlockReads).toEqual([true, true]);
+  });
+
+  it('without a relay: header-only block reads and direct txs only (unchanged behaviour)', async () => {
+    const { day, fullBlockReads } = await run(false);
+    expect(day?.txs).toBe(1001);
+    expect(fullBlockReads).toEqual([false, false]);
   });
 });

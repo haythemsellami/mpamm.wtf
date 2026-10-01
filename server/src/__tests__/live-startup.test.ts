@@ -248,6 +248,69 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
+  it('keeps an adapter-explained outage off MISSING when the same reason returns after a recovery', async () => {
+    // ThogAMM, 2026-09-30: "maker: stale" → healed → "maker: stale". The
+    // adapter's second note was a verbatim repeat of the first, still in the
+    // window, so ctx.note's dedupe dropped it. The backstop then found no
+    // explanation for this outage, raised its own, and the frame listed the
+    // venue MISSING while the reason sat one episode back in the window.
+    const { createQuoteOutageReporter } = await import('../venues/quote-health.js');
+    const { QUOTE_DARK_CYCLES } = await import('../datasource/live.js');
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.bootMs = Date.now() - 65_000;
+    source.schedulePostQuoteMaintenance = vi.fn();
+    const healthy = adapters[0].quote!;
+    const report = createQuoteOutageReporter('Test Venue');
+    const stale = { status: 'failure' as const, error: Object.assign(new Error('x'), { reason: 'maker: stale' }) };
+    const fail = () => { adapters[0].quote = vi.fn(async (ctx) => { report(ctx, [stale]); return []; }); };
+    const heal = () => { adapters[0].quote = vi.fn(async (ctx, sizes, block, markets) => { report(ctx, [{ status: 'success' }]); return healthy(ctx, sizes, block, markets); }); };
+    const window = () => source.notes.list()
+      .filter((n: StateNote) => n.venue === 'venue' && n.code.startsWith('venue.quote.'))
+      .map((n: StateNote) => n.code.slice('venue.quote.'.length));
+    let block = 300n;
+    try {
+      await poll(block++);
+      fail();
+      for (let i = 0; i <= QUOTE_DARK_CYCLES; i++) await poll(block++);
+      heal();
+      await poll(block++);
+      fail();
+      for (let i = 0; i <= QUOTE_DARK_CYCLES; i++) await poll(block++);
+      expect(window()).toEqual(['unavailable', 'recovered', 'unavailable']);
+      expect(source.quoteDark.has('venue')).toBe(false);
+      expect(source.getQuotes().frame.missingVenues).not.toContain('venue');
+    } finally { source.store.close(); }
+  });
+
+  it('drops a dark venue from MISSING once its adapter explains the outage late', async () => {
+    // Clober can only name empty books once it has legs to price. If the
+    // backstop marked it dark first, a later explanation must still win.
+    const { createQuoteOutageLatch } = await import('../venues/quote-health.js');
+    const { QUOTE_DARK_CYCLES } = await import('../datasource/live.js');
+    const { source, adapters, poll } = await setup({ withQuotes: true });
+    source.bootMs = Date.now() - 65_000;
+    source.schedulePostQuoteMaintenance = vi.fn();
+    const report = createQuoteOutageLatch('Test Venue');
+    let canPrice = false;
+    adapters[0].quote = vi.fn(async (ctx) => {
+      report(ctx, canPrice ? { reason: 'books empty', msg: 'Test Venue quotes unavailable — books empty' } : undefined);
+      return [];
+    });
+    const window = () => source.notes.list()
+      .filter((n: StateNote) => n.venue === 'venue' && n.code.startsWith('venue.quote.')).map((n: StateNote) => n.msg);
+    let block = 400n;
+    try {
+      for (let i = 0; i <= QUOTE_DARK_CYCLES; i++) await poll(block++);
+      expect(source.quoteDark.has('venue')).toBe(true);
+      expect(source.getQuotes().frame.missingVenues).toContain('venue');
+      canPrice = true;
+      await poll(block++);
+      expect(source.quoteDark.has('venue')).toBe(false);
+      expect(source.getQuotes().frame.missingVenues).not.toContain('venue');
+      expect(window()).toEqual(['Test Venue quotes unavailable — books empty']);
+    } finally { source.store.close(); }
+  });
+
   it('ages fills in yielding passes with identical buy/sell signs and persistence updates', async () => {
     const { source } = await setup();
     const now = Date.now();
@@ -521,6 +584,86 @@ describe('live startup archive gate', () => {
     await source.stop();
   });
 
+  it('a capped boot prune that stops mid-day never lets swap reconciliation rewrite that expired day', async () => {
+    const { source } = await setup();
+    const { retentionCutoffMs, PRUNE_BATCH_ROWS } = await import('../db.js');
+    const { config } = await import('../config.js');
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const cutoff = retentionCutoffMs(Date.now(), config.fillsRetentionDays);
+    const expiredTs = cutoff - 12 * 3_600_000; // midday of the last expired day
+    const retainedTs = cutoff + 36 * 3_600_000; // well inside retention
+    const expiredCount = (config.pruneBootMaxBatches + 2) * PRUNE_BATCH_ROWS; // more than the boot cap drains
+    const mk = (i: number, ts: number): Fill => ({
+      id: `test-venue-0x${i.toString(16)}-0`, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'ROUTER',
+      usd: 1, baseAmount: 1, execPx: 1, txHash: '0x1', to: 'x', pool: 'p', blockNumber: i, ts, markoutsBps: [null, null, null, null, null],
+    });
+    source.store.persistSnapshot([
+      { utcDay: day(expiredTs), partial: false, byVenue: { 'test-venue': { usd: 1, swaps: expiredCount } } },
+      { utcDay: day(retainedTs), partial: false, byVenue: { 'test-venue': { usd: 1, swaps: 0 } } },
+    ], {}, [
+      ...Array.from({ length: expiredCount }, (_, i) => mk(i, expiredTs + i)),
+      mk(expiredCount, retainedTs), mk(expiredCount + 1, retainedTs + 1), mk(expiredCount + 2, retainedTs + 2),
+    ]);
+    // the capped boot prune: stops with part of the expired day still on disk
+    expect(source.store.pruneFillsBefore(cutoff, config.pruneBootMaxBatches).done).toBe(false);
+    source.days = source.store.all();
+    source.reconcileSwapCounts();
+    const swaps = (d: string) => source.days.find((x: any) => x.utcDay === d)?.byVenue['test-venue']?.swaps;
+    expect(swaps(day(expiredTs))).toBe(expiredCount); // persisted total kept, not the 2k remainder
+    expect(swaps(day(retainedTs))).toBe(3);           // retained days still reconcile from fills
+    source.store.close();
+  });
+
+  it('drains a retention backlog on the WRITER in sweeps, then VACUUMs once there — never on the main thread', async () => {
+    vi.useFakeTimers();
+    const { source } = await setup();
+    const mainPrune = vi.spyOn(source.store, 'pruneFillsBefore');
+    const mainVacuum = vi.spyOn(source.store, 'vacuumIfRoom');
+    const sweeps = [{ removed: 50_000, done: false }, { removed: 50_000, done: false }, { removed: 12, done: true }];
+    const writer = {
+      pruneFills: vi.fn(async () => sweeps.shift()!),
+      vacuumIfRoom: vi.fn(async () => ({ plan: 'defer' as const, freeBytes: 0, liveBytes: 0, availBytes: 0, ms: 0 })),
+    };
+    source.storeWriter = writer;
+    source.kickMaintenance();
+    await vi.runAllTimersAsync();
+    expect(writer.pruneFills).toHaveBeenCalledTimes(3);
+    expect(writer.vacuumIfRoom).toHaveBeenCalledTimes(1);
+    expect(mainPrune).not.toHaveBeenCalled();
+    expect(mainVacuum).not.toHaveBeenCalled();
+    // a second kick (e.g. the 10-min timer) sweeps again but never re-VACUUMs
+    sweeps.push({ removed: 0, done: true });
+    source.kickMaintenance();
+    await vi.runAllTimersAsync();
+    expect(writer.vacuumIfRoom).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+    source.store.close();
+  });
+
+  it('a sweep blocked by a reader stops without VACUUM; the timer tick that drains it still VACUUMs', async () => {
+    vi.useFakeTimers();
+    const { source } = await setup();
+    const sweeps: Array<{ removed: number; done: boolean; blocked?: true }> = [{ removed: 1_000, done: false, blocked: true }];
+    const writer = {
+      pruneFills: vi.fn(async () => sweeps.shift()!),
+      vacuumIfRoom: vi.fn(async () => ({ plan: 'defer' as const, freeBytes: 0, liveBytes: 0, availBytes: 0, ms: 0 })),
+    };
+    source.storeWriter = writer;
+    source.kickMaintenance(); // boot: pinned → stops at once, no retry spin
+    await vi.runAllTimersAsync();
+    expect(writer.pruneFills).toHaveBeenCalledTimes(1);
+    expect(writer.vacuumIfRoom).not.toHaveBeenCalled();
+    // the retention timer fires (the same entry point) with the reader gone
+    source.pruneTimer = setInterval(() => source.kickMaintenance(), 60_000);
+    sweeps.push({ removed: 500, done: true });
+    await vi.advanceTimersByTimeAsync(60_000);
+    clearInterval(source.pruneTimer);
+    expect(writer.pruneFills).toHaveBeenCalledTimes(2);
+    expect(writer.vacuumIfRoom).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+    source.store.close();
+  });
+
   it('persists only volume days changed since the prior snapshot', async () => {
     const { source } = await setup();
     const historical = { utcDay: '2026-01-01', partial: false, byVenue: { old: { usd: 1, swaps: 1 } } };
@@ -531,7 +674,7 @@ describe('live startup archive gate', () => {
 
     await source.persist();
 
-    expect(persistSnapshot).toHaveBeenCalledWith([changed], expect.any(Object), [], expect.any(Array));
+    expect(persistSnapshot).toHaveBeenCalledWith([changed], expect.any(Object), []);
     expect(source.dirtyDays.size).toBe(0);
     source.store.close();
   });

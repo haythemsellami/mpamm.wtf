@@ -37,8 +37,15 @@ export interface AdapterContext {
    *  what a consumer filters and alerts on, and it also decides the note's
    *  level (@shared: NOTE_LEVEL), so nothing downstream has to read your
    *  wording. The core stamps the timestamp and your venue id, and drops a
-   *  repeat of a note it already holds (discovery re-runs every 10 minutes). */
-  note: (code: NoteCode, msg: string) => void;
+   *  repeat of a note it already holds (discovery re-runs every 10 minutes).
+   *
+   *  Pass `{ repeatable: true }` for a STATE TRANSITION you already latch
+   *  (outage → recovery → the same outage again). Window-wide dedupe would
+   *  swallow the second outage as a repeat of the first, still in the window,
+   *  and the core's went-dark backstop would then report the venue as
+   *  unexplained. That is how ThogAMM's second "maker: stale" outage reached
+   *  the dashboard as MISSING (2026-09-30). */
+  note: (code: NoteCode, msg: string, opts?: { repeatable?: boolean }) => void;
   /** Small durable key/value store, namespaced to this adapter's venue (SQLite
    *  `meta`; survives restarts). For state that cannot be re-derived cheaply at
    *  boot — e.g. a pool a permissionless factory announced ONCE: the fills tail
@@ -104,13 +111,33 @@ export interface EntryPoint {
  *              only sound for a near-constant-cadence keeper (POE pushes
  *              every block).
  *
+ *              `relays` additionally counts updates that reach `address`
+ *              THROUGH a shared forwarder (see GasRelay).
+ *
  * A venue whose quoting cost is NOT self-funded (external oracle, taker-paid
  * JIT repricing) simply doesn't implement gasSources — absence is the honest
  * value, not zero.
  */
 export type GasSource =
   | { mode: 'logs'; address: `0x${string}` | `0x${string}`[]; events?: readonly unknown[]; topic0?: `0x${string}` }
-  | { mode: 'blocks'; address: `0x${string}` | `0x${string}`[] };
+  | { mode: 'blocks'; address: `0x${string}` | `0x${string}`[]; relays?: readonly GasRelay[] };
+
+/**
+ * A SHARED contract some of a venue's update txs are sent to instead of the
+ * update contract itself (e.g. an MEV auction handler that forwards the call
+ * to a named searcher). tx.to alone can't attribute these — other searchers
+ * use the same relay — and the receipt may carry nothing naming the target
+ * (reverted bids have no logs, yet still pay gas_limit). So the match is on
+ * CALLDATA: tx.to == `address`, the 4-byte `selector`, and the static head
+ * word `targetWord` (0-based, after the selector) holding one of the
+ * source's own `address` entries. The relay is never an owned destination —
+ * it is not claimed in the cross-venue ownership check.
+ */
+export interface GasRelay {
+  address: `0x${string}`;
+  selector: `0x${string}`;
+  targetWord: number;
+}
 
 /** Optional historical seed returned by `backfill()`. */
 export interface AdapterBackfill {

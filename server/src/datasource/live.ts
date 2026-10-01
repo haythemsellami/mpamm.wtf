@@ -4,6 +4,8 @@ import { QuoteHealthBatch } from '../venues/quote-health.js';
 import { agePendingMarkouts, nearestReferenceSample } from '../markout-aging.js';
 import { BaseSource, QUOTE_HISTORY_MS } from './index.js';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { statfsSync } from 'node:fs';
+import { dirname } from 'node:path';
 import {
   MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase,
   type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
@@ -22,7 +24,10 @@ import {
 } from '../chain/rpc.js';
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
-import { VolumeStore, type ResetDeletes } from '../db.js';
+import { VolumeStore, retentionCutoffMs, type ResetDeletes } from '../db.js';
+
+/** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
+const PRUNE_LOG_MIN_ROWS = 1_000;
 import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
 import { NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
@@ -286,7 +291,7 @@ export function checkQuoteOutage(
     warn: (id: string, m: string) => void;
     announce: (id: string, m: string) => void;
     clear: (id: string, m: string) => void;
-    explained: (id: string, since: number) => boolean;
+    explained: (id: string, since: number, except?: string) => boolean;
   },
 ): void {
   for (const v of venues) {
@@ -302,7 +307,20 @@ export function checkQuoteOutage(
     const run = empty.get(v.id) ?? { runs: 0, since: 0 }; // 0: never seen quoting
     run.runs++;
     empty.set(v.id, run);
-    if (run.runs < QUOTE_DARK_CYCLES || dark.has(v.id)) continue;
+    const warned = dark.get(v.id);
+    if (warned !== undefined) {
+      // The reason can arrive AFTER this check fired: Clober only names its
+      // empty books once a reference warms and it has legs to price. Hand the
+      // venue back to the adapter, or frameMissingVenues lists it dark until
+      // it quotes again, next to the explanation. Retract without announcing:
+      // it still is not quoting, and the adapter now owns the recovery note.
+      if (io.explained(v.id, run.since, warned)) {
+        dark.delete(v.id);
+        io.clear(v.id, warned);
+      }
+      continue;
+    }
+    if (run.runs < QUOTE_DARK_CYCLES) continue;
     // The adapter already said WHY, so it owns this venue's outage telemetry
     // BOTH ways: standing down here but still marking it dark would let the
     // core announce a second, vaguer recovery alongside the adapter's own.
@@ -883,8 +901,9 @@ export class LiveDataSource extends BaseSource {
         pricer: this.pricer,
         config,
         // deduped: discovery notes repeat verbatim on every 10-min rediscover
-        // and were accumulating unbounded ("Metric: 3 pool(s)" × N).
-        note: (code, msg) => this.noteOnce(code, msg, venue),
+        // and were accumulating unbounded ("Metric: 3 pool(s)" × N). A
+        // `repeatable` note is a transition the adapter latches itself.
+        note: (code, msg, opts) => opts?.repeatable ? this.note(code, msg, venue) : this.noteOnce(code, msg, venue),
         // storeWriter is read at CALL time: it is the direct store during boot
         // discovery and the persistence worker once writes are sealed.
         state: {
@@ -955,6 +974,7 @@ export class LiveDataSource extends BaseSource {
   private loopsStopped = false;
   private stopPromise?: Promise<void>;
   private persistTimer?: ReturnType<typeof setInterval>;
+  private pruneTimer?: ReturnType<typeof setInterval>;
   private snapshotWriter?: SnapshotWriter;
   private storeWriter: StoreWriter = directStoreWriter(this.store);
   private rediscoverTimer?: ReturnType<typeof setInterval>;
@@ -1047,6 +1067,7 @@ export class LiveDataSource extends BaseSource {
     this.storeWriter = this.snapshotWriter;
     this.gas.setWriter(this.snapshotWriter);
     this.store.sealWrites();
+    this.kickMaintenance();
 
     // The boot head was captured by initHistory. Quote that exact state once,
     // then let newHeads drive every later matrix. If boot quoting fails, the
@@ -1092,6 +1113,9 @@ export class LiveDataSource extends BaseSource {
     // finality-margin range reads never decide which block a quote represents.
     this.scheduleTail();
     this.persistTimer = setInterval(() => { void this.persist(); }, config.persistMs);
+    // rolling retention: without it fills only aged out at boot, so uptime
+    // alone grew the table past its window.
+    this.pruneTimer = setInterval(() => this.kickMaintenance(), config.pruneIntervalMs);
     this.rediscoverTimer = setInterval(() => { void this.rediscover(); }, config.rediscoverMs);
 
     // The archive pool is NOT fatal for an outage. Deep crawls hold their
@@ -1252,6 +1276,7 @@ export class LiveDataSource extends BaseSource {
     if (this.quoteRetryTimer) clearTimeout(this.quoteRetryTimer);
     if (this.postQuoteImmediate) clearImmediate(this.postQuoteImmediate);
     if (this.persistTimer) clearInterval(this.persistTimer);
+    if (this.pruneTimer) clearInterval(this.pruneTimer);
     if (this.rediscoverTimer) clearInterval(this.rediscoverTimer);
     if (this.remarkTimer) clearInterval(this.remarkTimer);
     this.gas.stop();
@@ -1384,11 +1409,14 @@ export class LiveDataSource extends BaseSource {
     }
     // 1. authoritative persisted history
     this.days = this.store.all();
-    // load recent fills for live serving; drop rows past the retention window
-    // (the persisted mid curve shares the fills' retention — it only exists to
-    // replay THEM on a markout-model bump).
-    this.store.pruneFills(Date.now() - config.fillsRetentionDays * 86_400_000);
-    this.store.pruneMids(Date.now() - config.fillsRetentionDays * 86_400_000);
+    // drop a FEW batches past the retention window now (so recentFills and
+    // swap counts below never see expired rows at the head of the table);
+    // any larger backlog, and the VACUUM, run on the persistence worker once
+    // it starts (kickMaintenance) — boot blocks the event loop, and Render
+    // kills a process whose health check doesn't answer.
+    const aged = this.store.pruneFillsBefore(retentionCutoffMs(Date.now(), config.fillsRetentionDays), config.pruneBootMaxBatches);
+    if (aged.removed) console.log(`[mpamm] retention: pruned ${aged.removed} fill(s) at boot${aged.done ? '' : ' — backlog continues on the worker'}`);
+    // load recent fills for live serving
     this.fills = this.store.recentFills(400);
     // seed the dedup guard with the persisted window so a gap-fill re-decode of
     // already-counted fills won't re-count them.
@@ -1484,6 +1512,59 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
+  /** Storage maintenance, all on the persistence worker so the event loop
+   *  (quotes, /api/health) keeps serving: drain the retention backlog in
+   *  bounded sweeps, then VACUUM once if the disk allows it. Run after boot
+   *  AND by the retention timer — a boot sweep a reader blocked is finished
+   *  by a later tick, which must still reach the VACUUM. */
+  private kickMaintenance(): void {
+    void this.pruneSweep().then((drained) => { if (drained) return this.vacuumOnce(); });
+  }
+
+  private pruning = false;
+  /** Retention on the writer worker: bounded sweeps back to back until the
+   *  backlog is gone (a short pause between them lets snapshot writes
+   *  interleave), stopping early when a reader pins the WAL. Resolves true
+   *  when the backlog is fully drained. */
+  private async pruneSweep(): Promise<boolean> {
+    if (this.pruning) return false;
+    this.pruning = true;
+    let total = 0;
+    try {
+      while (!this.loopsStopped) {
+        const r = await this.storeWriter.pruneFills(retentionCutoffMs(Date.now(), config.fillsRetentionDays), config.pruneMaxBatches);
+        total += r.removed;
+        if (r.done || r.blocked) {
+          if (total > PRUNE_LOG_MIN_ROWS) console.log(`[mpamm] retention: pruned ${total} fill(s)${r.done ? ' — backlog clear' : ' — paused (reader holds the WAL)'}`);
+          return r.done;
+        }
+        await sleep(1_000);
+      }
+      return false;
+    } catch (e) {
+      this.noteOnce('store.persist.failed', `retention sweep failed (${(e as Error).message}); retried next interval`);
+      return false;
+    } finally {
+      this.pruning = false;
+    }
+  }
+
+  private vacuumed = false;
+  /** One VACUUM per process, behind the disk-capacity gate, on the worker. */
+  private async vacuumOnce(): Promise<void> {
+    if (this.vacuumed) return;
+    this.vacuumed = true;
+    try {
+      const fs = statfsSync(dirname(config.dbPath));
+      const r = await this.storeWriter.vacuumIfRoom(Number(fs.bavail) * Number(fs.bsize));
+      const mb = (b: number) => (b / 1e6).toFixed(0);
+      if (r.plan === 'defer') console.log(`[mpamm] vacuum deferred: ${mb(r.freeBytes)} MB reclaimable, but only ${mb(r.availBytes)} MB free for a ${mb(r.liveBytes)} MB rewrite`);
+      if (r.plan === 'run') console.log(`[mpamm] vacuum: reclaimed ${mb(r.freeBytes)} MB in ${r.ms}ms`);
+    } catch (e) {
+      console.log(`[mpamm] vacuum skipped (${(e as Error).message})`);
+    }
+  }
+
   private persist(reportFailure = false): Promise<void> {
     // Swap the dirty sets synchronously. New fills/day mutations land in fresh
     // sets while this immutable snapshot waits for the worker ACK; a failure
@@ -1492,18 +1573,12 @@ export class LiveDataSource extends BaseSource {
     const dirtyDays = this.dirtyDays;
     this.dirty = new Set();
     this.dirtyDays = new Set();
-    const now = Date.now();
     const snapshot: SnapshotWrite = {
       days: this.days
         .filter((d) => dirtyDays.has(d.utcDay))
         .map((d) => ({ ...d, byVenue: Object.fromEntries(Object.entries(d.byVenue).map(([id, v]) => [id, { ...v }])) })),
       meta: { lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
       fills: [...dirtyFills].map((f) => ({ ...f, markoutsBps: [...f.markoutsBps] })),
-      // Each pass samples every pair's CURRENT reference mid into mid_history
-      // (~PERSIST_MS cadence), for future markout-model replay.
-      mids: PAIRS
-        .map((p) => ({ ts: now, market: p.symbol, mid: REFERENCES.midForPair(p.symbol) }))
-        .filter((m) => m.mid > 0),
     };
 
     return this.writeSnapshot(snapshot)
@@ -1557,7 +1632,11 @@ export class LiveDataSource extends BaseSource {
    */
   private reconcileSwapCounts(): void {
     const byDay = new Map<string, Map<string, number>>();
-    for (const c of this.store.fillCountsByDayVenue()) {
+    // only days inside retention: the cutoff is day-aligned and nothing at or
+    // after it is ever pruned, so those days are complete — while an expired
+    // day may be half-deleted (boot prune capped at PRUNE_BOOT_MAX_BATCHES),
+    // and overwriting its persisted swaps with the remainder would corrupt it.
+    for (const c of this.store.fillCountsByDayVenue(retentionCutoffMs(Date.now(), config.fillsRetentionDays))) {
       let m = byDay.get(c.utcDay); if (!m) { m = new Map(); byDay.set(c.utcDay, m); }
       m.set(c.venueId, c.swaps);
     }
@@ -1906,7 +1985,7 @@ export class LiveDataSource extends BaseSource {
       cursor = to + 1n;
       if (++sinceMerge >= config.backfillMergeEvery || cursor > end) {
         const changed = this.mergeBackfill(vid, acc, flushed);
-        await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(cursor) }, fills: [], mids: [] });
+        await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(cursor) }, fills: [] });
         for (const d of changed) flushed.set(d.utcDay, { ...acc.get(d.utcDay)! });
         sinceMerge = 0;
       }
@@ -1914,7 +1993,7 @@ export class LiveDataSource extends BaseSource {
     }
 
     const changed = this.mergeBackfill(vid, acc, flushed);
-    await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(end + 1n) }, fills: [], mids: [] });
+    await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(end + 1n) }, fills: [] });
     if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
     // done even when ranges were skipped — re-running every boot can't fix an RPC
     // archive hole. To re-attempt after the provider repairs it: delete the
@@ -2522,7 +2601,7 @@ export class LiveDataSource extends BaseSource {
         warn: (id, m) => this.noteOnce('venue.quote.unavailable', m, id),
         announce: (id, m) => this.note('venue.quote.recovered', m, id),
         clear: (id, m) => this.dropNote('venue.quote.unavailable', m, id),
-        explained: (id, since) => this.notes.holds('venue.quote.unavailable', id, since),
+        explained: (id, since, except) => this.notes.holds('venue.quote.unavailable', id, since, except),
       });
     }
     annotateCex(venueRows, refRows); // docs/architecture.md: fill stream — matched per market, so each venue row hits its pair's CEX

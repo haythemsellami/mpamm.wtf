@@ -34,7 +34,6 @@ describe('persistence worker', () => {
         usd: 12, baseAmount: 10, execPx: 1.2, txHash: '0xabc', to: 'Router', router: 'Test Router',
         pool: 'Test Pool', blockNumber: 123, ts: 1_777_000_000_000, markoutsBps: [1, null, null, null, null],
       }],
-      mids: [{ market: 'MON/USDC', ts: 1_777_000_000_000, mid: 1.21 }],
     });
     expect(read.getMeta('lastProcessedBlock')).toBe('123');
     expect(read.all()).toEqual([
@@ -58,6 +57,15 @@ describe('persistence worker', () => {
       beforeDay: '2026-08-26', volume: {}, fills: { fromBlock: 123n },
     }, 123n)).toEqual({ volume: 1, fills: 1 });
     expect(read.recentFills(1)).toEqual([]);
+
+    // the rolling retention sweep runs on the worker lane too
+    const aged = (id: string, ts: number) => ({
+      id, venueId: 'test', market: 'MON/USDC', side: 'buy' as const, category: 'ROUTER' as const,
+      usd: 1, baseAmount: 1, execPx: 1, txHash: '0xdef', to: 'x', pool: 'p', blockNumber: 1, ts, markoutsBps: [null, null, null, null, null],
+    });
+    await writer.persist({ days: [], meta: {}, fills: [aged('old', 1_000), aged('new', 9_000)] });
+    expect(await writer.pruneFills(5_000, 3)).toEqual({ removed: 1, done: true });
+    expect(read.recentFills(5).map((f) => f.id)).toEqual(['new']);
 
     await writer.close();
     read.close();
