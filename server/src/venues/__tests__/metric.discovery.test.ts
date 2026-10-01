@@ -88,6 +88,7 @@ const SEEDS = [
   '0xFA32f9ec28787d1F9C5BA5c39e54e59984FEF3f0',
   '0x2D82AC42334b394A9a8d8f097d61DC1c6B065Fd8',
   '0x354D92279cA0190fF275095fE6A2a6989BAa66Fb',
+  '0x5357bf9863320e8fc0c10c97896c0aed070aab9f',   // WMON/USDC #2 — shares the first WMON pool's provider
 ].map((s) => s.toLowerCase());
 const ORACLE_A = '0x681e908b8ab57c49c74d770f369754ccc3e1ae09';
 const ORACLE_B = '0xaaaa0000000000000000000000000000000000bb';
@@ -101,14 +102,18 @@ interface StubOpts {
   logsThrow?: boolean;
   /** oracle probe reverts — pools stay ADMITTED but drop out of `live`. */
   priceFails?: boolean;
+  /** durable adapter state (the core's ctx.state); omitted ⇒ no persistence. */
+  state?: { get(key: string): string | undefined; set(key: string, value: string): Promise<void> };
 }
 const stub = (notes: string[], o: StubOpts = {}) => {
   const tokenOf: Record<string, [string, string]> = {
     [SEEDS[0]]: [TOKENS.WMON.address, TOKENS.USDC.address],
     [SEEDS[1]]: [TOKENS.WBTC.address, TOKENS.USDC.address],
     [SEEDS[2]]: [TOKENS.WETH.address, TOKENS.USDC.address],
+    [SEEDS[3]]: [TOKENS.WMON.address, TOKENS.USDC.address],
   };
-  const providerFor = (pool: string) => '0xprov' + pool.slice(6);
+  // on-chain both WMON/USDC pools read ONE provider (0xEaFD…), hence one feed
+  const providerFor = (pool: string) => '0xprov' + (pool === SEEDS[3] ? SEEDS[0] : pool).slice(6);
   return {
     client: {
       getBlockNumber: async () => o.head ?? 1_000_000n,
@@ -143,7 +148,23 @@ const stub = (notes: string[], o: StubOpts = {}) => {
     },
     pricer: { pairMid: () => 1, usdPerToken: () => 1, usdForToken: () => 1, tokenForUsd: () => 1, assetUsd: () => 1 },
     note: (_code: string, m: string) => notes.push(m),
+    state: o.state,
   } as any;
+};
+
+/** In-memory stand-in for the core's meta-backed ctx.state. */
+const memState = (init: Record<string, string> = {}) => {
+  const kv = new Map(Object.entries(init));
+  let failNext = 0;
+  return {
+    kv,
+    failWrites: (n: number) => { failNext = n; },
+    get: (k: string) => kv.get(k),
+    set: async (k: string, v: string) => {
+      if (failNext > 0) { failNext--; throw new Error('disk full'); }
+      kv.set(k, v);
+    },
+  };
 };
 
 describe('Metric permissionless discovery', () => {
@@ -156,7 +177,7 @@ describe('Metric permissionless discovery', () => {
       await adapter.discover(ctx);
       expect(adapter.quoteMarkets!()).toEqual(catalog);
       expect(await adapter.quote!(ctx, [100], 1_000_000n, new Set(['BTC/USDC']))).toEqual([]);
-      expect(adapter.logSources().find((s) => s.key === 'swap')?.address).toHaveLength(3);
+      expect(adapter.logSources().find((s) => s.key === 'swap')?.address).toHaveLength(SEEDS.length);
     }
     await adapter.discover(stub([]));
     expect(adapter.quoteMarkets!()).toEqual(catalog);
@@ -199,8 +220,8 @@ describe('Metric permissionless discovery', () => {
     await a.discover(ctx);
     const swap = a.logSources().find((s) => s.key === 'swap')!;
     expect(swap.address).toContain(NEW);                       // tailed
-    // …but excluded from the live set, so it is never quoted: 3 seeds live, 1 shell.
-    expect(notes.some((n) => /Metric: 3 live base\/stable pool\(s\) \(\+1 unfunded; not quoted\)/.test(n))).toBe(true);
+    // …but excluded from the live set, so it is never quoted: 4 seeds live, 1 shell.
+    expect(notes.some((n) => /Metric: 4 live base\/stable pool\(s\) \(\+1 unfunded; not quoted\)/.test(n))).toBe(true);
   });
 
   it('survives a factory scan failure — seeds still resolve', async () => {
@@ -386,5 +407,97 @@ describe('liveness carries a REASON, not just a verdict (issue #58)', () => {
     await a.discover(ctx);
     expect(seen.some((n) => n.code === 'venue.quote.unavailable')).toBe(false);
     expect(seen.some((n) => n.code === 'venue.quote.recovered')).toBe(false);
+  });
+});
+
+describe('factory-announced pools survive a restart', () => {
+  // 2026-08-22 the factory created a second funded WMON/USDC pool. It was held
+  // only in memory, the next day's deploy forgot it, and 2,172 of its swaps
+  // (~$916k) went uncounted: the fills tail never re-reads a PoolCreated behind
+  // its cursor, and boot deliberately does not backscan the factory.
+  const NEW = '0xcccc000000000000000000000000000000000003';
+  const createdLog = { args: { pool: NEW }, address: '0xe22f9fc0f04486de25ed6cf1800a4a47afd82e0c' };
+  const swapLog = (pool: string) => ({
+    address: pool,
+    args: { amount0Delta: -1_000_000_000_000_000_000n, amount1Delta: 2_000_000n, recipient: '0x' + '1'.repeat(40) },
+    transactionHash: '0x' + 'b'.repeat(64), blockNumber: 2n, logIndex: 0,
+  });
+  const tailed = (a: ReturnType<typeof createMetricAdapter>) =>
+    (a.logSources().find((s) => s.key === 'swap')!.address as string[]).map((x) => x.toLowerCase());
+
+  it('a pool seen by the fills tail is persisted before decode returns, and a fresh adapter tails it', async () => {
+    const state = memState();
+    const first = createMetricAdapter();
+    const ctx = stub([], { state });
+    await first.discover(ctx);
+    await first.decode(ctx, { poolCreated: [createdLog], swap: [] } as any, () => 0, new Set());
+    expect(JSON.parse(state.kv.get('factory_pools')!)).toEqual([NEW]);
+
+    // restart: new adapter instance, same durable state, nothing in the tail
+    const second = createMetricAdapter();
+    const ctx2 = stub([], { state });
+    await second.discover(ctx2);
+    expect(tailed(second)).toContain(NEW);
+    const fills = await second.decode(ctx2, { swap: [swapLog(NEW)] } as any, () => 0, new Set());
+    expect(fills).toHaveLength(1);   // decodable after the restart, not dropped as unknown
+  });
+
+  it('a pool seen by the forward factory scan is persisted too', async () => {
+    const state = memState();
+    const a = createMetricAdapter();
+    await a.discover(stub([], { state }));
+    await a.discover(stub([], { state, head: 1_000_500n, createdPools: [{ pool: NEW }] }));
+    expect(JSON.parse(state.kv.get('factory_pools')!)).toEqual([NEW]);
+  });
+
+  it('a failed persist in decode THROWS (holds the cursor) and is retried on the next range', async () => {
+    const state = memState();
+    const a = createMetricAdapter();
+    const ctx = stub([], { state });
+    await a.discover(ctx);
+    state.failWrites(1);
+    await expect(a.decode(ctx, { poolCreated: [createdLog], swap: [] } as any, () => 0, new Set())).rejects.toThrow(/disk full/);
+    expect(state.kv.has('factory_pools')).toBe(false);
+    // the re-tried range no longer looks "new" (already in memory) — the write
+    // must still happen, or the next restart loses the pool after all
+    await a.decode(ctx, { poolCreated: [createdLog], swap: [] } as any, () => 0, new Set());
+    expect(JSON.parse(state.kv.get('factory_pools')!)).toEqual([NEW]);
+  });
+
+  it('a failed persist in the forward scan keeps the scan cursor, so the range is re-scanned', async () => {
+    const state = memState();
+    const a = createMetricAdapter();
+    await a.discover(stub([], { state }));
+    state.failWrites(1);
+    await a.discover(stub([], { state, head: 1_000_500n, createdPools: [{ pool: NEW }] }));
+    expect(state.kv.has('factory_pools')).toBe(false);
+    expect(tailed(a)).toContain(NEW);   // still tailed this run
+    await a.discover(stub([], { state, head: 1_000_600n }));
+    expect(JSON.parse(state.kv.get('factory_pools')!)).toEqual([NEW]);
+  });
+
+  it('ignores a corrupt or junk persisted value instead of failing discovery', async () => {
+    for (const bad of ['not json', '{"a":1}', JSON.stringify(['0x123', 42, NEW.toUpperCase()])]) {
+      const a = createMetricAdapter();
+      await a.discover(stub([], { state: memState({ factory_pools: bad }) }));
+      expect(tailed(a)).toHaveLength(SEEDS.length);
+    }
+  });
+
+  it('never persists the seeds, and writes nothing when nothing new was found', async () => {
+    const state = memState();
+    const set = state.set;
+    let writes = 0;
+    state.set = async (k: string, v: string) => { writes++; return set(k, v); };
+    const a = createMetricAdapter();
+    await a.discover(stub([], { state }));
+    await a.discover(stub([], { state, head: 1_000_500n }));
+    expect(writes).toBe(0);
+  });
+
+  it('tails the 2026-08-22 WMON/USDC pool as a seed — the replay needs it with no history scan', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([]));
+    expect(tailed(a)).toContain('0x5357bf9863320e8fc0c10c97896c0aed070aab9f');
   });
 });

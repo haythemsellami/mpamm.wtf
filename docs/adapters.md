@@ -36,7 +36,7 @@ interface VenueAdapter {
 }
 ```
 
-Everything you need is on `ctx` (`AdapterContext`) — **use it instead of importing globals**: `ctx.client` (viem), `ctx.getLogs` (range-chunked), `ctx.pricer` (`usdPerToken`/`tokenForUsd` for USD sizing; **`pairMid(market)`** = the pair's CEX reference mid in the pair's own terms — use it as the bps anchor when quoting), `ctx.config`, `ctx.note`.
+Everything you need is on `ctx` (`AdapterContext`) — **use it instead of importing globals**: `ctx.client` (viem), `ctx.getLogs` (range-chunked), `ctx.pricer` (`usdPerToken`/`tokenForUsd` for USD sizing; **`pairMid(market)`** = the pair's CEX reference mid in the pair's own terms — use it as the bps anchor when quoting), `ctx.config`, `ctx.note`, and `ctx.state` (optional durable key/value, namespaced to your venue — see *Event-discovered contracts* below).
 
 **Only quote/emit REGISTERED pairs** (`@shared` `PAIRS`; check a combo with `pairFor(baseKey, stableSym)`). An unregistered market has no reference rows and no markout routing — the core drops it. Adding a pair/asset is a `@shared` registry entry (see **Scope & limits**).
 
@@ -61,6 +61,7 @@ Everything you need is on `ctx` (`AdapterContext`) — **use it instead of impor
 - **Decode is cursor-critical:** if `decode()` throws, the core holds the cursor and retries the whole range — use that for genuinely unsafe states. For one malformed log, catch locally and skip it so the indexer doesn't wedge.
 - **Attribution is the core's job — emit `UNKNOWN`, never guess:** set `category: 'UNKNOWN'` unless you have log-level evidence (Clober's router-gateway events). The core attributor (`server/src/attribution.ts`) looks at what the tx entered through (`tx.to`) and upgrades UNKNOWN fills to `DIRECT` (tx.to is the venue itself), `Router - <venue>` (your own periphery), `Router - <brand>` (the verified aggregator registry — extend it there) or `MEV - <brand>` (auction/bundle infrastructure, e.g. FastLane). Declare your venue's taker entry contracts via the optional `entryPoints()` hook: addresses with no `router` name are the venue itself (DIRECT); with a name they're your periphery. Private/unidentified intermediaries stay UNKNOWN — that's the honest label.
 - **Merge-safe discovery:** `discover()` re-runs periodically; make it **merge** into your cache, never replace, so a transient failure can't shrink the tailed set.
+- **Event-discovered contracts must be persisted:** the fills tail reads each log once and never re-reads anything behind its cursor, so a contract you learn about from an event (a factory's `PoolCreated`) and keep only in memory is **lost on the next restart**. Write it to `ctx.state` and `await` the write *before* `decode()` returns (a throw holds the cursor), and reload it in `discover()`. Metric lost a funded pool this way on 2026-08-23 (~$916k of swaps uncounted). `ctx.state` is absent outside the live indexer — treat it as optional.
 - **Multiple venues from one adapter** are fine (return several `VenueMeta`, tag each fill/quote with the right id) — the core validates that every emitted `venueId` was declared.
 - **`backfill().fills`** are persisted and tape-visible; their **volume** must come from `backfill().days` (fills are not re-aggregated). Historical fills with null markouts stay excluded from markout stats — never fabricated from a much-later mid.
 

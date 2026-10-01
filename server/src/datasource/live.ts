@@ -885,6 +885,12 @@ export class LiveDataSource extends BaseSource {
         // deduped: discovery notes repeat verbatim on every 10-min rediscover
         // and were accumulating unbounded ("Metric: 3 pool(s)" × N).
         note: (code, msg) => this.noteOnce(code, msg, venue),
+        // storeWriter is read at CALL time: it is the direct store during boot
+        // discovery and the persistence worker once writes are sealed.
+        state: {
+          get: (key) => this.store.getMeta(`adapter_${venue}_${key}`),
+          set: (key, value) => this.storeWriter.setMeta(`adapter_${venue}_${key}`, value),
+        },
       };
       this.ctxCache.set(a, ctx);
     }

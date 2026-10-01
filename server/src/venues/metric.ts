@@ -29,28 +29,34 @@ export const ROUTER = '0xaF9ADa6b6eC7993CE146f6c0bF98f7211CDfD3e5' as const;
 /** MetricOmmFactory — the permissionless deployer. Metric is a DEX whose pool
  *  architecture lets anyone run their own propAMM on it, so the pool set is
  *  open-ended: pools are discovered from the factory's PoolCreated event rather
- *  than listed here (verified on-chain: 7 pools created to date, of which the
- *  three seeds below are the funded ones). */
+ *  than listed here (verified on-chain 2026-10-01: 8 pools created to date,
+ *  the last on 2026-08-22; the four seeds below are the funded ones). */
 const FACTORY = '0xe22F9fc0f04486dE25ed6CF1800a4a47aFD82e0C' as const;
 
-/** Seed pools — the funded, team-run pools that predate event discovery. They
- *  are the ONLY entries that fail loud: a seed that stops resolving is a real
- *  regression, while a permissionless pool that misbehaves is just skipped. */
+/** Seed pools — the funded, team-run pools. They are the ONLY entries that
+ *  fail loud: a seed that stops resolving is a real regression, while a
+ *  permissionless pool that misbehaves is just skipped. */
 export const SEED_POOLS: `0x${string}`[] = [
   '0xFA32f9ec28787d1F9C5BA5c39e54e59984FEF3f0', // WMON/USDC
   '0x2D82AC42334b394A9a8d8f097d61DC1c6B065Fd8', // WBTC/USDC
   '0x354D92279cA0190fF275095fE6A2a6989BAa66Fb', // WETH/USDC
+  // WMON/USDC #2 (same provider/feed as the first), created 2026-08-22 at block
+  // 98326258 and funded alongside it, not instead of it. It was only ever known
+  // in memory, so the 2026-08-23 deploy forgot it: 2,172 swaps (~$916k) over
+  // Aug 23–26 went uncounted. A seed so the replay covers it, persisted
+  // discovery (below) so the next one is not lost the same way.
+  '0x5357bf9863320e8fc0c10c97896c0aed070aab9f',
 ];
 
 /** Boot does NOT scan the factory's history — it records the head and scans
- *  only forward from there. Three reasons this is safe and the alternative is
- *  not: pools older than boot are the SEED_POOLS (verified: the only other
- *  pools ever created hold nothing); pools created while we were DOWN arrive
- *  through `poolCreated` in logSources, which the core's fills tail gap-fills
- *  from its persisted cursor; and a lookback is ruinously slow — 200k blocks
- *  through the 90-block getLogs cap is ~2,200 sequential requests, measured at
- *  7m45s, which would block boot every restart. The forward scan below then
- *  costs ~17 requests per cycle. */
+ *  only forward from there. A lookback is ruinously slow: the factory dates
+ *  from block 64.8M, so the full history is ~45k getLogs even at the 1000-block
+ *  archive cap, every boot. Instead, every pool the factory announces is
+ *  PERSISTED (`ctx.state`, POOLS_KEY) before the cursor that read it commits,
+ *  and reloaded at boot. Pools created while we were DOWN arrive through
+ *  `poolCreated` in logSources, which the core's fills tail gap-fills from its
+ *  persisted cursor. The forward scan below then costs ~17 requests per cycle. */
+const POOLS_KEY = 'factory_pools';
 
 /** Price-limit sentinels (Q64.64) so a quote walks the full binned liquidity for
  *  the size: no upper bound buying the base, no lower bound selling it. */
@@ -246,6 +252,30 @@ export function createMetricAdapter(): VenueAdapter {
   let noPriceWarned = false;
   /** every pool address the factory has told us about (seeds + discovered). */
   const candidates = new Set<string>(SEED_POOLS.map((p) => p.toLowerCase()));
+  const seedSet = new Set(SEED_POOLS.map((p) => p.toLowerCase()));
+  /** the non-seed candidates as last persisted; null until loaded. */
+  let persistedPools: string | null = null;
+  /** Merge what earlier runs persisted — once, on the first pass. */
+  const loadPools = (ctx: AdapterContext) => {
+    if (persistedPools !== null || !ctx.state) return;
+    let saved: unknown = [];
+    try { saved = JSON.parse(ctx.state.get(POOLS_KEY) ?? '[]'); } catch { /* unreadable → nothing to merge */ }
+    for (const p of Array.isArray(saved) ? saved : []) {
+      if (typeof p === 'string' && /^0x[0-9a-f]{40}$/.test(p)) candidates.add(p);
+    }
+    persistedPools = JSON.stringify([...candidates].filter((p) => !seedSet.has(p)).sort());
+  };
+  /** Persist every non-seed candidate; throws if the write fails. Compares
+   *  against the last WRITTEN value, not "anything new this pass", so a write
+   *  that failed is retried by the next pass even though the pool is already
+   *  in memory. */
+  const persistPools = async (ctx: AdapterContext) => {
+    if (!ctx.state) return;
+    const value = JSON.stringify([...candidates].filter((p) => !seedSet.has(p)).sort());
+    if (value === persistedPools) return;
+    await ctx.state.set(POOLS_KEY, value);
+    persistedPools = value;
+  };
   /** factory scan progress; null until the first discovery. */
   let scanCursor: bigint | null = null;
   /** every push oracle Metric's live providers read — sorted + deduped so the
@@ -255,11 +285,13 @@ export function createMetricAdapter(): VenueAdapter {
   /** Full discovery pass — also called from decode() when the factory
    *  announces a pool mid-range. */
   const refresh = async (ctx: AdapterContext) => {
+      loadPools(ctx);
       // ── 1. widen the candidate set from the factory ────────────────────────
-      // Incremental: first pass covers a bounded lookback, later passes only
-      // the new blocks. A scan failure is non-fatal — the seeds and everything
+      // Incremental: first pass anchors at head, later passes scan only the
+      // new blocks. A scan failure is non-fatal — the seeds and everything
       // already discovered still resolve below, and the cursor is left alone
-      // so the next cycle retries the same range.
+      // so the next cycle retries the same range (a failed persist included:
+      // the scan cursor only advances once the pools it found are on disk).
       try {
         const head = await ctx.client.getBlockNumber();
         if (scanCursor === null) scanCursor = head + 1n;   // first pass: anchor, don't backscan
@@ -274,6 +306,7 @@ export function createMetricAdapter(): VenueAdapter {
             const p = String(l?.args?.pool ?? '').toLowerCase();
             if (/^0x[0-9a-f]{40}$/.test(p) && !candidates.has(p)) { candidates.add(p); added++; }
           }
+          await persistPools(ctx);
           scanCursor = head + 1n;
           if (added) ctx.note('venue.discovery', `Metric: factory announced ${added} new pool(s)`);
         }
@@ -281,7 +314,6 @@ export function createMetricAdapter(): VenueAdapter {
 
       // ── 2. resolve + admit every candidate ─────────────────────────────────
       const list = [...candidates] as `0x${string}`[];
-      const seeds = new Set(SEED_POOLS.map((p) => p.toLowerCase()));
       const imRes = await ctx.client.multicall({
         contracts: list.map((p) => ({ address: p, abi: metricPoolAbi, functionName: 'getImmutables' as const })),
         allowFailure: true,
@@ -289,7 +321,7 @@ export function createMetricAdapter(): VenueAdapter {
       const admitted: MetricPool[] = [];
       for (let i = 0; i < list.length; i++) {
         const r = imRes[i];
-        const isSeed = seeds.has(list[i].toLowerCase());
+        const isSeed = seedSet.has(list[i].toLowerCase());
         const verdict = admitMetricPool(list[i], r.status === 'success' ? (r.result as readonly unknown[]) : null);
         if (verdict.ok) { admitted.push(verdict.value); continue; }
         // A SEED that stops resolving is a real regression → fail closed (held
@@ -551,6 +583,11 @@ export function createMetricAdapter(): VenueAdapter {
         ctx.note('venue.discovery', `Metric: factory deployed ${created.length} new pool(s) — re-running discovery`);
         await refresh(ctx);
       }
+      // Persisted BEFORE returning: the core commits this range's cursor only
+      // after decode() returns, and once it does the PoolCreated is never
+      // re-read. Throwing here holds the cursor (fail closed). Outside the
+      // created branch too, so a write that failed earlier is retried.
+      await persistPools(ctx);
       const out: Fill[] = [];
       const abs = (x: bigint) => (x < 0n ? -x : x);
       for (const l of logs.swap ?? []) {
