@@ -222,7 +222,7 @@ export const config = {
   backfillMergeEvery: num('BACKFILL_MERGE_EVERY', 50),
   /** ONBOARDING markout backfill: once per venue, scan its last N days of fills
    *  on-chain (real block timestamps) and mark them against the exchanges'
-   *  ARCHIVED prices (Bybit trade dumps at 1s / Binance 1s klines — see
+   *  ARCHIVED prices (Bybit orderbook BBO mids / Binance 1s klines — see
    *  server/src/history/cex.ts), so a newly added venue starts with its
    *  leaderboard window populated instead of empty. Bounded to the UI's widest
    *  window (30d) on purpose — the display never goes deeper (pamm.wtf-aligned),

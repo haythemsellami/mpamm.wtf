@@ -35,6 +35,18 @@ const SCHEMA_VERSION = '3';
  *  'pair-mid-1' — markouts vs the PAIR-terms CEX mid (wrap basis + stable
  *                 cross), replacing raw USDT mids (~10bps different on USDC
  *                 pairs — old and new values are not comparable).
+ *
+ * NOT bumped (2026-10-01) when the ARCHIVE path (history/cex.ts) moved Bybit
+ * legs from trade prints + host-dependent kline crosses to orderbook BBO mids.
+ * The benchmark's meaning didn't change; the archive became a faithful copy of
+ * it: on 2026-09-29 the old construction marked MON/USDC T+0 ~+1.5bp above the
+ * live marks (+0.2–0.3bp at T+5…60), the new one within 0.05bp everywhere. A
+ * bump is the wrong tool here: it nulls EVERY retained markout, live-marked
+ * ones included, and nothing re-marks them — fills past the live ring can't
+ * re-age, and the remark walk resumes from its `mkhist_cursor_*`, past those
+ * days. Nor can the old archive marks be re-marked selectively: fills carry no
+ * mark-source column. So the old archive marks stay in the stats, a known
+ * T+0 skew that ages out with fills retention (31 days).
  */
 const MARKOUT_MODEL_VERSION = 'pair-mid-1';
 /** Retention cutoff: the UTC day start `days` days back. Day-aligned so the
