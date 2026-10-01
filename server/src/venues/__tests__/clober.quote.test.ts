@@ -53,11 +53,33 @@ describe('quoteClober outage verdict', () => {
 
   it('reports the most executable side, not a dust leg that happens to sit at mid', async () => {
     // Live 2026-10-01: an ETH book's sell leg spent 3831 wei at +224 bps.
+    // Here the dust sell sits at +112 bps (1 raw USDC for 3.4e-5 MON), far
+    // closer to mid than the buy, so a bps-only ranking would pick it.
     const dustAtMid = clientFor((id) => ({ status: 'success', result: id === SELL_BOOK.bookId
-      ? [1n, 3_831n * 10n ** 9n] // 3.8e-6 MON in: dust
-      : RECORDED.get(id)! }));   // buy: ~$100 at +58545 bps
+      ? [1n, 34_000_000_000_000n] // 3.4e-5 MON in, ~$0.000001 filled
+      : RECORDED.get(id)! }));    // buy: ~$100 at +58545 bps
     const { outage } = await quoteClober(dustAtMid, [MARKET], [100], pricer(), 1n);
     expect(outage?.msg).toContain('(nearest: MON/USDC buy at +58545 bps, ~$100.00 of $100 filled)');
+  });
+
+  it('does not call it a depth outage when some book calls failed', async () => {
+    const mixed = clientFor((id) => id === SELL_BOOK.bookId
+      ? { status: 'failure', error: Object.assign(new Error('x'), { reason: 'book not open' }) }
+      : { status: 'success', result: RECORDED.get(id)! });
+    const { outage } = await quoteClober(mixed, [MARKET], [100], pricer(), 1n);
+    expect(outage?.reason).toBe('some book calls failed with "book not open"');
+    expect(outage?.msg).toContain('1 of 2 book calls failed with "book not open", and no answered side fills $100');
+    expect(outage?.msg).not.toContain('not an adapter fault');
+  });
+
+  it('names a market it could not price instead of withholding the verdict', async () => {
+    // A cold reference leaves a market with no legs, so it cannot quote this
+    // frame either way. The warm books still explain the outage.
+    const btc: CloberMarket = { ...MARKET, market: 'BTC/USDC', baseAsset: 'BTC', baseToken: 'WBTC', baseDec: 8 };
+    const coldBtc = { pairMid: (m: string) => (m === 'BTC/USDC' ? 0 : MID), tokenForUsd: (_t: string, usd: number) => usd / MID } as any;
+    const { outage } = await quoteClober(recorded, [MARKET, btc], [100], coldBtc, 1n);
+    expect(outage?.reason).toBe('no vault book side fills $100 within ±2000 bps of mid');
+    expect(outage?.msg).toContain('; not priced, reference cold: BTC/USDC)');
   });
 
   it('clears once a side is executable again', async () => {

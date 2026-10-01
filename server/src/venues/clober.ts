@@ -296,11 +296,12 @@ export async function quoteClober(
   if (!markets.length) return { rows: [], outage: undefined };
   type Leg = { market: string; size: number; side: Side; book: CloberBook; inDec: number; outDec: number; reqBase: bigint; basePx: number };
   const legs: Leg[] = [];
+  const unpriced: string[] = []; // cold reference: no legs, so nothing learned about these books
   for (const m of markets) {
     // bps anchor = the pair-terms CEX mid (wrap basis + stable cross applied),
     // NOT the raw USDT price — book quotes are in the pair's stable terms.
     const basePx = pricer.pairMid(m.market);
-    if (basePx <= 0) continue;
+    if (basePx <= 0) { unpriced.push(m.market); continue; }
     const stable = tokenBySym(m.stable);
     for (const size of sizesUsd) {
       if (m.baseBook) {
@@ -380,7 +381,7 @@ export async function quoteClober(
       out.push(row);
     }
   }
-  return { rows: out, outage: out.length ? null : cloberOutage(res, minUsd, best) };
+  return { rows: out, outage: out.length ? null : cloberOutage(res, minUsd, best, unpriced) };
 }
 
 /** The smallest-size leg closest to executable in a round that produced no row. */
@@ -395,19 +396,40 @@ function cloberLegBeats(a: CloberBestLeg, b: CloberBestLeg): boolean {
 }
 
 /** Why a round with legs produced no row. Every leg reverting is the
- *  multicall reporter's case, worded the same way. Otherwise the books
- *  answered but no side is executable. The vault had pulled its depth
- *  (2026-09-30): at $100 the MON/USDC books swept to −7500 / +58000 bps.
+ *  multicall reporter's case, worded the same way. A round where only SOME
+ *  calls failed gets its own reason: the failed books were never read, so it
+ *  cannot be called a depth outage. Otherwise every book answered and no side
+ *  is executable. The vault had pulled its depth (2026-09-30): at $100 the
+ *  MON/USDC books swept to −7500 / +58000 bps.
+ *
+ *  Markets with a cold reference are named, not counted against the verdict.
+ *  They have no legs, so they cannot quote this frame whatever their books
+ *  hold. Withholding the verdict for them would leave the venue unexplained
+ *  for as long as any one reference stays cold.
+ *
  *  `reason` stays fixed while the vault stays in that state, so a drifting
- *  price in `msg` never re-raises it. */
-export function cloberOutage(res: readonly MulticallOutcome[], minUsd: number, best: CloberBestLeg | undefined): QuoteOutage {
-  const why = quoteOutageReason(res);
-  if (why) return { reason: why, msg: `${CLOBER_VAULT_VENUE.name} quotes unavailable — all ${res.length} legs failed with "${why}" (venue disabled, or the ABI drifted from the contract)` };
-  const reason = `no vault book side fills $${minUsd} within ±${PER_SIDE_BAND_BPS} bps of mid`;
+ *  price or failure count in `msg` never re-raises it. */
+export function cloberOutage(
+  res: readonly MulticallOutcome[], minUsd: number, best: CloberBestLeg | undefined, unpriced: readonly string[] = [],
+): QuoteOutage {
+  const name = CLOBER_VAULT_VENUE.name;
+  const cold = unpriced.length ? `; not priced, reference cold: ${unpriced.join(', ')}` : '';
+  const all = quoteOutageReason(res);
+  if (all) return { reason: all, msg: `${name} quotes unavailable — all ${res.length} legs failed with "${all}" (venue disabled, or the ABI drifted from the contract)${cold}` };
+  const band = `fills $${minUsd} within ±${PER_SIDE_BAND_BPS} bps of mid`;
   const bps = (b: number) => `${b >= 0 ? '+' : '−'}${Math.round(Math.abs(b))} bps`;
-  const detail = !best ? `every $${minUsd} leg returned nothing`
-    : `nearest: ${best.market} ${best.side} at ${bps(best.bps)}${best.full ? '' : `, ~$${best.filledUsd.toFixed(2)} of $${minUsd} filled`}`;
-  return { reason, msg: `${CLOBER_VAULT_VENUE.name} quotes unavailable — ${reason} (${detail}): the vault's books are empty or priced away from mid, not an adapter fault` };
+  const detail = (!best ? `every answered $${minUsd} leg returned nothing`
+    : `nearest: ${best.market} ${best.side} at ${bps(best.bps)}${best.full ? '' : `, ~$${best.filledUsd.toFixed(2)} of $${minUsd} filled`}`) + cold;
+  const failures = res.filter((r) => r.status === 'failure');
+  if (failures.length) {
+    const why = quoteOutageReason(failures)!; // every entry failed, so never null
+    return {
+      reason: `some book calls failed with "${why}"`,
+      msg: `${name} quotes unavailable — ${failures.length} of ${res.length} book calls failed with "${why}", and no answered side ${band} (${detail}): read the failed books before blaming the vault`,
+    };
+  }
+  const reason = `no vault book side ${band}`;
+  return { reason, msg: `${name} quotes unavailable — ${reason} (${detail}): the vault's books are empty or priced away from mid, not an adapter fault` };
 }
 
 /** routed-flow attribution for a Take (its tx also emitted a RouterGateway.Swap). */

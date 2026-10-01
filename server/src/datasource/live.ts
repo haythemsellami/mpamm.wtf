@@ -286,7 +286,7 @@ export function checkQuoteOutage(
     warn: (id: string, m: string) => void;
     announce: (id: string, m: string) => void;
     clear: (id: string, m: string) => void;
-    explained: (id: string, since: number) => boolean;
+    explained: (id: string, since: number, except?: string) => boolean;
   },
 ): void {
   for (const v of venues) {
@@ -302,7 +302,20 @@ export function checkQuoteOutage(
     const run = empty.get(v.id) ?? { runs: 0, since: 0 }; // 0: never seen quoting
     run.runs++;
     empty.set(v.id, run);
-    if (run.runs < QUOTE_DARK_CYCLES || dark.has(v.id)) continue;
+    const warned = dark.get(v.id);
+    if (warned !== undefined) {
+      // The reason can arrive AFTER this check fired: Clober only names its
+      // empty books once a reference warms and it has legs to price. Hand the
+      // venue back to the adapter, or frameMissingVenues lists it dark until
+      // it quotes again, next to the explanation. Retract without announcing:
+      // it still is not quoting, and the adapter now owns the recovery note.
+      if (io.explained(v.id, run.since, warned)) {
+        dark.delete(v.id);
+        io.clear(v.id, warned);
+      }
+      continue;
+    }
+    if (run.runs < QUOTE_DARK_CYCLES) continue;
     // The adapter already said WHY, so it owns this venue's outage telemetry
     // BOTH ways: standing down here but still marking it dark would let the
     // core announce a second, vaguer recovery alongside the adapter's own.
@@ -2517,7 +2530,7 @@ export class LiveDataSource extends BaseSource {
         warn: (id, m) => this.noteOnce('venue.quote.unavailable', m, id),
         announce: (id, m) => this.note('venue.quote.recovered', m, id),
         clear: (id, m) => this.dropNote('venue.quote.unavailable', m, id),
-        explained: (id, since) => this.notes.holds('venue.quote.unavailable', id, since),
+        explained: (id, since, except) => this.notes.holds('venue.quote.unavailable', id, since, except),
       });
     }
     annotateCex(venueRows, refRows); // docs/architecture.md: fill stream — matched per market, so each venue row hits its pair's CEX
