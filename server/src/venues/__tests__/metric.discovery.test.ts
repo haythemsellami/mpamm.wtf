@@ -102,6 +102,8 @@ interface StubOpts {
   logsThrow?: boolean;
   /** oracle probe reverts — pools stay ADMITTED but drop out of `live`. */
   priceFails?: boolean;
+  /** getImmutables reverts for these pools (unresolved this pass). */
+  unresolved?: (pool: string) => boolean;
   /** per-pool token override (e.g. an unregistered pair). */
   tokens?: Record<string, [string, string]>;
   /** durable adapter state (the core's ctx.state); omitted ⇒ no persistence. */
@@ -123,6 +125,7 @@ const stub = (notes: string[], o: StubOpts = {}) => {
       multicall: async ({ contracts }: any) => contracts.map((c: any) => {
         if (c.functionName === 'getImmutables') {
           const p = String(c.address).toLowerCase();
+          if (o.unresolved?.(p)) return { status: 'failure' };
           const t = tokenOf[p] ?? [TOKENS.WMON.address, TOKENS.USDC.address];
           return { status: 'success', result: [A('0x' + '0'.repeat(40)), providerFor(p), t[0], t[1], 0n, 0n, 0n, false, 0n, 0n, 0, 0, 0n, 0n] };
         }
@@ -534,7 +537,7 @@ describe('a pool announced mid-range forces that range to be re-read', () => {
     const ctx = stub([]);
     await a.discover(ctx);
     const chain = { poolCreated: [created], swaps: [swapOf(NEW)] };   // created AND traded in one range
-    await expect(a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).rejects.toThrow(/missing from its swap query/);
+    await expect(a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).rejects.toThrow(/admitted after this range's swap query was built/);
     const fills = await a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set());   // the core's retry
     expect(fills.map((f) => f.pool)).toEqual([`metric ${NEW.slice(0, 8)}`]);
   });
@@ -545,7 +548,7 @@ describe('a pool announced mid-range forces that range to be re-read', () => {
     const chain = { poolCreated: [created], swaps: [swapOf(NEW)] };
     const stale = fetchWith(a, chain);                                            // tail snapshots…
     await a.discover(stub([], { head: 1_000_500n, createdPools: [{ pool: NEW }] }));   // …rediscovery admits NEW
-    await expect(a.decode(stub([]), stale as any, () => 0, new Set())).rejects.toThrow(/missing from its swap query/);
+    await expect(a.decode(stub([]), stale as any, () => 0, new Set())).rejects.toThrow(/admitted after this range's swap query was built/);
     expect(await a.decode(stub([]), fetchWith(a, chain) as any, () => 0, new Set())).toHaveLength(1);
   });
 
@@ -555,8 +558,30 @@ describe('a pool announced mid-range forces that range to be re-read', () => {
     await a.discover(ctx);                                   // every seed unregistered ⇒ nothing tailed
     expect(a.logSources().map((s) => s.key)).toEqual(['poolCreated']);
     const chain = { poolCreated: [created], swaps: [swapOf(NEW)] };
-    await expect(a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).rejects.toThrow(/missing from its swap query/);
+    await expect(a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).rejects.toThrow(/admitted after this range's swap query was built/);
     expect(await a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).toHaveLength(1);
+  });
+
+  it('also catches an OLDER candidate that resolves late — no PoolCreated in the range at all', async () => {
+    // A persisted pool whose getImmutables failed at snapshot time, admitted by
+    // the concurrent rediscovery before decode. Its creation log is long behind
+    // the cursor, so a check keyed on this range's PoolCreated logs saw nothing.
+    const state = memState({ factory_pools: JSON.stringify([NEW]) });
+    const a = createMetricAdapter();
+    await a.discover(stub([], { state, unresolved: (p) => p === NEW }));
+    const chain = { poolCreated: [], swaps: [swapOf(NEW)] };
+    const stale = fetchWith(a, chain);                                   // NEW not admitted ⇒ not queried
+    await a.discover(stub([], { state, head: 1_000_500n }));             // rediscovery: NEW resolves
+    await expect(a.decode(stub([]), stale as any, () => 0, new Set())).rejects.toThrow(/admitted after this range's swap query was built/);
+    expect(await a.decode(stub([]), fetchWith(a, chain) as any, () => 0, new Set())).toHaveLength(1);
+  });
+
+  it('does not retry when admission SHRINKS (the snapshot covers more than is admitted)', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([]));
+    const bundle = fetchWith(a, { poolCreated: [], swaps: [swapOf(SEEDS[1])] });
+    await a.discover(stub([], { tokens: { [SEEDS[2]]: ['0x1111111111111111111111111111111111111111', TOKENS.USDC.address] } }));
+    await expect(a.decode(stub([]), bundle as any, () => 0, new Set())).resolves.toHaveLength(1);
   });
 
   it('does not retry for a pool that was not admitted (it is not tailed either way)', async () => {

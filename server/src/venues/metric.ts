@@ -594,10 +594,9 @@ export function createMetricAdapter(): VenueAdapter {
     },
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
-      const announced = (logs.poolCreated ?? [])
+      const created = [...new Set<string>((logs.poolCreated ?? [])
         .map((l: any) => String(l?.args?.pool ?? '').toLowerCase())
-        .filter((p: string) => /^0x[0-9a-f]{40}$/.test(p));
-      const created = [...new Set<string>(announced)].filter((p) => !candidates.has(p));
+        .filter((p: string) => /^0x[0-9a-f]{40}$/.test(p)))].filter((p) => !candidates.has(p));
       if (created.length) {
         for (const p of created) candidates.add(p);
         ctx.note('venue.discovery', `Metric: factory deployed ${created.length} new pool(s) — re-running discovery`);
@@ -609,21 +608,24 @@ export function createMetricAdapter(): VenueAdapter {
       // created branch too, so a write that failed earlier is retried.
       await persistPools(ctx);
       // The swap query for this range was built BEFORE it was fetched, so it
-      // cannot contain a pool this range announced — or one the 10-minute
-      // rediscovery admitted between that snapshot and now. That pool may
-      // already have traded within the range, and those Swaps were never
-      // fetched. Admitting it is not enough: the range has to be read again.
-      // Throw (the cursor holds); the retry snapshots logSources() afresh, which
-      // now carries the pool, so the same range passes on the second attempt.
+      // cannot contain a pool admitted since: one this range announced, one the
+      // 10-minute rediscovery admitted between that snapshot and now, or an
+      // older candidate that only now resolved (its PoolCreated is long behind
+      // the cursor, so nothing in this range names it). Any of them may have
+      // traded within the range, and those Swaps were never fetched. Admitting
+      // the pool is not enough: the range has to be read again. Throw (the
+      // cursor holds); the retry snapshots logSources() afresh, which now
+      // carries every admitted pool, so the same range passes on the second
+      // attempt. The replays (volume backfill, onboarding) handle the throw
+      // the same way: they pause and resume with a fresh snapshot.
       const swapKeys = Object.keys(logs).filter((k) => k === 'swap' || k.startsWith(SWAP_KEY_PREFIX));
       // A bare 'swap' key is a hand-built bundle (tests, scripts) whose address
       // set is unknown; only snapshot-keyed bundles can be checked.
       if (!swapKeys.includes('swap')) {
         const fetched = new Set<string>(swapKeys.flatMap((k) => [...(snapshotAddrs.get(k) ?? [])]));
-        const admitted = new Set(admittedPools.map((p) => p.pool.toLowerCase()));
-        const unread = [...new Set<string>(announced)].filter((p) => admitted.has(p) && !fetched.has(p));
+        const unread = admittedPools.map((p) => p.pool.toLowerCase()).filter((p) => !fetched.has(p));
         if (unread.length) {
-          throw new Error(`pool(s) ${unread.map((p) => shortHex(p)).join(', ')} announced in this range but missing from its swap query — re-reading the range with them included`);
+          throw new Error(`pool(s) ${unread.map((p) => shortHex(p)).join(', ')} admitted after this range's swap query was built — re-reading the range with them included`);
         }
       }
       const out: Fill[] = [];
