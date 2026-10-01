@@ -102,6 +102,8 @@ interface StubOpts {
   logsThrow?: boolean;
   /** oracle probe reverts — pools stay ADMITTED but drop out of `live`. */
   priceFails?: boolean;
+  /** per-pool token override (e.g. an unregistered pair). */
+  tokens?: Record<string, [string, string]>;
   /** durable adapter state (the core's ctx.state); omitted ⇒ no persistence. */
   state?: { get(key: string): string | undefined; set(key: string, value: string): Promise<void> };
 }
@@ -111,6 +113,7 @@ const stub = (notes: string[], o: StubOpts = {}) => {
     [SEEDS[1]]: [TOKENS.WBTC.address, TOKENS.USDC.address],
     [SEEDS[2]]: [TOKENS.WETH.address, TOKENS.USDC.address],
     [SEEDS[3]]: [TOKENS.WMON.address, TOKENS.USDC.address],
+    ...o.tokens,
   };
   // on-chain both WMON/USDC pools read ONE provider (0xEaFD…), hence one feed
   const providerFor = (pool: string) => '0xprov' + (pool === SEEDS[3] ? SEEDS[0] : pool).slice(6);
@@ -177,7 +180,7 @@ describe('Metric permissionless discovery', () => {
       await adapter.discover(ctx);
       expect(adapter.quoteMarkets!()).toEqual(catalog);
       expect(await adapter.quote!(ctx, [100], 1_000_000n, new Set(['BTC/USDC']))).toEqual([]);
-      expect(adapter.logSources().find((s) => s.key === 'swap')?.address).toHaveLength(SEEDS.length);
+      expect(adapter.logSources().find((s) => s.key.startsWith('swap'))?.address).toHaveLength(SEEDS.length);
     }
     await adapter.discover(stub([]));
     expect(adapter.quoteMarkets!()).toEqual(catalog);
@@ -201,7 +204,7 @@ describe('Metric permissionless discovery', () => {
     // the new PoolCreated in the forward range.
     await a.discover(stub(notes, {}));
     await a.discover(stub(notes, { head: 1_000_500n, createdPools: [{ pool: NEW }] }));
-    const swap = a.logSources().find((s) => s.key === 'swap')!;
+    const swap = a.logSources().find((s) => s.key.startsWith('swap'))!;
     expect(swap.address).toContain(NEW);              // tailed for fills
     expect(notes.some((n) => /announced 1 new pool/.test(n))).toBe(true);
   });
@@ -218,7 +221,7 @@ describe('Metric permissionless discovery', () => {
     await a.discover(stub(notes, { balances }));
     const ctx = stub(notes, { head: 1_000_500n, createdPools: [{ pool: NEW }], balances });
     await a.discover(ctx);
-    const swap = a.logSources().find((s) => s.key === 'swap')!;
+    const swap = a.logSources().find((s) => s.key.startsWith('swap'))!;
     expect(swap.address).toContain(NEW);                       // tailed
     // …but excluded from the live set, so it is never quoted: 4 seeds live, 1 shell.
     expect(notes.some((n) => /Metric: 4 live base\/stable pool\(s\) \(\+1 unfunded; not quoted\)/.test(n))).toBe(true);
@@ -228,7 +231,7 @@ describe('Metric permissionless discovery', () => {
     const notes: string[] = [];
     const a = createMetricAdapter();
     await a.discover(stub(notes, { logsThrow: true }));
-    const swap = a.logSources().find((s) => s.key === 'swap')!;
+    const swap = a.logSources().find((s) => s.key.startsWith('swap'))!;
     expect((swap.address as string[]).length).toBe(SEEDS.length);
   });
 });
@@ -297,7 +300,7 @@ describe('an unquotable pool still trades (issue #61)', () => {
     await a.discover(stub(notes, { priceFails: true }));
 
     expect(notes.some((n) => /0 live/.test(n))).toBe(true);      // nothing quotable…
-    const swap = a.logSources().find((s) => s.key === 'swap');
+    const swap = a.logSources().find((s) => s.key.startsWith('swap'));
     expect(swap).toBeDefined();                                   // …but still tailed
     expect(swap!.kind).toBe('fills');
     expect((swap!.address as string[]).length).toBe(SEEDS.length);
@@ -423,7 +426,7 @@ describe('factory-announced pools survive a restart', () => {
     transactionHash: '0x' + 'b'.repeat(64), blockNumber: 2n, logIndex: 0,
   });
   const tailed = (a: ReturnType<typeof createMetricAdapter>) =>
-    (a.logSources().find((s) => s.key === 'swap')!.address as string[]).map((x) => x.toLowerCase());
+    (a.logSources().find((s) => s.key.startsWith('swap'))!.address as string[]).map((x) => x.toLowerCase());
 
   it('a pool seen by the fills tail is persisted before decode returns, and a fresh adapter tails it', async () => {
     const state = memState();
@@ -499,5 +502,86 @@ describe('factory-announced pools survive a restart', () => {
     const a = createMetricAdapter();
     await a.discover(stub([]));
     expect(tailed(a)).toContain('0x5357bf9863320e8fc0c10c97896c0aed070aab9f');
+  });
+});
+
+describe('a pool announced mid-range forces that range to be re-read', () => {
+  // The core snapshots logSources() BEFORE fetching a range, so that range's
+  // swap query cannot contain a pool the range itself announces (or one the
+  // 10-minute rediscovery admitted in between). If the pool trades later in
+  // the same range, those Swaps were never fetched — admitting the pool only
+  // fixes the NEXT range. Found by review on #127.
+  const NEW = '0xcccc000000000000000000000000000000000004';
+  const created = { args: { pool: NEW } };
+  const swapOf = (pool: string, logIndex = 0) => ({
+    address: pool,
+    args: { amount0Delta: -1_000_000_000_000_000_000n, amount1Delta: 2_000_000n, recipient: '0x' + '1'.repeat(40) },
+    transactionHash: '0x' + 'c'.repeat(64), blockNumber: 3n, logIndex,
+  });
+  /** What the core does: snapshot sources, then hand decode the fetched bundle. */
+  const fetchWith = (a: ReturnType<typeof createMetricAdapter>, chain: { poolCreated: any[]; swaps: any[] }) => {
+    const bundle: Record<string, any[]> = {};
+    for (const src of a.logSources()) {
+      bundle[src.key] = src.key === 'poolCreated'
+        ? chain.poolCreated
+        : chain.swaps.filter((l) => (src.address as string[]).map((x) => x.toLowerCase()).includes(l.address));
+    }
+    return bundle;
+  };
+
+  it('throws (holds the cursor) when the announced pool was not in the swap query, then counts its swap on the retry', async () => {
+    const a = createMetricAdapter();
+    const ctx = stub([]);
+    await a.discover(ctx);
+    const chain = { poolCreated: [created], swaps: [swapOf(NEW)] };   // created AND traded in one range
+    await expect(a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).rejects.toThrow(/missing from its swap query/);
+    const fills = await a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set());   // the core's retry
+    expect(fills.map((f) => f.pool)).toEqual([`metric ${NEW.slice(0, 8)}`]);
+  });
+
+  it('also catches a pool the rediscovery admitted between the snapshot and decode', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([]));
+    const chain = { poolCreated: [created], swaps: [swapOf(NEW)] };
+    const stale = fetchWith(a, chain);                                            // tail snapshots…
+    await a.discover(stub([], { head: 1_000_500n, createdPools: [{ pool: NEW }] }));   // …rediscovery admits NEW
+    await expect(a.decode(stub([]), stale as any, () => 0, new Set())).rejects.toThrow(/missing from its swap query/);
+    expect(await a.decode(stub([]), fetchWith(a, chain) as any, () => 0, new Set())).toHaveLength(1);
+  });
+
+  it('also catches it when NO pool was tailed yet (no swap source in the bundle at all)', async () => {
+    const a = createMetricAdapter();
+    const ctx = stub([], { tokens: Object.fromEntries(SEEDS.map((p) => [p, ['0x1111111111111111111111111111111111111111', TOKENS.USDC.address]])) });
+    await a.discover(ctx);                                   // every seed unregistered ⇒ nothing tailed
+    expect(a.logSources().map((s) => s.key)).toEqual(['poolCreated']);
+    const chain = { poolCreated: [created], swaps: [swapOf(NEW)] };
+    await expect(a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).rejects.toThrow(/missing from its swap query/);
+    expect(await a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).toHaveLength(1);
+  });
+
+  it('does not retry for a pool that was not admitted (it is not tailed either way)', async () => {
+    const a = createMetricAdapter();
+    const ctx = stub([], { tokens: { [NEW]: ['0x1111111111111111111111111111111111111111', TOKENS.USDC.address] } });
+    await a.discover(ctx);
+    await expect(a.decode(ctx, fetchWith(a, { poolCreated: [created], swaps: [] }) as any, () => 0, new Set())).resolves.toEqual([]);
+  });
+
+  it('does not retry a range whose swap query already covered the pool (replays of known history)', async () => {
+    const a = createMetricAdapter();
+    const ctx = stub([]);
+    await a.discover(ctx);
+    const seedCreated = { args: { pool: SEEDS[3] } };   // a seed's own historical PoolCreated
+    const fills = await a.decode(ctx, fetchWith(a, { poolCreated: [seedCreated], swaps: [swapOf(SEEDS[3])] }) as any, () => 0, new Set());
+    expect(fills).toHaveLength(1);
+  });
+
+  it('keeps one snapshot key while admission is unchanged, and a new one when it changes', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([]));
+    const key = () => a.logSources().find((s) => s.key.startsWith('swap'))!.key;
+    const k1 = key();
+    expect(key()).toBe(k1);
+    await a.discover(stub([], { head: 1_000_500n, createdPools: [{ pool: NEW }] }));
+    expect(key()).not.toBe(k1);
   });
 });

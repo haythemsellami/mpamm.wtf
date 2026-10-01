@@ -57,6 +57,8 @@ export const SEED_POOLS: `0x${string}`[] = [
  *  `poolCreated` in logSources, which the core's fills tail gap-fills from its
  *  persisted cursor. The forward scan below then costs ~17 requests per cycle. */
 const POOLS_KEY = 'factory_pools';
+/** logSources() swap-source key prefix: `swap@<snapshot>` (see decode). */
+const SWAP_KEY_PREFIX = 'swap@';
 
 /** Price-limit sentinels (Q64.64) so a quote walks the full binned liquidity for
  *  the size: no upper bound buying the base, no lower bound selling it. */
@@ -278,6 +280,26 @@ export function createMetricAdapter(): VenueAdapter {
   };
   /** factory scan progress; null until the first discovery. */
   let scanCursor: bigint | null = null;
+  /** The swap source's key names the exact address set it was fetched with,
+   *  so decode() can tell which pools a bundle's swap query actually covered
+   *  (see the re-read check there). A new key only when admission changes —
+   *  rare — and the last few are kept, since a long replay can decode with a
+   *  snapshot taken before a later one. */
+  const snapshotAddrs = new Map<string, ReadonlySet<string>>();
+  let snapshotSig = '';
+  let snapshotKey = '';
+  let snapshotSeq = 0;
+  const swapSnapshotKey = () => {
+    const addrs = admittedPools.map((p) => p.pool.toLowerCase()).sort();
+    const sig = addrs.join(',');
+    if (sig !== snapshotSig) {
+      snapshotSig = sig;
+      snapshotKey = `${SWAP_KEY_PREFIX}${++snapshotSeq}`;
+      snapshotAddrs.set(snapshotKey, new Set(addrs));
+      for (const k of snapshotAddrs.keys()) { if (snapshotAddrs.size <= 32) break; snapshotAddrs.delete(k); }
+    }
+    return snapshotKey;
+  };
   /** every push oracle Metric's live providers read — sorted + deduped so the
    *  gas tracker's destination fingerprint is stable (see gasSources). */
   let pushOracles: `0x${string}`[] = [];
@@ -542,7 +564,7 @@ export function createMetricAdapter(): VenueAdapter {
       // executed 141 swaps in the 6.7h after its oracle began reverting, none of
       // which we saw because this list had gone empty).
       if (!admittedPools.length) return sources;
-      return [{ key: 'swap', address: admittedPools.map((p) => p.pool), events: [ev(metricPoolAbi, 'Swap')], kind: 'fills' as const }, ...sources];
+      return [{ key: swapSnapshotKey(), address: admittedPools.map((p) => p.pool), events: [ev(metricPoolAbi, 'Swap')], kind: 'fills' as const }, ...sources];
     },
 
     // taker entries owned by Metric: today only the pools themselves — sampled
@@ -572,14 +594,12 @@ export function createMetricAdapter(): VenueAdapter {
     },
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
-      // A pool announced mid-range must be admitted BEFORE this range's Swaps
-      // are decoded, or its first fills would be dropped as unknown addresses.
-      const created = (logs.poolCreated ?? []).filter((l: any) => {
-        const p = String(l?.args?.pool ?? '').toLowerCase();
-        return /^0x[0-9a-f]{40}$/.test(p) && !candidates.has(p);
-      });
+      const announced = (logs.poolCreated ?? [])
+        .map((l: any) => String(l?.args?.pool ?? '').toLowerCase())
+        .filter((p: string) => /^0x[0-9a-f]{40}$/.test(p));
+      const created = [...new Set<string>(announced)].filter((p) => !candidates.has(p));
       if (created.length) {
-        for (const l of created) candidates.add(String(l.args.pool).toLowerCase());
+        for (const p of created) candidates.add(p);
         ctx.note('venue.discovery', `Metric: factory deployed ${created.length} new pool(s) — re-running discovery`);
         await refresh(ctx);
       }
@@ -588,9 +608,27 @@ export function createMetricAdapter(): VenueAdapter {
       // re-read. Throwing here holds the cursor (fail closed). Outside the
       // created branch too, so a write that failed earlier is retried.
       await persistPools(ctx);
+      // The swap query for this range was built BEFORE it was fetched, so it
+      // cannot contain a pool this range announced — or one the 10-minute
+      // rediscovery admitted between that snapshot and now. That pool may
+      // already have traded within the range, and those Swaps were never
+      // fetched. Admitting it is not enough: the range has to be read again.
+      // Throw (the cursor holds); the retry snapshots logSources() afresh, which
+      // now carries the pool, so the same range passes on the second attempt.
+      const swapKeys = Object.keys(logs).filter((k) => k === 'swap' || k.startsWith(SWAP_KEY_PREFIX));
+      // A bare 'swap' key is a hand-built bundle (tests, scripts) whose address
+      // set is unknown; only snapshot-keyed bundles can be checked.
+      if (!swapKeys.includes('swap')) {
+        const fetched = new Set<string>(swapKeys.flatMap((k) => [...(snapshotAddrs.get(k) ?? [])]));
+        const admitted = new Set(admittedPools.map((p) => p.pool.toLowerCase()));
+        const unread = [...new Set<string>(announced)].filter((p) => admitted.has(p) && !fetched.has(p));
+        if (unread.length) {
+          throw new Error(`pool(s) ${unread.map((p) => shortHex(p)).join(', ')} announced in this range but missing from its swap query — re-reading the range with them included`);
+        }
+      }
       const out: Fill[] = [];
       const abs = (x: bigint) => (x < 0n ? -x : x);
-      for (const l of logs.swap ?? []) {
+      for (const l of swapKeys.flatMap((k) => logs[k] ?? [])) {
         const p = byAddr.get(String(l.address).toLowerCase());
         if (!p) continue;
         const a = l.args;
