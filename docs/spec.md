@@ -59,7 +59,9 @@ Stacked daily-notional-by-venue. Each landed swap contributes the USD value of i
 Live normalized fill tape + post-trade markouts: each fill's realized price vs its pair's CEX mid at T+{0,5,10,30,60}s, aging in as it crosses each horizon. Fills whose realized price is approximated (`pxApprox`) are excluded from markout stats rather than fabricating ~0 edge. Rows link to the explorer.
 
 ### 3.4 Leaderboard
-Top groups/swaps over a selectable window (24H/7D/30D — markouts are a recent-execution-quality signal, not an all-time archive), filtered to fills with a real `execPx`. Stats are **aggregated server-side** (`/api/leaderboard`): the browser gets small TAKER-signed group rows (volume, swaps, markout percentiles, pool PnL, a cumulative-PnL sparkline) plus top winner/loser fills per horizon, and derives the MAKER view as a pure sign flip. Shipping raw fills would silently truncate the wide windows at any sane fetch cap.
+Top groups/swaps over a selectable window (24H/7D/30D — markouts are a recent-execution-quality signal, not an all-time archive), filtered to fills with a real `execPx`.
+
+**MARKOUT_CURVE**: per venue, the notional-weighted maker markout from 5s before to 15s after the fill, filterable by **flow** (quiet = the reference moved under 1bp from −5s to +1s, the retail proxy; or moving), **route** (single / split / two-sided over the transaction's tracked legs) and **entry** category. Curves are captured live from the reference feed and never fabricated; a COVERAGE column states how much of the window's notional has one. Stats are **aggregated server-side** (`/api/leaderboard`): the browser gets small TAKER-signed group rows (volume, swaps, markout percentiles, pool PnL, a cumulative-PnL sparkline) plus top winner/loser fills per horizon, and derives the MAKER view as a pure sign flip. Shipping raw fills would silently truncate the wide windows at any sane fetch cap.
 
 ---
 
@@ -135,7 +137,7 @@ Persisted (SQLite, **long format** — adding/removing a venue never changes the
 meta(key, value)                               -- schema/model versions + every cursor
 daily_volume(utc_day, venue_id, usd, swaps)    -- PK (utc_day, venue_id)
 day_meta(utc_day, partial)
-fills(id, venue_id, …, markouts_bps)           -- upsert-by-id; rolling retention
+fills(id, venue_id, …, markouts_bps, curve_bps) -- upsert-by-id; rolling retention
 daily_gas(utc_day, venue_id, mon, txs)         -- additive; atomic with its cursor
 ```
 
@@ -151,6 +153,7 @@ GET /api/depth/stream?market=      demand-driven live depth curves (SSE, $100 �
 GET /api/volume?from=&to=          daily series
 GET /api/fills?days=&limit=        recent fills (the tape)
 GET /api/leaderboard?days=1|7|30   server-side aggregates
+GET /api/markout-curves?days=1|7|30  markout-curve cells, summed client-side per filter
 GET /api/gas                       quote-update burn series (+ approx venue ids)
 WS  /stream                        channels: state, quotes, fill, volume (compressed; state = hello + lean ticks)
 ```

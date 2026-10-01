@@ -647,6 +647,82 @@ export interface LeaderboardResponse {
   outliers: Fill[];
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Markout curve (Leaderboard tab — docs/architecture.md: Markout curve)
+// ──────────────────────────────────────────────────────────────────────────
+//
+// The propAMM signature from Solmaz, Heimbach & Milionis, "Active Liquidity On
+// Chain" (arXiv 2609.38056): the notional-weighted markout from 5s BEFORE to
+// 15s after a fill. A passive pool is in the money before the fill and loses
+// after it (it was picked off); a venue that reprices ahead of flow shows the
+// inverse. The fixed horizons above can't show this — they start at the fill.
+
+/** Curve offsets in seconds from the fill — dense around the fill where the
+ *  shape lives, sparse after. Index positions are part of the stored format
+ *  (fills.curve_bps): change it and bump CURVE_MODEL_VERSION (server/src/db.ts),
+ *  which nulls every stored curve. */
+export const CURVE_OFFSETS_S = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 10, 15] as const;
+
+/** Monad block timestamps are WHOLE SECONDS (header and monadNewHeads alike,
+ *  ~3 blocks per second), so a fill executed somewhere in [ts, ts+1s). Curve
+ *  points mark at the middle of that second — the unbiased estimate (±0.5s)
+ *  — where the legacy horizons mark at `ts` itself (≈0.5s early). */
+export const CURVE_SECOND_MID_MS = 500;
+
+/** A fill is QUIET (the paper's retail proxy) when the reference moved less
+ *  than this from 5s before to 1s after it — flow that arrived independently of
+ *  the market, so its markout level is what an uninformed taker pays. */
+export const CURVE_QUIET_MOVE_BPS = 1;
+
+/** Absolute mark time of curve offset `offsetS` for a fill stamped `ts`. */
+export function curveMarkMs(ts: number, offsetS: number): number {
+  return ts + CURVE_SECOND_MID_MS + offsetS * 1000;
+}
+
+/** quiet vs moving from a COMPLETE taker-signed curve: the gap between the +1s
+ *  and −5s points is the reference move over that span (in bps of execPx, which
+ *  differs from bps of the mid by a negligible factor). null = incomplete. */
+export function curveFlow(curve: readonly (number | null)[]): CurveFlow | null {
+  const from = curve[CURVE_OFFSETS_S.indexOf(-5)], to = curve[CURVE_OFFSETS_S.indexOf(1)];
+  if (from == null || to == null) return null;
+  return Math.abs(to - from) < CURVE_QUIET_MOVE_BPS ? 'quiet' : 'moving';
+}
+
+export type CurveFlow = 'quiet' | 'moving';
+/** How the fill's transaction touched the TRACKED venues: the only tracked
+ *  fill (`single`), several fills all taking one direction per base asset
+ *  (`split` — routing / multi-hop), or both directions in one base asset
+ *  (`twoSided` — the atomic-arbitrage signature: one leg buys where another
+ *  sells). Legs on untracked DEXes are invisible, so `single` can still hide a
+ *  venue-vs-AMM arbitrage. */
+export type CurveRoute = 'single' | 'split' | 'twoSided';
+
+/** One aggregation cell. Every fill with a complete curve lands in exactly one
+ *  (venue, flow, route, category) cell, so the client can filter by summing
+ *  cells — any combination of filters, without the server enumerating them. */
+export interface MarkoutCurveCell {
+  venueId: string;
+  flow: CurveFlow;
+  route: CurveRoute;
+  category: FillCategory;
+  fills: number;
+  usd: number;
+  /** Σ(usd × taker bps) per CURVE_OFFSETS_S entry. Mean = sum ÷ usd; MAKER =
+   *  the negation (same convention as the leaderboard). */
+  usdBps: number[];
+}
+
+export interface MarkoutCurvesResponse {
+  days: number;
+  generatedAt: number;
+  offsetsS: number[];
+  quietMoveBps: number;
+  cells: MarkoutCurveCell[];
+  /** every non-approximate fill in the window per venue, curve or not — the
+   *  denominator for "the curve covers X% of this venue's notional". */
+  coverage: Record<string, { fills: number; usd: number }>;
+}
+
 /** Linear-interpolated percentile (p in [0,1]) — the ONE implementation shared
  *  by the server aggregation and any client-side math, so numbers never drift. */
 export function percentile(arr: number[], p: number): number {

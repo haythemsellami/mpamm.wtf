@@ -7,14 +7,15 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { statfsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
-  MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase,
-  type DataSourceMode, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
+  MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase, CURVE_OFFSETS_S, curveMarkMs,
+  type DataSourceMode, type MarkoutCurvesResponse, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode, type QuoteFrameTelemetry,
   type QuoteHeadSource, type RealtimeHealth,
 } from '@shared';
 import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from '../chain/failover.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries } from '../history/cex.js';
+import { curveComplete, curvePoints } from '../markout-curves.js';
 import { GasTracker } from '../gas.js';
 import { DepthWorkerClient } from '../depth/worker-client.js';
 import { config } from '../config.js';
@@ -365,6 +366,8 @@ export function frameMissingVenues(
   }
   return out.sort();
 }
+
+const CURVE_LAST_S = CURVE_OFFSETS_S[CURVE_OFFSETS_S.length - 1];
 
 /** Archive-pending lifecycle for the markout re-scan (family A of #6).
  *
@@ -945,6 +948,11 @@ export class LiveDataSource extends BaseSource {
    *  basis + stable cross applied) — the markout anchors. Keyed per pair, not per
    *  base, because MON/USDC and MON/USDT0 mark against different mids. */
   private midHist = new Map<string, { t: number; mid: number }[]>();
+  /** Fills whose markout curve was already taken (complete or not). */
+  private curveTaken = new WeakSet<Fill>();
+  /** Complete curves awaiting the next snapshot (fills.curve_bps). Kept off the
+   *  Fill objects: those ride the WS stream, and the curve must not. */
+  private dirtyCurves = new Map<string, (number | null)[]>();
   private lastBlock = 0n;
   /** Chain head captured at boot: live gap-fill handoff and reset validation. */
   private bootHead = 0n;
@@ -1571,20 +1579,24 @@ export class LiveDataSource extends BaseSource {
     // merges the original objects/keys back so the next tick retries them.
     const dirtyFills = this.dirty;
     const dirtyDays = this.dirtyDays;
+    const dirtyCurves = this.dirtyCurves;
     this.dirty = new Set();
     this.dirtyDays = new Set();
+    this.dirtyCurves = new Map();
     const snapshot: SnapshotWrite = {
       days: this.days
         .filter((d) => dirtyDays.has(d.utcDay))
         .map((d) => ({ ...d, byVenue: Object.fromEntries(Object.entries(d.byVenue).map(([id, v]) => [id, { ...v }])) })),
       meta: { lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
       fills: [...dirtyFills].map((f) => ({ ...f, markoutsBps: [...f.markoutsBps] })),
+      curves: [...dirtyCurves].map(([id, curveBps]) => ({ id, curveBps })),
     };
 
     return this.writeSnapshot(snapshot)
       .catch((e) => {
         for (const f of dirtyFills) this.dirty.add(f);
         for (const day of dirtyDays) this.dirtyDays.add(day);
+        for (const [id, curve] of dirtyCurves) if (!this.dirtyCurves.has(id)) this.dirtyCurves.set(id, curve);
         // retained + retried next tick, but say so — a broken disk otherwise
         // looks healthy while the cursor silently stops advancing.
         this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); ${reportFailure ? 'shutdown flush not acknowledged' : 'retrying'}`);
@@ -2306,6 +2318,26 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
+  /** Markout-curve aggregates over the window — same worker, cache and
+   *  dedupe discipline as the leaderboard. */
+  private curveCache = new Map<number, { at: number; res: MarkoutCurvesResponse }>();
+  private curveInflight = new Map<number, Promise<MarkoutCurvesResponse>>();
+  markoutCurves(days: number): Promise<MarkoutCurvesResponse> {
+    const ttl = days <= 1 ? 30_000 : days <= 7 ? 120_000 : 600_000;
+    const now = Date.now();
+    const hit = this.curveCache.get(days);
+    if (hit && now - hit.at < ttl) return Promise.resolve(hit.res);
+    const inflight = this.curveInflight.get(days);
+    if (inflight) return inflight;
+    const p = (async () => {
+      const res = await this.analyticsWorker.computeCurves(days, now);
+      this.curveCache.set(days, { at: now, res });
+      return res;
+    })().finally(() => this.curveInflight.delete(days));
+    this.curveInflight.set(days, p);
+    return p;
+  }
+
   /** Aggregated leaderboard over the FULL window, from SQLite (no fetch cap).
    *  TTL-cached per window so polling clients share one computation, and
    *  inflight-deduped so concurrent cold hits can't stack N computes. The pass
@@ -2845,8 +2877,23 @@ export class LiveDataSource extends BaseSource {
       }
     }
     if (changed) { this.dirty.add(f); this.emitMsg({ ch: 'fill', data: f }); }
+    // The curve is taken ONCE, when its last point has elapsed — the ring
+    // (~2 min) still covers every point then. Only a complete curve is kept: a
+    // gap (boot, starving feed) leaves curve_bps NULL rather than freezing a
+    // partial one. There is deliberately no archive backfill: the archives are
+    // per-second LAST TRADES, which sit ~1bp off the BBO mid right at the fill
+    // (trade-side bounce correlated with the flow — measured over a day of
+    // MON/USDC fills), exactly where the curve's signal lives.
+    if (!this.curveTaken.has(f) && now >= curveMarkMs(f.ts, CURVE_LAST_S) + LiveDataSource.CURVE_NEAR_TOL_MS) {
+      this.curveTaken.add(f);
+      const curve = curvePoints(f, (t) => nearestReferenceSample(hist, t, LiveDataSource.CURVE_NEAR_TOL_MS)?.mid);
+      if (curveComplete(curve)) this.dirtyCurves.set(f.id, curve);
+    }
     if (complete) this.pending.delete(f);
   }
+  /** Curve points are 1s apart, so a sample further than this from its mark
+   *  belongs to a neighbouring point. The ring samples every 100ms. */
+  private static readonly CURVE_NEAR_TOL_MS = 250;
   /** the pair mid within ±MID_NEAR_TOL_MS of `t`, else 0 (unmarkable). The
    *  history is time- and length-capped; a stalled event loop must never join
    *  a fill to a reference sample minutes away from its horizon. */

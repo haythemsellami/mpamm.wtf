@@ -1,6 +1,6 @@
 import { BaseSource } from './index.js';
 import {
-  MARKETS, SIZES_USD, HISTORY_START_UTC, ASSETS, pairOf, cexForBase, depthSizes,
+  MARKETS, SIZES_USD, HISTORY_START_UTC, ASSETS, pairOf, cexForBase, depthSizes, CURVE_OFFSETS_S,
   type DataSourceMode, type DepthSnapshot, type MarketState, type QuoteSnapshot, type QuoteRow,
   type Fill, type DailyVolume, type VenueMeta, type Side, type FillCategory,
   type GasResponse, type VenueGasDaily,
@@ -23,7 +23,7 @@ import { buildDepthSnapshot } from '../depth.js';
 const ASSET_PX: Record<string, number> = { MON: 0.01928, BTC: 98000, ETH: 3500, XAUt: 4350 };
 const BASE_MON = ASSET_PX.MON;
 
-interface SimFill extends Fill { bornMs: number; }
+interface SimFill extends Fill { bornMs: number; curveBps: number[] }
 /** `capDecades` = how many log10 decades above $100 this venue can still fill
  *  in full — its quoted depth cap, the thing BID_ASK_DEPTH draws a leg up to. */
 interface Param { offset: number; half: number; slip: number; markoutBias: number; weight: number; capDecades: number }
@@ -381,6 +381,7 @@ export class SimDataSource extends BaseSource {
     let dd = 0;
     const mk: number[] = [e0];
     for (const h of [5, 10, 30, 60]) { dd += rnd() * Math.sqrt(h) * 1.05; mk.push(e0 + ss * dd); }
+    const curveBps = this.synthCurve(e0, this.param[v.id]?.markoutBias ?? 0);
     const pool = this.pools[v.id + market] ?? txS();
     const to = (cat === 'ROUTER' || cat === 'AGG')
       ? this.routers[Math.floor(Math.random() * this.routers.length)]
@@ -392,12 +393,50 @@ export class SimDataSource extends BaseSource {
       usd, baseAmount: usd / (execPx * quoteUsd), execPx,
       txHash: txS(), to, pool,
       blockNumber: Math.max(1, this.block - Math.round(ageSec / 0.4)),
-      ts: bornMs, markoutsBps: mk,
+      ts: bornMs, markoutsBps: mk, curveBps,
     };
   }
 
+  /** TAKER-signed curve with the shapes the paper separates: QUIET fills are
+   *  flat (retail paying a level), MOVING fills follow a reference run-up the
+   *  venue repriced into (taker ahead before the fill) — or, for the venue with
+   *  a negative maker bias, a stale quote that keeps bleeding after it. */
+  private synthCurve(e0: number, makerBias: number): number[] {
+    const quiet = Math.random() < 0.35;
+    const stale = makerBias < 0;
+    const pre = quiet ? 0 : (stale ? -1 : 1) * (2 + Math.random() * 5);
+    const post = stale ? 1.5 + Math.random() : -0.3 * Math.random();
+    return CURVE_OFFSETS_S.map((h) => {
+      const noise = rnd() * (quiet ? 0.12 : 0.5);
+      const v = h < 0 ? e0 + pre * (-h / 5) : e0 + (quiet ? 0 : post * (1 - Math.exp(-h / 3)));
+      return Math.round((v + noise) * 100) / 100;
+    });
+  }
+
+  /** A second tracked leg in the same transaction: the opposite side on
+   *  another venue (atomic-arbitrage shape) or the same side (a split route). */
+  private companion(f: SimFill): SimFill {
+    const g = this.makeFill(0, false);
+    const others = this.display.filter((v) => v.id !== f.venueId);
+    const v = others.length ? others[Math.floor(Math.random() * others.length)] : this.display[0];
+    const twoSided = Math.random() < 0.5;
+    return {
+      ...g, venueId: v?.id ?? g.venueId, market: f.market, side: twoSided ? (f.side === 'buy' ? 'sell' : 'buy') : f.side,
+      pool: this.pools[(v?.id ?? g.venueId) + f.market] ?? g.pool,
+      txHash: f.txHash, blockNumber: f.blockNumber, ts: f.ts, bornMs: f.bornMs, category: f.category,
+    };
+  }
+
+  protected override curveOf(fillId: string): number[] | null {
+    return this.fills.find((f) => f.id === fillId)?.curveBps ?? null;
+  }
+
   private seedFills(): void {
-    for (let i = 0; i < 260; i++) this.fills.push(this.makeFill(Math.random() * 86400, Math.random() < 0.18));
+    for (let i = 0; i < 260; i++) {
+      const f = this.makeFill(Math.random() * 86400, Math.random() < 0.18);
+      this.fills.push(f);
+      if (Math.random() < 0.12) this.fills.push(this.companion(f));
+    }
     const recent: SimFill[] = [];
     for (let i = 0; i < 48; i++) recent.push(this.makeFill(Math.random() * 85, Math.random() < 0.12));
     recent.sort((a, b) => a.bornMs - b.bornMs);
@@ -409,9 +448,12 @@ export class SimDataSource extends BaseSource {
   private spawnFill(): void {
     if (Math.random() < 0.55) {
       const f = this.makeFill(0, Math.random() < 0.14);
-      this.fills.push(f);
-      if (this.fills.length > 360) this.fills.shift();
-      this.emitMsg({ ch: 'fill', data: stripFill(f) });
+      const legs = Math.random() < 0.1 ? [f, this.companion(f)] : [f];
+      for (const leg of legs) {
+        this.fills.push(leg);
+        if (this.fills.length > 360) this.fills.shift();
+        this.emitMsg({ ch: 'fill', data: stripFill(leg) });
+      }
     }
   }
 
@@ -434,6 +476,6 @@ export class SimDataSource extends BaseSource {
 }
 
 function stripFill(f: SimFill): Fill {
-  const { bornMs, ...rest } = f;
+  const { bornMs, curveBps, ...rest } = f;
   return rest;
 }

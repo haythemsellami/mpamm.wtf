@@ -1,11 +1,13 @@
 import { Worker } from 'node:worker_threads';
 import type { DailyVolume, Fill } from '@shared';
-import type { ResetDeletes, VolumeStore } from './db.js';
+import type { CurveWrite, ResetDeletes, VolumeStore } from './db.js';
 
 export interface SnapshotWrite {
   days: DailyVolume[];
   meta: Record<string, string>;
   fills: Fill[];
+  /** markout curves completed since the last snapshot (written after `fills`). */
+  curves?: CurveWrite[];
 }
 
 export type PruneResult = ReturnType<VolumeStore['pruneFillsBefore']>;
@@ -46,7 +48,7 @@ export interface StoreWriter {
 
 export function directStoreWriter(store: VolumeStore): StoreWriter {
   return {
-    persist: async (snapshot) => store.persistSnapshot(snapshot.days, snapshot.meta, snapshot.fills),
+    persist: async (snapshot) => store.persistSnapshot(snapshot.days, snapshot.meta, snapshot.fills, snapshot.curves),
     setMeta: async (key, value) => store.setMeta(key, value),
     deleteMetaPrefix: async (prefix) => store.deleteMetaPrefix(prefix),
     resetVenueHistory: async (venueId, deletes, fromBlock) => store.resetVenueHistory(venueId, deletes, fromBlock),
