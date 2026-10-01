@@ -46,6 +46,20 @@ export interface AdapterContext {
    *  unexplained. That is how ThogAMM's second "maker: stale" outage reached
    *  the dashboard as MISSING (2026-09-30). */
   note: (code: NoteCode, msg: string, opts?: { repeatable?: boolean }) => void;
+  /** Small durable key/value store, namespaced to this adapter's venue (SQLite
+   *  `meta`; survives restarts). For state that cannot be re-derived cheaply at
+   *  boot — e.g. a pool a permissionless factory announced ONCE: the fills tail
+   *  never re-reads a log behind its cursor, so an in-memory-only record of it
+   *  is lost on the next restart. `set` resolves after COMMIT and throws on
+   *  failure; await it before returning fills that depend on it, so the cursor
+   *  can never commit past state that was not persisted. Absent outside the
+   *  live indexer (depth worker, scripts, tests) — treat it as optional. */
+  state?: AdapterState;
+}
+
+export interface AdapterState {
+  get(key: string): string | undefined;
+  set(key: string, value: string): Promise<void>;
 }
 
 /** A group of on-chain logs the core fetches each cycle for this adapter and

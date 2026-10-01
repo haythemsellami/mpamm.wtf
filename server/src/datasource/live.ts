@@ -904,6 +904,12 @@ export class LiveDataSource extends BaseSource {
         // and were accumulating unbounded ("Metric: 3 pool(s)" × N). A
         // `repeatable` note is a transition the adapter latches itself.
         note: (code, msg, opts) => opts?.repeatable ? this.note(code, msg, venue) : this.noteOnce(code, msg, venue),
+        // storeWriter is read at CALL time: it is the direct store during boot
+        // discovery and the persistence worker once writes are sealed.
+        state: {
+          get: (key) => this.store.getMeta(`adapter_${venue}_${key}`),
+          set: (key, value) => this.storeWriter.setMeta(`adapter_${venue}_${key}`, value),
+        },
       };
       this.ctxCache.set(a, ctx);
     }
