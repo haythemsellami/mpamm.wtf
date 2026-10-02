@@ -165,16 +165,26 @@ function zipEntryReader(label: string) {
   return { strip, tap, verify };
 }
 
-/** `[[price, size], …]` as numbers — price finite > 0, size finite ≥ 0 (0 =
- *  remove the level) — or throws via `bad`. */
+/** Bybit writes every price/size as a plain decimal STRING. Matched
+ *  strictly, not via Number(), which coerces '' / null / [] to 0 (a silent
+ *  level delete), true to 1 and '0x1f' to 31. */
+const DECIMAL = /^\d+(\.\d+)?$/;
+
+/** `[[price, size], …]` as numbers — price > 0, size ≥ 0 (0 = remove the
+ *  level), both decimal strings — or throws via `bad`. */
 function bookLevels(raw: unknown, bad: (why: string) => Error): Array<[number, number]> {
   if (!Array.isArray(raw)) throw bad('levels not an array');
   return raw.map((lv) => {
-    const P = Array.isArray(lv) && lv.length >= 2 ? Number(lv[0]) : NaN, S = Array.isArray(lv) ? Number(lv[1]) : NaN;
-    if (!(Number.isFinite(P) && P > 0) || !(Number.isFinite(S) && S >= 0)) throw bad(`bad level ${JSON.stringify(lv)}`);
-    return [P, S];
+    const [p, sz] = Array.isArray(lv) && lv.length >= 2 ? lv : [];
+    if (typeof p !== 'string' || !DECIMAL.test(p) || typeof sz !== 'string' || !DECIMAL.test(sz)) throw bad(`bad level ${JSON.stringify(lv)}`);
+    const P = Number(p);
+    if (!(P > 0)) throw bad(`bad level ${JSON.stringify(lv)}`);
+    return [P, Number(sz)];
   });
 }
+/** a JSON integer field (ms timestamp, update id) — a real number, never a
+ *  coerced string/null. */
+const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v);
 
 /** Replays one day's book messages and returns its BBO-mid curve over
  *  [dayStart, dayEnd), stamped with Bybit's send time (`ts` — what the live
@@ -203,11 +213,11 @@ export async function reduceBookMids(lines: AsyncIterable<string>, symbol: strin
     const bad = (why: string) => new Error(`bybit book archive ${symbol}: ${why} in ${String(line).slice(0, 80)}`);
     if (m?.topic !== topic || !m.data) throw bad('unexpected message');
     if (m.type !== 'snapshot' && m.type !== 'delta') throw bad(`unknown type ${String(m.type)}`);
-    const t = Number(m.ts);
-    if (!Number.isFinite(t)) throw bad('non-finite ts');
+    if (!isInt(m.ts) || m.ts <= 0) throw bad('bad ts');
+    const t = m.ts;
     const b = bookLevels(m.data.b, bad), a = bookLevels(m.data.a, bad);
-    const u = Number(m.data.u);
-    if (!Number.isSafeInteger(u)) throw bad('bad update id');
+    if (!isInt(m.data.u)) throw bad('bad update id');
+    const u = m.data.u;
     let dirty = m.type === 'snapshot';
     if (dirty) { bids.clear(); asks.clear(); synced = true; }
     else if (!synced) continue;

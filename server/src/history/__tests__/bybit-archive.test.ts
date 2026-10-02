@@ -82,19 +82,30 @@ describe('reduceBookMids', () => {
     await expect(reduceBookMids(lines([msg('USDCUSDT', D + 1, 'snapshot', [['1', '1']], [['2', '1']])]), 'MONUSDT', D)).rejects.toThrow(/unexpected message/);
   });
 
-  it('rejects a parseable but malformed record BEFORE it touches the book', async () => {
-    const snap = msg('MONUSDT', D + 1_000, 'snapshot', [['0.0285', '1']], [['0.0286', '1']]);
-    const raw = (o: object) => JSON.stringify({ topic: 'orderbook.200.MONUSDT', ts: D + 2_000, type: 'delta', data: { b: [], a: [] }, ...o });
-    for (const [bad, why] of [
-      [raw({ type: 'update' }), /unknown type/],
-      [raw({ ts: 'soon' }), /non-finite ts/],
-      [raw({ data: { b: [['0.0287', 'x']], a: [] } }), /bad level/],
-      [raw({ data: { b: [['-1', '1']], a: [] } }), /bad level/],
-      [raw({ data: { b: [['0.0287']], a: [] } }), /bad level/],
-      [raw({ data: { a: [] } }), /not an array/],
-    ] as const) {
-      await expect(reduceBookMids(lines([snap, bad]), 'MONUSDT', D), bad).rejects.toThrow(why);
-    }
+  // each case is its own test, so every check is proven independently
+  const raw = (o: object) => JSON.stringify({ topic: 'orderbook.200.MONUSDT', ts: D + 2_000, type: 'delta', data: { b: [], a: [], u: 2 }, ...o });
+  const lv = (b: unknown) => raw({ data: { b, a: [], u: 2 } });
+  it.each([
+    ['unknown type', raw({ type: 'update' }), /unknown type/],
+    ['non-numeric ts', raw({ ts: 'soon' }), /bad ts/],
+    ['non-numeric size', lv([['0.0287', 'x']]), /bad level/],
+    ['negative price', lv([['-1', '1']]), /bad level/],
+    ['level without size', lv([['0.0287']]), /bad level/],
+    ['missing bids array', raw({ data: { a: [], u: 2 } }), /not an array/],
+    // Number() would coerce each of these into a "valid" value
+    ['null ts (→ 0)', raw({ ts: null }), /bad ts/],
+    ['string ts', raw({ ts: String(D + 2_000) }), /bad ts/],
+    ["empty size (→ 0: a silent delete)", lv([['0.0285', '']]), /bad level/],
+    ['null size (→ 0)', lv([['0.0285', null]]), /bad level/],
+    ['boolean size (→ 1)', lv([['0.0285', true]]), /bad level/],
+    ['hex price (→ 31)', lv([['0x1f', '1']]), /bad level/],
+    ['exponent price', lv([['1e-2', '1']]), /bad level/],
+    ["numeric price (not Bybit's string form)", lv([[0.0285, '1']]), /bad level/],
+    ['null update id (→ 0)', raw({ data: { b: [], a: [], u: null } }), /bad update id/],
+    ['string update id', raw({ data: { b: [], a: [], u: '2' } }), /bad update id/],
+  ] as const)('rejects a malformed record before it touches the book: %s', async (_label, bad, why) => {
+    const snap = msg('MONUSDT', D + 1_000, 'snapshot', [['0.0285', '1']], [['0.0286', '1']], 1);
+    await expect(reduceBookMids(lines([snap, bad]), 'MONUSDT', D)).rejects.toThrow(why);
   });
 
   it('throws on a gap in the update id (a dropped delta), re-basing on each snapshot', async () => {
