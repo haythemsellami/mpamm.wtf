@@ -1,7 +1,8 @@
-import { createGunzip } from 'node:zlib';
+import { createInflateRaw, crc32 } from 'node:zlib';
 import { createInterface } from 'node:readline';
-import { Readable } from 'node:stream';
-import { createWriteStream, createReadStream, existsSync, mkdirSync } from 'node:fs';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pairOf, assetOf, TOKENS, wrapBasisFor } from '@shared';
@@ -12,14 +13,19 @@ import { config } from '../config.js';
  *
  * Live markouts age against the in-memory mid ring; historical fills need the
  * pair's CEX mid at second precision at times long past. Both exchanges publish
- * exactly that, keylessly:
- *  - Bybit: monthly PUBLIC trade dumps (public.bybit.com/spot/<SYM>/<SYM>-YYYY-MM.csv.gz,
- *    `id,timestamp(ms),price,volume,side`) — reduced here to a per-second
- *    last-trade series (MON's base series; Bybit's kline API floors at 1m).
+ * it, keylessly:
+ *  - Bybit: daily ORDERBOOK archives (quote-saver.bycsi.com, the `orderbook.200`
+ *    WS stream) replayed to a BBO-mid curve — the base series for MON AND the
+ *    stable cross (USDCUSDT, USD1USDT) of Bybit-based pairs. A mid, not a trade
+ *    print, on purpose: MONUSDT's 0.00001 tick is ~3.5bp at $0.03, and the last
+ *    trade sits on whichever side the flow hit — flow correlated with the fill
+ *    being marked. The public trade dumps this replaced marked T+0 ~+1.5bp
+ *    above the live 100ms BBO-mid ring (4,208 live-marked MON/USDC fills,
+ *    2026-09-29); the book mid agrees within 0.05bp at every horizon.
  *  - Binance: 1-SECOND klines via the geo-unrestricted data mirror (the base
- *    series for BTC/ETH).
- * Cross (USDCUSDT) and wrap (WBTCBTC) legs move ~bps per hour, so 1-minute
- * klines are ample for them (<0.1bp error over a 60s markout horizon).
+ *    series for BTC/ETH; a last trade, but on a 0.01 tick that's ~0.001bp).
+ * Binance-side cross (USDCUSDT, 0.00001 tick) and wrap (WBTCBTC) legs move
+ * ~bps per hour, so 1-minute klines are ample for them (<0.1bp over 60s).
  *
  * All lookups are CARRY-FORWARD with a staleness cap: `at(t)` returns the last
  * price at-or-before t, or null when no print exists within `staleMs` — a gap
@@ -76,32 +82,7 @@ export async function binanceKlineSeries(symbol: string, interval: '1s' | '1m', 
   return makeSeries(ts, px, interval === '1s' ? STALE_BASE_MS : STALE_SLOW_MS);
 }
 
-/** Bybit klines (1-minute) → StepSeries of closes stamped at close time (cross leg).
- *  NB Bybit returns the NEWEST 1000 candles of [start,end] (newest-first), so
- *  pagination walks BACKWARD by lowering `end` — a forward walk collects only
- *  the tail of the range and silently starves earlier hours. Errors arrive as
- *  retCode in HTTP-200 envelopes; throw on them so the caller defers instead of
- *  treating an error as an empty (all-null) series. */
-export async function bybitKlineSeries(symbol: string, fromMs: number, toMs: number): Promise<StepSeries> {
-  const pts: Array<[number, number]> = [];
-  let end = toMs;
-  while (end > fromMs) {
-    const j = await fetchJson(
-      `${config.bybitRest}/v5/market/kline?category=spot&symbol=${symbol}&interval=1&start=${fromMs}&end=${end}&limit=1000`);
-    if (j?.retCode !== 0) throw new Error(`bybit kline ${symbol}: ${j?.retCode} ${j?.retMsg ?? ''}`);
-    const rows: any[] = j?.result?.list ?? [];
-    if (!rows.length) break;
-    for (const r of rows) pts.push([Number(r[0]) + 60_000, parseFloat(r[4])]); // close @ close time
-    const oldestStart = Number(rows[rows.length - 1][0]);
-    if (oldestStart <= fromMs) break;
-    end = oldestStart - 1;
-    await sleep(config.backfillPaceMs);
-  }
-  pts.sort((a, b) => a[0] - b[0]);
-  return makeSeries(pts.map((p) => p[0]), pts.map((p) => p[1]), STALE_SLOW_MS);
-}
-
-// ── Bybit monthly trade dumps ────────────────────────────────────────────────
+// ── Bybit daily orderbook archives → BBO-mid series ─────────────────────────
 
 const dumpDir = () => {
   const d = process.env.HIST_CACHE_DIR ?? join(tmpdir(), 'mpamm-cex-dumps');
@@ -109,97 +90,212 @@ const dumpDir = () => {
   return d;
 };
 
-/** Bybit publishes each spot trade archive twice: a DAILY file the next day
- *  (`SYM_YYYY-MM-DD`) and a MONTHLY dump only after the month closes
- *  (`SYM-YYYY-MM`), same columns (daily adds a trailing `rpi`, unused here).
- *  Reading monthly dumps alone deferred every unmarked fill of the running
- *  month until the next month's dump landed — up to ~5 weeks of null markouts. */
-const bybitDumpUrl = (symbol: string, name: string) => `https://public.bybit.com/spot/${symbol}/${name}.csv.gz`;
+/** Bybit's keyless historical-data host publishes each spot symbol's
+ *  `orderbook.200` WS stream (snapshot + deltas, ~10ms) as ONE daily zip the
+ *  next day (~00:10 UTC). Days are UTC; each file starts with a snapshot a few
+ *  seconds after midnight and runs a few seconds past the next one. */
+const bybitBookUrl = (symbol: string, day: string) =>
+  `https://quote-saver.bycsi.com/orderbook/spot/${symbol}/${day}_${symbol}_ob200.data.zip`;
+/** the day REDUCED to its BBO-mid curve — ~2 MB vs ~200 MB of raw book
+ *  messages, so every venue × market remark of that day shares one download. */
+const bookMidPath = (symbol: string, day: string) => join(dumpDir(), `${symbol}_${day}.bbo-mid.csv`);
+/** a carry-forward point is re-emitted at least this often while messages
+ *  arrive, so the staleness cap measures a FEED gap, not a quiet mid. */
+const BOOK_HEARTBEAT_MS = 5_000;
 
-/** true when the archive is published (HEAD, no body) — lets a multi-file
- *  request fail fast BEFORE downloading any dump: without this, every boot
- *  re-downloaded a full month (~10²MB, tmp cache is wiped per deploy) only to
- *  defer on the NEXT file's 404. Non-404 probe failures return true (the GET
- *  decides — a flaky HEAD must not fabricate an "unpublished" verdict). */
-async function bybitDumpExists(symbol: string, name: string): Promise<boolean> {
-  if (existsSync(join(dumpDir(), `${name}.csv.gz`))) return true;
+/** true when the day's archive is published (HEAD, no body) — lets a multi-day
+ *  request defer BEFORE downloading any file (the next day's file is what's
+ *  usually missing). Non-404 probe failures return true: the GET decides, a
+ *  flaky HEAD must not fabricate an "unpublished" verdict. */
+async function bybitBookExists(symbol: string, day: string): Promise<boolean> {
+  if (existsSync(bookMidPath(symbol, day))) return true;
   try {
-    const r = await fetch(bybitDumpUrl(symbol, name), { method: 'HEAD', signal: AbortSignal.timeout(15_000) });
+    const r = await fetch(bybitBookUrl(symbol, day), { method: 'HEAD', signal: AbortSignal.timeout(15_000) });
     return r.status !== 404;
   } catch {
     return true;
   }
 }
 
-/** Download (once) a Bybit spot trade archive; returns local path or null (404 = not published). */
-async function bybitDumpFile(symbol: string, name: string /* SYM-YYYY-MM | SYM_YYYY-MM-DD */): Promise<string | null> {
-  const path = join(dumpDir(), `${name}.csv.gz`);
-  if (existsSync(path)) return path;
-  const url = bybitDumpUrl(symbol, name);
-  // generous timeout: it covers the WHOLE body stream (a ~12MB file on a slow
-  // link can exceed 2min), and pipeline() propagates every stream error into
-  // the awaited promise (a bare .pipe() left source errors unhandled → crash).
-  const r = await fetch(url, { signal: AbortSignal.timeout(600_000) });
-  if (r.status === 404) return null;
-  if (!r.ok || !r.body) throw new Error(`bybit dump ${r.status} for ${name}`);
-  const { pipeline } = await import('node:stream/promises');
-  const { renameSync, rmSync } = await import('node:fs');
-  try {
-    await pipeline(Readable.fromWeb(r.body as any), createWriteStream(path + '.part'));
-  } catch (e) {
-    rmSync(path + '.part', { force: true }); // never leave a truncated cache file
-    throw e;
-  }
-  renameSync(path + '.part', path);
-  return path;
+/** Streams a single-entry zip's payload straight into inflateRaw — no unzip
+ *  binary on the host (alpine image), no 200 MB temp file — and verifies the
+ *  entry against the zip's CENTRAL DIRECTORY afterwards. inflateRaw alone
+ *  checks only the deflate stream: a body cut off after it, or a corruption
+ *  that still inflates, would pass. The archives set the data-descriptor flag
+ *  (local header sizes zeroed), so the directory at the end of the body is the
+ *  only place the entry's CRC-32 and size live; `strip` keeps the body's tail
+ *  for it, `tap` hashes what inflated, and `verify()` must pass before any of
+ *  it is trusted. A missing/garbled directory (a truncated body) throws. */
+function zipEntryReader(label: string) {
+  const TAIL = 64 * 1024; // EOCD (+≤64KiB comment) and a one-entry directory
+  let head: Buffer | null = Buffer.alloc(0);
+  let tail = Buffer.alloc(0), bodyBytes = 0;
+  let crc = 0, size = 0;
+  const strip = new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      bodyBytes += chunk.length;
+      tail = tail.length + chunk.length <= 2 * TAIL ? Buffer.concat([tail, chunk]) : Buffer.concat([tail, chunk]).subarray(-TAIL);
+      if (!head) return cb(null, chunk);
+      head = Buffer.concat([head, chunk]);
+      if (head.length < 30) return cb();
+      if (head.readUInt32LE(0) !== 0x04034b50) return cb(new Error(`${label}: not a zip`));
+      const method = head.readUInt16LE(8);
+      if (method !== 8) return cb(new Error(`${label}: zip method ${method} unsupported`));
+      const start = 30 + head.readUInt16LE(26) + head.readUInt16LE(28);
+      if (head.length < start) return cb();
+      const rest = head.subarray(start);
+      head = null;
+      cb(null, rest);
+    },
+  });
+  const tap = new Transform({
+    transform(chunk: Buffer, _enc, cb) { crc = crc32(chunk, crc); size += chunk.length; cb(null, chunk); },
+  });
+  const verify = () => {
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i--) if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error(`${label}: zip directory missing (truncated body?)`);
+    if (tail.readUInt16LE(eocd + 10) !== 1) throw new Error(`${label}: expected a single-entry zip`);
+    const cd = tail.readUInt32LE(eocd + 16) - (bodyBytes - tail.length); // directory offset → tail index
+    if (cd < 0 || cd + 46 > eocd || tail.readUInt32LE(cd) !== 0x02014b50) throw new Error(`${label}: zip directory unreadable`);
+    const wantCrc = tail.readUInt32LE(cd + 16), wantSize = tail.readUInt32LE(cd + 24);
+    if (wantSize === 0xffffffff) throw new Error(`${label}: zip64 entry unsupported`);
+    if (wantCrc !== crc >>> 0 || wantSize !== size) throw new Error(`${label}: zip CRC/size mismatch (corrupt download)`);
+  };
+  return { strip, tap, verify };
 }
 
-/** Per-second last-trade series for [fromMs, toMs) from Bybit trade archives:
- *  each month's dump when published, else that month's daily files for exactly
- *  the days in range. Returns null when a needed day isn't published yet — the
- *  caller defers those days to a later run rather than fabricating. */
-export async function bybitTradeSeries(symbol: string, fromMs: number, toMs: number): Promise<StepSeries | null> {
-  const days: string[] = [];
-  for (let t = Math.floor(fromMs / 86_400_000) * 86_400_000; t < toMs; t += 86_400_000) days.push(new Date(t).toISOString().slice(0, 10));
-  // fail fast: resolve (probe) every needed file before downloading ANY of them.
-  // Chronological order matters — makeSeries binary-searches the concatenation.
-  const names: string[] = [];
-  for (const month of [...new Set(days.map((d) => d.slice(0, 7)))]) {
-    if (await bybitDumpExists(symbol, `${symbol}-${month}`)) { names.push(`${symbol}-${month}`); continue; }
-    for (const day of days.filter((d) => d.startsWith(month))) {
-      if (!(await bybitDumpExists(symbol, `${symbol}_${day}`))) return null;
-      names.push(`${symbol}_${day}`);
+/** Bybit writes every price/size as a plain decimal STRING. Matched
+ *  strictly, not via Number(), which coerces '' / null / [] to 0 (a silent
+ *  level delete), true to 1 and '0x1f' to 31. */
+const DECIMAL = /^\d+(\.\d+)?$/;
+const ZERO = /^0+(\.0+)?$/;
+
+/** `[[price, size], …]` as numbers — price > 0, size ≥ 0 (0 = remove the
+ *  level), both decimal strings — or throws via `bad`. The converted values
+ *  are checked too: an overlong digit string becomes Infinity, and a nonzero
+ *  size can underflow to 0 — a silent delete, unless it was written as 0. */
+function bookLevels(raw: unknown, bad: (why: string) => Error): Array<[number, number]> {
+  if (!Array.isArray(raw)) throw bad('levels not an array');
+  return raw.map((lv) => {
+    const [p, sz] = Array.isArray(lv) && lv.length >= 2 ? lv : [];
+    if (typeof p !== 'string' || !DECIMAL.test(p) || typeof sz !== 'string' || !DECIMAL.test(sz)) throw bad(`bad level ${JSON.stringify(lv)}`);
+    const P = Number(p), S = Number(sz);
+    if (!(Number.isFinite(P) && P > 0) || !Number.isFinite(S) || (S === 0 && !ZERO.test(sz))) throw bad(`bad level ${JSON.stringify(lv)}`);
+    return [P, S];
+  });
+}
+/** a JSON integer field (ms timestamp, update id) — a real number, never a
+ *  coerced string/null. */
+const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v);
+
+/** Replays one day's book messages and returns its BBO-mid curve over
+ *  [dayStart, dayEnd), stamped with Bybit's send time (`ts` — what the live
+ *  feed receives, not the matching-engine `cts`). Throws on any unparseable
+ *  line or a gap in the update id `u` (+1 per delta, re-based by each
+ *  snapshot): deltas are absolute per level, so a missing one corrupts the
+ *  book until the next snapshot (the archive has ~2 per day). Book order is
+ *  FILE order (= `u` order); `ts` only orders the emitted points, so a
+ *  regressed `ts` is applied but not emitted (none in 900k real messages). */
+export async function reduceBookMids(lines: AsyncIterable<string>, symbol: string, dayStart: number): Promise<{ ts: number[]; px: number[] }> {
+  const dayEnd = dayStart + 86_400_000;
+  const topic = `orderbook.200.${symbol}`;
+  const bids = new Map<number, number>(), asks = new Map<number, number>();
+  let bb = 0, ba = Infinity, lastMid = NaN, lastT = -Infinity;
+  const ts: number[] = [], px: number[] = [];
+  const recompute = () => {
+    bb = 0; for (const p of bids.keys()) if (p > bb) bb = p;
+    ba = Infinity; for (const p of asks.keys()) if (p < ba) ba = p;
+  };
+  let synced = false, lastU = NaN; // deltas only mean something on top of a snapshot
+  for await (const line of lines) {
+    if (!line) continue;
+    // validate the WHOLE message before touching the book: a parseable but
+    // malformed record applied first would leak into every later mid.
+    const m = JSON.parse(line);
+    const bad = (why: string) => new Error(`bybit book archive ${symbol}: ${why} in ${String(line).slice(0, 80)}`);
+    if (m?.topic !== topic || !m.data) throw bad('unexpected message');
+    if (m.type !== 'snapshot' && m.type !== 'delta') throw bad(`unknown type ${String(m.type)}`);
+    if (!isInt(m.ts) || m.ts <= 0) throw bad('bad ts');
+    const t = m.ts;
+    const b = bookLevels(m.data.b, bad), a = bookLevels(m.data.a, bad);
+    if (!isInt(m.data.u)) throw bad('bad update id');
+    const u = m.data.u;
+    let dirty = m.type === 'snapshot';
+    if (dirty) { bids.clear(); asks.clear(); synced = true; }
+    else if (!synced) continue;
+    else if (u !== lastU + 1) throw bad(`update id gap ${lastU} → ${u}`);
+    lastU = u;
+    for (const [P, S] of b) {
+      if (S === 0) { bids.delete(P); if (P === bb) dirty = true; } else { bids.set(P, S); if (P > bb) bb = P; }
     }
+    for (const [P, S] of a) {
+      if (S === 0) { asks.delete(P); if (P === ba) dirty = true; } else { asks.set(P, S); if (P < ba) ba = P; }
+    }
+    if (dirty) recompute();
+    // the file overlaps its neighbours by a few seconds — keep only its own day
+    // so concatenated days stay sorted for makeSeries' binary search.
+    if (!(t >= dayStart && t < dayEnd) || t < lastT) continue;
+    if (!(bb > 0 && bb < ba)) continue; // one-sided/crossed: no honest mid
+    const mid = (bb + ba) / 2;
+    if (mid !== lastMid || t - lastT >= BOOK_HEARTBEAT_MS) { ts.push(t); px.push(mid); lastMid = mid; lastT = t; }
+  }
+  return { ts, px };
+}
+
+/** One day's BBO-mid curve — from the reduced cache, else downloaded, replayed
+ *  and cached (write-then-rename: a crash never leaves a truncated cache).
+ *  Null = not published yet. */
+async function bybitBookDay(symbol: string, day: string): Promise<{ ts: number[]; px: number[] } | null> {
+  const path = bookMidPath(symbol, day);
+  if (!existsSync(path)) {
+    const r = await fetch(bybitBookUrl(symbol, day), { signal: AbortSignal.timeout(600_000) });
+    if (r.status === 404) return null;
+    if (!r.ok || !r.body) throw new Error(`bybit book archive ${r.status} for ${symbol} ${day}`);
+    const zip = zipEntryReader(`bybit book archive ${symbol} ${day}`);
+    const inflate = createInflateRaw();
+    // pipeline() carries every stage's error into `done`; readline does not
+    // forward input errors, so both are awaited together.
+    const done = pipeline(Readable.fromWeb(r.body as any), zip.strip, inflate, zip.tap);
+    const lines = createInterface({ input: zip.tap, crlfDelay: Infinity });
+    let pts: { ts: number[]; px: number[] };
+    try { [pts] = await Promise.all([reduceBookMids(lines, symbol, Date.parse(`${day}T00:00:00Z`)), done]); }
+    catch (e) { zip.tap.destroy(); throw e; } // a bad line must also stop the download
+    zip.verify(); // before the curve is cached or used
+    // a valid zip with no in-day two-sided book (e.g. no snapshot) is not
+    // "published": cached empty, every later read would defer on it forever.
+    if (!pts.ts.length) throw new Error(`bybit book archive ${symbol} ${day}: replayed to no in-day BBO — unusable archive`);
+    let out = '';
+    for (let i = 0; i < pts.ts.length; i++) out += `${pts.ts[i]},${pts.px[i]}\n`;
+    writeFileSync(path + '.part', out);
+    renameSync(path + '.part', path);
+    return pts;
   }
   const ts: number[] = [], px: number[] = [];
-  for (const name of names) {
-    const file = await bybitDumpFile(symbol, name);
-    if (!file) return null; // not published yet
-    await new Promise<void>((resolve, reject) => {
-      // wire EVERY stage's error into the promise — readline does not forward
-      // input-stream errors, and an unhandled 'error' event kills the process.
-      const raw = createReadStream(file);
-      const gz = createGunzip();
-      raw.on('error', reject);
-      gz.on('error', reject);
-      const rl = createInterface({ input: raw.pipe(gz), crlfDelay: Infinity });
-      let lastSec = -1;
-      rl.on('line', (line) => {
-        // id,timestamp(ms),price,volume,side
-        const c1 = line.indexOf(','); if (c1 < 0) return;
-        const c2 = line.indexOf(',', c1 + 1); if (c2 < 0) return;
-        const t = Number(line.slice(c1 + 1, c2));
-        if (!Number.isFinite(t) || t < fromMs || t >= toMs) return;
-        const c3 = line.indexOf(',', c2 + 1);
-        const p = parseFloat(line.slice(c2 + 1, c3 < 0 ? undefined : c3));
-        if (!(p > 0)) return;
-        const sec = Math.floor(t / 1000);
-        if (sec === lastSec) { ts[ts.length - 1] = t; px[px.length - 1] = p; } // keep the LAST trade of the second
-        else { lastSec = sec; ts.push(t); px.push(p); }
-      });
-      rl.on('close', resolve);
-      rl.on('error', reject);
-    });
+  for (const row of readFileSync(path, 'utf8').split('\n')) {
+    const c = row.indexOf(',');
+    if (c < 0) continue;
+    ts.push(Number(row.slice(0, c))); px.push(Number(row.slice(c + 1)));
+  }
+  return { ts, px };
+}
+
+/** BBO-mid series for [fromMs, toMs) from Bybit's daily orderbook archives —
+ *  the SAME quantity the live reference reads (BybitFeed.mid()/crossMid() are
+ *  BBO mids), for the base leg and the stable cross alike. Null when a needed
+ *  day isn't published yet — the caller defers rather than fabricating. */
+export async function bybitBookMidSeries(symbol: string, fromMs: number, toMs: number): Promise<StepSeries | null> {
+  const days: string[] = [];
+  for (let t = Math.floor(fromMs / 86_400_000) * 86_400_000; t < toMs; t += 86_400_000) days.push(new Date(t).toISOString().slice(0, 10));
+  for (const day of days) if (!(await bybitBookExists(symbol, day))) return null; // fail fast
+  const ts: number[] = [], px: number[] = [];
+  for (const day of days) { // chronological — makeSeries binary-searches the concatenation
+    const pts = await bybitBookDay(symbol, day);
+    if (!pts) return null;
+    for (let i = 0; i < pts.ts.length; i++) {
+      const t = pts.ts[i];
+      if (t >= fromMs && t < toMs) { ts.push(t); px.push(pts.px[i]); }
+    }
   }
   if (!ts.length) return null;
   return makeSeries(ts, px, STALE_BASE_MS);
@@ -208,14 +304,14 @@ export async function bybitTradeSeries(symbol: string, fromMs: number, toMs: num
 // ── pair-terms mid series (base × wrap ÷ quote leg — same construction as live) ──
 
 /** an ASSET's own USDT-terms series at second precision — Binance 1s klines, or
- *  Bybit trade dumps for assets Binance doesn't list (MON). Null = the archive
- *  for part of the window isn't published yet. */
+ *  Bybit's orderbook BBO mid for assets Binance doesn't list (MON). Null = the
+ *  archive for part of the window isn't published yet. */
 async function assetUsdtSeries(assetKey: string, fromMs: number, toMs: number): Promise<StepSeries | null> {
   const a = assetOf(assetKey);
   if (!a) return null;
   return a.cex === 'binance'
     ? binanceKlineSeries(a.cexSymbol, '1s', fromMs - STALE_BASE_MS, toMs)
-    : bybitTradeSeries(a.cexSymbol, fromMs - STALE_BASE_MS, toMs);
+    : bybitBookMidSeries(a.cexSymbol, fromMs - STALE_BASE_MS, toMs);
 }
 
 /**
@@ -227,9 +323,11 @@ async function assetUsdtSeries(assetKey: string, fromMs: number, toMs: number): 
  *
  * wrapBasis resolves PER PAIR (wrapBasisFor — cbBTC pairs are parity-overridden,
  * WBTC pairs use the real WBTCBTC curve). The quote leg is a stable's USDT cross
- * at 1m (slow-moving) or, for ASSET-quoted pairs (MON/ETH …), the quote asset's
- * own 1s-precision series. Returns null when a required source isn't available
- * yet (e.g. the current month's Bybit dump) — the caller defers, never fabricates.
+ * on the base's exchange — Binance 1m klines, or for Bybit-based pairs Bybit's
+ * BBO mid, exactly what the live crossMid() reads — or, for ASSET-quoted pairs
+ * (MON/ETH …), the quote asset's own series. Returns null when a required
+ * source isn't available yet (e.g. yesterday's Bybit book archive) — the caller
+ * defers, never fabricates.
  */
 export async function pairMidSeries(market: string, fromMs: number, toMs: number): Promise<StepSeries | null> {
   const pair = pairOf(market);
@@ -238,7 +336,7 @@ export async function pairMidSeries(market: string, fromMs: number, toMs: number
   const pad = STALE_SLOW_MS; // lead-in so carry-forward has a value at fromMs
 
   const base = await assetUsdtSeries(pair.base, fromMs, toMs);
-  if (!base) return null; // dump month not published yet
+  if (!base) return null; // archive day not published yet
 
   const wrapSym = wrapBasisFor(pair);
   const wrap = wrapSym ? await binanceKlineSeries(wrapSym, '1m', fromMs - pad, toMs) : null;
@@ -248,7 +346,7 @@ export async function pairMidSeries(market: string, fromMs: number, toMs: number
   if (pair.quoteKind === 'asset') {
     quoteNeeded = true;
     quote = await assetUsdtSeries(pair.quote, fromMs, toMs);
-    if (!quote) return null; // quote asset's archive missing (e.g. MON dump month)
+    if (!quote) return null; // quote asset's archive missing (e.g. a MON book day)
   } else {
     const crossSym = TOKENS[pair.quote]?.usdtCross;
     if (crossSym) {
@@ -256,12 +354,15 @@ export async function pairMidSeries(market: string, fromMs: number, toMs: number
       if (asset.cex === 'binance') {
         quote = await binanceKlineSeries(crossSym, '1m', fromMs - pad, toMs);
       } else {
-        // api.bybit.com REST geo-blocks some server IPs (403 from Render US —
-        // observed in prod; the dump host public.bybit.com is NOT blocked). The
-        // same stable/stable cross trades on Binance within fractions of a bp,
-        // so fall back to the geo-unrestricted Binance mirror.
-        try { quote = await bybitKlineSeries(crossSym, fromMs - pad, toMs); }
-        catch { quote = await binanceKlineSeries(crossSym, '1m', fromMs - pad, toMs); }
+        // ONE source on every host, and the live one. This used to be Bybit 1m
+        // klines falling back to Binance when api.bybit.com 403'd (Render US),
+        // so prod and local marked the same fill against different crosses
+        // (1.0002 vs 1.00032 — 1.2bp on a 2026-09-29 Hanji fill), and Bybit's
+        // kline close is a last trade on a 0.0001 tick (1bp steps) where the
+        // live cross is the half-tick BBO mid. The book archive host is the
+        // keyless data CDN, not the REST API.
+        quote = await bybitBookMidSeries(crossSym, fromMs - STALE_BASE_MS, toMs);
+        if (!quote) return null; // cross day not published yet — defer, never peg
       }
     }
   }

@@ -368,8 +368,9 @@ export function frameMissingVenues(
 
 /** Archive-pending lifecycle for the markout re-scan (family A of #6).
  *
- * A month's CEX price archive publishes days after the month closes, so the
- * remark walk defers that day and raises a sticky `markout.archive.pending`
+ * A day's CEX price archive publishes only after it closes (Bybit's book
+ * archive the next morning UTC; a day's markouts also need the NEXT day's
+ * file for the horizons past midnight), so the remark walk defers that day and raises a sticky `markout.archive.pending`
  * note. Like the reference-starvation warning before 6c3cf5b, that note was
  * sticky for the whole process: it kept telling maintainers "markouts resume
  * later" for hours after the archive had landed and the fills were marked.
@@ -1136,11 +1137,11 @@ export class LiveDataSource extends BaseSource {
     // history horizon, later passes tail forward) — independent of the fills
     // pipeline on purpose: a gas-source failure must never hold the fill cursor.
     if (config.gasMetric) this.gas.start();
-    // Deferred markout backfills retry on a TIMER, not just at boot: a month's
-    // CEX archive publishes days after month end, and "marks itself when it
+    // Deferred markout backfills retry on a TIMER, not just at boot: a day's
+    // CEX archive publishes after the day closes, and "marks itself when it
     // lands" must not depend on a deploy happening to restart the process. Each
     // sweep is cheap when nothing is markable (per-venue SQL for candidates +
-    // a HEAD probe per missing dump month — no RPC, no downloads).
+    // a HEAD probe per missing archive day — no RPC, no downloads).
     if (config.markoutBackfill) this.remarkTimer = setInterval(() => { void this.remarkSweep(); }, config.markoutRetryMs);
   }
 
@@ -2034,8 +2035,8 @@ export class LiveDataSource extends BaseSource {
    * against the exchanges' ARCHIVED prices (server/src/history/cex.ts). Bounded
    * to the UI's widest window on purpose — the display never goes deeper.
    * Every stage is resumable (cursor metas); the remark also re-runs cheaply on
-   * later boots so days deferred on an unpublished archive (the current month's
-   * Bybit dump) self-heal once it publishes.
+   * later boots so days deferred on an unpublished archive (the newest Bybit
+   * book day) self-heal once it publishes.
    */
   private async markoutOnboarding(nowMs: number, end: bigint): Promise<void> {
     if (this.remarkRunning) return;
@@ -2044,10 +2045,10 @@ export class LiveDataSource extends BaseSource {
     finally { this.remarkRunning = false; }
   }
 
-  /** Timer-driven retry of DEFERRED markout backfills (e.g. a month's Bybit
-   *  dump that wasn't published yet): re-walk each venue's remark cursors.
-   *  No-op while the boot chain still owns the stage, and cheap when there is
-   *  nothing markable (SQL candidates + a HEAD probe per missing month). */
+  /** Timer-driven retry of DEFERRED markout backfills (e.g. a Bybit book
+   *  archive day that wasn't published yet): re-walk each venue's remark
+   *  cursors. No-op while the boot chain still owns the stage, and cheap when
+   *  there is nothing markable (SQL candidates + a HEAD probe per missing day). */
   private async remarkSweep(): Promise<void> {
     if (this.remarkRunning) return;
     this.remarkRunning = true;
@@ -2264,7 +2265,7 @@ export class LiveDataSource extends BaseSource {
       if (fills.length) {
         // pair-terms mid series covering the day + the horizons past midnight.
         const series = await pairMidSeries(market, dayStart, dayEnd + 120_000);
-        // Warn+defer while this month's archive is missing, retract the stale
+        // Warn+defer while this day's archive is missing, retract the stale
         // note on the sweep it publishes (checkArchivePending, family A of #6).
         // The pending string stays byte-identical so drop() matches what
         // noteOnce() emitted. The retraction fires here; the "resumed" announce
