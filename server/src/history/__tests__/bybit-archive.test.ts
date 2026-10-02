@@ -101,6 +101,10 @@ describe('reduceBookMids', () => {
     ['hex price (→ 31)', lv([['0x1f', '1']]), /bad level/],
     ['exponent price', lv([['1e-2', '1']]), /bad level/],
     ["numeric price (not Bybit's string form)", lv([[0.0285, '1']]), /bad level/],
+    ['overlong price (→ Infinity)', lv([['9'.repeat(400), '1']]), /bad level/],
+    ['overlong size (→ Infinity)', lv([['0.0285', '9'.repeat(400)]]), /bad level/],
+    ['nonzero size underflowing to 0 (a silent delete)', lv([['0.0285', `0.${'0'.repeat(400)}1`]]), /bad level/],
+    ['zero price', lv([['0.000', '1']]), /bad level/],
     ['null update id (→ 0)', raw({ data: { b: [], a: [], u: null } }), /bad update id/],
     ['string update id', raw({ data: { b: [], a: [], u: '2' } }), /bad update id/],
   ] as const)('rejects a malformed record before it touches the book: %s', async (_label, bad, why) => {

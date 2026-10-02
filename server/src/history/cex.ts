@@ -169,17 +169,20 @@ function zipEntryReader(label: string) {
  *  strictly, not via Number(), which coerces '' / null / [] to 0 (a silent
  *  level delete), true to 1 and '0x1f' to 31. */
 const DECIMAL = /^\d+(\.\d+)?$/;
+const ZERO = /^0+(\.0+)?$/;
 
 /** `[[price, size], …]` as numbers — price > 0, size ≥ 0 (0 = remove the
- *  level), both decimal strings — or throws via `bad`. */
+ *  level), both decimal strings — or throws via `bad`. The converted values
+ *  are checked too: an overlong digit string becomes Infinity, and a nonzero
+ *  size can underflow to 0 — a silent delete, unless it was written as 0. */
 function bookLevels(raw: unknown, bad: (why: string) => Error): Array<[number, number]> {
   if (!Array.isArray(raw)) throw bad('levels not an array');
   return raw.map((lv) => {
     const [p, sz] = Array.isArray(lv) && lv.length >= 2 ? lv : [];
     if (typeof p !== 'string' || !DECIMAL.test(p) || typeof sz !== 'string' || !DECIMAL.test(sz)) throw bad(`bad level ${JSON.stringify(lv)}`);
-    const P = Number(p);
-    if (!(P > 0)) throw bad(`bad level ${JSON.stringify(lv)}`);
-    return [P, Number(sz)];
+    const P = Number(p), S = Number(sz);
+    if (!(Number.isFinite(P) && P > 0) || !Number.isFinite(S) || (S === 0 && !ZERO.test(sz))) throw bad(`bad level ${JSON.stringify(lv)}`);
+    return [P, S];
   });
 }
 /** a JSON integer field (ms timestamp, update id) — a real number, never a
