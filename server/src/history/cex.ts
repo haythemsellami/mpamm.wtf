@@ -179,8 +179,11 @@ function bookLevels(raw: unknown, bad: (why: string) => Error): Array<[number, n
 /** Replays one day's book messages and returns its BBO-mid curve over
  *  [dayStart, dayEnd), stamped with Bybit's send time (`ts` — what the live
  *  feed receives, not the matching-engine `cts`). Throws on any unparseable
- *  line: deltas are absolute per level, so a skipped one corrupts the book
- *  until the next snapshot (the archive has ~2 per day). */
+ *  line or a gap in the update id `u` (+1 per delta, re-based by each
+ *  snapshot): deltas are absolute per level, so a missing one corrupts the
+ *  book until the next snapshot (the archive has ~2 per day). Book order is
+ *  FILE order (= `u` order); `ts` only orders the emitted points, so a
+ *  regressed `ts` is applied but not emitted (none in 900k real messages). */
 export async function reduceBookMids(lines: AsyncIterable<string>, symbol: string, dayStart: number): Promise<{ ts: number[]; px: number[] }> {
   const dayEnd = dayStart + 86_400_000;
   const topic = `orderbook.200.${symbol}`;
@@ -191,7 +194,7 @@ export async function reduceBookMids(lines: AsyncIterable<string>, symbol: strin
     bb = 0; for (const p of bids.keys()) if (p > bb) bb = p;
     ba = Infinity; for (const p of asks.keys()) if (p < ba) ba = p;
   };
-  let synced = false; // deltas only mean something on top of a snapshot
+  let synced = false, lastU = NaN; // deltas only mean something on top of a snapshot
   for await (const line of lines) {
     if (!line) continue;
     // validate the WHOLE message before touching the book: a parseable but
@@ -203,9 +206,13 @@ export async function reduceBookMids(lines: AsyncIterable<string>, symbol: strin
     const t = Number(m.ts);
     if (!Number.isFinite(t)) throw bad('non-finite ts');
     const b = bookLevels(m.data.b, bad), a = bookLevels(m.data.a, bad);
+    const u = Number(m.data.u);
+    if (!Number.isSafeInteger(u)) throw bad('bad update id');
     let dirty = m.type === 'snapshot';
     if (dirty) { bids.clear(); asks.clear(); synced = true; }
-    if (!synced) continue;
+    else if (!synced) continue;
+    else if (u !== lastU + 1) throw bad(`update id gap ${lastU} → ${u}`);
+    lastU = u;
     for (const [P, S] of b) {
       if (S === 0) { bids.delete(P); if (P === bb) dirty = true; } else { bids.set(P, S); if (P > bb) bb = P; }
     }
@@ -242,6 +249,9 @@ async function bybitBookDay(symbol: string, day: string): Promise<{ ts: number[]
     try { [pts] = await Promise.all([reduceBookMids(lines, symbol, Date.parse(`${day}T00:00:00Z`)), done]); }
     catch (e) { zip.tap.destroy(); throw e; } // a bad line must also stop the download
     zip.verify(); // before the curve is cached or used
+    // a valid zip with no in-day two-sided book (e.g. no snapshot) is not
+    // "published": cached empty, every later read would defer on it forever.
+    if (!pts.ts.length) throw new Error(`bybit book archive ${symbol} ${day}: replayed to no in-day BBO — unusable archive`);
     let out = '';
     for (let i = 0; i < pts.ts.length; i++) out += `${pts.ts[i]},${pts.px[i]}\n`;
     writeFileSync(path + '.part', out);

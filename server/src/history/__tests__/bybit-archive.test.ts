@@ -15,8 +15,11 @@ import { bybitBookMidSeries, pairMidSeries, reduceBookMids } from '../cex.js';
  */
 const day = (d: string) => Date.parse(`${d}T00:00:00Z`);
 type Lv = Array<[string, string]>;
-const msg = (sym: string, ts: number, type: 'snapshot' | 'delta', b: Lv, a: Lv) =>
-  JSON.stringify({ topic: `orderbook.200.${sym}`, ts, type, data: { s: sym, b, a, u: 1, seq: 1 }, cts: ts - 10 });
+// `u` counts up across every built message: a file's snapshot re-bases it and
+// its deltas follow contiguously, as in the real archive.
+let nextU = 1;
+const msg = (sym: string, ts: number, type: 'snapshot' | 'delta', b: Lv, a: Lv, u = nextU++) =>
+  JSON.stringify({ topic: `orderbook.200.${sym}`, ts, type, data: { s: sym, b, a, u, seq: u }, cts: ts - 10 });
 
 function zip(name: string, body: string, opts: { crc?: number } = {}): Uint8Array {
   const n = Buffer.from(name), raw = Buffer.from(body), def = deflateRawSync(raw);
@@ -94,6 +97,24 @@ describe('reduceBookMids', () => {
     }
   });
 
+  it('throws on a gap in the update id (a dropped delta), re-basing on each snapshot', async () => {
+    const snap = (t: number, u: number) => msg('MONUSDT', D + t, 'snapshot', [['0.0285', '1']], [['0.0286', '1']], u);
+    const delta = (t: number, u: number) => msg('MONUSDT', D + t, 'delta', [['0.0285', '2']], [], u);
+    await expect(reduceBookMids(lines([snap(1_000, 10), delta(2_000, 11), delta(3_000, 13)]), 'MONUSDT', D)).rejects.toThrow(/update id gap 11 → 13/);
+    const { ts } = await reduceBookMids(lines([snap(1_000, 10), delta(2_000, 11), snap(3_000, 500), delta(4_000, 501)]), 'MONUSDT', D);
+    expect(ts).toEqual([D + 1_000]);
+  });
+
+  it('applies but does not emit a regressed ts (book order is file order)', async () => {
+    const { ts, px } = await reduceBookMids(lines([
+      msg('MONUSDT', D + 5_000, 'snapshot', [['0.0285', '1']], [['0.0286', '1']]),
+      msg('MONUSDT', D + 4_000, 'delta', [['0.02855', '1']], []), // regressed: applied, not emitted
+      msg('MONUSDT', D + 6_000, 'delta', [['0.02840', '1']], []), // mid includes the regressed level
+    ]), 'MONUSDT', D);
+    expect(ts).toEqual([D + 5_000, D + 6_000]);
+    expect(px.map((p) => +p.toFixed(6))).toEqual([0.02855, 0.028575]);
+  });
+
   it('ignores deltas until the first snapshot (no book to apply them to)', async () => {
     const { ts } = await reduceBookMids(lines([
       msg('MONUSDT', D + 1_000, 'delta', [['0.0285', '1']], [['0.0286', '1']]),
@@ -154,6 +175,14 @@ describe('bybitBookMidSeries', () => {
     files.set(url('MONUSDT', D), zip(`${D}_MONUSDT_ob200.data`, msg('MONUSDT', day(D) + 3_000, 'snapshot', [['0.0285', '1']], [['0.0286', '1']]) + '\n', { crc: 0xdeadbeef }));
     await expect(bybitBookMidSeries('MONUSDT', day(D), day(D) + 60_000)).rejects.toThrow(/CRC/);
     expect(existsSync(join(dir, `MONUSDT_${D}.bbo-mid.csv`))).toBe(false);
+  });
+
+  it('throws (and caches nothing) on a valid zip with no in-day book, so the next sweep re-fetches', async () => {
+    publish('MONUSDT', D, [msg('MONUSDT', day(D) + 1_000, 'delta', [['0.0285', '1']], [['0.0286', '1']])]); // no snapshot
+    await expect(bybitBookMidSeries('MONUSDT', day(D), day(D) + 60_000)).rejects.toThrow(/unusable archive/);
+    expect(existsSync(join(dir, `MONUSDT_${D}.bbo-mid.csv`))).toBe(false);
+    book('MONUSDT', D, [[3_000, '0.02850', '0.02851']]); // archive fixed upstream
+    expect((await bybitBookMidSeries('MONUSDT', day(D), day(D) + 60_000))?.at(day(D) + 4_000)).toBeCloseTo(0.028505, 9);
   });
 
   it('a gap in the feed past the staleness cap yields null, never a carried mid', async () => {
