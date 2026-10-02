@@ -1,4 +1,4 @@
-import { createInflateRaw } from 'node:zlib';
+import { createInflateRaw, crc32 } from 'node:zlib';
 import { createInterface } from 'node:readline';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -117,27 +117,62 @@ async function bybitBookExists(symbol: string, day: string): Promise<boolean> {
   }
 }
 
-/** Strips a single-entry zip's local file header so the rest pipes straight
- *  into inflateRaw — no unzip binary on the host, no 200 MB temp file. The
- *  archives set the data-descriptor flag (sizes zeroed), which is fine: the
- *  deflate stream ends itself and inflateRaw ignores the trailing directory;
- *  a TRUNCATED body fails inflateRaw with "unexpected end of file". */
-function zipEntryPayload(): Transform {
+/** Streams a single-entry zip's payload straight into inflateRaw — no unzip
+ *  binary on the host (alpine image), no 200 MB temp file — and verifies the
+ *  entry against the zip's CENTRAL DIRECTORY afterwards. inflateRaw alone
+ *  checks only the deflate stream: a body cut off after it, or a corruption
+ *  that still inflates, would pass. The archives set the data-descriptor flag
+ *  (local header sizes zeroed), so the directory at the end of the body is the
+ *  only place the entry's CRC-32 and size live; `strip` keeps the body's tail
+ *  for it, `tap` hashes what inflated, and `verify()` must pass before any of
+ *  it is trusted. A missing/garbled directory (a truncated body) throws. */
+function zipEntryReader(label: string) {
+  const TAIL = 64 * 1024; // EOCD (+≤64KiB comment) and a one-entry directory
   let head: Buffer | null = Buffer.alloc(0);
-  return new Transform({
+  let tail = Buffer.alloc(0), bodyBytes = 0;
+  let crc = 0, size = 0;
+  const strip = new Transform({
     transform(chunk: Buffer, _enc, cb) {
+      bodyBytes += chunk.length;
+      tail = tail.length + chunk.length <= 2 * TAIL ? Buffer.concat([tail, chunk]) : Buffer.concat([tail, chunk]).subarray(-TAIL);
       if (!head) return cb(null, chunk);
       head = Buffer.concat([head, chunk]);
       if (head.length < 30) return cb();
-      if (head.readUInt32LE(0) !== 0x04034b50) return cb(new Error('bybit book archive: not a zip'));
+      if (head.readUInt32LE(0) !== 0x04034b50) return cb(new Error(`${label}: not a zip`));
       const method = head.readUInt16LE(8);
-      if (method !== 8) return cb(new Error(`bybit book archive: zip method ${method} unsupported`));
+      if (method !== 8) return cb(new Error(`${label}: zip method ${method} unsupported`));
       const start = 30 + head.readUInt16LE(26) + head.readUInt16LE(28);
       if (head.length < start) return cb();
       const rest = head.subarray(start);
       head = null;
       cb(null, rest);
     },
+  });
+  const tap = new Transform({
+    transform(chunk: Buffer, _enc, cb) { crc = crc32(chunk, crc); size += chunk.length; cb(null, chunk); },
+  });
+  const verify = () => {
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i--) if (tail.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error(`${label}: zip directory missing (truncated body?)`);
+    if (tail.readUInt16LE(eocd + 10) !== 1) throw new Error(`${label}: expected a single-entry zip`);
+    const cd = tail.readUInt32LE(eocd + 16) - (bodyBytes - tail.length); // directory offset → tail index
+    if (cd < 0 || cd + 46 > eocd || tail.readUInt32LE(cd) !== 0x02014b50) throw new Error(`${label}: zip directory unreadable`);
+    const wantCrc = tail.readUInt32LE(cd + 16), wantSize = tail.readUInt32LE(cd + 24);
+    if (wantSize === 0xffffffff) throw new Error(`${label}: zip64 entry unsupported`);
+    if (wantCrc !== crc >>> 0 || wantSize !== size) throw new Error(`${label}: zip CRC/size mismatch (corrupt download)`);
+  };
+  return { strip, tap, verify };
+}
+
+/** `[[price, size], …]` as numbers — price finite > 0, size finite ≥ 0 (0 =
+ *  remove the level) — or throws via `bad`. */
+function bookLevels(raw: unknown, bad: (why: string) => Error): Array<[number, number]> {
+  if (!Array.isArray(raw)) throw bad('levels not an array');
+  return raw.map((lv) => {
+    const P = Array.isArray(lv) && lv.length >= 2 ? Number(lv[0]) : NaN, S = Array.isArray(lv) ? Number(lv[1]) : NaN;
+    if (!(Number.isFinite(P) && P > 0) || !(Number.isFinite(S) && S >= 0)) throw bad(`bad level ${JSON.stringify(lv)}`);
+    return [P, S];
   });
 }
 
@@ -156,19 +191,25 @@ export async function reduceBookMids(lines: AsyncIterable<string>, symbol: strin
     bb = 0; for (const p of bids.keys()) if (p > bb) bb = p;
     ba = Infinity; for (const p of asks.keys()) if (p < ba) ba = p;
   };
+  let synced = false; // deltas only mean something on top of a snapshot
   for await (const line of lines) {
     if (!line) continue;
+    // validate the WHOLE message before touching the book: a parseable but
+    // malformed record applied first would leak into every later mid.
     const m = JSON.parse(line);
-    if (m?.topic !== topic || !m.data) throw new Error(`bybit book archive ${symbol}: unexpected message ${String(line).slice(0, 80)}`);
+    const bad = (why: string) => new Error(`bybit book archive ${symbol}: ${why} in ${String(line).slice(0, 80)}`);
+    if (m?.topic !== topic || !m.data) throw bad('unexpected message');
+    if (m.type !== 'snapshot' && m.type !== 'delta') throw bad(`unknown type ${String(m.type)}`);
     const t = Number(m.ts);
+    if (!Number.isFinite(t)) throw bad('non-finite ts');
+    const b = bookLevels(m.data.b, bad), a = bookLevels(m.data.a, bad);
     let dirty = m.type === 'snapshot';
-    if (dirty) { bids.clear(); asks.clear(); }
-    for (const [p, s] of m.data.b ?? []) {
-      const P = Number(p), S = Number(s);
+    if (dirty) { bids.clear(); asks.clear(); synced = true; }
+    if (!synced) continue;
+    for (const [P, S] of b) {
       if (S === 0) { bids.delete(P); if (P === bb) dirty = true; } else { bids.set(P, S); if (P > bb) bb = P; }
     }
-    for (const [p, s] of m.data.a ?? []) {
-      const P = Number(p), S = Number(s);
+    for (const [P, S] of a) {
       if (S === 0) { asks.delete(P); if (P === ba) dirty = true; } else { asks.set(P, S); if (P < ba) ba = P; }
     }
     if (dirty) recompute();
@@ -191,15 +232,16 @@ async function bybitBookDay(symbol: string, day: string): Promise<{ ts: number[]
     const r = await fetch(bybitBookUrl(symbol, day), { signal: AbortSignal.timeout(600_000) });
     if (r.status === 404) return null;
     if (!r.ok || !r.body) throw new Error(`bybit book archive ${r.status} for ${symbol} ${day}`);
-    const inflated = zipEntryPayload();
+    const zip = zipEntryReader(`bybit book archive ${symbol} ${day}`);
     const inflate = createInflateRaw();
     // pipeline() carries every stage's error into `done`; readline does not
     // forward input errors, so both are awaited together.
-    const done = pipeline(Readable.fromWeb(r.body as any), inflated, inflate);
-    const lines = createInterface({ input: inflate, crlfDelay: Infinity });
+    const done = pipeline(Readable.fromWeb(r.body as any), zip.strip, inflate, zip.tap);
+    const lines = createInterface({ input: zip.tap, crlfDelay: Infinity });
     let pts: { ts: number[]; px: number[] };
     try { [pts] = await Promise.all([reduceBookMids(lines, symbol, Date.parse(`${day}T00:00:00Z`)), done]); }
-    catch (e) { inflate.destroy(); throw e; } // a bad line must also stop the download
+    catch (e) { zip.tap.destroy(); throw e; } // a bad line must also stop the download
+    zip.verify(); // before the curve is cached or used
     let out = '';
     for (let i = 0; i < pts.ts.length; i++) out += `${pts.ts[i]},${pts.px[i]}\n`;
     writeFileSync(path + '.part', out);

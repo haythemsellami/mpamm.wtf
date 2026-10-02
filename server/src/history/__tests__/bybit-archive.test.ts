@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
-import { deflateRawSync } from 'node:zlib';
+import { crc32, deflateRawSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bybitBookMidSeries, pairMidSeries, reduceBookMids } from '../cex.js';
@@ -8,7 +8,8 @@ import { bybitBookMidSeries, pairMidSeries, reduceBookMids } from '../cex.js';
 /**
  * Bybit orderbook archives → BBO-mid series — no network. `fetch` serves
  * zips built here in the archive's exact layout (one deflated entry, data-
- * descriptor flag set, trailing directory bytes) and message format
+ * descriptor flag set — sizes zeroed locally, real ones in the descriptor and
+ * central directory) and message format
  * (`orderbook.200.<SYM>` snapshot + absolute-size deltas, `ts` = send time);
  * every other URL 404s, i.e. "not published yet".
  */
@@ -17,13 +18,22 @@ type Lv = Array<[string, string]>;
 const msg = (sym: string, ts: number, type: 'snapshot' | 'delta', b: Lv, a: Lv) =>
   JSON.stringify({ topic: `orderbook.200.${sym}`, ts, type, data: { s: sym, b, a, u: 1, seq: 1 }, cts: ts - 10 });
 
-function zip(name: string, body: string): Uint8Array {
-  const n = Buffer.from(name);
+function zip(name: string, body: string, opts: { crc?: number } = {}): Uint8Array {
+  const n = Buffer.from(name), raw = Buffer.from(body), def = deflateRawSync(raw);
+  const crc = opts.crc ?? crc32(raw);
   const h = Buffer.alloc(30);
   h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(0x0008, 6); h.writeUInt16LE(8, 8);
   h.writeUInt16LE(n.length, 26);
-  // trailer stands in for the data descriptor + central directory
-  return new Uint8Array(Buffer.concat([h, n, deflateRawSync(Buffer.from(body)), Buffer.from('PK\x07\x08trailing-directory-bytes')]));
+  const dd = Buffer.alloc(16);
+  dd.writeUInt32LE(0x08074b50, 0); dd.writeUInt32LE(crc, 4); dd.writeUInt32LE(def.length, 8); dd.writeUInt32LE(raw.length, 12);
+  const cd = Buffer.alloc(46);
+  cd.writeUInt32LE(0x02014b50, 0); cd.writeUInt16LE(20, 4); cd.writeUInt16LE(20, 6); cd.writeUInt16LE(0x0008, 8); cd.writeUInt16LE(8, 10);
+  cd.writeUInt32LE(crc, 16); cd.writeUInt32LE(def.length, 20); cd.writeUInt32LE(raw.length, 24); cd.writeUInt16LE(n.length, 28);
+  const cdOffset = h.length + n.length + def.length + dd.length;
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(1, 8); eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(cd.length + n.length, 12); eocd.writeUInt32LE(cdOffset, 16);
+  return new Uint8Array(Buffer.concat([h, n, def, dd, cd, n, eocd]));
 }
 
 let dir: string;
@@ -68,6 +78,29 @@ describe('reduceBookMids', () => {
     await expect(reduceBookMids(lines([msg('MONUSDT', D + 1, 'snapshot', [['1', '1']], [['2', '1']]), '{"topic":"orderbook.200.MON']), 'MONUSDT', D)).rejects.toThrow();
     await expect(reduceBookMids(lines([msg('USDCUSDT', D + 1, 'snapshot', [['1', '1']], [['2', '1']])]), 'MONUSDT', D)).rejects.toThrow(/unexpected message/);
   });
+
+  it('rejects a parseable but malformed record BEFORE it touches the book', async () => {
+    const snap = msg('MONUSDT', D + 1_000, 'snapshot', [['0.0285', '1']], [['0.0286', '1']]);
+    const raw = (o: object) => JSON.stringify({ topic: 'orderbook.200.MONUSDT', ts: D + 2_000, type: 'delta', data: { b: [], a: [] }, ...o });
+    for (const [bad, why] of [
+      [raw({ type: 'update' }), /unknown type/],
+      [raw({ ts: 'soon' }), /non-finite ts/],
+      [raw({ data: { b: [['0.0287', 'x']], a: [] } }), /bad level/],
+      [raw({ data: { b: [['-1', '1']], a: [] } }), /bad level/],
+      [raw({ data: { b: [['0.0287']], a: [] } }), /bad level/],
+      [raw({ data: { a: [] } }), /not an array/],
+    ] as const) {
+      await expect(reduceBookMids(lines([snap, bad]), 'MONUSDT', D), bad).rejects.toThrow(why);
+    }
+  });
+
+  it('ignores deltas until the first snapshot (no book to apply them to)', async () => {
+    const { ts } = await reduceBookMids(lines([
+      msg('MONUSDT', D + 1_000, 'delta', [['0.0285', '1']], [['0.0286', '1']]),
+      msg('MONUSDT', D + 2_000, 'snapshot', [['0.0284', '1']], [['0.0285', '1']]),
+    ]), 'MONUSDT', D);
+    expect(ts).toEqual([D + 2_000]);
+  });
 });
 
 describe('bybitBookMidSeries', () => {
@@ -103,8 +136,23 @@ describe('bybitBookMidSeries', () => {
   it('throws on a truncated download and leaves no cache file', async () => {
     book('MONUSDT', D, [[3_000, '0.02850', '0.02851']]);
     const full = files.get(url('MONUSDT', D))!;
-    files.set(url('MONUSDT', D), full.subarray(0, full.length - 40));
-    await expect(bybitBookMidSeries('MONUSDT', day(D), day(D) + 60_000)).rejects.toThrow();
+    const payload = 30 + full[26]; // local header + name (no extra field)
+    files.set(url('MONUSDT', D), full.subarray(0, payload + 4)); // cut inside the deflate stream
+    await expect(bybitBookMidSeries('MONUSDT', day(D), day(D) + 60_000)).rejects.toThrow(/unexpected end/);
+    expect(existsSync(join(dir, `MONUSDT_${D}.bbo-mid.csv`))).toBe(false);
+  });
+
+  it('throws when the body is cut off AFTER the deflate stream (directory missing)', async () => {
+    book('MONUSDT', D, [[3_000, '0.02850', '0.02851']]);
+    const full = files.get(url('MONUSDT', D))!;
+    files.set(url('MONUSDT', D), full.subarray(0, full.length - 30)); // deflate + descriptor intact
+    await expect(bybitBookMidSeries('MONUSDT', day(D), day(D) + 60_000)).rejects.toThrow(/directory/);
+    expect(existsSync(join(dir, `MONUSDT_${D}.bbo-mid.csv`))).toBe(false);
+  });
+
+  it('throws on a CRC mismatch even though the payload inflates', async () => {
+    files.set(url('MONUSDT', D), zip(`${D}_MONUSDT_ob200.data`, msg('MONUSDT', day(D) + 3_000, 'snapshot', [['0.0285', '1']], [['0.0286', '1']]) + '\n', { crc: 0xdeadbeef }));
+    await expect(bybitBookMidSeries('MONUSDT', day(D), day(D) + 60_000)).rejects.toThrow(/CRC/);
     expect(existsSync(join(dir, `MONUSDT_${D}.bbo-mid.csv`))).toBe(false);
   });
 
