@@ -103,6 +103,10 @@ export function createMetricV1Generation(): VenueGeneration {
   let admittedPools: MetricPool[] = [];
   let pools: MetricPool[] = [];                       // live: quoted
   const byAddr = new Map<string, MetricPool>();       // MONOTONIC decode map
+  /** candidates a SUCCESSFUL pass has decided (admitted or rejected). Distinct
+   *  from `candidates`, which a failed pass may already have grown: an
+   *  announcement is only "known" once its pool is settled here. */
+  const settled = new Set<string>();
   let discovered = false;
   /** the no-price warning currently on the record (null = none) — this latch
    *  owns the dedupe, so its transition notes are `repeatable` (adapter.ts note) */
@@ -241,6 +245,8 @@ export function createMetricV1Generation(): VenueGeneration {
     // The decode map is MONOTONIC and keyed on ADMISSION, not liveness, so a
     // pool leaving `live` can never strand fills already fetched for it.
     for (const p of admitted) byAddr.set(p.pool.toLowerCase(), p);
+    // every candidate reached a verdict in this pass (any unanswered read threw above)
+    for (const p of candidates) settled.add(p);
     // merged, never replaced: a provider read that fails on one pass must not
     // shrink the destination set (see step 5)
     pushOracles = [...new Set([...pushOracles, ...oracles])].sort() as `0x${string}`[];
@@ -367,7 +373,11 @@ export function createMetricV1Generation(): VenueGeneration {
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf: (bn: bigint) => number): Promise<Fill[]> {
       const announced = (logs.poolCreated ?? [])
         .map((l: any) => String(l?.args?.poolAddress ?? '').toLowerCase())
-        .filter((p: string) => /^0x[0-9a-f]{40}$/.test(p) && !candidates.has(p));
+        // against SETTLED, not candidates: a refresh that failed after
+        // enumerating the pool leaves it a candidate but unadmitted, and
+        // skipping its announcement then would let this range pass without
+        // its swaps — the retry must re-run discovery until it is decided.
+        .filter((p: string) => /^0x[0-9a-f]{40}$/.test(p) && !settled.has(p));
       if (announced.length) {
         ctx.note('venue.discovery', `Metric: factory deployed ${announced.length} new pool(s) — re-running discovery`);
         await refresh(ctx);

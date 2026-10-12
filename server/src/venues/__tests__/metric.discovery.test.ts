@@ -401,6 +401,22 @@ describe('a v1 pool announced mid-range forces that range to be re-read', () => 
     expect(fills[0]).toMatchObject({ venueId: 'metric', market: 'ETH/USDC', side: 'buy', usd: 2 });
   });
 
+  it('keeps holding when the announcing refresh FAILED after enumerating the pool — the retry re-runs discovery', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([], { pools: [P.wmon] }));
+    const NEW = P.weth;
+    // 1st attempt: NEW is enumerated, then its immutables read fails → hold
+    const flaky = stub([], { pools: [P.wmon, NEW], unresolved: (p) => p === NEW });
+    await expect(a.decode(flaky, bundleFor(a, { 'v1:poolCreated': [created(NEW)], 'v1:swap': [swapLog(NEW)] }), () => 1, new Set())).rejects.toThrow(/getImmutables failed/);
+    // 2nd attempt, same failure: must STILL hold — NEW is a candidate now, but not decided
+    await expect(a.decode(flaky, bundleFor(a, { 'v1:poolCreated': [created(NEW)], 'v1:swap': [swapLog(NEW)] }), () => 1, new Set())).rejects.toThrow();
+    // healed: discovery admits NEW, the range is re-read with it, and its swap counts
+    const ok = stub([], { pools: [P.wmon, NEW] });
+    await expect(a.decode(ok, bundleFor(a, { 'v1:poolCreated': [created(NEW)], 'v1:swap': [] }), () => 1, new Set())).rejects.toThrow(/admitted after/);
+    const fills = await a.decode(ok, bundleFor(a, { 'v1:poolCreated': [created(NEW)], 'v1:swap': [swapLog(NEW)] }), () => 1, new Set());
+    expect(fills).toHaveLength(1);
+  });
+
   it('does not retry a range whose swap query already covered the pool', async () => {
     const a = createMetricAdapter();
     await a.discover(stub([], { pools: [P.wmon] }));
