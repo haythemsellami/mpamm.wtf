@@ -365,7 +365,7 @@ describe('live startup archive gate', () => {
       .filter((s) => s.t >= now - 40_000 && !(s.t > now - 23_000 && s.t < now - 22_000)));
     const frames: Fill[] = [];
     source.on('message', (m: { ch: string; data: Fill }) => { if (m.ch === 'fill') frames.push(m.data); });
-    const persistSnapshot = vi.spyOn(source.store, 'persistSnapshot').mockImplementation(() => undefined);
+    const persistSnapshot = vi.spyOn(source.store, 'persistSnapshot').mockImplementation(() => ({ unmatchedCurves: [] }));
     try {
       await source.ageMarkouts();
       await source.ageMarkouts(); // taken once: a second pass never re-derives it
@@ -747,7 +747,7 @@ describe('live startup archive gate', () => {
     const changed = { utcDay: '2026-08-25', partial: true, byVenue: { live: { usd: 2, swaps: 2 } } };
     source.days = [historical, changed];
     source.dirtyDays = new Set([changed.utcDay]);
-    const persistSnapshot = vi.spyOn(source.store, 'persistSnapshot').mockImplementation(() => undefined);
+    const persistSnapshot = vi.spyOn(source.store, 'persistSnapshot').mockImplementation(() => ({ unmatchedCurves: [] }));
 
     await source.persist();
 
@@ -769,6 +769,80 @@ describe('live startup archive gate', () => {
     expect(source.notes.list()).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'store.persist.failed' })]));
     await expect(source.persist(true)).rejects.toThrow('disk unavailable');
     source.store.close();
+  });
+
+  describe('curve whose fill row is missing at commit', () => {
+    const curve = Array(CURVE_OFFSETS_S.length).fill(7);
+    const fill = (id: string, ts: number): Fill => ({
+      id, ts, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'DIRECT', usd: 100, baseAmount: 100,
+      execPx: 1, blockNumber: 1, txHash: `0x${id}`, to: 'direct', pool: 'pool', markoutsBps: [null, null, null, null, null],
+    });
+    const stored = (source: any) => new Map(source.store.curveFillsChunk(0, -1, '', 100).map((r: { id: string; curve: unknown }) => [r.id, r.curve]));
+
+    it('requeues it when an overlapping snapshot commits before the one inserting the fill rolls back', async () => {
+      const { source } = await setup();
+      source.knownVenueIds = new Set(['test-venue']);
+      try {
+        source.ingest(fill('f', Date.now() - 120_000));
+        vi.spyOn(source.store, 'persistSnapshot').mockImplementationOnce(() => { throw new Error('disk busy'); });
+        // A cuts the fill and fails (its requeue runs on a later microtask); B
+        // is cut before that, so it carries only the curve and commits first.
+        const a = source.persist();
+        source.dirtyCurves.set('f', curve);
+        const b = source.persist();
+        await Promise.all([a, b]);
+        expect(stored(source).has('f')).toBe(false);
+        expect([...source.dirty].map((f: Fill) => f.id)).toEqual(['f']);
+        expect(source.dirtyCurves.get('f')).toEqual(curve);
+        // C re-inserts the fill and, after it in the same transaction, its curve
+        await source.persist();
+        expect(stored(source).get('f')).toEqual(curve);
+        expect(source.dirtyCurves.size).toBe(0);
+        expect(source.curveMisses.size).toBe(0);
+      } finally { source.store.close(); }
+    });
+
+    it('drops a curve whose fill a venue reset purged, without wedging later snapshots', async () => {
+      const { source } = await setup();
+      source.knownVenueIds = new Set(['test-venue']);
+      const { purgeVenueFills } = await import('../datasource/live.js');
+      try {
+        source.ingest(fill('old', Date.now() - 3 * 86_400_000));
+        await source.persist();
+        source.dirtyCurves.set('old', curve);
+        const today = new Date().toISOString().slice(0, 10);
+        const deletes = { beforeDay: today, fills: { fromDay: '2000-01-01' } };
+        expect(await source.storeWriter.resetVenueHistory('test-venue', deletes)).toEqual({ volume: 0, fills: 1 });
+        purgeVenueFills(source, 'test-venue', deletes);
+
+        await source.persist();
+        expect(source.dirtyCurves.size).toBe(0);
+        expect(source.curveMisses.size).toBe(0);
+        source.ingest(fill('next', Date.now() - 120_000));
+        source.dirtyCurves.set('next', curve);
+        await expect(source.persist()).resolves.toBeUndefined();
+        expect([...stored(source)]).toEqual([['next', curve]]);
+        expect(source.notes.list().some((n: StateNote) => n.code === 'store.persist.failed')).toBe(false);
+      } finally { source.store.close(); }
+    });
+
+    it('gives up after a bounded number of snapshots when the row never lands under an in-memory fill', async () => {
+      const { source } = await setup();
+      source.knownVenueIds = new Set(['test-venue']);
+      const persistSnapshot = vi.spyOn(source.store, 'persistSnapshot');
+      try {
+        source.ingest(fill('pruned', Date.now() - 120_000));
+        await source.persist();
+        // retention deleted the row; the 400-fill ring still holds the fill
+        source.store.pruneFillsBefore(Date.now(), 10);
+        source.dirtyCurves.set('pruned', curve);
+        for (let i = 0; i < 6; i++) await source.persist();
+        const carried = persistSnapshot.mock.calls.filter((c: unknown[]) => (c[3] as unknown[] | undefined)?.length).length;
+        expect(carried).toBe(1 + source.constructor.CURVE_MAX_RETRIES);
+        expect(source.dirtyCurves.size).toBe(0);
+        expect(source.curveMisses.size).toBe(0);
+      } finally { source.store.close(); }
+    });
   });
 
   it('checkpoints only backfill days whose accumulated total changed', async () => {

@@ -123,6 +123,19 @@ describe('persistence', () => {
     expect(expected.coverage).toEqual({ venue: { fills: 2, usd: 200 } });
   });
 
+  it('reports curves that matched no fill row instead of failing the snapshot', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mpamm-curves-'));
+    clean.push(() => rmSync(dir, { recursive: true, force: true }));
+    const store = new VolumeStore(join(dir, 'history.db')); clean.push(() => store.close());
+    const result = store.persistSnapshot([], { lastProcessedBlock: '7' }, [fill('a', 1)], [
+      { id: 'a', curveBps: flat(2) }, { id: 'gone', curveBps: flat(3) },
+    ]);
+    expect(result).toEqual({ unmatchedCurves: ['gone'] });
+    // the rest of the transaction — cursor included — still committed
+    expect(store.getMeta('lastProcessedBlock')).toBe('7');
+    expect(store.curveFillsChunk(0, -1, '', 10).map((r) => r.curve)).toEqual([flat(2)]);
+  });
+
   it('nulls stored curves when the curve model changes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'mpamm-curves-'));
     clean.push(() => rmSync(dir, { recursive: true, force: true }));
