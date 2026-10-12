@@ -39,6 +39,7 @@ const ctx = {
           const ausd = String(c.address).toLowerCase() === AUSD_POOL;
           return { status: 'success', result: { factory: V1_FACTORY, token0: ausd ? TOKENS.AUSD.address : TOKENS.WMON.address, token1: TOKENS.USDC.address, immutablePriceProvider: '0x' + 'b'.repeat(40) } };
         }
+        if (c.functionName === 'priceProvider') return { status: 'success', result: '0x' + 'b'.repeat(40) };
         return { status: 'failure' };
       });
       return allowFailure === false ? out.map((r: any) => r.result) : out;

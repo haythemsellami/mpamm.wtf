@@ -181,15 +181,18 @@ export function createMetricV1Generation(): VenueGeneration {
       }
     }
     // A pool's provider can be swapped (timelocked), so read the live one; the
-    // immutable slot is zero for a pool created without one.
+    // immutable slot is zero for a pool created without one. No fallback to
+    // it: after a provider change it names the OBSOLETE provider, whose oracle
+    // would join the (never-shrinking) gas destination set for good. A failed
+    // read fails the pass — the previous state stays in force and it retries.
     const provRes = structural.length ? await ctx.client.multicall({
       contracts: structural.map((p) => ({ address: V1_DATA_PROVIDER, abi: dataProviderAbi, functionName: 'priceProvider' as const, args: [p.pool] as const })),
       allowFailure: true,
     }) : [];
     const admitted = structural.map((p, i) => {
       const r = provRes[i];
-      const prov = r?.status === 'success' ? String(r.result) : p.priceProvider;
-      return { ...p, priceProvider: prov as `0x${string}` };
+      if (r?.status !== 'success') throw new Error(`Metric priceProvider read failed for pool ${p.pool}`);
+      return { ...p, priceProvider: String(r.result) as `0x${string}` };
     });
 
     // ── 4. liveness gate: funded + two-sided price ───────────────────────────

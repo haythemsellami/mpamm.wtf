@@ -101,6 +101,10 @@ interface StubOpts {
   priceFails?: boolean;
   /** getImmutables reverts for these pools. */
   unresolved?: (pool: string) => boolean;
+  /** the DataProvider's current-provider read fails for these pools. */
+  providerFails?: (pool: string) => boolean;
+  /** the pool's CURRENT provider differs from the one it was created with. */
+  currentProvider?: (pool: string) => string;
   oracleOf?: (provider: string) => string | null;
   /** quoter: [amountIn used, amountOut] per call (default: full fill at 1:1). */
   quote?: (args: readonly unknown[]) => { status: 'success'; result: [bigint, bigint] } | { status: 'failure'; error?: Error };
@@ -132,7 +136,11 @@ const stub = (notes: string[], o: StubOpts = {}) => {
               const t = tokenOf[addr] ?? [TOKENS.WMON.address, TOKENS.USDC.address];
               return { status: 'success', result: { factory: V1_FACTORY, token0: t[0], token1: t[1], immutablePriceProvider: '0xprov' + addr.slice(6) } };
             }
-            case 'priceProvider': return { status: 'success', result: '0xprov' + String(c.args[0]).toLowerCase().slice(6) };
+            case 'priceProvider': {
+              const pool = String(c.args[0]).toLowerCase();
+              if (o.providerFails?.(pool)) return { status: 'failure' };
+              return { status: 'success', result: o.currentProvider?.(pool) ?? '0xprov' + pool.slice(6) };
+            }
             case 'balanceOf': {
               const pool = String(c.args[0]).toLowerCase();
               const [b0] = o.balances ? o.balances(pool) : [1_000n, 1_000n];
@@ -180,6 +188,16 @@ describe('Metric v1 discovery (factory enumeration)', () => {
     // healed on the next pass
     await a.discover(stub([], { pools: [P.wmon, P.weth] }));
     expect((swapSource(a).address as string[]).map((x) => x.toLowerCase()).sort()).toEqual([P.weth, P.wmon].sort());
+  });
+
+  it('fails the pass (keeps the last good state) when the current-provider read fails — never falls back to the creation-time provider', async () => {
+    const a = createMetricAdapter();
+    const ROTATED = '0x' + 'c'.repeat(40);
+    await a.discover(stub([], { currentProvider: () => ROTATED, oracleOf: (prov) => (prov === ROTATED ? ORACLE : ORACLE_B) }));
+    await expect(a.discover(stub([], { providerFails: (p) => p === P.wmon, oracleOf: (prov) => (prov === ROTATED ? ORACLE : ORACLE_B) }))).rejects.toThrow(/priceProvider read failed/);
+    // the obsolete provider's oracle never entered the gas destinations
+    expect(a.gasSources!().flatMap((s) => s.address as string[])).not.toContain(ORACLE_B);
+    expect((swapSource(a).address as string[]).map((x) => x.toLowerCase())).toContain(P.wmon);
   });
 
   it('only reads factory indices it has not read before', async () => {
