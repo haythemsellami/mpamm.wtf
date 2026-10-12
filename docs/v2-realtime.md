@@ -7,7 +7,7 @@ This implements the six delivery/computation changes discussed for [v2.0 (#100)]
 | Area | Behavior |
 | --- | --- |
 | Collection | One shared collector quotes every registered market and configured size, including baselines, independently of viewer count. Subscriptions select delivery, so opening another browser does not start another quote job. Depth retains its independent market demand and full size grid. |
-| Metric | A constructor-only `eth_call` reads the oracle and quotes each pool in one RPC round trip. No transaction, deployed contract, signing key or state override. Per-leg failures remain independent. Unsupported providers use the original two-call path with a 60s probe cooldown. |
+| Metric | *(v0, retired 2026-09-27)* A constructor-only `eth_call` read the oracle and quoted each pool in one RPC round trip. Metric v1's SwapQuoter reads the oracle itself, so v1 quotes are one plain multicall and the helper was removed (see `server/src/venues/metric-v1.ts`). |
 | RPC scheduling | Multicall3 still aggregates contract reads. HTTP batching is off for live quotes by default, optionally enabled per adapter. Head polling is unbatched. A 250ms default deadline cancels expired quote work; one outstanding job per adapter prevents late work accumulating. Durable ingestion keeps its original retry/cursor rules. |
 | Delivery | Filter before serialization; gzip once per topic and share the bytes. A versioned binary protocol does not depend on proxy negotiation of WebSocket extensions. Latest snapshots replace queued snapshots. Fill events preserve order; slow clients reconnect and resync. |
 | History | SQLite aggregation runs in a read-only worker using one WAL snapshot for both passes. Existing TTL/inflight caches remain. Immutable aggregate URLs, shared gzip and an optional edge worker avoid repeat serialization and origin downloads. Corrections create new revisions. |
@@ -90,7 +90,7 @@ Lunarbase settles every pool, size and bid/ask sibling before returning a reject
 
 Full legacy snapshots require every requested adapter to complete; deadline, rejected-task and occupied-slot frames remain available on v2 with their existing telemetry but cannot complete a legacy handoff or replace its complete matrix. `/api/bootstrap`, `/api/fills` and both leaderboard endpoints return retryable HTTP 503 until persisted history has loaded. The leaderboard cannot compute or cache a premature empty aggregate. The browser retries independently of socket reconnection and retains fills arriving during failed requests. Legacy quote startup endpoints keep their empty HTTP 200 contract. State cannot regress behind bootstrap or a newer stream frame, and SharedWorker replay excludes aged snapshots and disconnected caches.
 
-Uniswap's discovered catalog and the monotonic admitted catalogs for Metric and Capricorn survive transient discovery-read failures independently of current quotability. Metric coalesces concurrent plans at the same block/client/signal into one constructor call, then splits results back into the original leg order. Unsupported helpers share their probe and wait for all fallback results before committing cooldown. A later plan waits for an active probe instead of duplicating it.
+Uniswap's discovered catalog and the monotonic admitted catalogs for Metric and Capricorn survive transient discovery-read failures independently of current quotability. Metric v0 coalesced concurrent plans at the same block/client/signal into one constructor call (removed with the v0 quote path; v1 quotes are one multicall).
 
 Hanji validates its complete fixed market list before committing discovery. A failed read or token mismatch throws before either the catalog or decode map is replaced, so a partial discovery cannot remove an admitted market. Five regressions replay [live configuration recorded at block 105857551](../server/src/venues/__tests__/fixtures/hanji-config.json), covering partial/empty responses, token mismatch, transport failure and initial recovery. All six markets and fill sources survive a failed refresh, and scoped quote requests still reach the retained market.
 
@@ -122,13 +122,11 @@ npm -w web run test
 npm run build
 npx playwright install chromium
 npm -w web run test:e2e
-node server/scripts/compile-metric-helper.mjs --check
 npm -w server run benchmark:delivery -- /tmp/delivery.json
 npm -w server run benchmark:runtime -- /tmp/runtime.json
 BENCHMARK_FILLS=1000000 npm -w server run benchmark:runtime -- /tmp/runtime-million.json
 npm -w server run benchmark:markouts -- /tmp/markouts.json
 npm -w server run benchmark:heads -- /tmp/heads.json
-npm -w server run benchmark:metric -- /tmp/metric.json
 ```
 
 For the live stream test, run a local backend with `DATA_SOURCE=live VENUES=metric BACKFILL=off MARKOUT_BACKFILL=off GAS_METRIC=off DB_PATH=/tmp/mpamm-live-check.db API_PORT=8894 npm -w server run start`, then `npm -w server run benchmark:live -- ws://127.0.0.1:8894/stream /tmp/live-stream.json`. Configure the RPC/CEX environment normally; the report contains no provider URLs or credentials. Keep the configured node close to the deployment region.
@@ -153,7 +151,6 @@ Operator controls:
 
 - `QUOTE_DEADLINE_MS=250`: tune against missing venues and frame tails; increasing it trades coverage for more complete slow-provider frames.
 - `QUOTE_HTTP_BATCH=off`, `QUOTE_HTTP_BATCH_SIZE=8`: HTTP scheduling; Multicall3 remains active.
-- `METRIC_BATCH_QUOTE=off`: restore the original Metric read path immediately.
 - `ANALYTICS_WORKER_HEAP_MB=128`: worker JS heap budget. Monitor process RSS and 30-day aggregation success; native memory is additional.
 - `RPC_WS_URL`, `HEAD_POLL_MS=75`: block observation and fallback. Check coverage as well as compute time.
 

@@ -1,26 +1,25 @@
 // Metric is permissionless infra: anyone can deploy a pool on it and plug in
-// their own pricing. These cover the three things that has to get right —
-// admitting only benchmarkable pools, quoting only funded ones, and counting
-// EVERY push oracle for burn (the old single-oracle rule would have silently
-// stalled gas tracking the day a second curator went live).
+// their own pricing. These cover what that has to get right — admitting only
+// benchmarkable pools, quoting only funded ones, counting every oracle the
+// providers read for burn — plus the generation split: v1 (live) discovers,
+// quotes and tails; v0 (retired) costs nothing live and stays decodable.
 import { describe, expect, it } from 'vitest';
 import { TOKENS } from '@shared';
-import {
-  admitMetricPool,
-  createMetricAdapter,
-  isMetricPoolLive,
-  metricPoolLiveness,
-} from '../metric.js';
+import { createMetricAdapter } from '../metric.js';
+import { admitMetricPool, isMetricPoolLive, metricPoolLiveness } from '../metric-shared.js';
+import { V0_LAST_SWAP_BLOCK, V0_POOLS, V0_PUSH_ORACLE } from '../metric-v0.js';
+import { V1_FACTORY, V1_FACTORY_BLOCK, V1_SIMPLE_ROUTER } from '../metric-v1.js';
+import { sourceSpan } from '../adapter.js';
+import { classifyGasSourceChange, gasSourcesSignature } from '../../gas.js';
 
 const A = (s: string) => s as `0x${string}`;
-const POOL = A('0x00000000000000000000000000000000000000p1'.replace('p1', 'a1'));
-const PROVIDER = A('0x00000000000000000000000000000000000000b1');
-/** getImmutables tuple: [factory, priceProvider, token0, token1, …] */
-const imm = (t0: string, t1: string, provider = PROVIDER) => [A('0x' + '0'.repeat(40)), provider, t0, t1, 0n, 0n, 0n, false, 0n, 0n, 0, 0, 0n, 0n] as const;
+const POOL = A('0x00000000000000000000000000000000000000a1');
+const PROVIDER = '0x00000000000000000000000000000000000000b1';
+const im = (token0: string, token1: string, priceProvider = PROVIDER) => ({ token0, token1, priceProvider });
 
 describe('admitMetricPool (structural admission)', () => {
   it('admits a base/stable pool on a registered pair', () => {
-    const r = admitMetricPool(POOL, imm(TOKENS.WMON.address, TOKENS.USDC.address));
+    const r = admitMetricPool(POOL, im(TOKENS.WMON.address, TOKENS.USDC.address));
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.value.market).toBe('MON/USDC');
@@ -31,30 +30,28 @@ describe('admitMetricPool (structural admission)', () => {
   });
 
   it('handles either token ordering', () => {
-    const r = admitMetricPool(POOL, imm(TOKENS.USDC.address, TOKENS.WETH.address));
+    const r = admitMetricPool(POOL, im(TOKENS.USDC.address, TOKENS.WETH.address));
     expect(r.ok).toBe(true);
     if (r.ok) { expect(r.value.market).toBe('ETH/USDC'); expect(r.value.baseIsToken0).toBe(false); }
   });
 
   it('rejects an unresolved pool (getImmutables reverted)', () => {
-    const r = admitMetricPool(POOL, null);
-    expect(r).toMatchObject({ ok: false, reason: 'unresolved' });
+    expect(admitMetricPool(POOL, null)).toMatchObject({ ok: false, reason: 'unresolved' });
   });
 
-  it('rejects stable/stable and base/base pools', () => {
-    expect(admitMetricPool(POOL, imm(TOKENS.USDC.address, TOKENS.USDT0.address))).toMatchObject({ reason: 'not-base-stable' });
-    expect(admitMetricPool(POOL, imm(TOKENS.WMON.address, TOKENS.WETH.address))).toMatchObject({ reason: 'not-base-stable' });
+  it('rejects stable/stable and base/base pools — the live AUSD/USDC v1 pool is the former', () => {
+    expect(admitMetricPool(POOL, im(TOKENS.AUSD.address, TOKENS.USDC.address))).toMatchObject({ reason: 'not-base-stable' });
+    expect(admitMetricPool(POOL, im(TOKENS.WMON.address, TOKENS.WETH.address))).toMatchObject({ reason: 'not-base-stable' });
   });
 
   it('rejects a pool whose tokens we do not track at all — the permissionless junk case', () => {
     const rando = '0x1111111111111111111111111111111111111111';
-    expect(admitMetricPool(POOL, imm(rando, TOKENS.USDC.address))).toMatchObject({ ok: false, reason: 'not-base-stable' });
-    expect(admitMetricPool(POOL, imm(rando, '0x2222222222222222222222222222222222222222'))).toMatchObject({ ok: false });
+    expect(admitMetricPool(POOL, im(rando, TOKENS.USDC.address))).toMatchObject({ ok: false, reason: 'not-base-stable' });
+    expect(admitMetricPool(POOL, im(rando, '0x2222222222222222222222222222222222222222'))).toMatchObject({ ok: false });
   });
 
   it('is case-insensitive about token addresses (events and calls disagree on casing)', () => {
-    const r = admitMetricPool(POOL, imm(TOKENS.WMON.address.toUpperCase().replace('0X', '0x'), TOKENS.USDC.address));
-    expect(r.ok).toBe(true);
+    expect(admitMetricPool(POOL, im(TOKENS.WMON.address.toUpperCase().replace('0X', '0x'), TOKENS.USDC.address)).ok).toBe(true);
   });
 });
 
@@ -63,11 +60,8 @@ describe('isMetricPoolLive (liveness gate)', () => {
     expect(isMetricPoolLive(1n, 1n, 100n, 101n)).toBe(true);
   });
 
-  it('rejects the empty shells — 4 of the 7 pools on chain today hold nothing', () => {
+  it('rejects empty shells and one-sided inventory', () => {
     expect(isMetricPoolLive(0n, 0n, 100n, 101n)).toBe(false);
-  });
-
-  it('rejects one-sided inventory (cannot quote both directions)', () => {
     expect(isMetricPoolLive(1n, 0n, 100n, 101n)).toBe(false);
     expect(isMetricPoolLive(0n, 1n, 100n, 101n)).toBe(false);
   });
@@ -81,532 +75,298 @@ describe('isMetricPoolLive (liveness gate)', () => {
     expect(isMetricPoolLive(null, 1n, 100n, 101n)).toBe(false);
     expect(isMetricPoolLive(1n, 1n, null, 101n)).toBe(false);
   });
+
+  it('separates the three causes a bare boolean used to flatten (issue #58)', () => {
+    expect(metricPoolLiveness(0n, 0n, 100n, 101n)).toBe('unfunded');
+    expect(metricPoolLiveness(1n, 1n, null, null)).toBe('no-price');
+    expect(metricPoolLiveness(null, 1n, 100n, 101n)).toBe('unreadable');
+  });
 });
 
-// ── adapter-level: discovery + gas, against a stubbed chain ──────────────────
-const SEEDS = [
-  '0xFA32f9ec28787d1F9C5BA5c39e54e59984FEF3f0',
-  '0x2D82AC42334b394A9a8d8f097d61DC1c6B065Fd8',
-  '0x354D92279cA0190fF275095fE6A2a6989BAa66Fb',
-  '0x5357bf9863320e8fc0c10c97896c0aed070aab9f',   // WMON/USDC #2 — shares the first WMON pool's provider
-].map((s) => s.toLowerCase());
-const ORACLE_A = '0x681e908b8ab57c49c74d770f369754ccc3e1ae09';
+// ── v1 generation, against a stubbed chain ───────────────────────────────────
+const P = {
+  wmon: '0xe6831acf980c2dfc5ae993f06b198d872fddf515',   // #6, funded
+  weth: '0x22fcd163a8a317047ae64194baaa4c3857251e5f',   // #7, empty shell
+  ausd: '0x94d5e3543a39c0ec1171f14a45100bd62bee49bc',   // #9, stable/stable
+};
+const ORACLE = '0x30a88bf894d1b806125a23ebf23d715496fd7102';
 const ORACLE_B = '0xaaaa0000000000000000000000000000000000bb';
 
 interface StubOpts {
-  head?: bigint;
-  createdPools?: { pool: string }[];
-  oracleOf?: (provider: string) => string | null;   // null ⇒ that provider read fails
-  balances?: (pool: string) => [bigint, bigint];
-  oracleCount?: (oracle: string) => number;
-  logsThrow?: boolean;
-  /** oracle probe reverts — pools stay ADMITTED but drop out of `live`. */
-  priceFails?: boolean;
-  /** getImmutables reverts for these pools (unresolved this pass). */
-  unresolved?: (pool: string) => boolean;
-  /** per-pool token override (e.g. an unregistered pair). */
+  /** factory pool list, in index order (index 1 = first). */
+  pools?: string[];
   tokens?: Record<string, [string, string]>;
-  /** durable adapter state (the core's ctx.state); omitted ⇒ no persistence. */
-  state?: { get(key: string): string | undefined; set(key: string, value: string): Promise<void> };
+  balances?: (pool: string) => [bigint, bigint];
+  /** the pool's own price read reverts (oracle refused). */
+  priceFails?: boolean;
+  /** getImmutables reverts for these pools. */
+  unresolved?: (pool: string) => boolean;
+  oracleOf?: (provider: string) => string | null;
+  /** quoter: [amountIn used, amountOut] per call (default: full fill at 1:1). */
+  quote?: (args: readonly unknown[]) => { status: 'success'; result: [bigint, bigint] } | { status: 'failure'; error?: Error };
 }
 const stub = (notes: string[], o: StubOpts = {}) => {
+  const list = o.pools ?? [P.wmon, P.weth, P.ausd];
   const tokenOf: Record<string, [string, string]> = {
-    [SEEDS[0]]: [TOKENS.WMON.address, TOKENS.USDC.address],
-    [SEEDS[1]]: [TOKENS.WBTC.address, TOKENS.USDC.address],
-    [SEEDS[2]]: [TOKENS.WETH.address, TOKENS.USDC.address],
-    [SEEDS[3]]: [TOKENS.WMON.address, TOKENS.USDC.address],
+    [P.wmon]: [TOKENS.WMON.address, TOKENS.USDC.address],
+    [P.weth]: [TOKENS.WETH.address, TOKENS.USDC.address],
+    [P.ausd]: [TOKENS.AUSD.address, TOKENS.USDC.address],
     ...o.tokens,
   };
-  // on-chain both WMON/USDC pools read ONE provider (0xEaFD…), hence one feed
-  const providerFor = (pool: string) => '0xprov' + (pool === SEEDS[3] ? SEEDS[0] : pool).slice(6);
+  const calls: any[] = [];
   return {
+    calls,
     client: {
-      getBlockNumber: async () => o.head ?? 1_000_000n,
-      multicall: async ({ contracts }: any) => contracts.map((c: any) => {
-        if (c.functionName === 'getImmutables') {
-          const p = String(c.address).toLowerCase();
-          if (o.unresolved?.(p)) return { status: 'failure' };
-          const t = tokenOf[p] ?? [TOKENS.WMON.address, TOKENS.USDC.address];
-          return { status: 'success', result: [A('0x' + '0'.repeat(40)), providerFor(p), t[0], t[1], 0n, 0n, 0n, false, 0n, 0n, 0, 0, 0n, 0n] };
-        }
-        if (c.functionName === 'balanceOf') {
-          const pool = String(c.args[0]).toLowerCase();
-          const [b0, b1] = o.balances ? o.balances(pool) : [1_000n, 1_000n];
-          // two balanceOf calls per pool, in order base then stable
-          return { status: 'success', result: c.__side === 1 ? b1 : b0 };
-        }
-        if (c.functionName === 'getBidAndAskPrice') return o.priceFails ? { status: 'failure' } : { status: 'success', result: [100n, 101n] };
-        if (c.functionName === 'offchainOracle') {
-          const or = o.oracleOf ? o.oracleOf(String(c.address)) : ORACLE_A;
-          return or === null ? { status: 'failure' } : { status: 'success', result: or };
-        }
-        if (c.functionName === 'offchainFeedId') return { status: 'success', result: '0xfeed' + String(c.address).slice(-8) };
-        return { status: 'failure' };
-      }),
-      readContract: async ({ functionName, address }: any) => {
-        if (functionName === 'getOracleCount') return BigInt(o.oracleCount ? o.oracleCount(String(address).toLowerCase()) : 3);
+      readContract: async ({ functionName }: any) => {
+        if (functionName === 'nextPoolIdx') return BigInt(list.length + 1);
         throw new Error('unexpected readContract ' + functionName);
       },
-    },
-    getLogs: async () => {
-      if (o.logsThrow) throw new Error('rpc down');
-      return (o.createdPools ?? []).map((c) => ({ args: { pool: c.pool } }));
+      multicall: async ({ contracts, allowFailure }: any) => {
+        calls.push(...contracts);
+        const out = contracts.map((c: any) => {
+          const addr = String(c.address).toLowerCase();
+          switch (c.functionName) {
+            case 'idxToPool': return { status: 'success', result: list[Number(c.args[0]) - 1] ?? '0x0000000000000000000000000000000000000000' };
+            case 'getImmutables': {
+              if (o.unresolved?.(addr)) return { status: 'failure' };
+              const t = tokenOf[addr] ?? [TOKENS.WMON.address, TOKENS.USDC.address];
+              return { status: 'success', result: { factory: V1_FACTORY, token0: t[0], token1: t[1], immutablePriceProvider: '0xprov' + addr.slice(6) } };
+            }
+            case 'priceProvider': return { status: 'success', result: '0xprov' + String(c.args[0]).toLowerCase().slice(6) };
+            case 'balanceOf': {
+              const pool = String(c.args[0]).toLowerCase();
+              const [b0] = o.balances ? o.balances(pool) : [1_000n, 1_000n];
+              return { status: 'success', result: b0 };
+            }
+            case 'getSellAndBuyPrices': return o.priceFails ? { status: 'failure' } : { status: 'success', result: [100n, 101n] };
+            case 'offchainOracle': {
+              const or = o.oracleOf ? o.oracleOf(addr) : ORACLE;
+              return or === null ? { status: 'failure' } : { status: 'success', result: or };
+            }
+            case 'quoteLiveExactInSingle': return o.quote ? o.quote(c.args) : { status: 'success', result: [c.args[3], c.args[3]] };
+            default: return { status: 'failure' };
+          }
+        });
+        return allowFailure === false ? out.map((r: any) => r.result) : out;
+      },
     },
     pricer: { pairMid: () => 1, usdPerToken: () => 1, usdForToken: () => 1, tokenForUsd: () => 1, assetUsd: () => 1 },
     note: (_code: string, m: string) => notes.push(m),
-    state: o.state,
   } as any;
 };
+const swapSource = (a: ReturnType<typeof createMetricAdapter>) => a.logSources().find((s) => s.key.startsWith('v1:swap'))!;
 
-/** In-memory stand-in for the core's meta-backed ctx.state. */
-const memState = (init: Record<string, string> = {}) => {
-  const kv = new Map(Object.entries(init));
-  let failNext = 0;
-  return {
-    kv,
-    failWrites: (n: number) => { failNext = n; },
-    get: (k: string) => kv.get(k),
-    set: async (k: string, v: string) => {
-      if (failNext > 0) { failNext--; throw new Error('disk full'); }
-      kv.set(k, v);
-    },
-  };
-};
-
-describe('Metric permissionless discovery', () => {
-  it('retains discovered markets through liveness failures while withholding unavailable quotes', async () => {
-    const adapter = createMetricAdapter();
-    await adapter.discover(stub([]));
-    const catalog = adapter.quoteMarkets!();
-    expect(catalog).toEqual(expect.arrayContaining(['MON/USDC', 'BTC/USDC', 'ETH/USDC']));
-    for (const ctx of [stub([], { priceFails: true }), stub([], { balances: () => [0n, 0n] })]) {
-      await adapter.discover(ctx);
-      expect(adapter.quoteMarkets!()).toEqual(catalog);
-      expect(await adapter.quote!(ctx, [100], 1_000_000n, new Set(['BTC/USDC']))).toEqual([]);
-      expect(adapter.logSources().find((s) => s.key.startsWith('swap'))?.address).toHaveLength(SEEDS.length);
-    }
-    await adapter.discover(stub([]));
-    expect(adapter.quoteMarkets!()).toEqual(catalog);
+describe('Metric v1 discovery (factory enumeration)', () => {
+  it('admits every registered base/stable pool the factory lists — funded or not — and drops stable/stable', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([], { balances: (p) => (p === P.wmon ? [1_000n, 1_000n] : [0n, 0n]) }));
+    expect((swapSource(a).address as string[]).map((x) => x.toLowerCase()).sort()).toEqual([P.weth, P.wmon].sort());
+    expect([...a.quoteMarkets!()].sort()).toEqual(['ETH/USDC', 'MON/USDC']);
   });
 
-  it('tails the factory even before any pool is live, so a new deployment can reach us', async () => {
-    const notes: string[] = [];
+  it('holds (throws) until the first discovery succeeds — logSources is the fail-closed gate', async () => {
     const a = createMetricAdapter();
-    await a.discover(stub(notes, { balances: () => [0n, 0n] }));   // every pool unfunded
+    expect(() => a.logSources()).toThrow(/discovery unavailable/);
+    await expect(a.discover(stub([], { unresolved: (p) => p === P.wmon }))).rejects.toThrow(/getImmutables failed/);
+    expect(() => a.logSources()).toThrow(/discovery unavailable/);
+  });
+
+  it('never silently drops a factory pool whose immutables did not answer — and keeps the last good state', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([], { pools: [P.wmon] }));
+    // pool #2 appears but its read fails: the pass throws, the WMON pool stays tailed
+    await expect(a.discover(stub([], { pools: [P.wmon, P.weth], unresolved: (p) => p === P.weth }))).rejects.toThrow();
+    expect((swapSource(a).address as string[]).map((x) => x.toLowerCase())).toEqual([P.wmon]);
+    // healed on the next pass
+    await a.discover(stub([], { pools: [P.wmon, P.weth] }));
+    expect((swapSource(a).address as string[]).map((x) => x.toLowerCase()).sort()).toEqual([P.weth, P.wmon].sort());
+  });
+
+  it('only reads factory indices it has not read before', async () => {
+    const a = createMetricAdapter();
+    const first = stub([], { pools: [P.wmon] });
+    await a.discover(first);
+    const second = stub([], { pools: [P.wmon, P.weth] });
+    await a.discover(second);
+    const idx = second.calls.filter((c: any) => c.functionName === 'idxToPool').map((c: any) => c.args[0]);
+    expect(idx).toEqual([2n]);
+    // immutables are cached: only the new pool is resolved
+    expect(second.calls.filter((c: any) => c.functionName === 'getImmutables').map((c: any) => String(c.address).toLowerCase())).toEqual([P.weth]);
+  });
+
+  it('tails the factory even with no admitted pool, so a new deployment can reach us', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([], { pools: [P.ausd] }));
     const keys = a.logSources().map((s) => s.key);
-    expect(keys).toContain('poolCreated');
-    const factory = a.logSources().find((s) => s.key === 'poolCreated')!;
-    expect(factory.kind).toBe('state');   // a missed PoolCreated breaks later decodes
+    expect(keys).toContain('v1:poolCreated');
+    expect(keys.some((k) => k.startsWith('v1:swap'))).toBe(false);
+    const factory = a.logSources().find((s) => s.key === 'v1:poolCreated')!;
+    expect(factory.kind).toBe('state');
   });
 
-  it('admits a factory-announced pool and quotes it once funded', async () => {
-    const notes: string[] = [];
-    const NEW = '0xcccc000000000000000000000000000000000001';
-    const a = createMetricAdapter();
-    // pass 1 anchors the scan cursor at head (no history backscan); pass 2 sees
-    // the new PoolCreated in the forward range.
-    await a.discover(stub(notes, {}));
-    await a.discover(stub(notes, { head: 1_000_500n, createdPools: [{ pool: NEW }] }));
-    const swap = a.logSources().find((s) => s.key.startsWith('swap'))!;
-    expect(swap.address).toContain(NEW);              // tailed for fills
-    expect(notes.some((n) => /announced 1 new pool/.test(n))).toBe(true);
-  });
-
-  it('does NOT quote an unfunded shell, but DOES tail it', async () => {
-    // Tailing is keyed on admission, quoting on liveness (issue #61). An
-    // unfunded pool cannot trade today, but it can be funded and traded well
-    // before the next 10-minute rediscovery — and tailing it costs one more
-    // address in a single getLogs filter.
-    const notes: string[] = [];
-    const NEW = '0xcccc000000000000000000000000000000000002';
-    const a = createMetricAdapter();
-    const balances = (p: string) => (p === NEW ? [0n, 0n] as [bigint, bigint] : [1_000n, 1_000n] as [bigint, bigint]);
-    await a.discover(stub(notes, { balances }));
-    const ctx = stub(notes, { head: 1_000_500n, createdPools: [{ pool: NEW }], balances });
-    await a.discover(ctx);
-    const swap = a.logSources().find((s) => s.key.startsWith('swap'))!;
-    expect(swap.address).toContain(NEW);                       // tailed
-    // …but excluded from the live set, so it is never quoted: 4 seeds live, 1 shell.
-    expect(notes.some((n) => /Metric: 4 live base\/stable pool\(s\) \(\+1 unfunded; not quoted\)/.test(n))).toBe(true);
-  });
-
-  it('survives a factory scan failure — seeds still resolve', async () => {
-    const notes: string[] = [];
-    const a = createMetricAdapter();
-    await a.discover(stub(notes, { logsThrow: true }));
-    const swap = a.logSources().find((s) => s.key.startsWith('swap'))!;
-    expect((swap.address as string[]).length).toBe(SEEDS.length);
-  });
-});
-
-describe('Metric gas attribution (multi-oracle)', () => {
-  it('single shared oracle — one destination', async () => {
+  it('bounds every v1 source at the factory creation block — the lifetime replay skips them before it', async () => {
     const a = createMetricAdapter();
     await a.discover(stub([]));
-    expect(a.gasSources!()).toEqual([{ mode: 'blocks', address: [ORACLE_A] }]);
+    for (const s of a.logSources().filter((x) => x.key.startsWith('v1:'))) expect(s.fromBlock).toBe(V1_FACTORY_BLOCK);
   });
 
-  it('MULTIPLE oracles are all counted — the curator case that used to stall burn', async () => {
-    const notes: string[] = [];
-    const a = createMetricAdapter();
-    let n = 0;
-    await a.discover(stub(notes, { oracleOf: () => (n++ % 2 === 0 ? ORACLE_A : ORACLE_B) }));
-    const src = a.gasSources!()[0] as any;
-    expect(src.mode).toBe('blocks');
-    expect([...src.address].sort()).toEqual([ORACLE_A, ORACLE_B].sort());
-  });
-
-  it('destination list is sorted + deduped, so the tracker fingerprint is stable', async () => {
-    const a1 = createMetricAdapter(); await a1.discover(stub([], { oracleOf: () => ORACLE_B }));
-    const a2 = createMetricAdapter(); await a2.discover(stub([], { oracleOf: () => ORACLE_B }));
-    expect((a1.gasSources!()[0] as any).address).toEqual((a2.gasSources!()[0] as any).address);
-    expect((a1.gasSources!()[0] as any).address).toEqual([ORACLE_B]);   // deduped across 3 pools
-  });
-
-  it('ONE unreadable provider no longer blanks every oracle (the old failure)', async () => {
-    const a = createMetricAdapter();
-    let i = 0;
-    await a.discover(stub([], { oracleOf: () => (i++ === 0 ? null : ORACLE_A) }));
-    expect((a.gasSources!()[0] as any).address).toEqual([ORACLE_A]);
-  });
-
-  it('throws only when NO oracle resolves — fail closed holds the gas cursor', async () => {
-    const a = createMetricAdapter();
-    await a.discover(stub([], { oracleOf: () => null }));
-    expect(() => a.gasSources!()).toThrow(/not resolved/);
-  });
-
-  it('notes multi-tenancy when an oracle serves more feeds than Metric uses', async () => {
-    const notes: string[] = [];
-    const a = createMetricAdapter();
-    await a.discover(stub(notes, { oracleCount: () => 12 }));
-    expect(notes.some((n) => /serves 12 feed\(s\) but Metric uses/.test(n))).toBe(true);
-    expect(a.gasSources!()).toHaveLength(1);   // still tracked, just flagged
-  });
-
-  it('stays silent when the oracle serves exactly Metric feeds', async () => {
-    const notes: string[] = [];
-    const a = createMetricAdapter();
-    await a.discover(stub(notes, { oracleCount: () => 3 }));
-    expect(notes.some((n) => /overcount/.test(n))).toBe(false);
-  });
-});
-
-describe('an unquotable pool still trades (issue #61)', () => {
-  // Metric's router takes bid/ask as CALL PARAMETERS, so a dead PriceProvider
-  // stops us quoting but not an aggregator swapping. On 2026-08-14 the oracle
-  // began reverting at 05:43 UTC and the pools executed 141 more swaps over the
-  // next 6.7h — every one invisible to us, because the fills source had gone.
-  it('keeps tailing admitted pools when the oracle probe reverts', async () => {
-    const notes: string[] = [];
-    const a = createMetricAdapter();
-    await a.discover(stub(notes, { priceFails: true }));
-
-    expect(notes.some((n) => /0 live/.test(n))).toBe(true);      // nothing quotable…
-    const swap = a.logSources().find((s) => s.key.startsWith('swap'));
-    expect(swap).toBeDefined();                                   // …but still tailed
-    expect(swap!.kind).toBe('fills');
-    expect((swap!.address as string[]).length).toBe(SEEDS.length);
-  });
-
-  it('quotes nothing while unquotable — liveness still gates the quote path', async () => {
-    const a = createMetricAdapter();
-    const ctx = stub([], { priceFails: true });
-    await a.discover(ctx);
-    expect(await a.quote!(ctx, [100], 123n)).toEqual([]);
-  });
-
-  it('DECODES a swap from a pool that never passed liveness', async () => {
+  it('keeps tailing a funded pool whose oracle stopped answering, but does not quote it (issue #61)', async () => {
     const notes: string[] = [];
     const a = createMetricAdapter();
     const ctx = stub(notes, { priceFails: true });
     await a.discover(ctx);
-
-    // WMON/USDC seed: base=token0, 1 WMON out against 2 USDC in.
-    const log = {
-      address: SEEDS[0],
-      args: { amount0Delta: -1_000_000_000_000_000_000n, amount1Delta: 2_000_000n, recipient: '0x' + '1'.repeat(40) },
-      transactionHash: '0x' + 'a'.repeat(64),
-      blockNumber: 1n,
-      logIndex: 0,
-    };
-    const fills = await a.decode(ctx, { swap: [log] } as any, () => 1_760_000_000_000, new Set());
-    expect(fills).toHaveLength(1);
-    expect(fills[0].venueId).toBe('metric');
-    expect(fills[0].usd).toBeCloseTo(2, 9);
-    expect(fills[0].baseAmount).toBeCloseTo(1, 9);
-  });
-});
-
-describe('liveness carries a REASON, not just a verdict (issue #58)', () => {
-  it('separates the three causes a bare boolean used to flatten', () => {
-    expect(metricPoolLiveness(1n, 1n, 100n, 101n)).toBe('live');
-    expect(metricPoolLiveness(0n, 1n, 100n, 101n)).toBe('unfunded');    // curator's empty shell
-    expect(metricPoolLiveness(1n, 1n, 0n, 101n)).toBe('no-price');      // FUNDED, oracle silent
-    expect(metricPoolLiveness(1n, 1n, null, 101n)).toBe('no-price');    // provider REVERTED
+    expect((swapSource(a).address as string[]).map((x) => x.toLowerCase())).toContain(P.wmon);
+    expect(await a.quote!(ctx, [100], 1n)).toEqual([]);
+    expect(notes.some((n) => /funded pool\(s\) have no oracle price/.test(n))).toBe(true);
   });
 
-  it('treats a missing price as a revert, because the reads share one allowFailure multicall', () => {
-    // a transport failure kills the whole multicall before liveness runs, so a
-    // per-entry failure means the contract refused — which is the venue's state,
-    // not ours. Exactly Metric since 2026-08-14.
-    expect(metricPoolLiveness(1n, 1n, null, null)).toBe('no-price');
-    // an unreadable BALANCE is different: funding is then simply unknown.
-    expect(metricPoolLiveness(null, 0n, 0n, 0n)).toBe('unreadable');
-  });
-
-  it('names the real cause in the discovery note instead of calling it unfunded', async () => {
+  it('announces recovery once the price is back', async () => {
     const notes: string[] = [];
-    // funded on both sides, but the oracle probe fails — exactly Metric since 2026-08-14
-    await createMetricAdapter().discover(stub(notes, { priceFails: true }));
-    expect(notes.some((n) => /funded but no oracle price/.test(n))).toBe(true);
-    expect(notes.some((n) => /unfunded/.test(n))).toBe(false);
-  });
-
-  it('raises funded-but-unpriceable as a WARN, with the fact that it can still trade', async () => {
-    const seen: { code: string; msg: string }[] = [];
-    const ctx = stub([], { priceFails: true });
-    ctx.note = (code: string, msg: string) => seen.push({ code, msg });
-    await createMetricAdapter().discover(ctx);
-    const warn = seen.find((n) => n.code === 'venue.quote.unavailable');
-    expect(warn).toBeDefined();
-    expect(warn!.msg).toMatch(/PriceProvider is not answering/);
-    expect(warn!.msg).toMatch(/can still trade/);
-  });
-
-  it('stays quiet when the pools are merely empty — a shell is not a degradation', async () => {
-    const seen: { code: string; msg: string }[] = [];
-    const ctx = stub([], { balances: () => [0n, 0n] });
-    ctx.note = (code: string, msg: string) => seen.push({ code, msg });
-    await createMetricAdapter().discover(ctx);
-    expect(seen.some((n) => n.code === 'venue.quote.unavailable')).toBe(false);
-    expect(seen.some((n) => /unfunded/.test(n.msg))).toBe(true);
-  });
-
-  it('announces recovery when the oracle answers again, then stays quiet', async () => {
-    // The live condition since 2026-08-14, exercised against a scripted
-    // getBidAndAskPrice (revert → answer) rather than asserted in the abstract.
-    const seen: { code: string; msg: string }[] = [];
-    const failCtx = stub([], { priceFails: true });
-    failCtx.note = (code: string, msg: string) => seen.push({ code, msg });
-    const okCtx = stub([], {});
-    okCtx.note = (code: string, msg: string) => seen.push({ code, msg });
     const a = createMetricAdapter();
-    await a.discover(failCtx);
-    expect(seen.filter((n) => n.code === 'venue.quote.unavailable')).toHaveLength(1);
-    await a.discover(okCtx);
-    const recovered = seen.filter((n) => n.code === 'venue.quote.recovered');
-    expect(recovered).toHaveLength(1);
-    expect(recovered[0].msg).toMatch(/quoting again/);
-    // A second healthy pass with nothing raised in between stays silent — the
-    // recovered() guard. Without it every 10-minute rediscover would re-announce.
-    await a.discover(okCtx);
-    expect(seen.filter((n) => n.code === 'venue.quote.recovered')).toHaveLength(1);
+    await a.discover(stub(notes, { priceFails: true }));
+    await a.discover(stub(notes));
+    expect(notes.some((n) => /Metric quoting again/.test(n))).toBe(true);
   });
 
-  it('stays silent when healthy all along — no warning, no recovery', async () => {
-    const seen: { code: string; msg: string }[] = [];
-    const ctx = stub([], {});
-    ctx.note = (code: string, msg: string) => seen.push({ code, msg });
-    const a = createMetricAdapter();
-    await a.discover(ctx);
-    await a.discover(ctx);
-    expect(seen.some((n) => n.code === 'venue.quote.unavailable')).toBe(false);
-    expect(seen.some((n) => n.code === 'venue.quote.recovered')).toBe(false);
-  });
-});
-
-describe('factory-announced pools survive a restart', () => {
-  // 2026-08-22 the factory created a second funded WMON/USDC pool. It was held
-  // only in memory, the next day's deploy forgot it, and 2,172 of its swaps
-  // (~$916k) went uncounted: the fills tail never re-reads a PoolCreated behind
-  // its cursor, and boot deliberately does not backscan the factory.
-  const NEW = '0xcccc000000000000000000000000000000000003';
-  const createdLog = { args: { pool: NEW }, address: '0xe22f9fc0f04486de25ed6cf1800a4a47afd82e0c' };
-  const swapLog = (pool: string) => ({
-    address: pool,
-    args: { amount0Delta: -1_000_000_000_000_000_000n, amount1Delta: 2_000_000n, recipient: '0x' + '1'.repeat(40) },
-    transactionHash: '0x' + 'b'.repeat(64), blockNumber: 2n, logIndex: 0,
-  });
-  const tailed = (a: ReturnType<typeof createMetricAdapter>) =>
-    (a.logSources().find((s) => s.key.startsWith('swap'))!.address as string[]).map((x) => x.toLowerCase());
-
-  it('a pool seen by the fills tail is persisted before decode returns, and a fresh adapter tails it', async () => {
-    const state = memState();
-    const first = createMetricAdapter();
-    const ctx = stub([], { state });
-    await first.discover(ctx);
-    await first.decode(ctx, { poolCreated: [createdLog], swap: [] } as any, () => 0, new Set());
-    expect(JSON.parse(state.kv.get('factory_pools')!)).toEqual([NEW]);
-
-    // restart: new adapter instance, same durable state, nothing in the tail
-    const second = createMetricAdapter();
-    const ctx2 = stub([], { state });
-    await second.discover(ctx2);
-    expect(tailed(second)).toContain(NEW);
-    const fills = await second.decode(ctx2, { swap: [swapLog(NEW)] } as any, () => 0, new Set());
-    expect(fills).toHaveLength(1);   // decodable after the restart, not dropped as unknown
-  });
-
-  it('a pool seen by the forward factory scan is persisted too', async () => {
-    const state = memState();
-    const a = createMetricAdapter();
-    await a.discover(stub([], { state }));
-    await a.discover(stub([], { state, head: 1_000_500n, createdPools: [{ pool: NEW }] }));
-    expect(JSON.parse(state.kv.get('factory_pools')!)).toEqual([NEW]);
-  });
-
-  it('a failed persist in decode THROWS (holds the cursor) and is retried on the next range', async () => {
-    const state = memState();
-    const a = createMetricAdapter();
-    const ctx = stub([], { state });
-    await a.discover(ctx);
-    state.failWrites(1);
-    await expect(a.decode(ctx, { poolCreated: [createdLog], swap: [] } as any, () => 0, new Set())).rejects.toThrow(/disk full/);
-    expect(state.kv.has('factory_pools')).toBe(false);
-    // the re-tried range no longer looks "new" (already in memory) — the write
-    // must still happen, or the next restart loses the pool after all
-    await a.decode(ctx, { poolCreated: [createdLog], swap: [] } as any, () => 0, new Set());
-    expect(JSON.parse(state.kv.get('factory_pools')!)).toEqual([NEW]);
-  });
-
-  it('a failed persist in the forward scan keeps the scan cursor, so the range is re-scanned', async () => {
-    const state = memState();
-    const a = createMetricAdapter();
-    await a.discover(stub([], { state }));
-    state.failWrites(1);
-    await a.discover(stub([], { state, head: 1_000_500n, createdPools: [{ pool: NEW }] }));
-    expect(state.kv.has('factory_pools')).toBe(false);
-    expect(tailed(a)).toContain(NEW);   // still tailed this run
-    await a.discover(stub([], { state, head: 1_000_600n }));
-    expect(JSON.parse(state.kv.get('factory_pools')!)).toEqual([NEW]);
-  });
-
-  it('ignores a corrupt or junk persisted value instead of failing discovery', async () => {
-    for (const bad of ['not json', '{"a":1}', JSON.stringify(['0x123', 42, NEW.toUpperCase()])]) {
-      const a = createMetricAdapter();
-      await a.discover(stub([], { state: memState({ factory_pools: bad }) }));
-      expect(tailed(a)).toHaveLength(SEEDS.length);
-    }
-  });
-
-  it('never persists the seeds, and writes nothing when nothing new was found', async () => {
-    const state = memState();
-    const set = state.set;
-    let writes = 0;
-    state.set = async (k: string, v: string) => { writes++; return set(k, v); };
-    const a = createMetricAdapter();
-    await a.discover(stub([], { state }));
-    await a.discover(stub([], { state, head: 1_000_500n }));
-    expect(writes).toBe(0);
-  });
-
-  it('tails the 2026-08-22 WMON/USDC pool as a seed — the replay needs it with no history scan', async () => {
+  it('declares its pools DIRECT and its SimpleRouter as Metric periphery', async () => {
     const a = createMetricAdapter();
     await a.discover(stub([]));
-    expect(tailed(a)).toContain('0x5357bf9863320e8fc0c10c97896c0aed070aab9f');
+    const eps = a.entryPoints!();
+    expect(eps).toContainEqual({ address: V1_SIMPLE_ROUTER, router: 'Metric' });
+    expect(eps.map((e) => e.address.toLowerCase())).toContain(P.wmon);
   });
 });
 
-describe('a pool announced mid-range forces that range to be re-read', () => {
-  // The core snapshots logSources() BEFORE fetching a range, so that range's
-  // swap query cannot contain a pool the range itself announces (or one the
-  // 10-minute rediscovery admitted in between). If the pool trades later in
-  // the same range, those Swaps were never fetched — admitting the pool only
-  // fixes the NEXT range. Found by review on #127.
-  const NEW = '0xcccc000000000000000000000000000000000004';
-  const created = { args: { pool: NEW } };
-  const swapOf = (pool: string, logIndex = 0) => ({
-    address: pool,
-    args: { amount0Delta: -1_000_000_000_000_000_000n, amount1Delta: 2_000_000n, recipient: '0x' + '1'.repeat(40) },
-    transactionHash: '0x' + 'c'.repeat(64), blockNumber: 3n, logIndex,
+describe('Metric v1 quotes', () => {
+  it('quotes both sides of every live pool at the pinned block, sized in pair terms', async () => {
+    const a = createMetricAdapter();
+    // buy: 100 USDC in → 98 WMON out (ask 1/0.98); sell: 100 WMON in → 99 USDC out (bid 0.99)
+    const q = stub([], {
+      balances: (p) => (p === P.wmon ? [1_000n, 1_000n] : [0n, 0n]),
+      quote: (args) => {
+        const zeroForOne = args[2] as boolean;
+        const amountIn = args[3] as bigint;
+        // WMON is token0: zeroForOne = selling WMON
+        if (zeroForOne) return { status: 'success', result: [amountIn, (amountIn * 99n) / 100n / 10n ** 12n] };
+        return { status: 'success', result: [amountIn, (amountIn * 98n / 100n) * 10n ** 12n] };
+      },
+    });
+    await a.discover(q);
+    const blocks: unknown[] = [];
+    const inner = q.client.multicall;
+    q.client.multicall = async (args: any) => { blocks.push(args.blockNumber); return inner(args); };
+    const rows = await a.quote!(q, [100], 777n);
+    expect(blocks).toEqual([777n]);   // one multicall, at the frame's block
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ venueId: 'metric', market: 'MON/USDC', sizeUsd: 100, filledFull: true });
+    expect(rows[0].askPx).toBeCloseTo(1 / 0.98, 9);
+    expect(rows[0].bidPx).toBeCloseTo(0.99, 9);
+    const legs = q.calls.filter((c: any) => c.functionName === 'quoteLiveExactInSingle');
+    // buy leg: USDC (token1) in → zeroForOne=false, no upper bound; sell leg: WMON in → zeroForOne=true, floor 0
+    expect(legs.map((c: any) => [c.args[2], c.args[4]])).toEqual([[false, (1n << 128n) - 1n], [true, 0n]]);
   });
-  /** What the core does: snapshot sources, then hand decode the fetched bundle. */
-  const fetchWith = (a: ReturnType<typeof createMetricAdapter>, chain: { poolCreated: any[]; swaps: any[] }) => {
-    const bundle: Record<string, any[]> = {};
-    for (const src of a.logSources()) {
-      bundle[src.key] = src.key === 'poolCreated'
-        ? chain.poolCreated
-        : chain.swaps.filter((l) => (src.address as string[]).map((x) => x.toLowerCase()).includes(l.address));
-    }
-    return bundle;
-  };
+
+  it('marks a size the pool cannot absorb as not filled full', async () => {
+    const a = createMetricAdapter();
+    const q = stub([], {
+      balances: (p) => (p === P.wmon ? [1_000n, 1_000n] : [0n, 0n]),
+      quote: (args) => ({ status: 'success', result: [(args[3] as bigint) / 2n, (args[3] as bigint) / 2n] }),
+    });
+    await a.discover(q);
+    const [row] = await a.quote!(q, [100], 1n);
+    expect(row.filledFull).toBe(false);
+  });
+
+  it('reports a venue-wide outage when every leg reverts, instead of going dark silently', async () => {
+    const notes: string[] = [];
+    const a = createMetricAdapter();
+    const q = stub(notes, { balances: (p) => (p === P.wmon ? [1_000n, 1_000n] : [0n, 0n]), quote: () => ({ status: 'failure', error: new Error('oracle: not attributed') }) });
+    await a.discover(q);
+    expect(await a.quote!(q, [100], 1n)).toEqual([]);
+    expect(notes.some((n) => /Metric/.test(n) && /fail/i.test(n))).toBe(true);
+  });
+});
+
+describe('Metric gas attribution (both generations, one block walk)', () => {
+  it('declares the retired v0 oracle AND the v1 oracle — dropping v0 would rebuild the lifetime series', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([]));
+    const srcs = a.gasSources!();
+    expect(srcs.every((s) => s.mode === 'blocks')).toBe(true);
+    expect(srcs.flatMap((s) => s.address as string[]).sort()).toEqual([ORACLE, V0_PUSH_ORACLE].sort());
+  });
+
+  it('the deployed fingerprint (v0 oracle only) upgrades as a pure ADDITION — a partial rebuild, not a lifetime one', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([]));
+    const change = classifyGasSourceChange(V0_PUSH_ORACLE, gasSourcesSignature(a.gasSources!()));
+    expect(change).toEqual({ kind: 'partial', added: [ORACLE] });
+  });
+
+  it('throws (holds the gas cursor) until a v1 oracle resolves — never a partial set', async () => {
+    const a = createMetricAdapter();
+    expect(() => a.gasSources!()).toThrow(/not resolved/);
+    await a.discover(stub([], { oracleOf: () => null }));
+    expect(() => a.gasSources!()).toThrow(/not resolved/);
+  });
+
+  it('never shrinks: an oracle seen once stays, even when its pool is drained or its read fails later', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([], { oracleOf: (prov) => (prov.endsWith(P.weth.slice(6)) ? ORACLE_B : ORACLE) }));
+    await a.discover(stub([], { oracleOf: (prov) => (prov.endsWith(P.weth.slice(6)) ? null : ORACLE), balances: () => [0n, 0n] }));
+    expect(a.gasSources!().flatMap((s) => s.address as string[])).toEqual(expect.arrayContaining([ORACLE, ORACLE_B, V0_PUSH_ORACLE]));
+  });
+});
+
+describe('Metric v0 (retired generation)', () => {
+  it('tails all eight v0 pools, bounded at the last v0 swap — the live tail never fetches them', async () => {
+    const a = createMetricAdapter();
+    await a.discover(stub([]));
+    const v0 = a.logSources().filter((s) => s.key.startsWith('v0:'));
+    expect(v0).toHaveLength(1);
+    expect((v0[0].address as string[]).sort()).toEqual(V0_POOLS.map((p) => p.pool).sort());
+    expect(v0[0].untilBlock).toBe(V0_LAST_SWAP_BLOCK);
+    expect(sourceSpan(v0[0], 112_000_000n, 112_000_999n)).toBeNull();                 // today's tail: no fetch
+    expect(sourceSpan(v0[0], 108_406_000n, 108_406_999n)).toEqual({ from: 108_406_000n, to: V0_LAST_SWAP_BLOCK });
+  });
+
+  it('makes no RPC call of its own: discovery does not touch the chain for v0', async () => {
+    const a = createMetricAdapter();
+    const ctx = stub([]);
+    await a.discover(ctx);
+    const v0Addrs = new Set<string>(V0_POOLS.map((p) => p.pool.toLowerCase()));
+    expect(ctx.calls.some((c: any) => v0Addrs.has(String(c.address).toLowerCase()))).toBe(false);
+  });
+});
+
+describe('a v1 pool announced mid-range forces that range to be re-read', () => {
+  const created = (pool: string) => ({ args: { poolAddress: pool }, blockNumber: 110n });
+  const swapLog = (pool: string) => ({
+    address: pool, blockNumber: 150n, transactionHash: '0x' + '2'.repeat(64), logIndex: 3,
+    // pool gained 2 USDC (token1), paid out 1 WMON (token0): a buy
+    args: { recipient: '0x' + '3'.repeat(40), amountDeltas: ((-(10n ** 18n)) & ((1n << 128n) - 1n)) << 128n | 2_000_000n },
+  });
+  const bundleFor = (a: ReturnType<typeof createMetricAdapter>, logs: Record<string, any[]>) =>
+    Object.fromEntries(a.logSources().map((s) => [s.key, logs[s.key.replace(/swap@\d+$/, 'swap')] ?? []]));
 
   it('throws (holds the cursor) when the announced pool was not in the swap query, then counts its swap on the retry', async () => {
     const a = createMetricAdapter();
-    const ctx = stub([]);
-    await a.discover(ctx);
-    const chain = { poolCreated: [created], swaps: [swapOf(NEW)] };   // created AND traded in one range
-    await expect(a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).rejects.toThrow(/admitted after this range's swap query was built/);
-    const fills = await a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set());   // the core's retry
-    expect(fills.map((f) => f.pool)).toEqual([`metric ${NEW.slice(0, 8)}`]);
-  });
-
-  it('also catches a pool the rediscovery admitted between the snapshot and decode', async () => {
-    const a = createMetricAdapter();
-    await a.discover(stub([]));
-    const chain = { poolCreated: [created], swaps: [swapOf(NEW)] };
-    const stale = fetchWith(a, chain);                                            // tail snapshots…
-    await a.discover(stub([], { head: 1_000_500n, createdPools: [{ pool: NEW }] }));   // …rediscovery admits NEW
-    await expect(a.decode(stub([]), stale as any, () => 0, new Set())).rejects.toThrow(/admitted after this range's swap query was built/);
-    expect(await a.decode(stub([]), fetchWith(a, chain) as any, () => 0, new Set())).toHaveLength(1);
-  });
-
-  it('also catches it when NO pool was tailed yet (no swap source in the bundle at all)', async () => {
-    const a = createMetricAdapter();
-    const ctx = stub([], { tokens: Object.fromEntries(SEEDS.map((p) => [p, ['0x1111111111111111111111111111111111111111', TOKENS.USDC.address]])) });
-    await a.discover(ctx);                                   // every seed unregistered ⇒ nothing tailed
-    expect(a.logSources().map((s) => s.key)).toEqual(['poolCreated']);
-    const chain = { poolCreated: [created], swaps: [swapOf(NEW)] };
-    await expect(a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).rejects.toThrow(/admitted after this range's swap query was built/);
-    expect(await a.decode(ctx, fetchWith(a, chain) as any, () => 0, new Set())).toHaveLength(1);
-  });
-
-  it('also catches an OLDER candidate that resolves late — no PoolCreated in the range at all', async () => {
-    // A persisted pool whose getImmutables failed at snapshot time, admitted by
-    // the concurrent rediscovery before decode. Its creation log is long behind
-    // the cursor, so a check keyed on this range's PoolCreated logs saw nothing.
-    const state = memState({ factory_pools: JSON.stringify([NEW]) });
-    const a = createMetricAdapter();
-    await a.discover(stub([], { state, unresolved: (p) => p === NEW }));
-    const chain = { poolCreated: [], swaps: [swapOf(NEW)] };
-    const stale = fetchWith(a, chain);                                   // NEW not admitted ⇒ not queried
-    await a.discover(stub([], { state, head: 1_000_500n }));             // rediscovery: NEW resolves
-    await expect(a.decode(stub([]), stale as any, () => 0, new Set())).rejects.toThrow(/admitted after this range's swap query was built/);
-    expect(await a.decode(stub([]), fetchWith(a, chain) as any, () => 0, new Set())).toHaveLength(1);
-  });
-
-  it('does not retry when admission SHRINKS (the snapshot covers more than is admitted)', async () => {
-    const a = createMetricAdapter();
-    await a.discover(stub([]));
-    const bundle = fetchWith(a, { poolCreated: [], swaps: [swapOf(SEEDS[1])] });
-    await a.discover(stub([], { tokens: { [SEEDS[2]]: ['0x1111111111111111111111111111111111111111', TOKENS.USDC.address] } }));
-    await expect(a.decode(stub([]), bundle as any, () => 0, new Set())).resolves.toHaveLength(1);
-  });
-
-  it('does not retry for a pool that was not admitted (it is not tailed either way)', async () => {
-    const a = createMetricAdapter();
-    const ctx = stub([], { tokens: { [NEW]: ['0x1111111111111111111111111111111111111111', TOKENS.USDC.address] } });
-    await a.discover(ctx);
-    await expect(a.decode(ctx, fetchWith(a, { poolCreated: [created], swaps: [] }) as any, () => 0, new Set())).resolves.toEqual([]);
-  });
-
-  it('does not retry a range whose swap query already covered the pool (replays of known history)', async () => {
-    const a = createMetricAdapter();
-    const ctx = stub([]);
-    await a.discover(ctx);
-    const seedCreated = { args: { pool: SEEDS[3] } };   // a seed's own historical PoolCreated
-    const fills = await a.decode(ctx, fetchWith(a, { poolCreated: [seedCreated], swaps: [swapOf(SEEDS[3])] }) as any, () => 0, new Set());
+    await a.discover(stub([], { pools: [P.wmon] }));
+    const NEW = P.weth;
+    const first = bundleFor(a, { 'v1:poolCreated': [created(NEW)], 'v1:swap': [] });
+    const ctx = stub([], { pools: [P.wmon, NEW] });
+    await expect(a.decode(ctx, first, () => 1, new Set())).rejects.toThrow(/admitted after this range's swap query/);
+    // the retry re-snapshots logSources(), which now carries NEW
+    const second = bundleFor(a, { 'v1:poolCreated': [created(NEW)], 'v1:swap': [swapLog(NEW)] });
+    const fills = await a.decode(ctx, second, () => 1, new Set());
     expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({ venueId: 'metric', market: 'ETH/USDC', side: 'buy', usd: 2 });
   });
 
-  it('keeps one snapshot key while admission is unchanged, and a new one when it changes', async () => {
+  it('does not retry a range whose swap query already covered the pool', async () => {
     const a = createMetricAdapter();
-    await a.discover(stub([]));
-    const key = () => a.logSources().find((s) => s.key.startsWith('swap'))!.key;
-    const k1 = key();
-    expect(key()).toBe(k1);
-    await a.discover(stub([], { head: 1_000_500n, createdPools: [{ pool: NEW }] }));
-    expect(key()).not.toBe(k1);
+    await a.discover(stub([], { pools: [P.wmon] }));
+    const b = bundleFor(a, { 'v1:swap': [swapLog(P.wmon)] });
+    await expect(a.decode(stub([]), b, () => 1, new Set())).resolves.toHaveLength(1);
   });
 });

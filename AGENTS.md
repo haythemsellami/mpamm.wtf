@@ -26,6 +26,7 @@ Follow **[docs/adapters.md](docs/adapters.md)** exactly — interface, correctne
 - `discover()` must MERGE into adapter state, never replace it (it re-runs every 10 min).
 - Verify units on the real chain before claiming done: recompute one fill's `usd`/`baseAmount`/`execPx` by hand from the raw log; decimals/scaling are where every adapter bug lives.
 - Add fixture decode tests (`server/src/venues/__tests__/`) — real recorded logs, no network.
+- A protocol that **redeploys** keeps its venue id (renaming it deletes its history on boot): add a generation module and compose both with `composeGenerations`; the retired one is decode-only with `untilBlock` on its sources. See docs/adapters.md → *Retiring contracts* (reference: `metric.ts`).
 
 ## Conventions & gotchas
 

@@ -57,9 +57,6 @@ jobs:
       - name: Build frontend
         run: npm -w web run build
 
-      - name: Verify Metric helper bytecode
-        run: node server/scripts/compile-metric-helper.mjs --check
-
       - name: Install browser for dashboard regressions
         run: npx playwright install --with-deps chromium
 

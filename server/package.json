@@ -14,7 +14,6 @@
     "benchmark:runtime": "tsx scripts/benchmark-runtime.ts",
     "benchmark:markouts": "tsx scripts/benchmark-markouts.ts",
     "benchmark:heads": "tsx scripts/benchmark-heads.ts",
-    "benchmark:metric": "tsx --env-file-if-exists=../.env scripts/benchmark-metric.ts",
     "benchmark:live": "tsx scripts/benchmark-live-stream.ts"
   },
   "dependencies": {

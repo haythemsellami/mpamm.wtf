@@ -33,7 +33,7 @@ import { NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
 import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, allAdapterVenueIds, validateRegistry } from '../venues/registry.js';
-import type { AdapterContext, LogBundle, LogSource, ReferenceRegistry, VenueAdapter } from '../venues/adapter.js';
+import { sourceSpan, type AdapterContext, type LogBundle, type LogSource, type ReferenceRegistry, type VenueAdapter } from '../venues/adapter.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -1878,9 +1878,12 @@ export class LiveDataSource extends BaseSource {
     this.noteOnce('backfill.start', `${name}: on-chain backfill — blocks ${from}→${end} (venue history since ${sinceUtc})`, vid);
 
     /** one getLogs across every fill source over [cursor, t]; throws on failure.
-     *  ARCHIVE pool — this replays from the venue's deploy day. */
-    const fetchRange = (t: bigint) => allPreferAvailability(sources.map((s) =>
-      archiveRead(() => archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>)));
+     *  ARCHIVE pool — this replays from the venue's deploy day. A source is
+     *  only fetched inside its declared block span (a retired generation). */
+    const fetchRange = (t: bigint) => allPreferAvailability(sources.map((s) => {
+      const span = sourceSpan(s, cursor, t);
+      return span ? archiveRead(() => archiveClient.getLogs({ address: s.address as any, fromBlock: span.from, toBlock: span.to, events: s.events as any } as any) as Promise<any[]>) : Promise.resolve([]);
+    }));
 
     while (cursor <= end) {
       if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
@@ -2132,8 +2135,10 @@ export class LiveDataSource extends BaseSource {
 
     // ARCHIVE pool — the window reaches back markoutBackfillDays (30d default),
     // far past a pruning fullnode's retention.
-    const fetchAll = (t: bigint) => allPreferAvailability(sources.map((s) =>
-      archiveRead(() => archiveClient.getLogs({ address: s.address as any, fromBlock: cursor, toBlock: t, events: s.events as any } as any) as Promise<any[]>)));
+    const fetchAll = (t: bigint) => allPreferAvailability(sources.map((s) => {
+      const span = sourceSpan(s, cursor, t);
+      return span ? archiveRead(() => archiveClient.getLogs({ address: s.address as any, fromBlock: span.from, toBlock: span.to, events: s.events as any } as any) as Promise<any[]>) : Promise.resolve([]);
+    }));
 
     while (cursor <= end) {
       if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
@@ -2678,8 +2683,11 @@ export class LiveDataSource extends BaseSource {
       const all: any[] = [];
       const failed = new Set<string>(); // source keys whose fetch failed (surfaced to decode)
       await Promise.all(sources.map(async (s) => {
+        // outside its declared span a source cannot have logs: no fetch at all
+        const span = sourceSpan(s, from, to);
+        if (!span) { bundle[s.key] = []; return; }
         try {
-          const logs = (await getLogsChunked({ address: s.address, fromBlock: from, toBlock: to, events: s.events as any })) as any[];
+          const logs = (await getLogsChunked({ address: s.address, fromBlock: span.from, toBlock: span.to, events: s.events as any })) as any[];
           bundle[s.key] = logs;
           all.push(...logs);
         } catch {
