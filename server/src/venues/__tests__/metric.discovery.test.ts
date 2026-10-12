@@ -228,6 +228,20 @@ describe('Metric v1 discovery (factory enumeration)', () => {
     expect(notes.some((n) => /Metric quoting again/.test(n))).toBe(true);
   });
 
+  it('raises the SAME outage again after a recovery, repeatable, and stays quiet while it persists', async () => {
+    const seen: { code: string; msg: string; repeatable?: boolean }[] = [];
+    const a = createMetricAdapter();
+    const ctx = (o: StubOpts) => ({ ...stub([], o), note: (code: string, msg: string, opts?: { repeatable?: boolean }) => seen.push({ code, msg, repeatable: opts?.repeatable }) });
+    await a.discover(ctx({ priceFails: true }));
+    await a.discover(ctx({ priceFails: true }));    // still down: latched, no second warning
+    await a.discover(ctx({}));                      // healed
+    await a.discover(ctx({ priceFails: true }));    // the same outage returns
+    const transitions = seen.filter((n) => n.code === 'venue.quote.unavailable' || n.code === 'venue.quote.recovered');
+    expect(transitions.map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered', 'venue.quote.unavailable']);
+    expect(transitions.every((n) => n.repeatable)).toBe(true);
+    expect(transitions[0].msg).toBe(transitions[2].msg);   // verbatim repeat — only `repeatable` gets it past the core's dedupe
+  });
+
   it('declares its pools DIRECT and its SimpleRouter as Metric periphery', async () => {
     const a = createMetricAdapter();
     await a.discover(stub([]));

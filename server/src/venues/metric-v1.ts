@@ -104,7 +104,9 @@ export function createMetricV1Generation(): VenueGeneration {
   let pools: MetricPool[] = [];                       // live: quoted
   const byAddr = new Map<string, MetricPool>();       // MONOTONIC decode map
   let discovered = false;
-  let noPriceWarned = false;
+  /** the no-price warning currently on the record (null = none) — this latch
+   *  owns the dedupe, so its transition notes are `repeatable` (adapter.ts note) */
+  let noPriceWarned: string | null = null;
   /** every oracle an admitted pool's provider reads — sorted + deduped so the
    *  gas tracker's destination fingerprint is stable (see gasSources). */
   let pushOracles: `0x${string}`[] = [];
@@ -248,13 +250,19 @@ export function createMetricV1Generation(): VenueGeneration {
     ].filter(Boolean);
     ctx.note('venue.discovery', `Metric: ${live.length} live base/stable pool(s)${why.length ? ` (+${why.join(', ')}; not quoted)` : ''}`);
     // Funded capital we cannot price is a DEGRADATION, not lifecycle — warn,
-    // and announce the heal (an adapter can only append, never retract).
+    // and announce the heal (an adapter can only append, never retract). Both
+    // transitions are latched HERE and raised `repeatable`: the core's
+    // window-wide dedupe would otherwise swallow the same outage returning
+    // after a recovery while the first episode's note is still in the window.
     if (notLive['no-price']) {
-      noPriceWarned = true;
-      ctx.note('venue.quote.unavailable', `Metric: ${notLive['no-price']} funded pool(s) have no oracle price — they cannot be quoted (their fills are still tailed)`);
+      const msg = `Metric: ${notLive['no-price']} funded pool(s) have no oracle price — they cannot be quoted (their fills are still tailed)`;
+      if (msg !== noPriceWarned) {
+        noPriceWarned = msg;
+        ctx.note('venue.quote.unavailable', msg, { repeatable: true });
+      }
     } else if (noPriceWarned) {
-      noPriceWarned = false;
-      ctx.note('venue.quote.recovered', `Metric quoting again — oracle price back for funded pool(s)`);
+      noPriceWarned = null;
+      ctx.note('venue.quote.recovered', `Metric quoting again — oracle price back for funded pool(s)`, { repeatable: true });
     }
   };
 
