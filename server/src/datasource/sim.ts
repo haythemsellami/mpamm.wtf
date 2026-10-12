@@ -363,10 +363,13 @@ export class SimDataSource extends BaseSource {
     this.addrs = Array.from({ length: 14 }, () => txS());
   }
 
-  private makeFill(ageSec: number, big: boolean): SimFill {
-    const market = MARKETS[Math.floor(Math.random() * MARKETS.length)];
+  /** `pin` fixes the market (and venue): every price and bias below derives
+   *  from them, so a caller must not relabel a fill made for another. */
+  private makeFill(ageSec: number, big: boolean, pin?: { market: string; venueId?: string }): SimFill {
+    const market = pin?.market ?? MARKETS[Math.floor(Math.random() * MARKETS.length)];
     const side: Side = Math.random() < 0.5 ? 'buy' : 'sell';
-    const v = this.display.length ? wpick(this.display, this.weights()) : this.venues[0];
+    const v = this.display.find((d) => d.id === pin?.venueId)
+      ?? (this.display.length ? wpick(this.display, this.weights()) : this.venues[0]);
     const cr = Math.random();
     const cat: FillCategory = cr < 0.14 ? 'ROUTER' : cr < 0.22 ? 'AGG' : cr < 0.34 ? 'CEX/DEX' : 'DIRECT';
     const usd = big ? 60000 + Math.random() * 640000 : (Math.random() < 0.72 ? 50 + Math.random() * 9000 : 9000 + Math.random() * 90000);
@@ -416,13 +419,14 @@ export class SimDataSource extends BaseSource {
   /** A second tracked leg in the same transaction: the opposite side on
    *  another venue (atomic-arbitrage shape) or the same side (a split route). */
   private companion(f: SimFill): SimFill {
-    const g = this.makeFill(0, false);
     const others = this.display.filter((v) => v.id !== f.venueId);
     const v = others.length ? others[Math.floor(Math.random() * others.length)] : this.display[0];
+    // made FOR the other venue and this market, so its price, markouts and
+    // curve carry that venue's bias in the right quote asset
+    const g = this.makeFill(0, false, { market: f.market, venueId: v?.id });
     const twoSided = Math.random() < 0.5;
     return {
-      ...g, venueId: v?.id ?? g.venueId, market: f.market, side: twoSided ? (f.side === 'buy' ? 'sell' : 'buy') : f.side,
-      pool: this.pools[(v?.id ?? g.venueId) + f.market] ?? g.pool,
+      ...g, side: twoSided ? (f.side === 'buy' ? 'sell' : 'buy') : f.side,
       txHash: f.txHash, blockNumber: f.blockNumber, ts: f.ts, bornMs: f.bornMs, category: f.category,
     };
   }

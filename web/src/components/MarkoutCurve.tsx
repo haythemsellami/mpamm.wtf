@@ -14,7 +14,7 @@ const FIELDS = [
   { term: 'curve', unit: 'bps', desc: 'notional-weighted mean MAKER markout vs the pair’s CEX reference, from 5s before to 15s after the fill. Positive = the pool is ahead of the reference at that moment.' },
   { term: 'FLOW', unit: '—', desc: 'QUIET = the reference moved under 1bp from 5s before to 1s after the fill (flow that arrived independently of the market: the retail proxy); MOVING = everything else.' },
   { term: 'ROUTE', unit: '—', desc: 'what else the transaction did on TRACKED venues: SINGLE = the only tracked leg; SPLIT = several legs, one direction; TWO-SIDED = bought on one leg and sold on another (the atomic-arbitrage shape). Legs on untracked DEXes are invisible, so SINGLE can still hide an arbitrage against an AMM.' },
-  { term: 'ENTRY', unit: '—', desc: 'the fill’s routing category (DIRECT, ROUTER, AGG, MEV, UNKNOWN) — compare what each kind of counterparty is charged.' },
+  { term: 'ENTRY', unit: '—', desc: 'the fill’s routing category (DIRECT, ROUTER, AGG, MEV, CEX/DEX, UNKNOWN) — compare what each kind of counterparty is charged.' },
   { term: 'COVERAGE', unit: '%', desc: 'share of the venue’s notional in the window that has a complete curve. Curves are captured live, from the 100ms reference feed, once a fill ages past +15s — older fills and feed gaps have none, so wide windows fill in going forward.' },
   { term: 'QUIET / TWO-SIDED', unit: '% notional', desc: 'the venue’s flow mix over all its curve fills — independent of the filters.' },
 ] as const;

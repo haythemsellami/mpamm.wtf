@@ -406,6 +406,28 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
+  it('a fill reset drops cached aggregates and keeps a pre-reset pass from caching its result', async () => {
+    const { source } = await setup();
+    const resolvers: Array<(r: unknown) => void> = [];
+    const computeCurves = vi.fn(() => new Promise((r) => resolvers.push(r)));
+    const compute = vi.fn(async () => ({ stale: false }));
+    source.analyticsWorker = { computeCurves, compute, close: vi.fn(async () => {}) };
+    try {
+      await source.leaderboard(7);
+      const before = source.markoutCurves(7);         // a pass over the pre-reset rows
+      source.dropAggregates();                         // fills deleted meanwhile
+      const after = source.markoutCurves(7);          // not handed the pre-reset pass
+      expect(computeCurves).toHaveBeenCalledTimes(2);
+      resolvers[0]({ stale: true }); resolvers[1]({ stale: false });
+      expect(await before).toEqual({ stale: true });
+      expect(await after).toEqual({ stale: false });
+      expect(await source.markoutCurves(7)).toEqual({ stale: false }); // cached: the post-reset result
+      expect(computeCurves).toHaveBeenCalledTimes(2);
+      await source.leaderboard(7);
+      expect(compute).toHaveBeenCalledTimes(2);        // leaderboard cache dropped too
+    } finally { source.store.close(); }
+  });
+
   it('collects every market, size and venue role once per block with zero viewers', async () => {
     const { source, adapters, poll } = await setup({ withQuotes: true });
     source.schedulePostQuoteMaintenance = vi.fn();

@@ -148,4 +148,17 @@ describe('simulator', () => {
     expect(res.cells.length).toBeGreaterThan(0);
     expect(res.cells.every((c) => c.usdBps.length === N)).toBe(true);
   });
+
+  it('prices every leg of a multi-leg transaction in its own market', async () => {
+    const sim = new SimDataSource();
+    await sim.start();
+    clean.push(() => sim.stop());
+    const fills = sim.getFills();
+    const byTx = new Map<string, number>();
+    for (const f of fills) byTx.set(f.txHash, (byTx.get(f.txHash) ?? 0) + 1);
+    expect([...byTx.values()].some((n) => n > 1)).toBe(true);
+    // a companion leg relabeled from a fill made for another market would carry
+    // that market's price
+    for (const f of fills) expect(Math.abs(f.execPx / (sim as any).midPx(f.market) - 1)).toBeLessThan(0.01);
+  });
 });

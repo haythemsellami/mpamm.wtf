@@ -1785,7 +1785,7 @@ export class LiveDataSource extends BaseSource {
       const dropped = await this.storeWriter.resetVenueHistory(t.vid, deletes, from?.block);
       purgeVenueDays(this.days, t.vid, deletes);
       purgeVenueFills({ fills: this.fills, pending: this.pending, dirty: this.dirty, countedIds: this.countedIds }, t.vid, deletes);
-      if (dropped.fills) this.lbCache.clear();
+      if (dropped.fills) this.dropAggregates();
       await settle();
       // Say what was DESTROYED, not just what will be re-scanned: this is a
       // one-shot operation with no undo, and the counts are the only record.
@@ -2323,6 +2323,16 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
+  /** Drop the fill aggregates after fills are DELETED. A pass already running
+   *  over the pre-reset rows is detached (no longer shared with new requests)
+   *  and, via the generation, can't cache its result afterwards. */
+  private aggGen = 0;
+  private dropAggregates(): void {
+    this.aggGen++;
+    this.lbCache.clear(); this.lbInflight.clear();
+    this.curveCache.clear(); this.curveInflight.clear();
+  }
+
   /** Markout-curve aggregates over the window — same worker, cache and
    *  dedupe discipline as the leaderboard. */
   private curveCache = new Map<number, { at: number; res: MarkoutCurvesResponse }>();
@@ -2334,11 +2344,12 @@ export class LiveDataSource extends BaseSource {
     if (hit && now - hit.at < ttl) return Promise.resolve(hit.res);
     const inflight = this.curveInflight.get(days);
     if (inflight) return inflight;
+    const gen = this.aggGen;
     const p = (async () => {
       const res = await this.analyticsWorker.computeCurves(days, now);
-      this.curveCache.set(days, { at: now, res });
+      if (gen === this.aggGen) this.curveCache.set(days, { at: now, res });
       return res;
-    })().finally(() => this.curveInflight.delete(days));
+    })().finally(() => { if (this.curveInflight.get(days) === p) this.curveInflight.delete(days); });
     this.curveInflight.set(days, p);
     return p;
   }
@@ -2356,11 +2367,12 @@ export class LiveDataSource extends BaseSource {
     if (hit && now - hit.at < ttl) return Promise.resolve(hit.res);
     const inflight = this.lbInflight.get(days);
     if (inflight) return inflight;
+    const gen = this.aggGen;
     const p = (async () => {
       const res = await this.analyticsWorker.compute(days, now);
-      this.lbCache.set(days, { at: now, res });
+      if (gen === this.aggGen) this.lbCache.set(days, { at: now, res });
       return res;
-    })().finally(() => this.lbInflight.delete(days));
+    })().finally(() => { if (this.lbInflight.get(days) === p) this.lbInflight.delete(days); });
     this.lbInflight.set(days, p);
     return p;
   }
