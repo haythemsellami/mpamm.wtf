@@ -78,6 +78,23 @@ export interface LogSource {
    *  - `'attribution'` : labels only (e.g. router tags). Failure is tolerated —
    *    the cursor advances and affected fills just carry degraded attribution. */
   kind?: 'fills' | 'state' | 'attribution';
+  /** Inclusive block span the source can emit logs in — a contract's creation
+   *  block, a retired contract's last activity. Unset = unbounded. The core
+   *  never fetches the source outside it (tail, volume backfill, markout
+   *  onboarding): a retired generation costs zero RPC yet stays replayable
+   *  (docs/adapters.md → Retiring contracts). A bound is a PROMISE, not a
+   *  filter — logs outside it are never seen, so declare one only where the
+   *  chain proves the contract inert beyond it. */
+  fromBlock?: bigint;
+  untilBlock?: bigint;
+}
+
+/** The part of the inclusive range [from, to] a source can emit logs in, or
+ *  null when it cannot emit any there (skip the fetch entirely). */
+export function sourceSpan(s: Pick<LogSource, 'fromBlock' | 'untilBlock'>, from: bigint, to: bigint): { from: bigint; to: bigint } | null {
+  const lo = s.fromBlock !== undefined && s.fromBlock > from ? s.fromBlock : from;
+  const hi = s.untilBlock !== undefined && s.untilBlock < to ? s.untilBlock : to;
+  return lo <= hi ? { from: lo, to: hi } : null;
 }
 
 /** Logs delivered to `decode()`, keyed by `LogSource.key`. */
