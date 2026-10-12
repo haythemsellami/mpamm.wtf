@@ -2,7 +2,8 @@ import { createInflateRaw, crc32 } from 'node:zlib';
 import { createInterface } from 'node:readline';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pairOf, assetOf, TOKENS, wrapBasisFor } from '@shared';
@@ -44,7 +45,7 @@ function makeSeries(ts: number[], px: number[], staleMs: number): StepSeries {
       let lo = 0, hi = ts.length - 1, ans = -1;
       while (lo <= hi) { const mid = (lo + hi) >> 1; if (ts[mid] <= t) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
       if (ans < 0 || t - ts[ans] > staleMs) return null;
-      return px[ans];
+      return Number.isNaN(px[ans]) ? null : px[ans]; // NaN: source unavailable from ts[ans]
     },
   };
 }
@@ -240,11 +241,29 @@ export async function reduceBookMids(lines: AsyncIterable<string>, symbol: strin
     // the file overlaps its neighbours by a few seconds — keep only its own day
     // so concatenated days stay sorted for makeSeries' binary search.
     if (!(t >= dayStart && t < dayEnd) || t < lastT) continue;
-    if (!(bb > 0 && bb < ba)) continue; // one-sided/crossed: no honest mid
+    // One-sided/crossed: no honest mid. Record the outage as a NaN point
+    // (makeSeries reads it as null) so the last mid isn't carried through it;
+    // the next valid mid differs from NaN, so it is emitted at once.
+    if (!(bb > 0 && ba < Infinity && bb < ba)) { // an empty ask side leaves ba = Infinity
+      if (!Number.isNaN(lastMid)) { ts.push(t); px.push(NaN); lastMid = NaN; lastT = t; }
+      continue;
+    }
     const mid = (bb + ba) / 2;
     if (mid !== lastMid || t - lastT >= BOOK_HEARTBEAT_MS) { ts.push(t); px.push(mid); lastMid = mid; lastT = t; }
   }
   return { ts, px };
+}
+
+/** Recently parsed days, keyed by cache path. The remark calls pairMidSeries
+ *  per venue × market × day and each call reads D−1..D+1 for the base AND the
+ *  cross, so without this every call re-parses ~6 cached files on the event
+ *  loop the quote loop shares. ~1 MB per parsed day; a handful covers a walk. */
+const BOOK_DAY_MEMO = 8;
+const bookDayMemo = new Map<string, { ts: number[]; px: number[] }>();
+function memoBookDay(path: string, pts: { ts: number[]; px: number[] }) {
+  bookDayMemo.delete(path); bookDayMemo.set(path, pts); // most recent last
+  while (bookDayMemo.size > BOOK_DAY_MEMO) bookDayMemo.delete(bookDayMemo.keys().next().value!);
+  return pts;
 }
 
 /** One day's BBO-mid curve — from the reduced cache, else downloaded, replayed
@@ -252,6 +271,8 @@ export async function reduceBookMids(lines: AsyncIterable<string>, symbol: strin
  *  Null = not published yet. */
 async function bybitBookDay(symbol: string, day: string): Promise<{ ts: number[]; px: number[] } | null> {
   const path = bookMidPath(symbol, day);
+  const hit = bookDayMemo.get(path);
+  if (hit) return memoBookDay(path, hit);
   if (!existsSync(path)) {
     const r = await fetch(bybitBookUrl(symbol, day), { signal: AbortSignal.timeout(600_000) });
     if (r.status === 404) return null;
@@ -273,15 +294,15 @@ async function bybitBookDay(symbol: string, day: string): Promise<{ ts: number[]
     for (let i = 0; i < pts.ts.length; i++) out += `${pts.ts[i]},${pts.px[i]}\n`;
     writeFileSync(path + '.part', out);
     renameSync(path + '.part', path);
-    return pts;
+    return memoBookDay(path, pts);
   }
   const ts: number[] = [], px: number[] = [];
-  for (const row of readFileSync(path, 'utf8').split('\n')) {
+  for (const row of (await readFile(path, 'utf8')).split('\n')) {
     const c = row.indexOf(',');
     if (c < 0) continue;
-    ts.push(Number(row.slice(0, c))); px.push(Number(row.slice(c + 1)));
+    ts.push(Number(row.slice(0, c))); px.push(Number(row.slice(c + 1))); // "NaN" = outage
   }
-  return { ts, px };
+  return memoBookDay(path, { ts, px });
 }
 
 /** BBO-mid series for [fromMs, toMs) from Bybit's daily orderbook archives —

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { crc32, deflateRawSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -130,6 +130,19 @@ describe('reduceBookMids', () => {
     expect(px.map((p) => +p.toFixed(6))).toEqual([0.02855, 0.028575]);
   });
 
+  it('records a one-sided or crossed book as an outage (NaN), then re-emits the next valid mid at once', async () => {
+    const { ts, px } = await reduceBookMids(lines([
+      msg('MONUSDT', D + 1_000, 'snapshot', [['0.02850', '1']], [['0.02851', '1']]),
+      msg('MONUSDT', D + 2_000, 'delta', [], [['0.02851', '0']]),            // ask side empty
+      msg('MONUSDT', D + 3_000, 'delta', [['0.02849', '1']], []),           // still one-sided: no 2nd outage point
+      msg('MONUSDT', D + 4_000, 'delta', [], [['0.02851', '1']]),           // back: same mid as before the outage
+      msg('MONUSDT', D + 5_000, 'delta', [['0.02852', '1']], []),           // bid through the ask: crossed
+      msg('MONUSDT', D + 6_000, 'delta', [['0.02852', '0']], []),           // uncrossed
+    ]), 'MONUSDT', D);
+    expect(ts).toEqual([D + 1_000, D + 2_000, D + 4_000, D + 5_000, D + 6_000]);
+    expect(px.map((p) => Number.isNaN(p) ? 'outage' : +p.toFixed(6))).toEqual([0.028505, 'outage', 0.028505, 'outage', 0.028505]);
+  });
+
   it('ignores deltas until the first snapshot (no book to apply them to)', async () => {
     const { ts } = await reduceBookMids(lines([
       msg('MONUSDT', D + 1_000, 'delta', [['0.0285', '1']], [['0.0286', '1']]),
@@ -198,6 +211,18 @@ describe('bybitBookMidSeries', () => {
     expect(existsSync(join(dir, `MONUSDT_${D}.bbo-mid.csv`))).toBe(false);
     book('MONUSDT', D, [[3_000, '0.02850', '0.02851']]); // archive fixed upstream
     expect((await bybitBookMidSeries('MONUSDT', day(D), day(D) + 60_000))?.at(day(D) + 4_000)).toBeCloseTo(0.028505, 9);
+  });
+
+  it('an outage point reads null even under the slow cap, from a CACHED day too', async () => {
+    // written as the replay would have cached it: the book went one-sided at
+    // 60s and came back at 600s
+    writeFileSync(join(dir, `USDCUSDT_${D}.bbo-mid.csv`), `${day(D) + 1_000},1.00025\n${day(D) + 60_000},NaN\n${day(D) + 600_000},1.00035\n`);
+    publish('USDCUSDT', D, []); // published (HEAD 200), but the cache serves it
+    const s = await bybitBookMidSeries('USDCUSDT', day(D), day(D) + 86_400_000, 30 * 60_000);
+    expect(s?.at(day(D) + 30_000)).toBeCloseTo(1.00025, 9);
+    expect(s?.at(day(D) + 300_000)).toBeNull(); // not the carried 1.00025
+    expect(s?.at(day(D) + 700_000)).toBeCloseTo(1.00035, 9);
+    expect(gets()).toHaveLength(0);
   });
 
   it('a gap in the feed past the staleness cap yields null, never a carried mid', async () => {
