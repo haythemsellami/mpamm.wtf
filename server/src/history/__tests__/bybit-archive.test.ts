@@ -143,6 +143,13 @@ describe('reduceBookMids', () => {
     expect(px.map((p) => Number.isNaN(p) ? 'outage' : +p.toFixed(6))).toEqual([0.028505, 'outage', 0.028505, 'outage', 0.028505]);
   });
 
+  it('keeps the mid finite where bid + ask would overflow', async () => {
+    // the archive writes plain decimals: 1e308 and 1.5e308, spelled out
+    const big = (lead: string) => lead + '0'.repeat(309 - lead.length);
+    const { px } = await reduceBookMids(lines([msg('MONUSDT', D + 1_000, 'snapshot', [[big('1'), '1']], [[big('15'), '1']])]), 'MONUSDT', D);
+    expect(px).toEqual([1.25e308]);
+  });
+
   it('ignores deltas until the first snapshot (no book to apply them to)', async () => {
     const { ts } = await reduceBookMids(lines([
       msg('MONUSDT', D + 1_000, 'delta', [['0.0285', '1']], [['0.0286', '1']]),

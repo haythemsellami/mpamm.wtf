@@ -248,7 +248,7 @@ export async function reduceBookMids(lines: AsyncIterable<string>, symbol: strin
       if (!Number.isNaN(lastMid)) { ts.push(t); px.push(NaN); lastMid = NaN; lastT = t; }
       continue;
     }
-    const mid = (bb + ba) / 2;
+    const mid = bb + (ba - bb) / 2; // never overflows: 0 < bb < ba, both finite
     if (mid !== lastMid || t - lastT >= BOOK_HEARTBEAT_MS) { ts.push(t); px.push(mid); lastMid = mid; lastT = t; }
   }
   return { ts, px };
