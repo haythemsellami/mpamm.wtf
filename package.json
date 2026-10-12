@@ -18,7 +18,7 @@
     "start": "npm -w server run start"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0"
+    "concurrently": "^10.0.5"
   },
   "license": "AGPL-3.0-only",
   "repository": {
