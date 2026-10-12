@@ -73,6 +73,14 @@ Each tick the core fetches every adapter's `logSources()` over the pending block
 
 **Fail-closed ingest**: a failed fill/state log fetch, block-timestamp lookup, or adapter `decode()` **holds the global cursor** and retries the exact range — nothing advances or ingests partially. Changed daily volume + cursor + fills persist in one transaction, so a crash can never let a gap-fill double count. Every post-boot mutation — live snapshots, backfill checkpoints, gas cursors, resets, onboarding fills and historical remarks — runs through one worker-owned SQLite connection, so a slow Render-disk COMMIT cannot pause `newHeads`, quote responses or WebSocket fanout. The main connection is sealed read-only after boot and uses WAL for concurrent API reads; dirty-day tracking also avoids rewriting immutable history every five seconds.
 
+### Markout curve
+
+The Leaderboard's MARKOUT_CURVE is the notional-weighted markout from **5s before to 15s after** each fill (`CURVE_OFFSETS_S`), after Solmaz, Heimbach & Milionis, *Active Liquidity On Chain* (arXiv 2609.38056). It is the shape that separates the venue types: a passive pool is ahead before the fill and behind after it (picked off), while a venue that reprices as the reference moves shows the inverse. The fixed horizons start at the fill and can't show it.
+
+- **Timing.** Monad block timestamps are whole seconds (header and `monadNewHeads` alike, ~3 blocks/s), so curve points mark at `ts + 500ms + offset`, the middle of the block's second (unbiased, ±0.5s). The legacy horizons mark at `ts`.
+- **Capture is live-only.** A fill's curve is taken once, from the 100ms in-memory reference ring, when its last point has elapsed. It is stored (`fills.curve_bps`) only when complete, persisted in the next snapshot, and never put on the `Fill` (the WS stream carries fills). There is deliberately **no archive backfill**: the CEX archives are per-second *last trades*, measured over a day of MON/USDC fills at ~1bp off the BBO-mid reference **at the fill instant** (trade-side bounce correlated with the flow), while agreeing within ~0.05bp from +5s on. The curve's signal is exactly at the fill. A faithful backfill needs order-book (BBO) archives.
+- **Aggregation** (`/api/markout-curves`, analytics worker) classifies each fill as **quiet/moving** (reference move from −5s to +1s under 1bp: the paper's retail proxy) and by **route**: `single` / `split` / `twoSided`, from the transaction's tracked legs. A transaction's fills share a block timestamp, so grouping buffers one equal-ts run of the keyset scan (no tx_hash index). It ships TAKER-signed Σ(usd × bps) cells per (venue, flow, route, category). The client sums cells under any filter and negates for MAKER.
+
 ## History: persist-forward indexer + venue-lifetime backfill
 
 SQLite is the source of truth. On boot the service loads persisted days + the `lastProcessedBlock` cursor; a same-day restart gap-fills `getLogs` from the cursor to the tip. Deep history comes from the **background on-chain backfill**: each adapter's fill logs are replayed from its `backfillFromUtc` (the venue's deploy / first-activity day), yielding real per-day USD **and swap counts** for the venue's whole life. The replay runs off the boot path, in adaptive `getLogs` chunks (auto-shrink on range errors, hole-skipping with loud notes for unreadable archive ranges), paced under RPC limits, and resumable across restarts (`backfill_cursor_*` / `backfill_done_*` metas). It scans only fully closed UTC days and waits for the live gap-fill to cross its bound before applying authoritative daily SETs. If a multi-hour run crosses midnight, it persists a resumable cursor without setting the done marker, extends the bound to the new hot head, and replays the newly closed day in full; the live tail continues to own the current day.
@@ -114,11 +122,11 @@ Persisted (SQLite, long format — adding/removing a venue never changes the sha
 meta(key, value)                               -- schema/model versions + every cursor
 daily_volume(utc_day, venue_id, usd, swaps)    -- PK (utc_day, venue_id)
 day_meta(utc_day, partial)
-fills(id, venue_id, …, markouts_bps)           -- upsert-by-id; rolling retention
+fills(id, venue_id, …, markouts_bps, curve_bps) -- upsert-by-id; rolling retention; curve_bps NULL until captured
 daily_gas(utc_day, venue_id, mon, txs)         -- QUOTE_UPDATE_BURN; additive, atomic with its cursor
 ```
 
-`markout_model_version` gates a markout-model migration: retained fills keep volume/tape data and their markouts are nulled — old-model and new-model bps never mix. Fills are retained 31 full UTC days (the leaderboard's widest window is 30d), pruned in small batches at boot and every 10 min; volume/gas/meta rows are kept forever.
+`markout_model_version` gates a markout-model migration: retained fills keep volume/tape data and their markouts are nulled — old-model and new-model bps never mix. `curve_model_version` does the same for `curve_bps`. Fills are retained 31 full UTC days (the leaderboard's widest window is 30d), pruned in small batches at boot and every 10 min; volume/gas/meta rows are kept forever.
 
 REST + WS contract (the frontend renders purely off these):
 
@@ -137,6 +145,7 @@ GET /api/fills?days=&limit=        recent fills (the tape)
 GET /api/leaderboard?days=1|7|30   legacy aggregate endpoint
 GET /api/leaderboard/publication?days=1|7|30   current immutable revision URL
 GET /api/analytics/:revision.json  cacheable aggregate, revision changes on correction
+GET /api/markout-curves?days=1|7|30  markout-curve cells (venue × flow × route × category)
 GET /api/gas                       QUOTE_UPDATE_BURN series (+ approx venue ids)
 WS  /stream                        v2 subscriptions: state, quotes, depth, fill, volume; legacy clients supported
 ```

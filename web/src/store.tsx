@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { MarketState, StreamState, QuoteSnapshot, QuoteStatsResponse, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse } from '@shared';
+import type { MarketState, StreamState, QuoteSnapshot, QuoteStatsResponse, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse, MarkoutCurvesResponse } from '@shared';
 import { pairOf, cexForBase, QUOTE_CHART_WINDOW_MS, QUOTE_STATS_REFRESH_MS } from '@shared';
-import { fetchMarkets, fetchFills, fetchLeaderboard, fetchGas, fetchQuoteHistory, fetchQuoteStats, connectDashboardStream } from './lib/api';
+import { fetchMarkets, fetchFills, fetchLeaderboard, fetchMarkoutCurves, fetchGas, fetchQuoteHistory, fetchQuoteStats, connectDashboardStream } from './lib/api';
 import { pathForTab, tabFromPath, urlForTab, type Tab } from './lib/tab-route';
 import { appendQuoteSnapshot, quoteFrameTime, type QuoteSeries } from './lib/quote-series';
 import type { Theme } from './theme';
@@ -44,6 +44,8 @@ interface UiState {
   brkFrom: string | null; brkTo: string | null;
   // leaderboard
   lbWin: string; lbGroup: string; lbHz: string; lbWinners: boolean; lbTop: number;
+  // markout curve filters (Leaderboard tab; window follows lbWin)
+  cvFlow: string; cvRoute: string; cvEntry: string;
 }
 
 /** the leaderboard window pills → /api/leaderboard days. */
@@ -59,6 +61,8 @@ interface Dashboard extends UiState {
   lb: LeaderboardResponse | null;
   /** the 24h aggregate (outlier feed) — polled while the Markouts tab is open. */
   lbDay: LeaderboardResponse | null;
+  /** markout curves for the CURRENT leaderboard window (lbWin). */
+  curves: MarkoutCurvesResponse | null;
   /** QUOTE_UPDATE_BURN series — polled while the Volume tab is open. */
   gas: GasResponse | null;
   frame: number;
@@ -111,6 +115,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     volGran: 'D', burnGran: 'D',
     cumFrom: null, cumTo: null, msFrom: null, msTo: null, brkFrom: null, brkTo: null,
     lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbWinners: true, lbTop: 25,
+    cvFlow: 'ALL', cvRoute: 'ALL', cvEntry: 'ALL',
   }));
   const [conn, setConn] = useState<'connecting' | 'live' | 'reconnecting'>('connecting');
   const [state, setState] = useState<MarketState | null>(null);
@@ -121,6 +126,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [fills, setFills] = useState<Fill[]>([]);
   const [lb, setLb] = useState<LeaderboardResponse | null>(null);
   const [lbDay, setLbDay] = useState<LeaderboardResponse | null>(null);
+  const [curves, setCurves] = useState<MarkoutCurvesResponse | null>(null);
   const [gas, setGas] = useState<GasResponse | null>(null);
   const [frame, setFrame] = useState(0);
 
@@ -401,6 +407,17 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const id = setInterval(load, 30_000);
     return () => { on = false; clearInterval(id); document.removeEventListener('visibilitychange', load); };
   }, [ui.tab, lbDays]);
+  // markout curves: same window, slower poll — the aggregate moves with whole
+  // fills aging past +15s, and the server caches it per window anyway.
+  useEffect(() => {
+    if (ui.tab !== 'leaderboard') return;
+    let on = true;
+    const load = () => { if (document.hidden) return; fetchMarkoutCurves(lbDays).then((d) => { if (on) setCurves(d); }).catch(() => { /* retried on the next poll */ }); };
+    load();
+    document.addEventListener('visibilitychange', load);
+    const id = setInterval(load, 60_000);
+    return () => { on = false; clearInterval(id); document.removeEventListener('visibilitychange', load); };
+  }, [ui.tab, lbDays]);
   // the Markouts tab's OUTLIER_FEED reads the 24h aggregate.
   useEffect(() => {
     if (ui.tab !== 'markouts') return;
@@ -451,7 +468,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [venuesById, reference]);
 
   const api = useMemo<Dashboard>(() => ({
-    ...ui, conn, state, quotes, volume, fills, lb, lbDay, gas, frame,
+    ...ui, conn, state, quotes, volume, fills, lb, lbDay, curves, gas, frame,
     venues, displayVenues, baselines, reference, references, referenceFor, venuesById,
     series: seriesRef.current, quoteStats,
     set: (k, v) => setUi((s) => ({ ...s, [k]: v })),
@@ -467,8 +484,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       // canvas colors come from JS getters (not var()), so force a repaint.
       setFrame((f) => f + 1);
     },
-    resetLb: () => setUi((s) => ({ ...s, lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbWinners: true, lbTop: 25 })),
-  }), [ui, conn, state, quotes, quoteStats, volume, fills, lb, lbDay, gas, frame, venues, displayVenues, baselines, reference, references, referenceFor, venuesById]);
+    resetLb: () => setUi((s) => ({ ...s, lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbWinners: true, lbTop: 25, cvFlow: 'ALL', cvRoute: 'ALL', cvEntry: 'ALL' })),
+  }), [ui, conn, state, quotes, quoteStats, volume, fills, lb, lbDay, curves, gas, frame, venues, displayVenues, baselines, reference, references, referenceFor, venuesById]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

@@ -1,11 +1,12 @@
 import { EventEmitter } from 'node:events';
 import type {
   DataSourceMode, DepthSnapshot, MarketState, QuoteSnapshot, Fill, DailyVolume, StreamMessage,
-  LeaderboardResponse, GasResponse, QuoteStatsResponse,
+  LeaderboardResponse, GasResponse, QuoteStatsResponse, MarkoutCurvesResponse,
 } from '@shared';
 import { QUOTE_CHART_WINDOW_MS } from '@shared';
 import { ExecutionHistory } from '../execution-history.js';
 import { computeLeaderboard } from '../analytics.js';
+import { computeMarkoutCurves, type CurveRow } from '../markout-curves.js';
 
 /**
  * A DataSource produces the entire dashboard data model and streams updates.
@@ -33,6 +34,9 @@ export interface DataSource {
    *  Async: the pass yields to the event loop (hundreds of thousands of rows
    *  at 30d must not stall the quote stream). */
   leaderboard(days: number): Promise<LeaderboardResponse>;
+  /** Markout curves (−5s → +15s) aggregated per venue × flow × route ×
+   *  category over the window — the Leaderboard tab's MARKOUT_CURVE. */
+  markoutCurves(days: number): Promise<MarkoutCurvesResponse>;
   /** The last ~60s of REAL quote ticks for one (market, size) — seeds the
    *  Execution chart so it never fabricates history (flat pre-fill). */
   quoteHistory(market: string, size: number): QuoteSnapshot[];
@@ -95,6 +99,25 @@ export abstract class BaseSource extends EventEmitter implements DataSource {
       return this.getFills().filter((f) => want.has(f.id));
     });
   }
+
+  /** Default: aggregate the in-memory fill window (sim). Live overrides with a
+   *  keyset-paged SQLite scan on the analytics worker. */
+  markoutCurves(days: number): Promise<MarkoutCurvesResponse> {
+    const now = Date.now();
+    const since = now - days * 86_400_000;
+    const rows: CurveRow[] = this.getFills()
+      .filter((f) => f.ts >= since && f.ts <= now)
+      .sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((f) => ({
+        id: f.id, ts: f.ts, venueId: f.venueId, market: f.market, category: f.category, side: f.side,
+        pool: f.pool, usd: f.usd, txHash: f.txHash, pxApprox: !!f.pxApprox, curve: this.curveOf(f.id),
+      }));
+    let i = 0;
+    return computeMarkoutCurves(() => rows.slice(i, (i += 5000)), days, now);
+  }
+
+  /** A fill's markout curve for the in-memory aggregation (sim synthesizes one). */
+  protected curveOf(_fillId: string): (number | null)[] | null { return null; }
 
   /** Default: no gas series. Live reads daily_gas; sim synthesizes one. */
   gasSeries(): GasResponse { return { days: [], approx: [] }; }

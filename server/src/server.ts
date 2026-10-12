@@ -270,6 +270,19 @@ export function startServer(source: DataSource): Server {
     try { res.json(await source.leaderboard(days)); }
     catch { res.status(500).json({ error: 'aggregation failed' }); }
   });
+  // markout curves (−5s → +15s) aggregated per venue/flow/route/category over
+  // the window — small cells the client sums under any filter. TAKER-signed.
+  app.get('/api/markout-curves', async (req, res) => {
+    const days = positiveNumberParam(req.query.days) ?? 1;
+    if (!(LEADERBOARD_WINDOW_DAYS as readonly number[]).includes(days)) {
+      return res.status(400).json({ error: `days must be one of ${LEADERBOARD_WINDOW_DAYS.join(', ')}` });
+    }
+    if (source.isReady?.() === false) return res.setHeader('Retry-After', '1').status(503).json({ error: 'history warming' });
+    try {
+      res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=30, must-revalidate');
+      res.json(await source.markoutCurves(days));
+    } catch { res.status(500).json({ error: 'aggregation failed' }); }
+  });
   // QUOTE_UPDATE_BURN: per-venue quote-update gas per UTC day (MON + tx
   // counts), plus which venues are sampled estimates (UI shows ≈).
   app.get('/api/gas', (_req, res) => res.json(source.gasSeries()));

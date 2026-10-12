@@ -9,8 +9,8 @@ const store = new VolumeStore((workerData as { dbPath: string }).dbPath);
 function apply(mutation: StoreMutation): unknown {
   switch (mutation.kind) {
     case 'snapshot': {
-      const { days, meta, fills } = mutation.snapshot;
-      return store.persistSnapshot(days, meta, fills);
+      const { days, meta, fills, curves } = mutation.snapshot;
+      return store.persistSnapshot(days, meta, fills, curves);
     }
     case 'setMeta': return store.setMeta(mutation.key, mutation.value);
     case 'deleteMetaPrefix': return store.deleteMetaPrefix(mutation.prefix);

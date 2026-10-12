@@ -2,8 +2,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { MARKOUT_HORIZONS, type DailyVolume, type Fill, type GasDay } from '@shared';
+import type { CurveRow } from './markout-curves.js';
 
 type Stmt = ReturnType<DatabaseSync['prepare']>;
+/** One fill's derived markout curve (server/src/markout-curves.ts). */
+export type CurveWrite = { id: string; curveBps: (number | null)[] };
 
 /**
  * SQLite persistence (docs/architecture.md: data model). The DB is the source of truth for history:
@@ -37,6 +40,16 @@ const SCHEMA_VERSION = '3';
  *                 pairs — old and new values are not comparable).
  */
 const MARKOUT_MODEL_VERSION = 'pair-mid-1';
+
+/**
+ * Version of the stored markout CURVE (fills.curve_bps — server/src/markout-curves.ts).
+ * Bump when CURVE_OFFSETS_S, the mark-time convention or the reference changes:
+ * every stored curve is nulled, and the live ring re-captures from there, so
+ * curves of two models never mix in one aggregate.
+ *
+ *  'curve-1' — taker bps vs the pair-terms mid at block-second-mid + offset.
+ */
+const CURVE_MODEL_VERSION = 'curve-1';
 /** Retention cutoff: the UTC day start `days` days back. Day-aligned so the
  *  oldest retained day is always COMPLETE — reconcileSwapCounts rewrites a
  *  day's swap count from its retained fills, and a mid-day cutoff made the
@@ -113,6 +126,7 @@ export class VolumeStore {
   private metaStmt!: Stmt;
   private fillStmt!: Stmt;
   private gasStmt!: Stmt;
+  private curveStmt!: Stmt;
 
   constructor(path = 'data/mpamm.db', readOnly = false) {
     if (readOnly) {
@@ -210,6 +224,11 @@ export class VolumeStore {
     if (!fillCols.some((c) => c.name === 'router')) {
       this.db.exec(`ALTER TABLE fills ADD COLUMN router TEXT`);
     }
+    // additive migration: fills gained `curve_bps` (JSON, CURVE_OFFSETS_S order,
+    // taker-signed), written only once COMPLETE. NULL = the live ring never
+    // covered the fill (it predates curves, or a boot / feed gap).
+    const curveColAdded = !fillCols.some((c) => c.name === 'curve_bps');
+    if (curveColAdded) this.db.exec(`ALTER TABLE fills ADD COLUMN curve_bps TEXT`);
     // Defense in depth: pxApprox fills must never expose persisted markouts. This
     // normalizes adapter-supplied/backfilled rows and cleans any rows written by a
     // prior build that aged approximate fills before the live guard existed.
@@ -226,6 +245,15 @@ export class VolumeStore {
       if (Number(info.changes) > 0) console.log(`[mpamm] markout model → ${MARKOUT_MODEL_VERSION}: reset markouts on ${info.changes} retained fill(s)`);
       this.db.prepare(`INSERT INTO meta (key, value) VALUES ('markout_model_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(MARKOUT_MODEL_VERSION);
     }
+    const curveVer = (this.db.prepare(`SELECT value FROM meta WHERE key = 'curve_model_version'`).get() as { value: string } | undefined)?.value;
+    if (curveVer !== CURVE_MODEL_VERSION) {
+      // a freshly added column is all NULL already — skip the full-table scan.
+      if (!curveColAdded) {
+        const info = this.db.prepare(`UPDATE fills SET curve_bps = NULL WHERE curve_bps IS NOT NULL`).run();
+        if (Number(info.changes) > 0) console.log(`[mpamm] curve model → ${CURVE_MODEL_VERSION}: reset curves on ${info.changes} retained fill(s)`);
+      }
+      this.db.prepare(`INSERT INTO meta (key, value) VALUES ('curve_model_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(CURVE_MODEL_VERSION);
+    }
 
     this.dayStmt = this.db.prepare(`
       INSERT INTO daily_volume (utc_day, venue_id, usd, swaps) VALUES (?, ?, ?, ?)
@@ -241,6 +269,7 @@ export class VolumeStore {
     this.gasStmt = this.db.prepare(`
       INSERT INTO daily_gas (utc_day, venue_id, mon, txs) VALUES (?, ?, ?, ?)
       ON CONFLICT(utc_day, venue_id) DO UPDATE SET mon = mon + excluded.mon, txs = txs + excluded.txs`);
+    this.curveStmt = this.db.prepare(`UPDATE fills SET curve_bps = ? WHERE id = ?`);
   }
 
   async readSnapshot<T>(read: () => Promise<T>): Promise<T> {
@@ -473,13 +502,16 @@ export class VolumeStore {
    * cursor, which a gap-fill on the next boot would otherwise re-count (fills
    * dedupe by their deterministic txHash:logIndex id).
    */
-  persistSnapshot(days: DailyVolume[], meta: Record<string, string>, fills: Fill[]): void {
+  persistSnapshot(days: DailyVolume[], meta: Record<string, string>, fills: Fill[], curves: CurveWrite[] = []): void {
     this.assertWritable();
     this.db.exec('BEGIN');
     try {
       for (const d of days) this.runDay(d);
       for (const [k, v] of Object.entries(meta)) this.metaStmt.run(k, v);
       for (const f of fills) this.runFill(f);
+      // after the fills: a curve can complete in the same snapshot that first
+      // inserts its fill row.
+      for (const c of curves) this.curveStmt.run(JSON.stringify(c.curveBps), c.id);
       this.db.exec('COMMIT');
     } catch (e) {
       this.db.exec('ROLLBACK');
@@ -536,6 +568,24 @@ export class VolumeStore {
     return rows.map((r) => ({
       id: r.id, ts: r.ts, venueId: r.venue_id, market: r.market, category: r.category,
       pool: r.pool, to: r.to_label, usd: r.usd, markoutsBps: [r.m0, r.m1, r.m2, r.m3, r.m4],
+    }));
+  }
+
+  /** Rows for the markout-CURVE aggregation, keyset-paged like lbFillsChunk.
+   *  pxApprox rows are INCLUDED: they are real legs of their transaction, so
+   *  route classification needs them; the aggregation keeps them out of the
+   *  stats. The curve is parsed in JS — one array per row, read once. */
+  curveFillsChunk(sinceMs: number, afterTs: number, afterId: string, limit: number, maxTs?: number): CurveRow[] {
+    const rows = this.db.prepare(`
+      SELECT id, ts, venue_id, market, category, side, pool, usd, tx_hash, px_approx, curve_bps
+      FROM fills
+      WHERE ts >= ? AND (ts > ? OR (ts = ? AND id > ?)) AND ts <= ?
+      ORDER BY ts ASC, id ASC LIMIT ?
+    `).all(sinceMs, afterTs, afterTs, afterId, maxTs ?? Number.MAX_SAFE_INTEGER, limit) as Array<Record<string, any>>;
+    return rows.map((r) => ({
+      id: r.id, ts: r.ts, venueId: r.venue_id, market: r.market, category: r.category, side: r.side,
+      pool: r.pool, usd: r.usd, txHash: r.tx_hash, pxApprox: !!r.px_approx,
+      curve: r.curve_bps ? JSON.parse(r.curve_bps) : null,
     }));
   }
 

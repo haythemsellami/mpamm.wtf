@@ -1,6 +1,6 @@
 import { subscribeTopics } from './subscriptions';
 import type { StreamTopic } from '@shared';
-import type { MarketsResponse, StreamMessage, DepthSnapshot, Fill, QuoteSnapshot, QuoteStatsResponse, LeaderboardResponse, GasResponse } from '@shared';
+import type { MarketsResponse, StreamMessage, DepthSnapshot, Fill, QuoteSnapshot, QuoteStatsResponse, LeaderboardResponse, GasResponse, MarkoutCurvesResponse } from '@shared';
 
 export async function fetchMarkets(volume = false): Promise<MarketsResponse> {
   const r = await fetch(`/api/bootstrap${volume ? '?volume=1' : ''}`);
@@ -125,6 +125,13 @@ export async function fetchLeaderboard(days: number): Promise<LeaderboardRespons
     return result.json();
   }
   throw new Error('aggregate revision expired');
+}
+
+/** Markout curves (−5s → +15s) over the window, as filterable cells. */
+export async function fetchMarkoutCurves(days: number): Promise<MarkoutCurvesResponse> {
+  const r = await fetch(`/api/markout-curves?days=${days}`);
+  if (!r.ok) throw new Error(`/api/markout-curves ${r.status}`);
+  return r.json();
 }
 
 /** Reconnecting WS to the service stream, suspended while the tab is hidden
