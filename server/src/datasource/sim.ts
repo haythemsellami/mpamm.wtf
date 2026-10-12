@@ -363,11 +363,12 @@ export class SimDataSource extends BaseSource {
     this.addrs = Array.from({ length: 14 }, () => txS());
   }
 
-  /** `pin` fixes the market (and venue): every price and bias below derives
-   *  from them, so a caller must not relabel a fill made for another. */
-  private makeFill(ageSec: number, big: boolean, pin?: { market: string; venueId?: string }): SimFill {
+  /** `pin` fixes the market, venue and side: every price, bias and markout
+   *  sign below derives from them, so a caller must not relabel a fill made
+   *  for another. */
+  private makeFill(ageSec: number, big: boolean, pin?: { market: string; venueId?: string; side?: Side }): SimFill {
     const market = pin?.market ?? MARKETS[Math.floor(Math.random() * MARKETS.length)];
-    const side: Side = Math.random() < 0.5 ? 'buy' : 'sell';
+    const side: Side = pin?.side ?? (Math.random() < 0.5 ? 'buy' : 'sell');
     const v = this.display.find((d) => d.id === pin?.venueId)
       ?? (this.display.length ? wpick(this.display, this.weights()) : this.venues[0]);
     const cr = Math.random();
@@ -421,13 +422,13 @@ export class SimDataSource extends BaseSource {
   private companion(f: SimFill): SimFill {
     const others = this.display.filter((v) => v.id !== f.venueId);
     const v = others.length ? others[Math.floor(Math.random() * others.length)] : this.display[0];
-    // made FOR the other venue and this market, so its price, markouts and
-    // curve carry that venue's bias in the right quote asset
-    const g = this.makeFill(0, false, { market: f.market, venueId: v?.id });
     const twoSided = Math.random() < 0.5;
+    const side: Side = twoSided ? (f.side === 'buy' ? 'sell' : 'buy') : f.side;
+    // made FOR the other venue, this market and this side, so its price,
+    // markouts and curve carry that venue's bias, quote asset and sign
+    const g = this.makeFill(0, false, { market: f.market, venueId: v?.id, side });
     return {
-      ...g, side: twoSided ? (f.side === 'buy' ? 'sell' : 'buy') : f.side,
-      txHash: f.txHash, blockNumber: f.blockNumber, ts: f.ts, bornMs: f.bornMs, category: f.category,
+      ...g, txHash: f.txHash, blockNumber: f.blockNumber, ts: f.ts, bornMs: f.bornMs, category: f.category,
     };
   }
 

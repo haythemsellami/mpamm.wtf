@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -160,5 +160,16 @@ describe('simulator', () => {
     // a companion leg relabeled from a fill made for another market would carry
     // that market's price
     for (const f of fills) expect(Math.abs(f.execPx / (sim as any).midPx(f.market) - 1)).toBeLessThan(0.01);
+  });
+
+  it('generates a companion leg FOR its side, never relabels one made for the other', async () => {
+    const sim = new SimDataSource() as any;
+    await sim.start();
+    clean.push(() => sim.stop());
+    const make = vi.spyOn(sim, 'makeFill');
+    for (let i = 0; i < 20; i++) {
+      const c = sim.companion(sim.makeFill(0, false));
+      expect((make.mock.calls.at(-1)?.[2] as { side?: string } | undefined)?.side).toBe(c.side);
+    }
   });
 });
