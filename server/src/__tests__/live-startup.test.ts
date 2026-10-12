@@ -802,6 +802,25 @@ describe('live startup archive gate', () => {
       } finally { source.store.close(); }
     });
 
+    it('drains work restored during the shutdown flush before it resolves', async () => {
+      const { source } = await setup();
+      source.knownVenueIds = new Set(['test-venue']);
+      try {
+        source.ingest(fill('f', Date.now() - 120_000));
+        const persistSnapshot = vi.spyOn(source.store, 'persistSnapshot')
+          .mockImplementationOnce(() => { throw new Error('disk busy'); });
+        // A (the fill) is in flight and fails; stop()'s flush B carries only
+        // the curve and commits the cursor first. Nothing ticks after B.
+        const a = source.persist();
+        source.dirtyCurves.set('f', curve);
+        const b = source.persist(true);
+        await Promise.all([a, b]);
+        expect(stored(source).get('f')).toEqual(curve);
+        expect(persistSnapshot).toHaveBeenCalledTimes(3);
+        expect(source.dirty.size + source.dirtyCurves.size).toBe(0);
+      } finally { source.store.close(); }
+    });
+
     it('drops a curve whose fill a venue reset purged, without wedging later snapshots', async () => {
       const { source } = await setup();
       source.knownVenueIds = new Set(['test-venue']);

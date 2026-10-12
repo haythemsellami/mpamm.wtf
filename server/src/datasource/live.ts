@@ -1606,7 +1606,15 @@ export class LiveDataSource extends BaseSource {
 
     return this.writeSnapshot(snapshot)
       .then(
-        (result) => this.requeueUnmatchedCurves(dirtyCurves, result.unmatchedCurves),
+        (result): Promise<void> | void => {
+          this.requeueUnmatchedCurves(dirtyCurves, result.unmatchedCurves);
+          // The shutdown flush has no next tick: work restored meanwhile (an
+          // earlier in-flight snapshot that failed, a requeued curve) must be
+          // drained before stop() closes the writer — this snapshot already
+          // committed the cursor past it. Converges: a failure throws here,
+          // and a curve requeues at most CURVE_MAX_RETRIES times.
+          if (reportFailure && (this.dirty.size || this.dirtyDays.size || this.dirtyCurves.size)) return this.persist(true);
+        },
         (e) => {
           for (const f of dirtyFills) this.dirty.add(f);
           for (const day of dirtyDays) this.dirtyDays.add(day);
