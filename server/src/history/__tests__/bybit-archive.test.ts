@@ -227,6 +227,26 @@ describe('pairMidSeries — Bybit-based stable pair', () => {
     expect([...hosts]).toEqual(['quote-saver.bycsi.com']);
   });
 
+  it('carries a QUIET cross past 120s (an unchanged book publishes nothing) while the base still nulls', async () => {
+    const D = '2026-09-29', P = '2026-09-28', N = '2026-09-30';
+    for (const d of [P, D, N]) {
+      // MON ticks every minute, except a 5-minute feed gap at [600s, 900s)
+      const mon = [msg('MONUSDT', day(d) + 1_000, 'snapshot', [['0.02875', '1']], [['0.02876', '1']])];
+      for (let t = 60_000; t < 86_400_000; t += 60_000) if (t <= 600_000 || t >= 900_000) mon.push(msg('MONUSDT', day(d) + t, 'delta', [['0.02875', String(1 + (t % 7))]], []));
+      publish('MONUSDT', d, mon);
+      // the cross's book changes only every 5 minutes
+      const usdc = [msg('USDCUSDT', day(d) + 1_000, 'snapshot', [['1.0002', '1']], [['1.0003', '1']])];
+      for (let t = 300_000; t < 86_400_000; t += 300_000) usdc.push(msg('USDCUSDT', day(d) + t, 'delta', [['1.0002', String(1 + (t % 7))]], []));
+      publish('USDCUSDT', d, usdc);
+    }
+    const s = await pairMidSeries('MON/USDC', day(D), day(D) + 86_400_000 + 120_000);
+    expect(s?.at(day(D) + 299_000)).toBeCloseTo(0.028755 / 1.00025, 12); // cross last moved 298s ago
+    expect(s?.at(day(D) + 800_000)).toBeNull();                            // base silent 200s
+    // the cap is the reader's, not the cache's: the same cached day read as a
+    // BASE leg (120s) does null there
+    expect((await bybitBookMidSeries('USDCUSDT', day(D), day(D) + 86_400_000))?.at(day(D) + 299_000)).toBeNull();
+  });
+
   it('defers (null) when the cross day is unpublished — never pegs the cross to 1', async () => {
     const D = '2026-09-29';
     for (const d of ['2026-09-28', D, '2026-09-30']) publish('MONUSDT', d, [msg('MONUSDT', day(d) + 1_000, 'snapshot', [['0.02875', '1']], [['0.02876', '1']])]);

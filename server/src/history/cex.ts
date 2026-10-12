@@ -34,8 +34,8 @@ import { config } from '../config.js';
 
 export interface StepSeries { at(t: number): number | null }
 
-const STALE_BASE_MS = 120_000;  // base leg: trades/1s-klines — 2min gap ⇒ null
-const STALE_SLOW_MS = 30 * 60_000; // cross/wrap legs: 1m klines, slow-moving
+const STALE_BASE_MS = 120_000;  // base leg: book mids/1s klines — 2min gap ⇒ null
+const STALE_SLOW_MS = 30 * 60_000; // cross/wrap legs: 1m klines or a quiet stable book
 
 function makeSeries(ts: number[], px: number[], staleMs: number): StepSeries {
   return {
@@ -92,15 +92,19 @@ const dumpDir = () => {
 
 /** Bybit's keyless historical-data host publishes each spot symbol's
  *  `orderbook.200` WS stream (snapshot + deltas, ~10ms) as ONE daily zip the
- *  next day (~00:10 UTC). Days are UTC; each file starts with a snapshot a few
+ *  next day (~00:00–00:02 UTC). Days are UTC; each file starts with a snapshot a few
  *  seconds after midnight and runs a few seconds past the next one. */
 const bybitBookUrl = (symbol: string, day: string) =>
   `https://quote-saver.bycsi.com/orderbook/spot/${symbol}/${day}_${symbol}_ob200.data.zip`;
 /** the day REDUCED to its BBO-mid curve — ~2 MB vs ~200 MB of raw book
- *  messages, so every venue × market remark of that day shares one download. */
+ *  messages, so every venue × market remark of that day shares one download.
+ *  Raw points only: the staleness cap is the READER's (bybitBookMidSeries), so
+ *  one cached day serves a base leg and a cross leg with different caps. */
 const bookMidPath = (symbol: string, day: string) => join(dumpDir(), `${symbol}_${day}.bbo-mid.csv`);
 /** a carry-forward point is re-emitted at least this often while messages
- *  arrive, so the staleness cap measures a FEED gap, not a quiet mid. */
+ *  arrive, so an unchanged mid on a ticking book never reads as stale. A book
+ *  that doesn't change at all publishes NOTHING, though — see the cross leg's
+ *  cap in pairMidSeries. */
 const BOOK_HEARTBEAT_MS = 5_000;
 
 /** true when the day's archive is published (HEAD, no body) — lets a multi-day
@@ -282,9 +286,10 @@ async function bybitBookDay(symbol: string, day: string): Promise<{ ts: number[]
 
 /** BBO-mid series for [fromMs, toMs) from Bybit's daily orderbook archives —
  *  the SAME quantity the live reference reads (BybitFeed.mid()/crossMid() are
- *  BBO mids), for the base leg and the stable cross alike. Null when a needed
- *  day isn't published yet — the caller defers rather than fabricating. */
-export async function bybitBookMidSeries(symbol: string, fromMs: number, toMs: number): Promise<StepSeries | null> {
+ *  BBO mids), for the base leg and the stable cross alike, carried forward up
+ *  to `staleMs`. Null when a needed day isn't published yet — the caller
+ *  defers rather than fabricating. */
+export async function bybitBookMidSeries(symbol: string, fromMs: number, toMs: number, staleMs = STALE_BASE_MS): Promise<StepSeries | null> {
   const days: string[] = [];
   for (let t = Math.floor(fromMs / 86_400_000) * 86_400_000; t < toMs; t += 86_400_000) days.push(new Date(t).toISOString().slice(0, 10));
   for (const day of days) if (!(await bybitBookExists(symbol, day))) return null; // fail fast
@@ -298,7 +303,7 @@ export async function bybitBookMidSeries(symbol: string, fromMs: number, toMs: n
     }
   }
   if (!ts.length) return null;
-  return makeSeries(ts, px, STALE_BASE_MS);
+  return makeSeries(ts, px, staleMs);
 }
 
 // ── pair-terms mid series (base × wrap ÷ quote leg — same construction as live) ──
@@ -311,7 +316,7 @@ async function assetUsdtSeries(assetKey: string, fromMs: number, toMs: number): 
   if (!a) return null;
   return a.cex === 'binance'
     ? binanceKlineSeries(a.cexSymbol, '1s', fromMs - STALE_BASE_MS, toMs)
-    : bybitBookMidSeries(a.cexSymbol, fromMs - STALE_BASE_MS, toMs);
+    : bybitBookMidSeries(a.cexSymbol, fromMs - STALE_BASE_MS, toMs, STALE_BASE_MS);
 }
 
 /**
@@ -361,7 +366,13 @@ export async function pairMidSeries(market: string, fromMs: number, toMs: number
         // kline close is a last trade on a 0.0001 tick (1bp steps) where the
         // live cross is the half-tick BBO mid. The book archive host is the
         // keyless data CDN, not the REST API.
-        quote = await bybitBookMidSeries(crossSym, fromMs - STALE_BASE_MS, toMs);
+        // The SLOW cap, not the base one: the archive records only changes, and
+        // a stable cross's book can sit untouched for minutes (USD1USDT,
+        // 2026-10-11: 17 gaps > 120s in the first 9h). The live crossMid()
+        // serves its last BBO for as long as the socket is fresh, so a 120s cap
+        // here would null marks that live gives a value — the same 30min cap
+        // as the Binance-side 1m cross.
+        quote = await bybitBookMidSeries(crossSym, fromMs - pad, toMs, STALE_SLOW_MS);
         if (!quote) return null; // cross day not published yet — defer, never peg
       }
     }

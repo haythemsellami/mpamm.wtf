@@ -230,9 +230,11 @@ export const config = {
    *  boots; MARKOUT_BACKFILL=off disables. */
   markoutBackfill: (env.MARKOUT_BACKFILL ?? 'on').toLowerCase() !== 'off',
   markoutBackfillDays: num('MARKOUT_BACKFILL_DAYS', 30),
-  /** Retry cadence for DEFERRED markout backfills (ms). A month's CEX archive
-   *  publishes a few days after month end; this sweep re-probes (HEAD, cheap)
-   *  and marks the deferred days as soon as it lands — no restart needed. */
+  /** Retry cadence for DEFERRED markout backfills (ms). Bybit's book archive
+   *  for a UTC day publishes ~00:00–00:02 UTC the next day, and a day's marks
+   *  also need the NEXT day's file (horizons past midnight); this sweep
+   *  re-probes (HEAD, cheap) and marks the deferred days as soon as they land
+   *  — no restart needed. */
   markoutRetryMs: num('MARKOUT_RETRY_MS', 6 * 3_600_000),
   /** ONE-SHOT full re-scan trigger: comma-separated venue ids (e.g. "metric").
    *  On boot, clears those venues' backfill done-flag + cursor so their history

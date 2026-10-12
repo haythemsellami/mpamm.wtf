@@ -2241,7 +2241,7 @@ export class LiveDataSource extends BaseSource {
       // endpoint) must not skip the venue's OTHER markets — observed in prod
       // when a MON cross-leg 403 paused the whole venue's remark stage.
       try { await this.remarkVenueMarket(vid, name, market, cutoff); }
-      catch (e) { this.noteOnce('markout.paused', `${name} ${market}: markout backfill paused (${(e as Error).message}); resumes next boot`, vid); }
+      catch (e) { this.noteOnce('markout.paused', `${name} ${market}: markout backfill paused (${(e as Error).message}); retries on the next sweep`, vid); }
     }
   }
 
