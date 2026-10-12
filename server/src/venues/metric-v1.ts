@@ -1,10 +1,10 @@
-import { parseAbi } from 'viem';
+import { decodeErrorResult, parseAbi } from 'viem';
 import type { Fill, QuoteRow, Side } from '@shared';
 import { TOKENS } from '@shared';
 import { fromUnits, toUnits, shortHex } from '../util.js';
 import type { AdapterContext, LogBundle } from './adapter.js';
 import type { VenueGeneration } from './generations.js';
-import { createQuoteOutageReporter } from './quote-health.js';
+import { createQuoteOutageLatch, createQuoteOutageReporter, type MulticallOutcome } from './quote-health.js';
 import { METRIC_VENUE, admitMetricPool, metricFill, metricPoolLiveness, type MetricPool, type NotLiveReason } from './metric-shared.js';
 
 /**
@@ -79,6 +79,38 @@ export const metricV1QuoterAbi = parseAbi([
 ]);
 const erc20Abi = parseAbi(['function balanceOf(address) view returns (uint256)']);
 
+/** The custom errors a v1 quote leg reverts with (SDK abis/*.ts). The quoter
+ *  re-raises a pool or extension failure as WrappedError(target, selector,
+ *  reason), so the useful name is one or two layers down — and a custom error
+ *  carries no Error(string), which is all quote-health's reason reader sees. */
+const metricV1ErrorAbi = parseAbi([
+  'error WrappedError(address target, bytes4 selector, bytes reason)',
+  'error OracleStopLossTriggered(int16 binIdx, bool isToken0Metric, uint256 currentMetric, uint256 threshold)',
+  'error PriceVelocityExceeded(uint256 actualDeltaSqE36, uint256 allowedDeltaSqE36)',
+  'error PoolPaused()',
+  'error NotAllowedToSwap()',
+  'error InsufficientLiquidity(uint256 requested, uint256 available)',
+  'error PriceProviderFailed(bytes reason)',
+]);
+
+/** The innermost Metric error NAME in a failed leg's viem error chain (the
+ *  revert bytes sit on ContractFunctionRevertedError.raw), its selector when
+ *  unknown, or null when the leg failed without reverting (transport). */
+export function metricV1RevertName(err: unknown): string | null {
+  let raw: string | undefined;
+  for (let e = err as any, depth = 0; e && depth < 6 && !raw; e = e.cause, depth++) {
+    if (typeof e.raw === 'string' && e.raw.length >= 10) raw = e.raw;
+  }
+  for (let layer = 0; raw && layer < 4; layer++) {
+    try {
+      const decoded = decodeErrorResult({ abi: metricV1ErrorAbi, data: raw as `0x${string}` });
+      if (decoded.errorName !== 'WrappedError') return decoded.errorName;
+      raw = decoded.args[2];
+    } catch { return `error ${raw.slice(0, 10)}`; }
+  }
+  return raw ? `error ${raw.slice(0, 10)}` : null;
+}
+
 const ev = (abi: readonly unknown[], name: string) => abi.find((x: any) => x.type === 'event' && x.name === name);
 
 type Immutables = { factory: string; token0: string; token1: string; immutablePriceProvider: string };
@@ -87,6 +119,10 @@ export function createMetricV1Generation(): VenueGeneration {
   // every leg FAILING is a venue-wide cause (paused, ABI drift, an oracle that
   // refuses the read), not a per-pair gap — name it (venues/quote-health.ts).
   const reportOutage = createQuoteOutageReporter(METRIC_VENUE.name);
+  /** one latch per market × side: a pool can block ONE direction while the
+   *  other trades — Metric's stop-loss extension refused every MON-out leg
+   *  for ~2 minutes on 2026-10-12 (16:18:01 → 16:20:05 UTC) */
+  const sideLatches = new Map<string, ReturnType<typeof createQuoteOutageLatch>>();
   // THREE different questions, three different sets — conflating them is what
   // let real fills go uncounted (issue #61):
   //   candidates → every pool the factory lists.
@@ -309,7 +345,25 @@ export function createMetricV1Generation(): VenueGeneration {
       if (!calls.length) return [];
       const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
       ctx.quoteSignal?.throwIfAborted();
-      if (reportOutage(ctx, qRes)) return [];
+      // Hand the health reporter the DECODED name: it reads Error(string)
+      // reasons, and every v1 revert is a custom error it would call "call failed".
+      const names = qRes.map((r) => (r.status === 'failure' ? metricV1RevertName(r.error) : null));
+      const named: MulticallOutcome[] = qRes.map((r, i) => (r.status === 'failure' && names[i] ? { status: 'failure', error: { reason: names[i] } } : r));
+      if (reportOutage(ctx, named)) return [];
+
+      // A whole SIDE refusing (every size of one direction on one market) is a
+      // venue state, not thin liquidity: say why, once, and announce the heal.
+      // The other side is still published below as one-sided rows.
+      const bySide = new Map<string, number[]>();
+      legs.forEach((l, i) => { const k = `${l.pool.market}|${l.side}`; (bySide.get(k) ?? bySide.set(k, []).get(k)!).push(i); });
+      for (const [k, idx] of bySide) {
+        const [market, side] = k.split('|');
+        let latch = sideLatches.get(k);
+        if (!latch) sideLatches.set(k, (latch = createQuoteOutageLatch(`${METRIC_VENUE.name} ${market} ${side}s`)));
+        if (idx.some((i) => qRes[i].status === 'success')) { latch(ctx, null); continue; }
+        const reason = names[idx[0]] ?? 'call failed';
+        latch(ctx, { reason, msg: `${METRIC_VENUE.name} ${market} ${side}s unavailable — every ${side} leg failed with "${reason}"${reason === 'OracleStopLossTriggered' ? ' (the pool\'s stop-loss extension is blocking that direction)' : ''}; quoting the other side only` });
+      }
 
       const rowByKey = new Map<string, QuoteRow>();
       const ts = Date.now();
@@ -339,8 +393,16 @@ export function createMetricV1Generation(): VenueGeneration {
         else { row.bidBps = bps; row.bidPx = px; }
         row.filledFull &&= legFull;
       }
-      for (const row of rowByKey.values()) row.spreadBps = row.askBps - row.bidBps;
-      return [...rowByKey.values()].filter((r) => r.askPx > 0 && r.bidPx > 0);
+      // one real side + one refused side is a genuine half-market: keep the real
+      // side as one-sided (the Capricorn/Lunarbase/Uniswap convention) rather
+      // than dropping the venue off the grid while it still trades one way.
+      const out: QuoteRow[] = [];
+      for (const row of rowByKey.values()) {
+        if (row.askPx > 0 && row.bidPx > 0) row.spreadBps = row.askBps - row.bidBps;
+        else row.oneSided = true;
+        if (row.askPx > 0 || row.bidPx > 0) out.push(row);
+      }
+      return out;
     },
 
     logSources() {

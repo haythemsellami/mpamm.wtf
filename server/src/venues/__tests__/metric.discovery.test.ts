@@ -8,7 +8,8 @@ import { TOKENS } from '@shared';
 import { createMetricAdapter } from '../metric.js';
 import { admitMetricPool, isMetricPoolLive, metricPoolLiveness } from '../metric-shared.js';
 import { V0_LAST_SWAP_BLOCK, V0_POOLS, V0_PUSH_ORACLE } from '../metric-v0.js';
-import { V1_FACTORY, V1_FACTORY_BLOCK, V1_SIMPLE_ROUTER } from '../metric-v1.js';
+import { V1_FACTORY, V1_FACTORY_BLOCK, V1_SIMPLE_ROUTER, metricV1RevertName } from '../metric-v1.js';
+import { readFileSync } from 'node:fs';
 import { sourceSpan } from '../adapter.js';
 import { classifyGasSourceChange, gasSourcesSignature } from '../../gas.js';
 
@@ -316,6 +317,61 @@ describe('Metric v1 quotes', () => {
     await a.discover(q);
     expect(await a.quote!(q, [100], 1n)).toEqual([]);
     expect(notes.some((n) => /Metric/.test(n) && /fail/i.test(n))).toBe(true);
+  });
+});
+
+/** the real quoter revert recorded during the 2026-10-12 stop-loss window, in
+ *  the nesting viem's multicall hands back (ContractFunctionRevertedError.raw) */
+const STOP_LOSS_RAW = JSON.parse(readFileSync(new URL('./fixtures/metric.json', import.meta.url), 'utf8')).v1StopLossRevert.raw as string;
+const stopLossError = () => ({ name: 'ContractFunctionExecutionError', cause: { name: 'ContractFunctionRevertedError', raw: STOP_LOSS_RAW } });
+
+describe('Metric v1 one-sided quotes (a pool refusing one direction)', () => {
+  it('decodes the real quoter revert through WrappedError to OracleStopLossTriggered', () => {
+    expect(metricV1RevertName(stopLossError())).toBe('OracleStopLossTriggered');
+    expect(metricV1RevertName({ cause: { raw: '0xdeadbeef' } })).toBe('error 0xdeadbeef');
+    expect(metricV1RevertName(new Error('fetch failed'))).toBeNull();
+  });
+
+  const funded = (p: string): [bigint, bigint] => (p === P.wmon ? [1_000n, 1_000n] : [0n, 0n]);
+  // buy legs = USDC (token1) in → zeroForOne false
+  const buysBlocked = (args: readonly unknown[]) => (args[2] === false
+    ? { status: 'failure' as const, error: stopLossError() as unknown as Error }
+    : { status: 'success' as const, result: [args[3] as bigint, (args[3] as bigint) / 10n ** 12n] as [bigint, bigint] });
+
+  it('keeps the venue on the grid with the real side, marked one-sided, while the other side is refused', async () => {
+    const a = createMetricAdapter();
+    const q = stub([], { balances: funded, quote: buysBlocked });
+    await a.discover(q);
+    const rows = await a.quote!(q, [100, 1000], 1n);
+    expect(rows).toHaveLength(2);
+    for (const r of rows) expect(r).toMatchObject({ market: 'MON/USDC', oneSided: true, askPx: 0, spreadBps: 0 });
+    expect(rows.every((r) => r.bidPx > 0)).toBe(true);
+  });
+
+  it('names the refused side once, then announces when it quotes again', async () => {
+    const seen: { code: string; msg: string; repeatable?: boolean }[] = [];
+    const a = createMetricAdapter();
+    const ctx = (o: StubOpts) => ({ ...stub([], o), note: (code: string, msg: string, opts?: { repeatable?: boolean }) => seen.push({ code, msg, repeatable: opts?.repeatable }) });
+    const blocked = ctx({ balances: funded, quote: buysBlocked });
+    await a.discover(blocked);
+    await a.quote!(blocked, [100], 1n);
+    await a.quote!(blocked, [100], 2n);                        // still blocked: latched, no repeat
+    const healthy = ctx({ balances: funded });
+    await a.quote!(healthy, [100], 3n);
+    const quoteNotes = seen.filter((n) => n.code.startsWith('venue.quote.'));
+    expect(quoteNotes.map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered']);
+    expect(quoteNotes[0].msg).toMatch(/MON\/USDC buys unavailable — every buy leg failed with "OracleStopLossTriggered" \(the pool's stop-loss extension/);
+    expect(quoteNotes[1].msg).toMatch(/MON\/USDC buys quoting again \(was "OracleStopLossTriggered"\)/);
+    expect(quoteNotes.every((n) => n.repeatable)).toBe(true);
+  });
+
+  it('names a venue-wide outage by its custom error instead of "call failed"', async () => {
+    const notes: string[] = [];
+    const a = createMetricAdapter();
+    const q = stub(notes, { balances: funded, quote: () => ({ status: 'failure', error: stopLossError() as unknown as Error }) });
+    await a.discover(q);
+    expect(await a.quote!(q, [100], 1n)).toEqual([]);
+    expect(notes.some((n) => /all 2 legs failed with "OracleStopLossTriggered"/.test(n))).toBe(true);
   });
 });
 
