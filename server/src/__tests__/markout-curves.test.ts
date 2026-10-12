@@ -62,6 +62,13 @@ describe('route classification', () => {
     // MON/USDC and MON/AUSD share a base asset: buying one and selling the other is two-sided
     expect(routeOf([row({}), row({ venueId: 'b', pool: 'q', market: 'MON/AUSD', side: 'sell' })])).toBe('twoSided');
   });
+  it('keys a leg by market too: one singleton contract across two markets is a split', () => {
+    // ThogAMM labels every market with the same pool (venues/thogamm.ts)
+    const thog = (over: Partial<CurveRow>) => row({ venueId: 'thogamm', pool: 'thogamm 0x12345678', ...over });
+    expect(routeOf([thog({ market: 'MON/USDC' }), thog({ id: 'g', market: 'MON/USDT0' })])).toBe('split');
+    // several fills on the same book and market are still one leg
+    expect(routeOf([thog({ market: 'MON/USDC' }), thog({ id: 'g', market: 'MON/USDC' })])).toBe('single');
+  });
 });
 
 describe('aggregation', () => {

@@ -948,8 +948,13 @@ export class LiveDataSource extends BaseSource {
    *  basis + stable cross applied) — the markout anchors. Keyed per pair, not per
    *  base, because MON/USDC and MON/USDT0 mark against different mids. */
   private midHist = new Map<string, { t: number; mid: number }[]>();
+  /** How far back the reference ring reaches (sampleReferences trims it). */
+  private static readonly MID_HIST_MS = 120_000;
   /** Fills whose markout curve was already taken (complete or not). */
   private curveTaken = new WeakSet<Fill>();
+  /** Late fills queued ONLY for their curve: every legacy horizon had elapsed at
+   *  ingest, so those stay exactly as an unqueued fill's (never ring-derived). */
+  private curveOnly = new WeakSet<Fill>();
   /** Complete curves awaiting the next snapshot (fills.curve_bps). Kept off the
    *  Fill objects: those ride the WS stream, and the curve must not. */
   private dirtyCurves = new Map<string, (number | null)[]>();
@@ -2519,7 +2524,7 @@ export class LiveDataSource extends BaseSource {
       history.push({ t: now, mid });
       // A wall-clock correction must not invalidate binary horizon lookups.
       if (last && last.t > now) history.sort((a, b) => a.t - b.t);
-      while (history.length > 1 && (history[0].t < now - 120_000 || history.length > 2_000)) history.shift();
+      while (history.length > 1 && (history[0].t < now - LiveDataSource.MID_HIST_MS || history.length > 2_000)) history.shift();
       this.midHist.set(pair.symbol, history);
     }
   }
@@ -2806,7 +2811,10 @@ export class LiveDataSource extends BaseSource {
       if (dropped) this.countedIds.delete(dropped.id);
     }
     // Keep aging any fill that still has a recoverable (future) markout horizon.
+    // A fill landing after its last horizon (a tail/RPC stall over 60s) is
+    // still queued for its CURVE while the ring covers the curve's first point.
     if (this.hasFutureMarkoutHorizon(f)) this.pending.add(f);
+    else if (this.curveInRing(f)) { this.curveOnly.add(f); this.pending.add(f); }
     this.dirty.add(f);
     // Bucket by the fill's execution day, keyed generically by venueId.
     const d = this.dayFor(f.ts);
@@ -2839,6 +2847,15 @@ export class LiveDataSource extends BaseSource {
     return MARKOUT_HORIZONS.some((h, i) => f.markoutsBps[i] == null && now < f.ts + h * 1000);
   }
 
+  /** True while the ring still reaches back to the fill's first curve point.
+   *  Samples exist only from boot on, so a pre-boot point simply stays missing
+   *  and the curve incomplete — never back-dated. Same pxApprox / registry
+   *  gates as the markouts. */
+  private curveInRing(f: Fill, now = Date.now()): boolean {
+    if (f.pxApprox || !pairOf(f.market)) return false;
+    return curveMarkMs(f.ts, CURVE_OFFSETS_S[0]) - LiveDataSource.CURVE_NEAR_TOL_MS >= now - LiveDataSource.MID_HIST_MS;
+  }
+
   /** Join each pending fill to the reference mid at each horizon as it ages. */
   private ageMarkouts(): Promise<void> {
     if (this.markoutWork) return this.markoutWork;
@@ -2858,6 +2875,12 @@ export class LiveDataSource extends BaseSource {
     // discovery/decode on the pair registry so this shouldn't be reachable).
     if (!pairOf(f.market)) { this.pending.delete(f); this.noteOnce('markout.market.unregistered', `fill market '${f.market}' is not a registered pair — markouts skipped`, f.venueId); return; }
     const hist = this.midHist.get(f.market) ?? [];
+    // queued for the curve alone: the legacy horizons are left untouched.
+    if (this.curveOnly.has(f)) {
+      this.takeCurve(f, hist, now);
+      if (this.curveTaken.has(f)) this.pending.delete(f);
+      return;
+    }
     // A horizon that elapsed before we had any mid for THIS pair can't be
     // computed faithfully — leave it null rather than fabricate it (M1).
     const earliestMid = hist.length ? hist[0].t : now;
@@ -2877,6 +2900,10 @@ export class LiveDataSource extends BaseSource {
       }
     }
     if (changed) { this.dirty.add(f); this.emitMsg({ ch: 'fill', data: f }); }
+    this.takeCurve(f, hist, now);
+    if (complete) this.pending.delete(f);
+  }
+  private takeCurve(f: Fill, hist: readonly { t: number; mid: number }[], now: number): void {
     // The curve is taken ONCE, when its last point has elapsed — the ring
     // (~2 min) still covers every point then. Only a complete curve is kept: a
     // gap (boot, starving feed) leaves curve_bps NULL rather than freezing a
@@ -2889,7 +2916,6 @@ export class LiveDataSource extends BaseSource {
       const curve = curvePoints(f, (t) => nearestReferenceSample(hist, t, LiveDataSource.CURVE_NEAR_TOL_MS)?.mid);
       if (curveComplete(curve)) this.dirtyCurves.set(f.id, curve);
     }
-    if (complete) this.pending.delete(f);
   }
   /** Curve points are 1s apart, so a sample further than this from its mark
    *  belongs to a neighbouring point. The ring samples every 100ms. */

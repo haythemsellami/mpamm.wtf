@@ -13,9 +13,11 @@ import {
  * Why the curve is stored PER FILL (fills.curve_bps) rather than replayed: the
  * live reference is a 100ms in-memory ring that lives ~2 minutes, and the
  * persisted every-5s mid curve was retired after it filled the prod disk. So a
- * live fill's curve is captured while the ring still covers it, and closed
- * days are completed from the exchanges' second-precision archives
- * (history/cex.ts) — both against the same pair-terms reference.
+ * fill's curve is captured LIVE, while the ring still covers it, or never.
+ * There is deliberately no archive backfill for closed days: the CEX archives
+ * (history/cex.ts) are per-second last trades, which sit ~1bp off the BBO mid
+ * right at the fill — exactly where the curve's signal lives. A fill the ring
+ * never covered keeps curve_bps NULL and only lowers COVERAGE.
  *
  * Curves never ride the fill stream: the WS frame is the egress budget, and no
  * consumer needs a per-fill curve. Only the aggregate ships, over REST.
@@ -58,14 +60,16 @@ export interface CurveRow {
   curve: (number | null)[] | null;
 }
 
-/** Route class of one transaction's TRACKED legs. Several fills on one pool in
- *  one direction are one leg (a book sweeping several maker orders emits one
- *  log per order), so they stay `single`. */
+/** Route class of one transaction's TRACKED legs. Several fills on one pool and
+ *  market in one direction are one leg (a book sweeping several maker orders
+ *  emits one log per order), so they stay `single`. The market is part of the
+ *  leg: a singleton contract (ThogAMM) labels every market with one `pool`, and
+ *  two of its markets in one transaction are a split, not one leg. */
 export function routeOf(legs: readonly Pick<CurveRow, 'venueId' | 'pool' | 'market' | 'side'>[]): CurveRoute {
   const sides = new Map<string, Set<string>>();
   const pools = new Set<string>();
   for (const l of legs) {
-    pools.add(`${l.venueId}|${l.pool}`);
+    pools.add(`${l.venueId}|${l.pool}|${l.market}`);
     const base = pairOf(l.market)?.base ?? l.market;
     let s = sides.get(base);
     if (!s) { s = new Set(); sides.set(base, s); }

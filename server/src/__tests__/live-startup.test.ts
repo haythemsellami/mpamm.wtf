@@ -378,6 +378,34 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
+  it('still takes the curve of a fill that lands after its last horizon, never its legacy markouts', async () => {
+    const { source } = await setup();
+    source.knownVenueIds = new Set(['test-venue']);
+    const now = Date.now();
+    const fill = (id: string, ts: number): Fill => ({
+      id, ts, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'DIRECT', usd: 100, baseAmount: 100,
+      execPx: 1, blockNumber: 1, txHash: `0x${id}`, to: 'direct', pool: 'pool', markoutsBps: [null, null, null, null, null],
+    });
+    // a tail stall: both land with every 0–60s horizon elapsed. The ring still
+    // reaches 'late's −5s point; 'stale' predates it and is never queued.
+    const late = fill('late', now - 90_000), stale = fill('stale', now - 118_000);
+    source.midHist.set('MON/USDC', Array.from({ length: 1_200 }, (_, i) => ({ t: now - 119_900 + i * 100, mid: 2 })));
+    const frames: Fill[] = [];
+    source.on('message', (m: { ch: string; data: Fill }) => { if (m.ch === 'fill') frames.push(m.data); });
+    try {
+      source.ingest(late);
+      source.ingest(stale);
+      expect([...source.pending]).toEqual([late]);
+      await source.ageMarkouts();
+      expect([...source.dirtyCurves.keys()]).toEqual(['late']);
+      expect(source.dirtyCurves.get('late')).toEqual(Array(CURVE_OFFSETS_S.length).fill(10_000));
+      // the legacy horizons stay as an unqueued late fill's: null, never re-emitted
+      expect(late.markoutsBps).toEqual([null, null, null, null, null]);
+      expect(frames.map((f) => f.id)).toEqual(['late', 'stale']);
+      expect(source.pending.size).toBe(0);
+    } finally { source.store.close(); }
+  });
+
   it('collects every market, size and venue role once per block with zero viewers', async () => {
     const { source, adapters, poll } = await setup({ withQuotes: true });
     source.schedulePostQuoteMaintenance = vi.fn();
