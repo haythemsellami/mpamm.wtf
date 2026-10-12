@@ -351,6 +351,12 @@ describe('Metric gas attribution (both generations, one block walk)', () => {
 });
 
 describe('Metric v0 (retired generation)', () => {
+  it('anchors the lifetime replay at the FIRST v0 swap day (block 64913600, 2026-03-30 22:26 UTC — $222)', () => {
+    const a = createMetricAdapter();
+    expect(a.backfillFromUtc).toBe('2026-03-30');
+    expect(a.venues()[0].sinceUtc).toBe(a.backfillFromUtc);
+  });
+
   it('tails all eight v0 pools, bounded at the last v0 swap — the live tail never fetches them', async () => {
     const a = createMetricAdapter();
     await a.discover(stub([]));

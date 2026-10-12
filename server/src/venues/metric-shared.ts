@@ -10,10 +10,13 @@ import { fromUnits, shortHex } from '../util.js';
  * only holds for one deployment belongs in that deployment's file.
  */
 
-// sinceUtc = the v0 pools' on-chain deploy day (block 65042020) — same anchor as backfillFromUtc.
+// sinceUtc = Metric's first on-chain day: the first v0 pool is block 64911692
+// (2026-03-30 22:13 UTC) and its first swap block 64913600 (22:26, $222) — the
+// SAME anchor as backfillFromUtc, or a replay resolving it with blockAtOrAfter
+// starts after that swap and loses it for good.
 // ONE id across generations: history is keyed by venue id, and a new id would
 // be a new venue whose old rows the boot reconcile prunes (db.ts reconcileVenues).
-export const METRIC_VENUE: VenueMeta = { id: 'metric', name: 'Metric', color: { light: '#0F9D8C', dark: '#0D9488' }, kind: 'amm', role: 'venue', sinceUtc: '2026-03-31' };
+export const METRIC_VENUE: VenueMeta = { id: 'metric', name: 'Metric', color: { light: '#0F9D8C', dark: '#0D9488' }, kind: 'amm', role: 'venue', sinceUtc: '2026-03-30' };
 
 export interface MetricPool {
   pool: `0x${string}`;

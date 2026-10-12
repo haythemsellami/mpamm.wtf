@@ -23,7 +23,7 @@ import { createMetricV1Generation } from './metric-v1.js';
  * retirement and v1 only from its factory's creation.
  */
 export function createMetricAdapter(): VenueAdapter {
-  return composeGenerations(METRIC_VENUE, { backfillFromUtc: '2026-03-31' }, {
+  return composeGenerations(METRIC_VENUE, { backfillFromUtc: METRIC_VENUE.sinceUtc }, {
     v0: createMetricV0Generation(),
     v1: createMetricV1Generation(),
   });
