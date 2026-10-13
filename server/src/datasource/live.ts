@@ -46,6 +46,8 @@ const REALTIME_WINDOW_MS = 60_000;
 
 /** Max blocks one tail cycle fetches/decodes/commits (see tailFills). */
 const TAIL_WINDOW_BLOCKS = 1_000;
+/** The in-memory recent-fill ring (`/api/markets` tape, ingest dedup window). */
+const FILL_RING_SIZE = 400;
 
 interface QuoteTrigger {
   identity?: HeadIdentity;
@@ -659,6 +661,27 @@ export function planReread(stored: readonly Fill[], decoded: readonly Fill[]): {
 }
 
 /**
+ * Fold re-read fills into the recent-fill ring: ts order, newest `cap` kept.
+ * Reports which inserted fills made it in (their dedup ids and markout aging
+ * start now) and which ring members fell out (their dedup ids go, exactly as
+ * ingest's own eviction drops them). Pure (history-revisions.test.ts).
+ */
+export function mergeIntoRing(ring: readonly Fill[], inserted: readonly Fill[], cap: number): {
+  ring: Fill[]; added: Fill[]; evicted: Fill[];
+} {
+  if (!inserted.length) return { ring: [...ring], added: [], evicted: [] };
+  const fresh = new Set(inserted);
+  const all = [...ring, ...inserted].sort((a, b) => a.ts - b.ts || a.blockNumber - b.blockNumber);
+  const cut = Math.max(0, all.length - cap);
+  const kept = all.slice(cut);
+  return {
+    ring: kept,
+    added: kept.filter((f) => fresh.has(f)),
+    evicted: all.slice(0, cut).filter((f) => !fresh.has(f)),
+  };
+}
+
+/**
  * An adapter's declared HistoryRevisions as reset targets — the same pipeline
  * BACKFILL_RESET feeds, with a marker of their own.
  *
@@ -1198,10 +1221,10 @@ export class LiveDataSource extends BaseSource {
     this.storeWriter = this.snapshotWriter;
     this.gas.setWriter(this.snapshotWriter);
     this.store.sealWrites();
-    for (const a of ADAPTERS) {
-      const vid = a.venues()[0]?.id;
-      const day = vid ? this.store.getMeta(rereadKey(vid)) : undefined;
-      if (vid && day && day === utcDay()) this.rereads.set(vid, day);
+    // every venue an adapter declares, not just its first: a reset can name any of them
+    for (const vid of ADAPTERS.flatMap((a) => a.venues().map((v) => v.id))) {
+      const day = this.store.getMeta(rereadKey(vid));
+      if (day && day === utcDay()) this.rereads.set(vid, day);
     }
     this.kickMaintenance();
 
@@ -1556,7 +1579,7 @@ export class LiveDataSource extends BaseSource {
     const aged = this.store.pruneFillsBefore(retentionCutoffMs(Date.now(), config.fillsRetentionDays), config.pruneBootMaxBatches);
     if (aged.removed) console.log(`[mpamm] retention: pruned ${aged.removed} fill(s) at boot${aged.done ? '' : ' — backlog continues on the worker'}`);
     // load recent fills for live serving
-    this.fills = this.store.recentFills(400);
+    this.fills = this.store.recentFills(FILL_RING_SIZE);
     // seed the dedup guard with the persisted window so a gap-fill re-decode of
     // already-counted fills won't re-count them.
     for (const f of this.fills) this.countedIds.add(f.id);
@@ -1861,12 +1884,14 @@ export class LiveDataSource extends BaseSource {
     // the env reset, nobody chose to run it on this config. So it waits for a
     // run with both stages on (production always is; the adapter dev loop is not).
     const revisionsRun = config.backfillEnabled && config.markoutBackfill;
+    // Per VENUE: an adapter may declare several, a revision applies to each,
+    // and a pending re-read is keyed by the venue it was queued for.
     for (const a of ADAPTERS) {
-      const vid = a.venues()[0]?.id;
-      if (!vid) continue;
-      if (revisionsRun) targets.push(...revisionTargets(vid, a.historyRevisions));
-      const carried = carriedRereadTarget(vid, this.store.getMeta(rereadKey(vid)), today);
-      if (carried) targets.push(carried);
+      for (const { id: vid } of a.venues()) {
+        if (revisionsRun) targets.push(...revisionTargets(vid, a.historyRevisions));
+        const carried = carriedRereadTarget(vid, this.store.getMeta(rereadKey(vid)), today);
+        if (carried) targets.push(carried);
+      }
     }
     return targets;
   }
@@ -2110,11 +2135,22 @@ export class LiveDataSource extends BaseSource {
         for (const id of gone) { this.countedIds.delete(id); this.dirtyCurves.delete(id); }
       }
       const written = await this.storeWriter.reconcileFills(plan.deleteIds, plan.insert);
+      // The served tape and the ingest dedup window follow the store. NOT via
+      // ingest(): the bucket below is SET, so an ingest would count them twice.
+      const ring = mergeIntoRing(this.fills, plan.insert, FILL_RING_SIZE);
+      this.fills = ring.ring;
+      for (const f of ring.added) {
+        this.countedIds.add(f.id);
+        if (this.hasFutureMarkoutHorizon(f)) this.pending.add(f);
+      }
+      for (const f of ring.evicted) this.countedIds.delete(f.id);
 
       const d = this.dayFor(dayStartMs);
       const before = d.byVenue[vid] ?? { usd: 0, swaps: 0 };
-      if (plan.total.swaps) d.byVenue[vid] = { ...plan.total };
-      else delete d.byVenue[vid];
+      // An explicit zero, never a deleted key: the snapshot only upserts the
+      // venues a day carries, so a missing key leaves the stale SQLite row in
+      // place — while the same snapshot clears the marker that would retry it.
+      d.byVenue[vid] = { ...plan.total };
       this.dirtyDays.add(day);
       this.snapshotMeta[rereadKey(vid)] = '';
       if (written.deleted || written.inserted) this.dropAggregates();
@@ -3210,7 +3246,7 @@ export class LiveDataSource extends BaseSource {
     if (this.countedIds.has(f.id)) return;
     this.countedIds.add(f.id);
     this.fills.push(f);
-    if (this.fills.length > 400) {
+    if (this.fills.length > FILL_RING_SIZE) {
       const dropped = this.fills.shift();
       if (dropped) this.countedIds.delete(dropped.id);
     }

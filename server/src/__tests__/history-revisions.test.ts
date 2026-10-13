@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import type { Fill } from '@shared';
 import { VolumeStore, rewindCursor } from '../db.js';
 import {
-  carriedRereadTarget, markResetApplied, planReread, rereadKey, resetAlreadyApplied, resetMarker, revisionTargets,
+  carriedRereadTarget, markResetApplied, mergeIntoRing, planReread, rereadKey, resetAlreadyApplied, resetMarker, revisionTargets,
 } from '../datasource/live.js';
 import { ADAPTERS } from '../venues/registry.js';
 
@@ -95,6 +95,32 @@ describe('planReread — converge today onto the current decode', () => {
 
   it('counts a fill decoded twice (overlapping windows) once', () => {
     expect(planReread([], [fill('a'), fill('a')]).total.swaps).toBe(1);
+  });
+});
+
+describe('mergeIntoRing — recovered fills join the served tape', () => {
+  const at = (id: string, ts: number) => fill(id, { ts, blockNumber: ts });
+
+  it('slots an inserted fill in ts order', () => {
+    const r = mergeIntoRing([at('a', 1), at('c', 3)], [at('b', 2)], 10);
+    expect(r.ring.map((f) => f.id)).toEqual(['a', 'b', 'c']);
+    expect(r.added.map((f) => f.id)).toEqual(['b']);
+    expect(r.evicted).toEqual([]);
+  });
+
+  it('keeps the newest `cap`, evicting old ring members', () => {
+    const r = mergeIntoRing([at('a', 1), at('c', 3)], [at('b', 2)], 2);
+    expect(r.ring.map((f) => f.id)).toEqual(['b', 'c']);
+    expect(r.evicted.map((f) => f.id)).toEqual(['a']);
+  });
+
+  /** an inserted fill older than the whole ring never enters it — it must not
+   *  be reported as added (no dedup id, no markout aging for it) */
+  it('drops an inserted fill older than a full ring', () => {
+    const r = mergeIntoRing([at('b', 2), at('c', 3)], [at('a', 1)], 2);
+    expect(r.ring.map((f) => f.id)).toEqual(['b', 'c']);
+    expect(r.added).toEqual([]);
+    expect(r.evicted).toEqual([]);
   });
 });
 
