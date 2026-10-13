@@ -135,6 +135,18 @@ const ev = (abi: readonly unknown[], name: string) => abi.find((x: any) => x.typ
 /** book depth requested per quote poll — enough for the largest probed notional. */
 const BOOK_LEVELS = 60;
 
+/** Per-side sanity band (bps from the pair mid), the Clober/Uniswap/Lunarbase
+ *  convention: a book level priced beyond ±this is not comparable liquidity, so
+ *  the walk never reaches it. The books carry far-tick stub orders below the
+ *  vault's ladder — on MON/USDC every sampled block 2026-10-05→12 held bids of
+ *  1 MON @ $0.001 and 10,000 MON @ $0.0001 and asks of 1 MON @ $10,000 and
+ *  @ $24,172; cbBTC/MON a 1-cbBTC bid @ 1 MON. When the vault's ladder thinned
+ *  or vanished, walking into them "filled" $100 MON/USDC bids at ~$0 (−9961 bps)
+ *  and a $10k cbBTC/MON bid at −5728 bps (block 110,682,151), all reported as
+ *  full two-sided quotes. With the band, a side whose in-band depth runs out is
+ *  a PARTIAL (filledFull=false), and a side with none is absent (oneSided). */
+const PER_SIDE_BAND_BPS = 2_000;
+
 interface HanjiMarket {
   market: string;
   clob: `0x${string}`;
@@ -229,11 +241,13 @@ export function createHanjiAdapter(): VenueAdapter {
         const [bidP, bidS, askP, askS] = r.result as readonly [readonly bigint[], readonly bigint[], readonly bigint[], readonly bigint[]];
         const fee = m.feeBps / 1e4;
 
-        // walk a ladder for `baseNeeded`, best level first → VWAP + filled-full.
+        // walk a ladder for `baseNeeded`, best level first → VWAP + filled-full,
+        // over in-band levels only (PER_SIDE_BAND_BPS: far stubs are not depth).
         const walk = (prices: readonly bigint[], shares: readonly bigint[], baseNeeded: number) => {
           let remaining = baseNeeded, cost = 0;
           for (let k = 0; k < prices.length && remaining > 0; k++) {
             const px = Number(prices[k]) * m.pxScale;
+            if (!(Math.abs(px / pxMid - 1) * 1e4 <= PER_SIDE_BAND_BPS)) continue;
             const avail = Number(shares[k]) * m.baseShare;
             const take = Math.min(avail, remaining);
             cost += take * px;
