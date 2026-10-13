@@ -1077,6 +1077,9 @@ export class LiveDataSource extends BaseSource {
   /** venue id → UTC day of a pending today re-read (rereadToday). */
   private rereads = new Map<string, string>();
   private rereadRunning = false;
+  /** Fills cut into a snapshot whose write has not settled: between the cut
+   *  and the COMMIT they are in neither the store nor `dirty`. */
+  private inflightFills = new Set<readonly Fill[]>();
   /** Work that must run BETWEEN tail cycles (scheduleTail drains it). */
   private tailGates: Array<() => Promise<void>> = [];
   /** CEX mid history per PAIR (market symbol), in the pair's own terms (wrap
@@ -1748,7 +1751,10 @@ export class LiveDataSource extends BaseSource {
       curves: [...dirtyCurves].map(([id, curveBps]) => ({ id, curveBps })),
     };
 
+    const inflight = snapshot.fills;
+    this.inflightFills.add(inflight);
     return this.writeSnapshot(snapshot)
+      .finally(() => { this.inflightFills.delete(inflight); })
       .then(
         (result): Promise<void> | void => {
           this.requeueUnmatchedCurves(dirtyCurves, result.unmatchedCurves);
@@ -2120,13 +2126,15 @@ export class LiveDataSource extends BaseSource {
       if (end > bulkEnd) await this.rereadRange(a, vid, bulkEnd + 1n, end, dayStartMs, dayEndMs, decoded);
       try { await this.attributor.attribute(decoded); } catch { /* labels only */ }
 
-      // What the tail holds for the range: stored rows, plus in-memory ones a
-      // snapshot has not committed yet (the newer object wins). A fill only
-      // inside an in-flight snapshot AND already rotated out of the ring is
-      // invisible here — that needs >400 fills inside one persist interval.
+      // What the tail holds for the range: stored rows, fills cut into a
+      // snapshot that has not committed yet (posted before reconcileFills, so
+      // its row lands first and is deleted after it), and in-memory ones (the
+      // newest object wins). Everything from here to the reconcile post is
+      // synchronous, so no snapshot can be cut in between.
       const inRange = (f: Fill) => f.venueId === vid && f.ts >= dayStartMs && f.ts < dayEndMs && BigInt(f.blockNumber) <= end;
       const held = new Map<string, Fill>();
       for (const f of this.store.venueFillsInRange(vid, dayStartMs, dayEndMs, end)) held.set(f.id, f);
+      for (const batch of this.inflightFills) for (const f of batch) if (inRange(f)) held.set(f.id, f);
       for (const owner of [this.fills, this.dirty, this.pending]) for (const f of owner) if (inRange(f)) held.set(f.id, f);
       const plan = planReread([...held.values()], decoded);
 
