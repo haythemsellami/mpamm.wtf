@@ -16,11 +16,11 @@ The [`Dockerfile`](../Dockerfile) builds the frontend and runs the server servin
 
 ## Railway (migration target)
 
-[`.railway/railway.ts`](../.railway/railway.ts) is the Railway equivalent of `render.yaml`: the same single Dockerfile service, pinned to **US East Metal (Virginia, `us-east4-eqdc4a`)**, with a volume at `/data`, `/api/health` as the rollout gate, and the RPC URLs kept as Railway-held secrets (`preserve()`). It uses Railway Infrastructure as Code; the legacy `railway.json` format is never read for new services. `npm run typecheck` checks it against the pinned `railway` SDK. `railway config plan` (read-only) and `railway config apply` need Railway CLI **≥ 5.42.1**.
+[`.railway/railway.ts`](../.railway/railway.ts) is the Railway equivalent of `render.yaml`: the same single Dockerfile service, pinned to **US East Metal (Virginia, `us-east4-eqdc4a`)**, with a volume at `/data`, an `/api/health` rollout check, and the RPC URLs kept as Railway-held secrets (`preserve()`). It uses Railway Infrastructure as Code; the legacy `railway.json` format is never read for new services. `npm run typecheck` checks it against the pinned `railway` SDK. `railway config plan` (read-only) and `railway config apply` need Railway CLI **≥ 5.42.1**.
 
 Differences from Render that matter here:
 
-- **The health check only gates a rollout.** Railway never probes a live deploy, so a hung (not crashed) process is not restarted; `restartPolicyType: ON_FAILURE` covers crashes only.
+- **The health check proves very little.** The server binds its port before warm-up (RPC probe, discovery, history load), and `/api/health` returns 200 from that moment on. So the rollout check passes before startup finishes, and its timeout does not bound the boot. Railway never re-probes a live deploy: a boot that later fails exits and is retried by `restartPolicyType: ON_FAILURE`, but a hung (not crashed) process is never restarted.
 - **Every deploy has a short outage.** A volume can't be mounted by two deployments, so the old one stops before the new one starts. `drainingSeconds` must stay above the 5s shutdown flush in `server/src/index.ts`.
 - **Egress is $0.05/GB** (Render: $0.15/GB) and compute is billed by usage, not by instance size. Volume storage is billed on bytes used, so size headroom costs nothing.
 
@@ -37,7 +37,7 @@ The file declares no `source` on purpose: the first deploy must boot on a copy o
    `VACUUM INTO` is transactionally consistent (WAL included) and drops the free pages. Copy the file off the instance and check it with `PRAGMA integrity_check`.
 4. **Seed.** `railway volume files --volume mpamm-data upload ./mpamm-snapshot.db /mpamm.db` (volume paths are relative to the `/data` mount).
 5. **Connect the repo, once.** Service → Settings → Source → `haythemsellami/mpamm.wtf`, branch `main`, with *Wait for CI* on. This triggers the first build. Do it promptly after the snapshot: the fills tail resumes from the snapshot's cursors on the hot node, which keeps only a couple of days of history.
-6. **Verify** on a generated `*.up.railway.app` domain before moving `mpamm.wtf`. Check that `/api/health` answers, that `state.notes` shows the tail catching up with no `rpc.` warnings, and that the head block matches Render's.
+6. **Verify** before moving `mpamm.wtf`. The config declares no domain, so generate one with `railway domain --service mpamm` (a free `*.up.railway.app` URL). Check that `/api/bootstrap` returns 200 (it is 503 until history has loaded, unlike `/api/health`), that `state.notes` shows the tail catching up with no `rpc.` warnings, and that the head block matches Render's.
 
 ## Any container host / local
 

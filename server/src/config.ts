@@ -202,9 +202,10 @@ export const config = {
   pruneMaxBatches: num('PRUNE_MAX_BATCHES', 50),
   /** batches the SYNCHRONOUS boot prune may run before handing the rest of a
    *  backlog to the worker sweep. Small on purpose: boot blocks the event
-   *  loop, and the host kills a boot whose /api/health doesn't answer in time
-   *  (~50s on Render; healthcheckTimeout in .railway/railway.ts) — an
-   *  unbounded boot prune crash-looped prod on 2026-09-29. */
+   *  loop, and Render kills a process whose /api/health doesn't answer
+   *  (~50s) — an unbounded boot prune crash-looped prod on 2026-09-29.
+   *  Railway's rollout check passes before this runs and never re-probes, so
+   *  there nothing kills a long prune: it just stalls quotes and the WS. */
   pruneBootMaxBatches: num('PRUNE_BOOT_MAX_BATCHES', 5),
 
   // ── on-chain backfill (background) ──────────────────────────────────────────

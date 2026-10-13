@@ -25,9 +25,13 @@ export default defineRailway(() => {
   const mpamm = service("mpamm", {
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     replicas: { "us-east4-eqdc4a": 1 },
-    // Railway only gates the rollout on this; it never probes a live deploy.
-    // Boot does bounded synchronous work before /api/health answers (see
-    // pruneBootMaxBatches), so keep that well inside this window.
+    // Proves only that the process bound $PORT. index.ts binds BEFORE
+    // source.start() (RPC probe, discovery, initHistory) so clients get empty
+    // snapshots rather than refusals during warm-up, and /api/health answers
+    // 200 throughout — so this does not wait for, or bound, the boot. A boot
+    // that fails afterwards exits non-zero and restartPolicy retries it. A
+    // readiness gate would buy nothing here: the volume already forces the old
+    // deploy down before this one starts. Railway never re-probes a live deploy.
     healthcheck: "/api/health",
     healthcheckTimeout: 60,
     deploy: {
