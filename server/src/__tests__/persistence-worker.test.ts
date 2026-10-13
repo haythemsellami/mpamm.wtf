@@ -26,7 +26,7 @@ describe('persistence worker', () => {
     await expect((writer as any).request({ kind: 'unexpected' }))
       .rejects.toThrow("unknown persistence mutation 'unexpected'");
 
-    await writer.persist({
+    await expect(writer.persist({
       days: [{ utcDay: '2026-08-25', partial: true, byVenue: { test: { usd: 12, swaps: 3 } } }],
       meta: { lastProcessedBlock: '123' },
       fills: [{
@@ -34,7 +34,8 @@ describe('persistence worker', () => {
         usd: 12, baseAmount: 10, execPx: 1.2, txHash: '0xabc', to: 'Router', router: 'Test Router',
         pool: 'Test Pool', blockNumber: 123, ts: 1_777_000_000_000, markoutsBps: [1, null, null, null, null],
       }],
-    });
+      curves: [{ id: 'never-inserted', curveBps: [1] }],
+    })).resolves.toEqual({ unmatchedCurves: ['never-inserted'] });
     expect(read.getMeta('lastProcessedBlock')).toBe('123');
     expect(read.all()).toEqual([
       { utcDay: '2026-08-25', partial: true, byVenue: { test: { usd: 12, swaps: 3 } } },

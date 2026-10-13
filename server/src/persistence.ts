@@ -1,6 +1,6 @@
 import { Worker } from 'node:worker_threads';
 import type { DailyVolume, Fill } from '@shared';
-import type { CurveWrite, ResetDeletes, VolumeStore } from './db.js';
+import type { CurveWrite, ResetDeletes, SnapshotResult, VolumeStore } from './db.js';
 
 export interface SnapshotWrite {
   days: DailyVolume[];
@@ -31,7 +31,7 @@ export type StoreMutation =
 /** The one post-boot SQLite mutation lane. Production implements it in a
  * worker; tests may use the direct adapter before realtime loops exist. */
 export interface StoreWriter {
-  persist(snapshot: SnapshotWrite): Promise<void>;
+  persist(snapshot: SnapshotWrite): Promise<SnapshotResult>;
   setMeta(key: string, value: string): Promise<void>;
   deleteMetaPrefix(prefix: string): Promise<void>;
   resetVenueHistory(venueId: string, deletes: ResetDeletes, fromBlock?: bigint): Promise<{ volume: number; fills: number }>;
@@ -103,7 +103,7 @@ export class SnapshotWriter implements StoreWriter {
     });
   }
 
-  persist(snapshot: SnapshotWrite): Promise<void> {
+  persist(snapshot: SnapshotWrite): Promise<SnapshotResult> {
     return this.request({ kind: 'snapshot', snapshot });
   }
   setMeta(key: string, value: string): Promise<void> { return this.request({ kind: 'setMeta', key, value }); }

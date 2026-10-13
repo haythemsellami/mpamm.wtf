@@ -25,7 +25,7 @@ import {
 } from '../chain/rpc.js';
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
-import { VolumeStore, retentionCutoffMs, type ResetDeletes } from '../db.js';
+import { VolumeStore, retentionCutoffMs, type ResetDeletes, type SnapshotResult } from '../db.js';
 
 /** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
 const PRUNE_LOG_MIN_ROWS = 1_000;
@@ -959,6 +959,12 @@ export class LiveDataSource extends BaseSource {
   /** Complete curves awaiting the next snapshot (fills.curve_bps). Kept off the
    *  Fill objects: those ride the WS stream, and the curve must not. */
   private dirtyCurves = new Map<string, (number | null)[]>();
+  /** Snapshots in a row whose curve UPDATE matched no fill row, per fill id
+   *  (requeueUnmatchedCurves). An entry lives only while its curve is queued. */
+  private curveMisses = new Map<string, number>();
+  /** Snapshot overlap resolves within a commit or two; past this the fill row
+   *  is not coming (retention pruned it under a still-in-memory fill). */
+  private static readonly CURVE_MAX_RETRIES = 3;
   private lastBlock = 0n;
   /** Chain head captured at boot: live gap-fill handoff and reset validation. */
   private bootHead = 0n;
@@ -1599,19 +1605,55 @@ export class LiveDataSource extends BaseSource {
     };
 
     return this.writeSnapshot(snapshot)
-      .catch((e) => {
-        for (const f of dirtyFills) this.dirty.add(f);
-        for (const day of dirtyDays) this.dirtyDays.add(day);
-        for (const [id, curve] of dirtyCurves) if (!this.dirtyCurves.has(id)) this.dirtyCurves.set(id, curve);
-        // retained + retried next tick, but say so — a broken disk otherwise
-        // looks healthy while the cursor silently stops advancing.
-        this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); ${reportFailure ? 'shutdown flush not acknowledged' : 'retrying'}`);
-        if (reportFailure) throw e;
-      });
+      .then(
+        (result): Promise<void> | void => {
+          this.requeueUnmatchedCurves(dirtyCurves, result.unmatchedCurves);
+          // The shutdown flush has no next tick: work restored meanwhile (an
+          // earlier in-flight snapshot that failed, a requeued curve) must be
+          // drained before stop() closes the writer — this snapshot already
+          // committed the cursor past it. Converges: a failure throws here,
+          // and a curve requeues at most CURVE_MAX_RETRIES times.
+          if (reportFailure && (this.dirty.size || this.dirtyDays.size || this.dirtyCurves.size)) return this.persist(true);
+        },
+        (e) => {
+          for (const f of dirtyFills) this.dirty.add(f);
+          for (const day of dirtyDays) this.dirtyDays.add(day);
+          for (const [id, curve] of dirtyCurves) if (!this.dirtyCurves.has(id)) this.dirtyCurves.set(id, curve);
+          // retained + retried next tick, but say so — a broken disk otherwise
+          // looks healthy while the cursor silently stops advancing.
+          this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); ${reportFailure ? 'shutdown flush not acknowledged' : 'retrying'}`);
+          if (reportFailure) throw e;
+        },
+      );
   }
 
-  private writeSnapshot(snapshot: SnapshotWrite): Promise<void> {
+  private writeSnapshot(snapshot: SnapshotWrite): Promise<SnapshotResult> {
     return this.storeWriter.persist(snapshot);
+  }
+
+  /**
+   * A committed snapshot's curve can match no fill row. Snapshots overlap (each
+   * swaps its dirty sets before the previous ACK), so the snapshot inserting
+   * fill F can roll back AFTER a later one carrying only F's curve was cut:
+   * that UPDATE lands first, on nothing, and F is re-inserted curve-less. So a
+   * miss is requeued for the snapshot that re-inserts F — but only while F is
+   * still in memory, and only a few times: a reset/retention-deleted fill
+   * misses forever, and failing the write instead would wedge every later
+   * snapshot (and the cursors committed with them) behind a row that is gone.
+   */
+  private requeueUnmatchedCurves(sent: ReadonlyMap<string, (number | null)[]>, unmatched: readonly string[]): void {
+    const missed = new Set(unmatched);
+    if (this.curveMisses.size) for (const id of sent.keys()) if (!missed.has(id)) this.curveMisses.delete(id);
+    if (!missed.size) return;
+    const inMemory = new Set<string>();
+    for (const owner of [this.fills, this.dirty, this.pending]) for (const f of owner) inMemory.add(f.id);
+    for (const id of missed) {
+      const curve = sent.get(id);
+      const misses = (this.curveMisses.get(id) ?? 0) + 1;
+      if (!curve || !inMemory.has(id) || misses > LiveDataSource.CURVE_MAX_RETRIES) { this.curveMisses.delete(id); continue; }
+      this.curveMisses.set(id, misses);
+      if (!this.dirtyCurves.has(id)) this.dirtyCurves.set(id, curve);
+    }
   }
 
   /** A fresh zeroed daily bucket (venue slices fill in as fills land). */

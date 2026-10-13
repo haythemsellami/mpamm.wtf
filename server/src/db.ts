@@ -7,6 +7,12 @@ import type { CurveRow } from './markout-curves.js';
 type Stmt = ReturnType<DatabaseSync['prepare']>;
 /** One fill's derived markout curve (server/src/markout-curves.ts). */
 export type CurveWrite = { id: string; curveBps: (number | null)[] };
+/** What a committed snapshot could not apply. `unmatchedCurves` are curve ids
+ *  whose UPDATE hit no fill row: the row is not there (yet — an earlier
+ *  snapshot inserting it rolled back — or any more: reset/retention). Never an
+ *  error, so a deleted fill can't wedge every later snapshot; the caller
+ *  decides whether to retry. */
+export type SnapshotResult = { unmatchedCurves: string[] };
 
 /**
  * SQLite persistence (docs/architecture.md: data model). The DB is the source of truth for history:
@@ -514,8 +520,9 @@ export class VolumeStore {
    * cursor, which a gap-fill on the next boot would otherwise re-count (fills
    * dedupe by their deterministic txHash:logIndex id).
    */
-  persistSnapshot(days: DailyVolume[], meta: Record<string, string>, fills: Fill[], curves: CurveWrite[] = []): void {
+  persistSnapshot(days: DailyVolume[], meta: Record<string, string>, fills: Fill[], curves: CurveWrite[] = []): SnapshotResult {
     this.assertWritable();
+    const unmatchedCurves: string[] = [];
     this.db.exec('BEGIN');
     try {
       for (const d of days) this.runDay(d);
@@ -523,8 +530,11 @@ export class VolumeStore {
       for (const f of fills) this.runFill(f);
       // after the fills: a curve can complete in the same snapshot that first
       // inserts its fill row.
-      for (const c of curves) this.curveStmt.run(JSON.stringify(c.curveBps), c.id);
+      for (const c of curves) {
+        if (Number(this.curveStmt.run(JSON.stringify(c.curveBps), c.id).changes) === 0) unmatchedCurves.push(c.id);
+      }
       this.db.exec('COMMIT');
+      return { unmatchedCurves };
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
