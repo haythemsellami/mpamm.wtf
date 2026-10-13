@@ -206,7 +206,8 @@ export interface VenueAdapter {
   /** Re-derive stored history after a change to what this adapter decodes — a
    *  redeploy's new sources, a units fix. Each entry runs ONCE per database, on
    *  the first boot of the build that declares it: the deploy is the trigger,
-   *  not an operator setting. See HistoryRevision. */
+   *  not an operator setting. Applies to `venues()[0]`, the venue the core's
+   *  history scans book this adapter's fills under. See HistoryRevision. */
   historyRevisions?: readonly HistoryRevision[];
   /** Optional live bid/ask per market×size for the Execution tab. Every chain
    *  read must use `blockNumber`: one published matrix represents exactly one

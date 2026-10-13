@@ -1884,14 +1884,15 @@ export class LiveDataSource extends BaseSource {
     // the env reset, nobody chose to run it on this config. So it waits for a
     // run with both stages on (production always is; the adapter dev loop is not).
     const revisionsRun = config.backfillEnabled && config.markoutBackfill;
-    // Per VENUE: an adapter may declare several, a revision applies to each,
-    // and a pending re-read is keyed by the venue it was queued for.
+    // The adapter's FIRST venue only: both closed-day stages (backfillAdapter,
+    // backfillRecentFills) key their cursors on it and book every decoded fill
+    // under it. A reset aimed at a later venue would delete rows no scan rebuilds.
     for (const a of ADAPTERS) {
-      for (const { id: vid } of a.venues()) {
-        if (revisionsRun) targets.push(...revisionTargets(vid, a.historyRevisions));
-        const carried = carriedRereadTarget(vid, this.store.getMeta(rereadKey(vid)), today);
-        if (carried) targets.push(carried);
-      }
+      const vid = this.vidOf(a);
+      if (!vid) continue;
+      if (revisionsRun) targets.push(...revisionTargets(vid, a.historyRevisions));
+      const carried = carriedRereadTarget(vid, this.store.getMeta(rereadKey(vid)), today);
+      if (carried) targets.push(carried);
     }
     return targets;
   }
@@ -2050,6 +2051,10 @@ export class LiveDataSource extends BaseSource {
   private async queueReread(vid: string, day: string): Promise<void> {
     delete this.snapshotMeta[rereadKey(vid)];   // an earlier re-read's clear must not land after this
     await this.storeWriter.setMeta(rereadKey(vid), day);
+    // ...and again once acknowledged: an in-flight snapshot that carried the
+    // clear and FAILED restores it into snapshotMeta while the write is
+    // pending. Worker replies are ordered, so that restore has run by now.
+    delete this.snapshotMeta[rereadKey(vid)];
     this.rereads.set(vid, day);
     void this.runRereads();
   }
@@ -2128,20 +2133,29 @@ export class LiveDataSource extends BaseSource {
       // Drop the replaced fills from memory BEFORE the write is queued: a
       // snapshot taken meanwhile would otherwise write the old row back.
       const gone = new Set(plan.deleteIds);
-      if (gone.size) {
+      const dropGone = () => {
+        if (!gone.size) return;
         const drop = (f: Fill) => gone.has(f.id);
         this.fills.splice(0, this.fills.length, ...this.fills.filter((f) => !drop(f)));
         for (const set of [this.pending, this.dirty]) for (const f of set) if (drop(f)) set.delete(f);
         for (const id of gone) { this.countedIds.delete(id); this.dirtyCurves.delete(id); }
-      }
+      };
+      dropGone();
       const written = await this.storeWriter.reconcileFills(plan.deleteIds, plan.insert);
+      // Again after the ACK: a snapshot in flight before the write that then
+      // failed merges its captured fills/curves back into dirty while we await,
+      // and the next snapshot would write a deleted fill (or its old curve)
+      // back. Replies are ordered, so that merge has already happened.
+      dropGone();
       // The served tape and the ingest dedup window follow the store. NOT via
       // ingest(): the bucket below is SET, so an ingest would count them twice.
+      // Markout/curve queueing mirrors ingest's, curve-only branch included.
       const ring = mergeIntoRing(this.fills, plan.insert, FILL_RING_SIZE);
       this.fills = ring.ring;
       for (const f of ring.added) {
         this.countedIds.add(f.id);
         if (this.hasFutureMarkoutHorizon(f)) this.pending.add(f);
+        else if (this.curveInRing(f)) { this.curveOnly.add(f); this.pending.add(f); }
       }
       for (const f of ring.evicted) this.countedIds.delete(f.id);
 
