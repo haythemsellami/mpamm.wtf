@@ -34,7 +34,7 @@ import { NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
 import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, allAdapterVenueIds, validateRegistry } from '../venues/registry.js';
-import { sourceSpan, type AdapterContext, type LogBundle, type LogSource, type ReferenceRegistry, type VenueAdapter } from '../venues/adapter.js';
+import { sourceSpan, type AdapterContext, type HistoryRevision, type LogBundle, type LogSource, type ReferenceRegistry, type VenueAdapter } from '../venues/adapter.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -46,6 +46,8 @@ const REALTIME_WINDOW_MS = 60_000;
 
 /** Max blocks one tail cycle fetches/decodes/commits (see tailFills). */
 const TAIL_WINDOW_BLOCKS = 1_000;
+/** The in-memory recent-fill ring (`/api/markets` tape, ingest dedup window). */
+const FILL_RING_SIZE = 400;
 
 interface QuoteTrigger {
   identity?: HeadIdentity;
@@ -548,8 +550,8 @@ export function fillsScanFromDay(backfillFromUtc: string | undefined, nowMs: num
  * only recreate the merge-only bug on a later boot; the operator must re-run
  * the reset with that stage enabled. TODAY is excluded for the same reason: it
  * belongs to the live tail and neither scan writes it, so a mid-day reset that
- * dropped it would erase what had already been counted since midnight. A reset
- * re-run the next day rewrites that day properly, once it is closed.
+ * dropped it would erase what had already been counted since midnight. Today
+ * is re-read instead (rereadToday), SET against the tail's own cursor.
  *
  * The fills boundary is the scan's own resume point: backfillRecentFills takes
  * `max(window start, cursor)`, so a targeted start LATER than the window wins
@@ -618,6 +620,117 @@ export function purgeVenueFills(
   for (const id of ids) state.countedIds.delete(id);
 }
 
+/** Fields that make two decodes the SAME fill. Attribution labels (category,
+ *  `to`, router) are excluded: they are best-effort enrichment a second pass
+ *  can label differently, and replacing a live fill over a label would throw
+ *  away its markouts and curve for nothing. */
+function sameFill(a: Fill, b: Fill): boolean {
+  return a.ts === b.ts && a.blockNumber === b.blockNumber && a.venueId === b.venueId && a.market === b.market
+    && a.side === b.side && a.usd === b.usd && a.baseAmount === b.baseAmount && a.execPx === b.execPx
+    && !!a.pxApprox === !!b.pxApprox && a.txHash === b.txHash && a.pool === b.pool;
+}
+
+/**
+ * Converge one venue's fills over a re-read range onto the current decode.
+ *
+ * `total` is the venue's exact day bucket over the range — a SET, like the
+ * closed-day replay, never an increment: the tail decoded the same range with
+ * the previous build, and its count is precisely what is being replaced.
+ *
+ * A fill decoded identically is left alone (it keeps the markouts and curve the
+ * tail captured live, which no archive can restore for today); a changed one
+ * is deleted and re-inserted; a stored one the decode no longer produces is
+ * deleted. Pure so the convergence rules are unit-testable (history-revisions.test.ts).
+ */
+export function planReread(stored: readonly Fill[], decoded: readonly Fill[]): {
+  deleteIds: string[]; insert: Fill[]; total: { usd: number; swaps: number };
+} {
+  const byId = new Map<string, Fill>();
+  for (const f of decoded) byId.set(f.id, f);   // a re-tailed duplicate collapses
+  const kept = new Set<string>();
+  const deleteIds: string[] = [];
+  for (const s of stored) {
+    const d = byId.get(s.id);
+    if (d && sameFill(s, d)) kept.add(s.id);
+    else deleteIds.push(s.id);
+  }
+  const insert = [...byId.values()].filter((f) => !kept.has(f.id));
+  let usd = 0;
+  for (const f of byId.values()) usd += f.usd;
+  return { deleteIds, insert, total: { usd, swaps: byId.size } };
+}
+
+/**
+ * Fold re-read fills into the recent-fill ring: ts order, newest `cap` kept.
+ * Reports which inserted fills made it in (their dedup ids and markout aging
+ * start now) and which ring members fell out (their dedup ids go, exactly as
+ * ingest's own eviction drops them). Pure (history-revisions.test.ts).
+ */
+export function mergeIntoRing(ring: readonly Fill[], inserted: readonly Fill[], cap: number): {
+  ring: Fill[]; added: Fill[]; evicted: Fill[];
+} {
+  if (!inserted.length) return { ring: [...ring], added: [], evicted: [] };
+  const fresh = new Set(inserted);
+  const all = [...ring, ...inserted].sort((a, b) => a.ts - b.ts || a.blockNumber - b.blockNumber);
+  const cut = Math.max(0, all.length - cap);
+  const kept = all.slice(cut);
+  return {
+    ring: kept,
+    added: kept.filter((f) => fresh.has(f)),
+    evicted: all.slice(0, cut).filter((f) => !fresh.has(f)),
+  };
+}
+
+/**
+ * An adapter's declared HistoryRevisions as reset targets — the same pipeline
+ * BACKFILL_RESET feeds, with a marker of their own.
+ *
+ * The marker is per REVISION (`history_revision_<vid>_<id>`), not the env
+ * reset's per-venue key: sharing that key, applying a revision would read as
+ * a changed BACKFILL_RESET entry and re-run the operator's reset, and vice
+ * versa. The marker's value is the entry's text, so editing an applied entry
+ * re-runs it — adding a new id is the clearer way to ask for that.
+ *
+ * Starts are UTC days only (a block number means nothing in review) and ids
+ * must be unique: two entries sharing a marker would overwrite each other's
+ * record and re-run on every boot. Either mistake comes back `invalid`, which
+ * the apply pass reports loudly on every boot WITHOUT stamping (a stamp could
+ * land on a shared marker) — and history-revisions.test.ts fails on.
+ */
+export function revisionTargets(vid: string, revisions: readonly HistoryRevision[] | undefined): BackfillResetTarget[] {
+  const uses = new Map<string, number>();
+  for (const r of revisions ?? []) uses.set(r.id.trim(), (uses.get(r.id.trim()) ?? 0) + 1);
+  return (revisions ?? []).map((r) => {
+    const id = r.id.trim();
+    const spec = `${vid}#${id}:${r.from ?? 'lifetime'}`;
+    const marker = `history_revision_${vid}_${id}`;
+    const [parsed] = parseBackfillReset(r.from === undefined ? vid : `${vid}:${r.from}`);
+    // EVERY occurrence of a shared id is invalid, the first included: a valid
+    // first one would apply, and the invalid twin would still share its marker.
+    const dup = (uses.get(id) ?? 0) > 1;
+    if (!/^[\w.-]+$/.test(id) || dup || !parsed || parsed.from === 'block' || parsed.from === 'invalid') {
+      return { vid, spec, marker, from: 'invalid' as const };
+    }
+    return { ...parsed, spec, marker };
+  });
+}
+
+/**
+ * A today re-read that a restart carried past midnight: its day is CLOSED now,
+ * so it is no longer the tail's — the closed-day replay owns it. It comes back
+ * as an ordinary reset from that day (which re-reads the new today as well).
+ * Its marker is the pending re-read itself: queuing the new today's re-read
+ * overwrites it, which is what records this one as applied.
+ */
+export function carriedRereadTarget(vid: string, pendingDay: string | undefined, today: string): BackfillResetTarget | null {
+  if (!pendingDay || pendingDay >= today) return null;
+  return { vid, spec: pendingDay, marker: rereadKey(vid), carried: true, from: 'day', day: pendingDay };
+}
+
+/** The pending today re-read for a venue: its UTC day, cleared in the same
+ *  snapshot that commits the re-read's day bucket. */
+export const rereadKey = (vid: string) => `reread_day_${vid}`;
+
 /**
  * Why a reset names a venue this boot cannot resolve to a running adapter.
  *
@@ -648,13 +761,21 @@ export function classifyMissingResetVenue(
  * is trimmed by the parser, so padding cannot masquerade as a change either.
  */
 export function resetAlreadyApplied(store: Pick<VolumeStore, 'getMeta'>, t: BackfillResetTarget): boolean {
-  return !!t.vid && store.getMeta(`backfill_reset_applied_${t.vid}`) === t.spec;
+  if (!t.vid) return false;
+  const v = store.getMeta(resetMarker(t));
+  // a carried re-read is pending while its marker still names its day
+  return t.carried ? v !== t.spec : v === t.spec;
+}
+
+/** where an entry's applied-record lives */
+export function resetMarker(t: BackfillResetTarget): string {
+  return t.marker ?? `backfill_reset_applied_${t.vid}`;
 }
 
 /** Record an entry as finished — done, or refused for a reason that will still
  *  hold next boot. An entry with no parseable venue id has nowhere to record. */
 export function markResetApplied(store: Pick<VolumeStore, 'setMeta'>, t: BackfillResetTarget): void {
-  if (t.vid) store.setMeta(`backfill_reset_applied_${t.vid}`, t.spec);
+  if (t.vid && !t.carried) store.setMeta(resetMarker(t), t.spec);
 }
 
 /**
@@ -709,7 +830,15 @@ export function resetVenueHistory(
  *  BACKFILL_RESET value — because it is what the venue's one-shot marker is
  *  keyed on: keyed on the whole value, adding a venue to the list would re-run
  *  the destructive replay for every venue already done. */
-export type BackfillResetTarget = { vid: string; spec: string } & (
+export type BackfillResetTarget = {
+  vid: string;
+  spec: string;
+  /** meta key recording the entry as applied (value = `spec`); unset = the env
+   *  reset's per-venue key. HistoryRevisions and carried re-reads have their own. */
+  marker?: string;
+  /** a carried today re-read (carriedRereadTarget): settled by re-queuing, never stamped */
+  carried?: boolean;
+} & (
   | { from: 'lifetime' }
   | { from: 'block'; block: bigint }
   | { from: 'day'; day: string }
@@ -743,16 +872,15 @@ export function resetStartFromBlock(block: bigint, timestampSec: bigint | number
  * nothing and re-scans nothing, and the one-shot marker is spent on it.
  *
  * Checked before resolving so the refusal names the real mistake, and so a
- * typo costs no RPC.
+ * typo costs no RPC. TODAY is a valid start: it re-reads today's prefix (the
+ * part the tail decoded with the previous build) and touches no closed day.
  */
 export function refuseResetStart(t: BackfillResetTarget, today: string, bootHead: bigint): string | null {
   if (t.from === 'block' && bootHead > 0n && t.block > bootHead) {
     return `start ${t.block} is past head ${bootHead} — skipped rather than replaying the lifetime`;
   }
-  if (t.from === 'day' && t.day >= today) {
-    return t.day === today
-      ? `start ${t.day} is TODAY — the live tail owns today, so a replay from it would delete nothing and re-scan nothing; use an earlier day`
-      : `start ${t.day} is in the future (today is ${today}) — skipped rather than anchoring the replay to head`;
+  if (t.from === 'day' && t.day > today) {
+    return `start ${t.day} is in the future (today is ${today}) — skipped rather than anchoring the replay to head`;
   }
   return null;
 }
@@ -761,12 +889,9 @@ export function refuseResetStart(t: BackfillResetTarget, today: string, bootHead
  * The same question for a start only knowable after the chain answered: a RAW
  * block carries no day until eth_getBlock resolves one.
  *
- * A start landing on today is a total no-op — both deletes bound exclusively at
- * today and both scans skip it — so it would spend the venue's one-shot marker
- * on nothing at all. Refused rather than applied, and refused PERMANENTLY even
- * though the same start becomes valid after midnight: a destructive replay must
- * not lie in wait to fire at a boundary the operator did not choose. The note
- * says what to do instead, and bumping the nonce re-arms it deliberately.
+ * A start landing on today is valid — a today-only re-read, as for a day start
+ * (refuseResetStart) — and it re-reads the WHOLE day from midnight: a superset
+ * of the block asked for, and the only range whose day bucket can be SET.
  */
 export function refuseResolvedStart(
   from: { block: bigint; day: string },
@@ -778,8 +903,8 @@ export function refuseResolvedStart(
   if (bootHead > 0n && from.block > bootHead) {
     return `start ${from.block} is past head ${bootHead} — skipped rather than replaying the lifetime`;
   }
-  if (from.day >= today) {
-    return `start block ${from.block} falls on ${from.day}, which the live tail owns — a replay from it would delete nothing and re-scan nothing; use an earlier block`;
+  if (from.day > today) {
+    return `start block ${from.block} falls on ${from.day}, after today (${today}) — skipped rather than anchoring the replay to head`;
   }
   return null;
 }
@@ -851,6 +976,9 @@ function hotUnavailable(): boolean {
 /** One deep read is valid only when the archive pool stays primary/healthy for
  *  its entire lifetime. The breaker can fail over and retry inside the await. */
 const archiveRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, archiveUnavailable, archiveRpcGeneration);
+/** The same guarantee on the HOT pool, for the today re-read: a result served
+ *  across a failover is refused (and retried) rather than mixed. */
+const hotRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, hotUnavailable, rpcGeneration);
 
 async function holdWhileDegraded(): Promise<boolean> {
   const wasUnavailable = archiveUnavailable();
@@ -945,6 +1073,18 @@ export class LiveDataSource extends BaseSource {
   /** ids already counted into the volume buckets (kept in sync with the fills
    *  window) — makes ingest idempotent so a re-decode never double-counts. */
   private countedIds = new Set<string>();
+  /** Meta keys committed with the NEXT snapshot — atomically with the day
+   *  buckets and cursor it carries (a finished today re-read clears its
+   *  pending marker this way, in the same transaction as the bucket it SET). */
+  private snapshotMeta: Record<string, string> = {};
+  /** venue id → UTC day of a pending today re-read (rereadToday). */
+  private rereads = new Map<string, string>();
+  private rereadRunning = false;
+  /** Fills cut into a snapshot whose write has not settled: between the cut
+   *  and the COMMIT they are in neither the store nor `dirty`. */
+  private inflightFills = new Set<readonly Fill[]>();
+  /** Work that must run BETWEEN tail cycles (scheduleTail drains it). */
+  private tailGates: Array<() => Promise<void>> = [];
   /** CEX mid history per PAIR (market symbol), in the pair's own terms (wrap
    *  basis + stable cross applied) — the markout anchors. Keyed per pair, not per
    *  base, because MON/USDC and MON/USDT0 mark against different mids. */
@@ -1087,6 +1227,11 @@ export class LiveDataSource extends BaseSource {
     this.storeWriter = this.snapshotWriter;
     this.gas.setWriter(this.snapshotWriter);
     this.store.sealWrites();
+    // every venue an adapter declares, not just its first: a reset can name any of them
+    for (const vid of ADAPTERS.flatMap((a) => a.venues().map((v) => v.id))) {
+      const day = this.store.getMeta(rereadKey(vid));
+      if (day && day === utcDay()) this.rereads.set(vid, day);
+    }
     this.kickMaintenance();
 
     // The boot head was captured by initHistory. Quote that exact state once,
@@ -1132,6 +1277,7 @@ export class LiveDataSource extends BaseSource {
     // Fill ingest is intentionally still timer-driven and independent. Its
     // finality-margin range reads never decide which block a quote represents.
     this.scheduleTail();
+    void this.runRereads();
     this.persistTimer = setInterval(() => { void this.persist(); }, config.persistMs);
     // rolling retention: without it fills only aged out at boot, so uptime
     // alone grew the table past its window.
@@ -1278,9 +1424,13 @@ export class LiveDataSource extends BaseSource {
    *  Filter to adapters active in this boot: a VENUES-filtered reset is meant
    *  to wait for a later boot, not launch a no-op history pass every 10 minutes. */
   private resetPending(): boolean {
+    if (!config.backfillEnabled && !config.markoutBackfill) return false;   // nothing would run them
     const active = new Set(ADAPTERS.flatMap((a) => a.venues().map((v) => v.id)));
-    return parseBackfillReset(config.backfillReset)
-      .some((target) => active.has(target.vid) && !resetAlreadyApplied(this.store, target));
+    // an invalid revision is never stamped, and only a code fix clears it — it
+    // must not re-launch the history pass every rediscovery tick meanwhile
+    return this.resetTargets(utcDay())
+      .some((target) => active.has(target.vid) && !(target.marker && target.from === 'invalid')
+        && !resetAlreadyApplied(this.store, target));
   }
 
   stop(): Promise<void> {
@@ -1335,6 +1485,7 @@ export class LiveDataSource extends BaseSource {
     // no-op when everything is seeded, and the in-flight guard makes an extra
     // kick free while a multi-hour backfill is still running.
     if (this.archiveVerified && (this.seedsPending() || this.resetPending())) void this.backgroundHistory();
+    if (this.rereads.size) void this.runRereads();
   }
 
   private realtimeHealth(): RealtimeHealth | undefined {
@@ -1437,7 +1588,7 @@ export class LiveDataSource extends BaseSource {
     const aged = this.store.pruneFillsBefore(retentionCutoffMs(Date.now(), config.fillsRetentionDays), config.pruneBootMaxBatches);
     if (aged.removed) console.log(`[mpamm] retention: pruned ${aged.removed} fill(s) at boot${aged.done ? '' : ' — backlog continues on the worker'}`);
     // load recent fills for live serving
-    this.fills = this.store.recentFills(400);
+    this.fills = this.store.recentFills(FILL_RING_SIZE);
     // seed the dedup guard with the persisted window so a gap-fill re-decode of
     // already-counted fills won't re-count them.
     for (const f of this.fills) this.countedIds.add(f.id);
@@ -1592,19 +1743,24 @@ export class LiveDataSource extends BaseSource {
     const dirtyFills = this.dirty;
     const dirtyDays = this.dirtyDays;
     const dirtyCurves = this.dirtyCurves;
+    const extraMeta = this.snapshotMeta;
     this.dirty = new Set();
     this.dirtyDays = new Set();
     this.dirtyCurves = new Map();
+    this.snapshotMeta = {};
     const snapshot: SnapshotWrite = {
       days: this.days
         .filter((d) => dirtyDays.has(d.utcDay))
         .map((d) => ({ ...d, byVenue: Object.fromEntries(Object.entries(d.byVenue).map(([id, v]) => [id, { ...v }])) })),
-      meta: { lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
+      meta: { ...extraMeta, lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
       fills: [...dirtyFills].map((f) => ({ ...f, markoutsBps: [...f.markoutsBps] })),
       curves: [...dirtyCurves].map(([id, curveBps]) => ({ id, curveBps })),
     };
 
+    const inflight = snapshot.fills;
+    this.inflightFills.add(inflight);
     return this.writeSnapshot(snapshot)
+      .finally(() => { this.inflightFills.delete(inflight); })
       .then(
         (result): Promise<void> | void => {
           this.requeueUnmatchedCurves(dirtyCurves, result.unmatchedCurves);
@@ -1613,12 +1769,13 @@ export class LiveDataSource extends BaseSource {
           // drained before stop() closes the writer — this snapshot already
           // committed the cursor past it. Converges: a failure throws here,
           // and a curve requeues at most CURVE_MAX_RETRIES times.
-          if (reportFailure && (this.dirty.size || this.dirtyDays.size || this.dirtyCurves.size)) return this.persist(true);
+          if (reportFailure && (this.dirty.size || this.dirtyDays.size || this.dirtyCurves.size || Object.keys(this.snapshotMeta).length)) return this.persist(true);
         },
         (e) => {
           for (const f of dirtyFills) this.dirty.add(f);
           for (const day of dirtyDays) this.dirtyDays.add(day);
           for (const [id, curve] of dirtyCurves) if (!this.dirtyCurves.has(id)) this.dirtyCurves.set(id, curve);
+          for (const [k, v] of Object.entries(extraMeta)) if (!(k in this.snapshotMeta)) this.snapshotMeta[k] = v;
           // retained + retried next tick, but say so — a broken disk otherwise
           // looks healthy while the cursor silently stops advancing.
           this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); ${reportFailure ? 'shutdown flush not acknowledged' : 'retrying'}`);
@@ -1710,51 +1867,87 @@ export class LiveDataSource extends BaseSource {
   }
 
   /**
-   * ONE-SHOT history reset for the listed venues after switching to a better
-   * archive RPC, or to recover a window the live tail could not see. Each
-   * enabled history stage is cleared and re-armed as one atomic unit; a stage
-   * switched off for this run stays untouched.
+   * ONE-SHOT history resets, from three places, through one pipeline:
+   *  - BACKFILL_RESET, the operator override, `vid[:from][@nonce]`:
+   *      metric                lifetime replay
+   *      metric:95836845       replay from that block
+   *      metric:2026-08-14     replay from that UTC day
+   *      metric@2              lifetime; `@` is a re-run nonce, never a start
+   *  - adapters' HistoryRevisions — the same replay declared in code, so the
+   *    deploy that changes a decode is also the one that repairs its history;
+   *  - a today re-read a restart carried past midnight (carriedRereadTarget).
    *
-   * BACKFILL_RESET is `vid[:from][@nonce]`, comma-separated:
-   *   metric                lifetime replay
-   *   metric:95836845       replay from that block
-   *   metric:2026-08-14     replay from that UTC day
-   *   metric@2              lifetime; `@` is a re-run nonce, never a start
+   * Each enabled history stage is cleared and re-armed as one atomic unit for
+   * the CLOSED days; a stage switched off for this run stays untouched. Today
+   * belongs to the live tail, so it is never deleted here — it is re-read
+   * instead (queueReread), from midnight to the tail's cursor, which is the
+   * part of the day the previous build decoded. Without that re-read, a reset
+   * applied mid-day recovered every day but the one it was deployed on.
    *
-   * A per-venue marker remembers its applied entry, so redeploys and edits to a
-   * different venue do not re-trigger a multi-hour scan. Runs from
-   * backgroundHistory() ahead of both stages so neither can miss it.
+   * Every entry has its own marker, so redeploys and edits to a different
+   * entry do not re-trigger a multi-hour scan. Runs from backgroundHistory()
+   * ahead of both stages so neither can miss it.
    */
+  private resetTargets(today: string): BackfillResetTarget[] {
+    const want = config.backfillReset.trim();
+    const targets = want ? parseBackfillReset(want) : [];
+    // A revision is a full replay or nothing. With a stage switched off it
+    // would rebuild half the history and still be stamped applied — and unlike
+    // the env reset, nobody chose to run it on this config. So it waits for a
+    // run with both stages on (production always is; the adapter dev loop is
+    // not). A carried re-read too: queuing today's re-read overwrites the very
+    // marker it is keyed on, so a half replay would consume it for good.
+    const fullReplay = config.backfillEnabled && config.markoutBackfill;
+    // The adapter's FIRST venue only: both closed-day stages (backfillAdapter,
+    // backfillRecentFills) key their cursors on it and book every decoded fill
+    // under it. A reset aimed at a later venue would delete rows no scan rebuilds.
+    for (const a of ADAPTERS) {
+      const vid = this.vidOf(a);
+      if (!vid) continue;
+      if (!fullReplay) continue;
+      targets.push(...revisionTargets(vid, a.historyRevisions));
+      const carried = carriedRereadTarget(vid, this.store.getMeta(rereadKey(vid)), today);
+      if (carried) targets.push(carried);
+    }
+    return targets;
+  }
+
   private async applyBackfillReset(nowMs: number): Promise<void> {
     const want = config.backfillReset.trim();
-    if (!want) return;
-    const targets = parseBackfillReset(want);
+    const today = utcDay(nowMs);
+    const targets = this.resetTargets(today);
 
     const applied: string[] = [];
     for (const t of targets) {
-      // One-shot PER VENUE, not per value. A global marker could not record
+      // One-shot PER ENTRY, not per value. A global marker could not record
       // that one entry deferred: retrying it meant re-running the entries that
       // had succeeded, throwing away replays already hours deep.
       if (resetAlreadyApplied(this.store, t)) continue;
       // Stamped only once an entry is FINISHED — done, or refused for a reason
       // that will still hold next boot. A transient failure leaves it unstamped
-      // so this entry, and only this entry, is retried.
-      const settle = () => t.vid
-        ? this.storeWriter.setMeta(`backfill_reset_applied_${t.vid}`, t.spec)
+      // so this entry, and only this entry, is retried. A carried re-read is
+      // stamped by queueReread itself (it overwrites the marker it is keyed on).
+      const settle = () => t.vid && !t.carried
+        ? this.storeWriter.setMeta(resetMarker(t), t.spec)
         : Promise.resolve();
+      const label = t.marker && !t.carried ? `history revision ${t.spec}` : `backfill reset: ${t.vid}`;
 
       if (t.from === 'invalid') {
-        this.note('backfill.config.invalid', `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
-        await settle();
+        this.noteOnce('backfill.config.invalid', t.marker
+          ? `history revision '${t.spec}' is invalid — expected a unique id ([A-Za-z0-9_.-]) and from: YYYY-MM-DD or omitted`
+          : `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
+        // An invalid REVISION is a code bug that only a fix clears; stamping it
+        // could also land on a valid twin's marker (shared id) and re-arm it.
+        if (!t.marker) await settle();
         continue;
       }
       // A start that is not in the past is IGNORED by both resume checks
       // (`cb <= end + 1n`), which would quietly downgrade a targeted replay
       // into a head-anchored one. Refuse instead of doing something other than
       // what was asked — see refuseResetStart for why neither form self-reports.
-      const refusal = refuseResetStart(t, utcDay(nowMs), this.bootHead);
+      const refusal = refuseResetStart(t, today, this.bootHead);
       if (refusal) {
-        this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${refusal}`);
+        this.note('backfill.config.invalid', `${label} ${refusal}`);
         await settle();
         continue;
       }
@@ -1776,6 +1969,15 @@ export class LiveDataSource extends BaseSource {
         await settle();
         continue;
       }
+      // A start ON today has no closed day to replay: it is the re-read alone.
+      // Resolving its block would also be pointless work — the re-read always
+      // starts at midnight.
+      if (t.from === 'day' && t.day === today) {
+        await this.queueReread(t.vid, today);
+        await settle();
+        applied.push(`${t.vid} today only — re-reading ${today} from midnight`);
+        continue;
+      }
       // A targeted replay needs BOTH ends of its start: the block the cursors
       // resume at, and the day the volume delete is scoped to (the volume scan
       // day-aligns, so it restores from that day's start).
@@ -1791,7 +1993,7 @@ export class LiveDataSource extends BaseSource {
         } catch (e) {
           // no settle(): a resolve that failed on the RPC may well succeed on
           // the next boot, and consuming the reset would strand it silently.
-          this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve block ${t.block} to a day (${(e as Error).message}); retried next boot`);
+          this.note('backfill.config.invalid', `${label} — could not resolve block ${t.block} to a day (${(e as Error).message}); retried next boot`);
           continue;
         }
       }
@@ -1803,16 +2005,22 @@ export class LiveDataSource extends BaseSource {
         }
         catch (e) {
           // no settle(): transient, same as the block form above.
-          this.note('backfill.config.invalid', `backfill reset: ${t.vid} — could not resolve ${t.day} to a block (${(e as Error).message}); retried next boot`);
+          this.note('backfill.config.invalid', `${label} — could not resolve ${t.day} to a block (${(e as Error).message}); retried next boot`);
           continue;
         }
       }
       // Now that a day exists for it, ask the same question again — a RAW
       // block could only be judged against head before this point.
-      const resolvedRefusal = from !== undefined ? refuseResolvedStart(from, utcDay(nowMs), this.bootHead) : null;
+      const resolvedRefusal = from !== undefined ? refuseResolvedStart(from, today, this.bootHead) : null;
       if (resolvedRefusal) {
-        this.note('backfill.config.invalid', `backfill reset: ${t.vid} ${resolvedRefusal}`);
+        this.note('backfill.config.invalid', `${label} ${resolvedRefusal}`);
         await settle();
+        continue;
+      }
+      if (from !== undefined && from.day === today) {
+        await this.queueReread(t.vid, today);
+        await settle();
+        applied.push(`${t.vid} today only — re-reading ${today} from midnight`);
         continue;
       }
       // Delete only what the two scans will actually rebuild. A switched-off
@@ -1829,17 +2037,231 @@ export class LiveDataSource extends BaseSource {
       purgeVenueDays(this.days, t.vid, deletes);
       purgeVenueFills({ fills: this.fills, pending: this.pending, dirty: this.dirty, countedIds: this.countedIds }, t.vid, deletes);
       if (dropped.fills) this.dropAggregates();
+      // Queued BEFORE the entry is stamped: a crash between the two re-applies
+      // the reset (idempotent) rather than losing today's re-read.
+      await this.queueReread(t.vid, today);
       await settle();
       // Say what was DESTROYED, not just what will be re-scanned: this is a
       // one-shot operation with no undo, and the counts are the only record.
       const scope = from === undefined ? 'lifetime' : `from block ${from.block} (${from.day} onward)`;
-      applied.push(`${t.vid} ${scope} — dropped ${dropped.volume} day-row(s), ${dropped.fills} fill(s)`);
+      const kind = t.carried ? 'carried re-read' : t.marker ? `revision ${t.spec}` : 'reset';
+      applied.push(`${t.vid} ${kind} ${scope} — dropped ${dropped.volume} day-row(s), ${dropped.fills} fill(s); re-reading ${today} from midnight`);
     }
     // Legacy breadcrumb, written for ROLLBACK only: older builds read this key
     // and would re-run the whole value without it. Nothing here reads it after
     // adoptLegacyResetMarker has run once.
-    await this.storeWriter.setMeta('backfill_reset_applied', want);
-    if (applied.length) this.note('backfill.reset', `backfill reset applied (${want}) — ${applied.join('; ')}`);
+    if (want) await this.storeWriter.setMeta('backfill_reset_applied', want);
+    if (applied.length) this.note('backfill.reset', `history reset applied — ${applied.join('; ')}`);
+  }
+
+  /** Run `fn` between two tail cycles: no fill is ingested, and the cursor
+   *  does not move, until it settles. */
+  private inTail<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.loopsStopped) return Promise.reject(new Error('source stopped'));
+    return new Promise<T>((resolve, reject) => {
+      this.tailGates.push(() => fn().then(resolve, reject));
+    });
+  }
+
+  /** Persist the pending marker FIRST: a re-read must survive a restart that
+   *  lands before it finishes, or today's prefix is lost exactly as before. */
+  private async queueReread(vid: string, day: string): Promise<void> {
+    delete this.snapshotMeta[rereadKey(vid)];   // an earlier re-read's clear must not land after this
+    await this.storeWriter.setMeta(rereadKey(vid), day);
+    // ...and again once acknowledged: an in-flight snapshot that carried the
+    // clear and FAILED restores it into snapshotMeta while the write is
+    // pending. Worker replies are ordered, so that restore has run by now.
+    delete this.snapshotMeta[rereadKey(vid)];
+    this.rereads.set(vid, day);
+    void this.runRereads();
+  }
+
+  private async runRereads(): Promise<void> {
+    if (this.rereadRunning || this.loopsStopped) return;
+    this.rereadRunning = true;
+    try {
+      for (const [vid, day] of [...this.rereads]) {
+        const a = ADAPTERS.find((x) => x.venues().some((v) => v.id === vid));
+        // A day that closed while this waited is the closed-day replay's now:
+        // its marker stays, and the reset pass carries it (carriedRereadTarget).
+        if (!a || day !== utcDay()) { this.rereads.delete(vid); continue; }
+        const name = a.venues()[0]?.name ?? vid;
+        try {
+          await this.rereadToday(a, vid, name, day);
+          this.rereads.delete(vid);
+        } catch (e) {
+          // held, never skipped: retried on the rediscovery tick
+          this.noteOnce('backfill.reread.held', `${name}: re-read of ${day} paused (${(e as Error).message}); retried automatically`, vid);
+        }
+      }
+    } finally {
+      this.rereadRunning = false;
+    }
+  }
+
+  /**
+   * Re-decode TODAY for one venue — midnight to the tail's cursor — and SET its
+   * day bucket and fills to the result.
+   *
+   * Today is the one day no replay can reach: the closed-day scans stop at
+   * midnight, and the tail only reads forward. So the hours between midnight
+   * and the deploy that changed a decode (Metric's v1 sources, 2026-10-12:
+   * ~$2.5M) were decoded by the previous build and stayed that way. The day
+   * was "closed" by the next midnight, after the reset that would have
+   * replayed it had already run.
+   *
+   * The bucket is SET, not incremented: the tail's count over [midnight,
+   * cursor] is exactly what the re-read replaces, so it has to be computed
+   * against the SAME cursor. The bulk is read while the tail keeps running;
+   * the remainder (old cursor → current cursor) is read and the result applied
+   * inside the tail (inTail), so no cycle ingests between the last read and
+   * the SET. HOT pool on purpose: these blocks are under a day old, and they
+   * are the blocks the tail itself just read there.
+   */
+  private async rereadToday(a: VenueAdapter, vid: string, name: string, day: string): Promise<void> {
+    const dayStartMs = Date.parse(`${day}T00:00:00Z`);
+    const dayEndMs = dayStartMs + 86_400_000;
+    const bulkEnd = this.lastBlock;
+    const start = await this.firstBlockOfDay(dayStartMs, bulkEnd);
+    if (start === null) {
+      // the tail has not reached today yet (boot gap-fill): it will decode
+      // today with this build, so there is nothing to re-read
+      this.snapshotMeta[rereadKey(vid)] = '';
+      this.note('backfill.reread', `${name}: ${day} not reached by the tail yet — it decodes the day with this build, nothing to re-read`, vid);
+      return;
+    }
+    const decoded: Fill[] = [];
+    await this.rereadRange(a, vid, start, bulkEnd, dayStartMs, dayEndMs, decoded);
+    // Labels for the bulk OUTSIDE the gate: attribution is a lookup per tx, and
+    // a day's worth inside it would hold the live tail for all of them.
+    try { await this.attributor.attribute(decoded); } catch { /* labels only */ }
+    await this.inTail(async () => {
+      const end = this.lastBlock;
+      if (end > bulkEnd) {
+        const rest: Fill[] = [];
+        await this.rereadRange(a, vid, bulkEnd + 1n, end, dayStartMs, dayEndMs, rest);
+        try { await this.attributor.attribute(rest); } catch { /* labels only */ }
+        decoded.push(...rest);
+      }
+
+      // What the tail holds for the range: stored rows, fills cut into a
+      // snapshot that has not committed yet (posted before reconcileFills, so
+      // its row lands first and is deleted after it), and in-memory ones (the
+      // newest object wins). Everything from here to the reconcile post is
+      // synchronous, so no snapshot can be cut in between.
+      const inRange = (f: Fill) => f.venueId === vid && f.ts >= dayStartMs && f.ts < dayEndMs && BigInt(f.blockNumber) <= end;
+      const held = new Map<string, Fill>();
+      for (const f of this.store.venueFillsInRange(vid, dayStartMs, dayEndMs, end)) held.set(f.id, f);
+      for (const batch of this.inflightFills) for (const f of batch) if (inRange(f)) held.set(f.id, f);
+      for (const owner of [this.fills, this.dirty, this.pending]) for (const f of owner) if (inRange(f)) held.set(f.id, f);
+      const plan = planReread([...held.values()], decoded);
+
+      // Drop the replaced fills from memory BEFORE the write is queued: a
+      // snapshot taken meanwhile would otherwise write the old row back.
+      const gone = new Set(plan.deleteIds);
+      const dropGone = () => {
+        if (!gone.size) return;
+        const drop = (f: Fill) => gone.has(f.id);
+        this.fills.splice(0, this.fills.length, ...this.fills.filter((f) => !drop(f)));
+        for (const set of [this.pending, this.dirty]) for (const f of set) if (drop(f)) set.delete(f);
+        for (const id of gone) { this.countedIds.delete(id); this.dirtyCurves.delete(id); }
+      };
+      dropGone();
+      const written = await this.storeWriter.reconcileFills(plan.deleteIds, plan.insert);
+      // Again after the ACK: a snapshot in flight before the write that then
+      // failed merges its captured fills/curves back into dirty while we await,
+      // and the next snapshot would write a deleted fill (or its old curve)
+      // back. Replies are ordered, so that merge has already happened.
+      dropGone();
+      // The served tape and the ingest dedup window follow the store. NOT via
+      // ingest(): the bucket below is SET, so an ingest would count them twice.
+      // Markout/curve queueing mirrors ingest's, curve-only branch included.
+      const ring = mergeIntoRing(this.fills, plan.insert, FILL_RING_SIZE);
+      this.fills = ring.ring;
+      for (const f of ring.added) {
+        this.countedIds.add(f.id);
+        if (this.hasFutureMarkoutHorizon(f)) this.pending.add(f);
+        else if (this.curveInRing(f)) { this.curveOnly.add(f); this.pending.add(f); }
+      }
+      for (const f of ring.evicted) this.countedIds.delete(f.id);
+
+      const d = this.dayFor(dayStartMs);
+      const before = d.byVenue[vid] ?? { usd: 0, swaps: 0 };
+      // An explicit zero, never a deleted key: the snapshot only upserts the
+      // venues a day carries, so a missing key leaves the stale SQLite row in
+      // place — while the same snapshot clears the marker that would retry it.
+      d.byVenue[vid] = { ...plan.total };
+      this.dirtyDays.add(day);
+      this.snapshotMeta[rereadKey(vid)] = '';
+      if (written.deleted || written.inserted) {
+        this.dropAggregates();
+        // connected tapes only take per-fill upserts — a deletion needs a reload
+        this.emitMsg({ ch: 'fill', resync: true });
+      }
+      this.note('backfill.reread', `${name}: re-read ${day} blocks ${start}→${end} — ${before.swaps}→${plan.total.swaps} swaps, $${Math.round(before.usd)}→$${Math.round(plan.total.usd)}; fills +${written.inserted} −${written.deleted}`, vid);
+    });
+  }
+
+  /** Decode [from, to] in tail-sized windows, keeping this day's own fills.
+   *  Windowed for the same reason the tail is: a whole day of raw logs held at
+   *  once is the OOM the 320MB heap already hit (2026-09-16). */
+  private async rereadRange(a: VenueAdapter, vid: string, from: bigint, to: bigint, dayStartMs: number, dayEndMs: number, out: Fill[]): Promise<void> {
+    const window = BigInt(TAIL_WINDOW_BLOCKS) * 10n;
+    const hotLogs = (p: { address: unknown; fromBlock: bigint; toBlock: bigint; events?: unknown }) =>
+      hotRead(() => publicClient.getLogs(p as any) as Promise<unknown[]>);
+    for (let lo = from; lo <= to; lo += window) {
+      if (this.loopsStopped) throw new Error('source stopped');
+      const hi = lo + window - 1n > to ? to : lo + window - 1n;
+      // logSources() per window: it is the fail-closed gate (throws while
+      // discovery is not ready), and decode may admit a pool mid-range.
+      const sources = a.logSources();
+      const bundle: LogBundle = {};
+      const blocks = new Set<bigint>();
+      await Promise.all(sources.map(async (s) => {
+        const span = sourceSpan(s, lo, hi);
+        const logs = span ? (await getLogsChunked({ address: s.address, fromBlock: span.from, toBlock: span.to, events: s.events as any }, undefined, hotLogs)) as any[] : [];
+        bundle[s.key] = logs;
+        for (const l of logs) blocks.add(l.blockNumber);
+      }));
+      const ts = new Map<bigint, number>();
+      const list = [...blocks];
+      for (let i = 0; i < list.length; i += 15) {
+        await Promise.all(list.slice(i, i + 15).map(async (bn) => {
+          ts.set(bn, Number((await hotRead(() => publicClient.getBlock({ blockNumber: bn }))).timestamp) * 1000);
+        }));
+      }
+      const tsOf = (bn: bigint) => {
+        const t = ts.get(bn);
+        if (t == null) throw new Error(`missing block timestamp for ${bn}`);
+        return t;
+      };
+      const fills = this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, new Set()), 'fill');
+      for (const f of fills) if (f.venueId === vid && f.ts >= dayStartMs && f.ts < dayEndMs) out.push(f);
+      await sleep(config.backfillPaceMs);
+    }
+  }
+
+  /** First block at or after `dayStartMs` within [hi − 400k, hi] (≈ 33h at
+   *  0.3s blocks, so it always holds midnight), or null when even `hi` is
+   *  earlier. A local search rather than blockAtOrAfter, which bisects from
+   *  block 0. The bracket's lower header is deliberately older than a day, so
+   *  it alone is read from the ARCHIVE pool; every probe after it falls
+   *  between it and `hi`, inside today's span, and stays on the hot pool. */
+  private async firstBlockOfDay(dayStartMs: number, hi: bigint): Promise<bigint | null> {
+    const tsOf = async (bn: bigint) => Number((await hotRead(() => publicClient.getBlock({ blockNumber: bn }))).timestamp) * 1000;
+    if (hi <= 0n || await tsOf(hi) < dayStartMs) return null;
+    let lo = hi > 400_000n ? hi - 400_000n : 0n;
+    const loTs = Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: lo }))).timestamp) * 1000;
+    if (loTs >= dayStartMs) {
+      if (lo === 0n) return 0n;
+      throw new Error(`midnight is more than 400k blocks behind block ${hi}`);
+    }
+    let h = hi;   // invariant: ts(lo) < dayStart <= ts(h)
+    while (h - lo > 1n) {
+      const mid = lo + (h - lo) / 2n;
+      if (await tsOf(mid) >= dayStartMs) h = mid; else lo = mid;
+    }
+    return h;
   }
 
   // ── background on-chain backfill ─────────────────────────────────────────────
@@ -2440,6 +2862,8 @@ export class LiveDataSource extends BaseSource {
     const timer = setTimeout(async () => {
       const t0 = Date.now();
       try { await this.tailFills(); } catch (e) { this.noteOnce('tail.failed', `tail failed — holding cursor, retrying: ${(e as Error).message}`); }
+      // between cycles: nothing can ingest while a gate runs (inTail)
+      for (const gate of this.tailGates.splice(0)) await gate();
       this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) });
       this.scheduleTail(Math.max(0, interval - (Date.now() - t0)));
     }, delay ?? interval);
@@ -2869,7 +3293,7 @@ export class LiveDataSource extends BaseSource {
     if (this.countedIds.has(f.id)) return;
     this.countedIds.add(f.id);
     this.fills.push(f);
-    if (this.fills.length > 400) {
+    if (this.fills.length > FILL_RING_SIZE) {
       const dropped = this.fills.shift();
       if (dropped) this.countedIds.delete(dropped.id);
     }

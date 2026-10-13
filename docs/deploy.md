@@ -58,7 +58,26 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | `MARKOUT_BACKFILL=off` · `MARKOUT_BACKFILL_DAYS` | onboarding markout backfill (archived CEX prices) |
 | `GAS_METRIC=off` · `GAS_SAMPLE_STRIDE_BLOCKS` | QUOTE_UPDATE_BURN tracker |
 | `SUBGRAPH_URL` | Clober discovery subgraph override |
-| `BACKFILL_RESET=spec[,spec]` | one-shot re-scan of a venue's history — volume backfill AND fills/markout onboarding. `venue` replays the lifetime; `venue:<block>` or `venue:YYYY-MM-DD` replays only from there. `@n` is a re-run nonce, never a start (`venue@2`). The applied value is remembered, so change it to re-run |
+| `BACKFILL_RESET=spec[,spec]` | operator override for a one-shot re-scan of a venue's history (the normal path is a `historyRevisions` entry in the adapter — see below). Volume backfill AND fills/markout onboarding for closed days, plus a re-read of today. `venue` replays the lifetime; `venue:<block>` or `venue:YYYY-MM-DD` replays only from there (today included). `@n` is a re-run nonce, never a start (`venue@2`). Each entry is remembered once applied, so change it to re-run |
+
+### Re-deriving history after an adapter change
+
+A change to what an adapter decodes (a redeploy's new sources, a units fix)
+ships its own history repair: declare it in the adapter and deploy — no host
+setting.
+
+```ts
+historyRevisions: [{ id: 'v1-deploy-day', from: '2026-10-12' }],
+```
+
+On the first boot of that build each database applies each unseen `id` once:
+closed days from `from` are deleted and replayed (volume + fills), and TODAY is
+re-read from midnight to the live tail's cursor, so the hours before the deploy
+are decoded by the new build too. A start of today is valid (today only). A
+replay never moves a scan forward: on a fresh database, or one whose lifetime
+scan is still crawling, the scan is left to cover those days itself. Revisions
+wait for a run with both `BACKFILL` and `MARKOUT_BACKFILL` on. Never edit an
+applied entry — add a new id.
 
 ### Recovering a window the live tail missed
 
@@ -66,12 +85,21 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 BACKFILL_RESET=metric:2026-08-14
 ```
 
-Replays that venue from the given day (or block) to head instead of its whole
-lifetime — for Metric that is ~955k blocks rather than ~29M. Both halves are
+The same replay as an operator override, for what no code change describes
+(an RPC outage hole, a better archive node). It replays that venue from the
+given day (or block) to head instead of its whole lifetime — for Metric that is
+~955k blocks rather than ~29M — then re-reads today. Both halves are
 idempotent: day rows are SET-per-day and fills dedupe on deterministic ids, so a
-replay can overlap what is already stored. Watch for `backfill.reset` then
-`backfill.start` in `state.notes`; a start past head is refused loudly rather
-than silently downgraded to a lifetime replay.
+replay can overlap what is already stored. Watch for `backfill.reset`,
+`backfill.reread` and `backfill.start` in `state.notes`; a start in the future
+is refused loudly rather than silently downgraded to a lifetime replay.
+
+**Before revisions, a reset recovered every day but the one it was deployed
+on.** The replay stops at midnight and the tail only reads forward, so the
+deploy day's prefix kept the old decode (Metric v1, 2026-10-12: $572k served of
+~$3M). The today re-read (`backfill.reread`) is what closes that gap; it SETs
+the day bucket against the tail's own cursor, keeps unchanged fills (and their
+live markouts) as they are, and replaces or deletes the rest.
 
 ## Operational notes
 

@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { adoptLegacyResetMarker, classifyMissingResetVenue, fillsScanFromDay, markResetApplied, parseBackfillReset, refuseResolvedStart, resetAlreadyApplied, planVenueReset, purgeVenueDays, purgeVenueFills, refuseResetStart, resetStartFromBlock, resetVenueHistory } from '../datasource/live.js';
 import type { DailyVolume, Fill } from '@shared';
-import type { ResetDeletes } from '../db.js';
+import { rewindCursor, type ResetDeletes } from '../db.js';
 
 /** records what a reset touched, without a real SQLite file. */
 function fakeStore(seed: Record<string, string> = {}, rows: Record<string, number> = {}) {
@@ -26,15 +26,14 @@ function fakeStore(seed: Record<string, string> = {}, rows: Record<string, numbe
     resetVenueHistory: (vid: string, deletes: ResetDeletes, fromBlock?: bigint) => {
       out.scoped.push({ vid, deletes, fromBlock });
       const n = volume.get(vid) ?? 0;
-      const cursor = fromBlock === undefined ? '' : String(fromBlock);
       if (deletes.volume) {
         if (deletes.volume.fromDay === undefined) volume.delete(vid);
+        meta.set(`backfill_cursor_${vid}`, rewindCursor(meta.get(`backfill_done_${vid}`), meta.get(`backfill_cursor_${vid}`), fromBlock));
         meta.set(`backfill_done_${vid}`, '');
-        meta.set(`backfill_cursor_${vid}`, cursor);
       }
       if (deletes.fills) {
+        meta.set(`mkfill_cursor_${vid}`, rewindCursor(meta.get(`mkfill_done_${vid}`), meta.get(`mkfill_cursor_${vid}`), fromBlock));
         meta.set(`mkfill_done_${vid}`, '');
-        meta.set(`mkfill_cursor_${vid}`, cursor);
         for (const k of [...meta.keys()]) if (k.startsWith(`mkhist_cursor_${vid}_`)) meta.delete(k);
       }
       return { volume: deletes.volume ? n : 0, fills: deletes.fills ? n : 0 };
@@ -195,13 +194,12 @@ describe('refuseResetStart', () => {
   });
 
   /**
-   * A start on TODAY is a total no-op: both deletes bound exclusively at today
-   * and both scans skip it (the live tail owns today). Applying it would spend
-   * the venue's one-shot marker on nothing — the very silence this guards.
+   * A start on TODAY used to be refused as a no-op: both deletes bound at
+   * today and both scans skip it. It is the today re-read now — the one range
+   * no closed-day scan can reach, and what a same-day deploy needs.
    */
-  it('refuses TODAY, which deletes nothing and re-scans nothing', () => {
-    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'day', day: TODAY }, TODAY, HEAD))
-      .toMatch(/is TODAY .*use an earlier day/);
+  it('accepts TODAY — it is the today-only re-read', () => {
+    expect(refuseResetStart({ vid: 'm', spec: 'm', from: 'day', day: TODAY }, TODAY, HEAD)).toBeNull();
   });
 
   it('accepts a past day and a block at head', () => {
@@ -280,9 +278,8 @@ describe('refuseResolvedStart', () => {
   const TODAY = '2026-08-22';
   const HEAD = 98_000_000n;
 
-  it('refuses a block that resolves onto today', () => {
-    expect(refuseResolvedStart({ block: 97_999_000n, day: TODAY }, TODAY, HEAD))
-      .toMatch(/falls on 2026-08-22.*use an earlier block/);
+  it('accepts a block that resolves onto today — the today-only re-read', () => {
+    expect(refuseResolvedStart({ block: 97_999_000n, day: TODAY }, TODAY, HEAD)).toBeNull();
   });
 
   it('refuses one that resolves past today', () => {

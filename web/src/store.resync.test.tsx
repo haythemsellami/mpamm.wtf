@@ -219,6 +219,17 @@ describe('fill snapshot resynchronization', () => {
     }
   });
 
+  /** a today re-read deleted or replaced stored fills: upserts cannot express
+   *  a deletion, so the tape is reloaded from /api/fills */
+  it('reloads the tape on a fill resync, dropping fills the server deleted', async () => {
+    await mount();
+    await act(async () => message({ ch: 'fill', data: fill('phantom') }));
+    expect(dashboard.fills.map((f) => f.id)).toEqual(['old', 'phantom']);
+    vi.mocked(api.fetchFills).mockResolvedValueOnce([fill('recovered'), fill('old')]);
+    await act(async () => message({ ch: 'fill', resync: true }));
+    expect(dashboard.fills.map((f) => f.id)).toEqual(['old', 'recovered']);
+  });
+
   it('ignores an older REST response when reconnect requests overlap', async () => {
     await mount();
     const older = deferred<Fill[]>(), newer = deferred<Fill[]>();

@@ -348,6 +348,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       }
       else if (msg.ch === 'volume') { if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data)); }
       else if (msg.ch === 'fill') {
+        // stored fills changed server-side (deletions included): reload the tape
+        if ('resync' in msg) { loadSnapshot(); return; }
         if (resyncing) pendingFills.current = upsertFill(pendingFills.current, msg.data);
         setFills((prev) => upsertFill(prev, msg.data));
       }
