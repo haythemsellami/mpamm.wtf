@@ -148,9 +148,9 @@ describe('revisionTargets', () => {
 
   /** two entries on one marker would overwrite each other's record — each
    *  boot then sees the other as unapplied and re-runs it, forever */
-  it('rejects a duplicate id rather than ping-ponging its marker', () => {
-    const ts = revisionTargets('metric', [{ id: 'a', from: '2026-10-11' }, { id: 'a', from: '2026-10-12' }]);
-    expect(ts.map((t) => t.from)).toEqual(['day', 'invalid']);
+  it('rejects EVERY entry sharing an id — the first one too', () => {
+    const ts = revisionTargets('metric', [{ id: 'a', from: '2026-10-11' }, { id: 'b', from: '2026-10-11' }, { id: 'a', from: '2026-10-12' }]);
+    expect(ts.map((t) => t.from)).toEqual(['invalid', 'day', 'invalid']);
   });
 
   it('is one-shot: applied once, skipped after', () => {

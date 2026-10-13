@@ -694,17 +694,20 @@ export function mergeIntoRing(ring: readonly Fill[], inserted: readonly Fill[], 
  * Starts are UTC days only (a block number means nothing in review) and ids
  * must be unique: two entries sharing a marker would overwrite each other's
  * record and re-run on every boot. Either mistake comes back `invalid`, which
- * the apply pass reports loudly — and history-revisions.test.ts fails on.
+ * the apply pass reports loudly on every boot WITHOUT stamping (a stamp could
+ * land on a shared marker) — and history-revisions.test.ts fails on.
  */
 export function revisionTargets(vid: string, revisions: readonly HistoryRevision[] | undefined): BackfillResetTarget[] {
-  const seen = new Set<string>();
+  const uses = new Map<string, number>();
+  for (const r of revisions ?? []) uses.set(r.id.trim(), (uses.get(r.id.trim()) ?? 0) + 1);
   return (revisions ?? []).map((r) => {
     const id = r.id.trim();
     const spec = `${vid}#${id}:${r.from ?? 'lifetime'}`;
     const marker = `history_revision_${vid}_${id}`;
     const [parsed] = parseBackfillReset(r.from === undefined ? vid : `${vid}:${r.from}`);
-    const dup = seen.has(id);
-    seen.add(id);
+    // EVERY occurrence of a shared id is invalid, the first included: a valid
+    // first one would apply, and the invalid twin would still share its marker.
+    const dup = (uses.get(id) ?? 0) > 1;
     if (!/^[\w.-]+$/.test(id) || dup || !parsed || parsed.from === 'block' || parsed.from === 'invalid') {
       return { vid, spec, marker, from: 'invalid' as const };
     }
@@ -1423,8 +1426,11 @@ export class LiveDataSource extends BaseSource {
   private resetPending(): boolean {
     if (!config.backfillEnabled && !config.markoutBackfill) return false;   // nothing would run them
     const active = new Set(ADAPTERS.flatMap((a) => a.venues().map((v) => v.id)));
+    // an invalid revision is never stamped, and only a code fix clears it — it
+    // must not re-launch the history pass every rediscovery tick meanwhile
     return this.resetTargets(utcDay())
-      .some((target) => active.has(target.vid) && !resetAlreadyApplied(this.store, target));
+      .some((target) => active.has(target.vid) && !(target.marker && target.from === 'invalid')
+        && !resetAlreadyApplied(this.store, target));
   }
 
   stop(): Promise<void> {
@@ -1888,15 +1894,18 @@ export class LiveDataSource extends BaseSource {
     // A revision is a full replay or nothing. With a stage switched off it
     // would rebuild half the history and still be stamped applied — and unlike
     // the env reset, nobody chose to run it on this config. So it waits for a
-    // run with both stages on (production always is; the adapter dev loop is not).
-    const revisionsRun = config.backfillEnabled && config.markoutBackfill;
+    // run with both stages on (production always is; the adapter dev loop is
+    // not). A carried re-read too: queuing today's re-read overwrites the very
+    // marker it is keyed on, so a half replay would consume it for good.
+    const fullReplay = config.backfillEnabled && config.markoutBackfill;
     // The adapter's FIRST venue only: both closed-day stages (backfillAdapter,
     // backfillRecentFills) key their cursors on it and book every decoded fill
     // under it. A reset aimed at a later venue would delete rows no scan rebuilds.
     for (const a of ADAPTERS) {
       const vid = this.vidOf(a);
       if (!vid) continue;
-      if (revisionsRun) targets.push(...revisionTargets(vid, a.historyRevisions));
+      if (!fullReplay) continue;
+      targets.push(...revisionTargets(vid, a.historyRevisions));
       const carried = carriedRereadTarget(vid, this.store.getMeta(rereadKey(vid)), today);
       if (carried) targets.push(carried);
     }
@@ -1924,10 +1933,12 @@ export class LiveDataSource extends BaseSource {
       const label = t.marker && !t.carried ? `history revision ${t.spec}` : `backfill reset: ${t.vid}`;
 
       if (t.from === 'invalid') {
-        this.note('backfill.config.invalid', t.marker
+        this.noteOnce('backfill.config.invalid', t.marker
           ? `history revision '${t.spec}' is invalid — expected a unique id ([A-Za-z0-9_.-]) and from: YYYY-MM-DD or omitted`
           : `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
-        await settle();
+        // An invalid REVISION is a code bug that only a fix clears; stamping it
+        // could also land on a valid twin's marker (shared id) and re-arm it.
+        if (!t.marker) await settle();
         continue;
       }
       // A start that is not in the past is IGNORED by both resume checks
