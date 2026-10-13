@@ -2121,10 +2121,17 @@ export class LiveDataSource extends BaseSource {
     }
     const decoded: Fill[] = [];
     await this.rereadRange(a, vid, start, bulkEnd, dayStartMs, dayEndMs, decoded);
+    // Labels for the bulk OUTSIDE the gate: attribution is a lookup per tx, and
+    // a day's worth inside it would hold the live tail for all of them.
+    try { await this.attributor.attribute(decoded); } catch { /* labels only */ }
     await this.inTail(async () => {
       const end = this.lastBlock;
-      if (end > bulkEnd) await this.rereadRange(a, vid, bulkEnd + 1n, end, dayStartMs, dayEndMs, decoded);
-      try { await this.attributor.attribute(decoded); } catch { /* labels only */ }
+      if (end > bulkEnd) {
+        const rest: Fill[] = [];
+        await this.rereadRange(a, vid, bulkEnd + 1n, end, dayStartMs, dayEndMs, rest);
+        try { await this.attributor.attribute(rest); } catch { /* labels only */ }
+        decoded.push(...rest);
+      }
 
       // What the tail holds for the range: stored rows, fills cut into a
       // snapshot that has not committed yet (posted before reconcileFills, so
