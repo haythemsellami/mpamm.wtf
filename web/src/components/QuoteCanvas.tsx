@@ -98,8 +98,14 @@ export function QuoteCanvas() {
     const padL = Math.max(58, Math.ceil(Math.max(...labels.map((l) => ctx.measureText(l).width))) + 12);
 
     const X = (ts: number) => padL + Math.max(0, Math.min(1, (ts - startTs) / QUOTE_WINDOW_MS)) * (w - padL - padR);
-    // clamped: an off-scale side runs along the plot edge it left through
     const Y = (p: number) => padT + (1 - Math.max(0, Math.min(1, (p - mn) / (mx - mn)))) * (h - padT - padB);
+    // An off-scale side is pinned to the edge on ITS side of ITS frame's mid —
+    // never projected: detection is per-frame bps, the domain is window-wide
+    // price, so after the mid drifts an off-scale price can sit inside mn..mx.
+    const pointY = (point: QuotePoint, side: 'bid' | 'ask') => {
+      const px = point[side]!;
+      return offScale(px, point.mid) ? (px > point.mid! ? padT : h - padB) : Y(px);
+    };
 
     ctx.lineWidth = 1;
     for (let g = 0; g <= GRID; g++) {
@@ -123,17 +129,16 @@ export function QuoteCanvas() {
     const stepPath = (run: readonly QuotePoint[], side: 'bid' | 'ask') => {
       ctx.beginPath();
       run.forEach((point, i) => {
-        const px = point[side]!;
-        const x = X(point.ts), y = Y(px);
+        const x = X(point.ts), y = pointY(point, side);
         if (!i) ctx.moveTo(x, y);
-        else { ctx.lineTo(x, Y(run[i - 1][side]!)); ctx.lineTo(x, y); } // hold, then step
+        else { ctx.lineTo(x, pointY(run[i - 1], side)); ctx.lineTo(x, y); } // hold, then step
       });
     };
     const strokeRun = (run: readonly QuotePoint[], side: 'bid' | 'ask') => {
       if (run.length > 1) stepPath(run, side);
       else {
         ctx.beginPath();
-        ctx.arc(X(run[0].ts), Y(run[0][side]!), 1.35, 0, Math.PI * 2);
+        ctx.arc(X(run[0].ts), pointY(run[0], side), 1.35, 0, Math.PI * 2);
       }
       ctx.stroke();
     };
@@ -195,7 +200,7 @@ export function QuoteCanvas() {
       for (const side of ['ask', 'bid'] as const) {
         const px = last[side];
         if (px === null || !offScale(px, last.mid)) continue;
-        const above = px > mx;
+        const above = px > last.mid;
         const slot = above ? edgeLabels.top++ : edgeLabels.bottom++;
         const bps = (px / last.mid - 1) * 1e4;
         ctx.fillStyle = venueColor(v, d.theme);
