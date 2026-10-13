@@ -19,7 +19,7 @@ on:
       - '.github/CODEOWNERS'
       - 'LICENSE'
       - 'render.yaml'
-      - 'railway.json'
+      - '.railway/**'
   pull_request:
   workflow_dispatch:
 

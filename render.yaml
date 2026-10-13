@@ -1,7 +1,7 @@
 # Render Blueprint (infra-as-code). Render reads this on "New → Blueprint" and
 # builds the existing multi-stage Dockerfile — one always-on web service that
 # serves the REST/WS API AND the built frontend (same origin), with a persistent
-# disk for the SQLite history. Mirrors the Railway setup (railway.json).
+# disk for the SQLite history. Mirrors the Railway service (.railway/railway.ts).
 #
 # The RPC vars are secrets (sync: false) — Render prompts for them on create;
 # they are NOT committed. DB_PATH=/data/mpamm.db and WEB_DIST are already baked
