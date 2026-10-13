@@ -79,7 +79,10 @@ export function QuoteCanvas() {
         }
       }
     }
-    if (!isFinite(mn) || mn === mx) return;
+    if (!isFinite(mn)) return;
+    // one retained price (every in-scale side on the mid, the rest pinned)
+    // still needs a span — returning here would blank the pinned lines too
+    if (mn === mx) { const half = Math.abs(mn) * 1e-4 || 1e-9; mn -= half; mx += half; }
     const pad = (mx - mn) * 0.12; mn -= pad; mx += pad;
 
     ctx.font = '9px "JetBrains Mono", monospace';
