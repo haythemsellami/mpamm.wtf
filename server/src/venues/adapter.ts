@@ -156,6 +156,28 @@ export interface GasRelay {
   targetWord: number;
 }
 
+/**
+ * A one-shot replay of this venue's history, declared next to the code change
+ * that needs it — the in-code form of `BACKFILL_RESET=<venue>:<from>`, so the
+ * replay's scope is reviewed in the PR and recorded in git rather than set by
+ * hand in the host's dashboard.
+ *
+ * The core replays closed days from `from` (volume + fills, deleting first so
+ * a day can go DOWN), then re-reads TODAY up to the live tail's cursor — the
+ * part of the day the tail decoded with the previous build. Applied once per
+ * database, keyed on `id`: never edit an applied entry, add a new id.
+ *
+ * A venue whose history scan has not reached `from` yet (a fresh database) is
+ * left to that scan: the replay never moves a scan cursor forward.
+ */
+export interface HistoryRevision {
+  /** stable, unique per venue — the marker that records it as applied */
+  id: string;
+  /** first UTC day (YYYY-MM-DD) whose stored history is wrong; omit for the
+   *  whole lifetime. Today is valid: only today's prefix is re-read. */
+  from?: string;
+}
+
 /** Optional historical seed returned by `backfill()`. */
 export interface AdapterBackfill {
   /** closed-day per-venue volume to merge into the store (usd; swaps defaults to 0). */
@@ -181,6 +203,11 @@ export interface VenueAdapter {
    *  volume. The core owns the chunking/pacing/resume so the adapter stays thin.
    *  Use for venues with no keyless subgraph; leave unset to accrue forward only. */
   backfillFromUtc?: string;
+  /** Re-derive stored history after a change to what this adapter decodes — a
+   *  redeploy's new sources, a units fix. Each entry runs ONCE per database, on
+   *  the first boot of the build that declares it: the deploy is the trigger,
+   *  not an operator setting. See HistoryRevision. */
+  historyRevisions?: readonly HistoryRevision[];
   /** Optional live bid/ask per market×size for the Execution tab. Every chain
    *  read must use `blockNumber`: one published matrix represents exactly one
    *  Monad block rather than a mixture of adjacent `latest` states.

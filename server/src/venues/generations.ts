@@ -1,5 +1,5 @@
 import type { QuoteRow, VenueMeta } from '@shared';
-import type { AdapterContext, EntryPoint, GasSource, LogBundle, LogSource, VenueAdapter } from './adapter.js';
+import type { AdapterContext, EntryPoint, GasSource, HistoryRevision, LogBundle, LogSource, VenueAdapter } from './adapter.js';
 
 /**
  * One venue, several contract GENERATIONS. A protocol that redeploys (new
@@ -15,9 +15,9 @@ import type { AdapterContext, EntryPoint, GasSource, LogBundle, LogSource, Venue
  * declares a bounded span (LogSource.untilBlock), so the core never fetches it
  * live. See docs/adapters.md → Retiring contracts.
  */
-export type VenueGeneration = Omit<VenueAdapter, 'venues' | 'backfill' | 'backfillFromUtc'>;
+export type VenueGeneration = Omit<VenueAdapter, 'venues' | 'backfill' | 'backfillFromUtc' | 'historyRevisions'>;
 
-export function composeGenerations(meta: VenueMeta, opts: { backfillFromUtc?: string }, generations: Record<string, VenueGeneration>): VenueAdapter {
+export function composeGenerations(meta: VenueMeta, opts: { backfillFromUtc?: string; historyRevisions?: readonly HistoryRevision[] }, generations: Record<string, VenueGeneration>): VenueAdapter {
   const gens = Object.entries(generations);
   const prefix = (name: string) => `${name}:`;
   const withGas = gens.filter(([, g]) => g.gasSources);
@@ -25,6 +25,7 @@ export function composeGenerations(meta: VenueMeta, opts: { backfillFromUtc?: st
   const adapter: VenueAdapter = {
     venues: () => [meta],
     backfillFromUtc: opts.backfillFromUtc,
+    historyRevisions: opts.historyRevisions,
     quoteMarkets: () => [...new Set(gens.flatMap(([, g]) => g.quoteMarkets?.() ?? []))],
 
     // Every generation runs even when one fails, so a retired generation's

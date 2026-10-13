@@ -136,6 +136,22 @@ export interface ResetDeletes {
   fills?: { fromBlock: bigint } | { fromDay: string };
 }
 
+/**
+ * Where a targeted reset leaves a history scan's resume cursor: back at
+ * `fromBlock`, but never FORWARD of where the scan already is. A scan that has
+ * not reached `fromBlock` (still crawling, or never started on a fresh
+ * database — cursor '') will decode those blocks with the current build anyway,
+ * and jumping it ahead would silently skip everything in between. That matters
+ * once resets ship in code (HistoryRevision): they run on the first boot of
+ * every database, including one whose lifetime scan has barely begun.
+ * Omitted `fromBlock` = lifetime replay = cleared cursor.
+ */
+export function rewindCursor(done: string | undefined, cursor: string | undefined, fromBlock: bigint | undefined): string {
+  if (fromBlock === undefined) return '';
+  if (done === '1') return String(fromBlock);
+  return cursor && BigInt(cursor) > fromBlock ? String(fromBlock) : (cursor ?? '');
+}
+
 export class VolumeStore {
   private db: DatabaseSync;
   private writesSealed = false;
@@ -397,8 +413,9 @@ export class VolumeStore {
         volume = Number((fromDay === undefined
           ? this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day < ?`).run(venueId, deletes.beforeDay)
           : this.db.prepare(`DELETE FROM daily_volume WHERE venue_id = ? AND utc_day >= ? AND utc_day < ?`).run(venueId, fromDay, deletes.beforeDay)).changes);
+        const cursor = rewindCursor(this.getMeta(`backfill_done_${venueId}`), this.getMeta(`backfill_cursor_${venueId}`), fromBlock);
         this.metaStmt.run(`backfill_done_${venueId}`, '');
-        this.metaStmt.run(`backfill_cursor_${venueId}`, fromBlock === undefined ? '' : String(fromBlock));
+        this.metaStmt.run(`backfill_cursor_${venueId}`, cursor);
       }
       if (deletes.fills) {
         // fills carry both a block and a timestamp; the scan's resume point is
@@ -417,8 +434,9 @@ export class VolumeStore {
         fills = Number(('fromBlock' in deletes.fills
           ? this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND block_number >= ? AND ts < ?`).run(venueId, deletes.fills.fromBlock, beforeMs)
           : this.db.prepare(`DELETE FROM fills WHERE venue_id = ? AND ts >= ? AND ts < ?`).run(venueId, fillFromMs, beforeMs)).changes);
+        const cursor = rewindCursor(this.getMeta(`mkfill_done_${venueId}`), this.getMeta(`mkfill_cursor_${venueId}`), fromBlock);
         this.metaStmt.run(`mkfill_done_${venueId}`, '');
-        this.metaStmt.run(`mkfill_cursor_${venueId}`, fromBlock === undefined ? '' : String(fromBlock));
+        this.metaStmt.run(`mkfill_cursor_${venueId}`, cursor);
         this.db.prepare(`DELETE FROM meta WHERE substr(key, 1, length(?)) = ?`)
           .run(`mkhist_cursor_${venueId}_`, `mkhist_cursor_${venueId}_`);
       }
@@ -645,25 +663,63 @@ export class VolumeStore {
   insertFillsIfAbsent(fills: Fill[]): number {
     this.assertWritable();
     if (!fills.length) return 0;
+    this.db.exec('BEGIN');
+    try {
+      const added = this.runInsertIfAbsent(fills);
+      this.db.exec('COMMIT');
+      return added;
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  /**
+   * Converge a venue's stored fills over a re-read range onto what the current
+   * build decodes there, in one transaction: `deleteIds` (decoded no longer, or
+   * decoded differently) go, then `insert` lands if absent. Insert-if-absent,
+   * not upsert, is what keeps a live fill's markouts and curve: the same fill,
+   * decoded identically, is left exactly as the tail stored it. A changed fill
+   * is in BOTH lists, so it is replaced and its markouts restart from null.
+   */
+  reconcileFills(deleteIds: readonly string[], insert: Fill[]): { deleted: number; inserted: number } {
+    this.assertWritable();
+    this.db.exec('BEGIN');
+    try {
+      const del = this.db.prepare(`DELETE FROM fills WHERE id = ?`);
+      let deleted = 0;
+      for (const id of deleteIds) deleted += Number(del.run(id).changes);
+      const inserted = this.runInsertIfAbsent(insert);
+      this.db.exec('COMMIT');
+      return { deleted, inserted };
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  private runInsertIfAbsent(fills: Fill[]): number {
+    if (!fills.length) return 0;
     const ins = this.db.prepare(`
       INSERT INTO fills (id, ts, block_number, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label, pool, markouts_bps, router)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO NOTHING`);
     let added = 0;
-    this.db.exec('BEGIN');
-    try {
-      for (const f of fills) {
-        const markouts = f.pxApprox ? NULL_MARKOUTS_JSON : JSON.stringify(f.markoutsBps);
-        const info = ins.run(f.id, f.ts, f.blockNumber, f.venueId, f.market, f.side, f.category,
-          f.usd, f.baseAmount, f.execPx, f.pxApprox ? 1 : 0, f.txHash, f.to, f.pool, markouts, f.router ?? null);
-        added += Number(info.changes);
-      }
-      this.db.exec('COMMIT');
-    } catch (e) {
-      this.db.exec('ROLLBACK');
-      throw e;
+    for (const f of fills) {
+      const markouts = f.pxApprox ? NULL_MARKOUTS_JSON : JSON.stringify(f.markoutsBps);
+      const info = ins.run(f.id, f.ts, f.blockNumber, f.venueId, f.market, f.side, f.category,
+        f.usd, f.baseAmount, f.execPx, f.pxApprox ? 1 : 0, f.txHash, f.to, f.pool, markouts, f.router ?? null);
+      added += Number(info.changes);
     }
     return added;
+  }
+
+  /** One venue's stored fills with `fromMs <= ts < toMs` and a block no later
+   *  than `maxBlock` — what a re-read of that range must converge. */
+  venueFillsInRange(venueId: string, fromMs: number, toMs: number, maxBlock: bigint): Fill[] {
+    const rows = this.db.prepare(`SELECT * FROM fills WHERE venue_id = ? AND ts >= ? AND ts < ? AND block_number <= ?`)
+      .all(venueId, fromMs, toMs, maxBlock) as Array<Record<string, any>>;
+    return rows.map(rowToFill);
   }
 
   /** One-time honesty relabel for retained fills: adapters that used to

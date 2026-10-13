@@ -24,6 +24,7 @@ export type StoreMutation =
   | { kind: 'resetGas'; venueId: string }
   | { kind: 'resetGasFrom'; venueId: string; fromDay: string }
   | { kind: 'insertFillsIfAbsent'; fills: Fill[] }
+  | { kind: 'reconcileFills'; deleteIds: string[]; insert: Fill[] }
   | { kind: 'applyRemarks'; rows: RemarkWrite[] }
   | { kind: 'pruneFills'; beforeMs: number; maxBatches: number }
   | { kind: 'vacuumIfRoom'; availBytes: number };
@@ -39,6 +40,8 @@ export interface StoreWriter {
   resetGas(venueId: string): Promise<void>;
   resetGasFrom(venueId: string, fromDay: string): Promise<void>;
   insertFillsIfAbsent(fills: Fill[]): Promise<number>;
+  /** see VolumeStore.reconcileFills */
+  reconcileFills(deleteIds: string[], insert: Fill[]): Promise<{ deleted: number; inserted: number }>;
   applyRemarks(rows: RemarkWrite[]): Promise<void>;
   /** retention sweep — see VolumeStore.pruneFillsBefore */
   pruneFills(beforeMs: number, maxBatches: number): Promise<PruneResult>;
@@ -56,6 +59,7 @@ export function directStoreWriter(store: VolumeStore): StoreWriter {
     resetGas: async (venueId) => store.resetGas(venueId),
     resetGasFrom: async (venueId, fromDay) => store.resetGasFrom(venueId, fromDay),
     insertFillsIfAbsent: async (fills) => store.insertFillsIfAbsent(fills),
+    reconcileFills: async (deleteIds, insert) => store.reconcileFills(deleteIds, insert),
     applyRemarks: async (rows) => store.applyRemarks(rows),
     pruneFills: async (beforeMs, maxBatches) => store.pruneFillsBefore(beforeMs, maxBatches),
     vacuumIfRoom: async (availBytes) => store.vacuumIfRoom(availBytes),
@@ -117,6 +121,9 @@ export class SnapshotWriter implements StoreWriter {
   resetGas(venueId: string): Promise<void> { return this.request({ kind: 'resetGas', venueId }); }
   resetGasFrom(venueId: string, fromDay: string): Promise<void> { return this.request({ kind: 'resetGasFrom', venueId, fromDay }); }
   insertFillsIfAbsent(fills: Fill[]): Promise<number> { return this.request({ kind: 'insertFillsIfAbsent', fills }); }
+  reconcileFills(deleteIds: string[], insert: Fill[]): Promise<{ deleted: number; inserted: number }> {
+    return this.request({ kind: 'reconcileFills', deleteIds, insert });
+  }
   applyRemarks(rows: RemarkWrite[]): Promise<void> { return this.request({ kind: 'applyRemarks', rows }); }
   pruneFills(beforeMs: number, maxBatches: number): Promise<PruneResult> {
     return this.request({ kind: 'pruneFills', beforeMs, maxBatches });

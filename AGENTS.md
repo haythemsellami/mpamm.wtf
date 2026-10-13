@@ -27,6 +27,7 @@ Follow **[docs/adapters.md](docs/adapters.md)** exactly — interface, correctne
 - Verify units on the real chain before claiming done: recompute one fill's `usd`/`baseAmount`/`execPx` by hand from the raw log; decimals/scaling are where every adapter bug lives.
 - Add fixture decode tests (`server/src/venues/__tests__/`) — real recorded logs, no network.
 - A protocol that **redeploys** keeps its venue id (renaming it deletes its history on boot): add a generation module and compose both with `composeGenerations`; the retired one is decode-only with `untilBlock` on its sources. See docs/adapters.md → *Retiring contracts* (reference: `metric.ts`).
+- A change to what an adapter decodes ships its own history repair: a `historyRevisions` entry (`{ id, from }`) replays closed days from `from` and re-reads today on the first boot of the build — no Render env step. `BACKFILL_RESET` is the operator override for gaps no code change describes.
 
 ## Conventions & gotchas
 
