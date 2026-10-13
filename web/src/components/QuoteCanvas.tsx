@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react';
 import { QUOTE_CHART_WINDOW_MS, type VenueMeta } from '@shared';
 import { useDashboard } from '../store';
 import { hexA, venueColor, CH } from '../theme';
-import { continuousQuoteRuns, quoteFrameTime, type QuotePoint } from '../lib/quote-series';
+import { continuousQuoteRuns, offScaleLimitBps, quoteDistanceBps, quoteFrameTime, type QuotePoint } from '../lib/quote-series';
 
 const QUOTE_WINDOW_MS = QUOTE_CHART_WINDOW_MS;
 
@@ -57,6 +57,14 @@ export function QuoteCanvas() {
     const endTs = Math.max(Date.now(), d.quotes ? quoteFrameTime(d.quotes) : 0);
     const startTs = endTs - QUOTE_WINDOW_MS;
 
+    // off-scale sides (lib/quote-series: OFF_SCALE_FACTOR) stay out of the
+    // domain; they are drawn pinned to the edge and labelled below.
+    const limit = offScaleLimitBps(active.flatMap((v) => {
+      const s = d.series[v.id];
+      return s ? [{ points: s.points, reference: v.role === 'reference' }] : [];
+    }), startTs);
+    const offScale = (px: number, mid: number | null) => limit !== null && (quoteDistanceBps(px, mid) ?? 0) > limit;
+    const pinned = new Set<string>();
     let mn = Infinity, mx = -Infinity;
     for (const v of active) {
       const s = d.series[v.id];
@@ -65,12 +73,16 @@ export function QuoteCanvas() {
         if (p.ts < startTs) continue;
         for (const px of [p.bid, p.ask]) {
           if (px === null) continue;
+          if (offScale(px, p.mid)) { pinned.add(v.id); continue; }
           if (px < mn) mn = px;
           if (px > mx) mx = px;
         }
       }
     }
-    if (!isFinite(mn) || mn === mx) return;
+    if (!isFinite(mn)) return;
+    // one retained price (every in-scale side on the mid, the rest pinned)
+    // still needs a span — returning here would blank the pinned lines too
+    if (mn === mx) { const half = Math.abs(mn) * 1e-4 || 1e-9; mn -= half; mx += half; }
     const pad = (mx - mn) * 0.12; mn -= pad; mx += pad;
 
     ctx.font = '9px "JetBrains Mono", monospace';
@@ -89,7 +101,14 @@ export function QuoteCanvas() {
     const padL = Math.max(58, Math.ceil(Math.max(...labels.map((l) => ctx.measureText(l).width))) + 12);
 
     const X = (ts: number) => padL + Math.max(0, Math.min(1, (ts - startTs) / QUOTE_WINDOW_MS)) * (w - padL - padR);
-    const Y = (p: number) => padT + (1 - (p - mn) / (mx - mn)) * (h - padT - padB);
+    const Y = (p: number) => padT + (1 - Math.max(0, Math.min(1, (p - mn) / (mx - mn)))) * (h - padT - padB);
+    // An off-scale side is pinned to the edge on ITS side of ITS frame's mid —
+    // never projected: detection is per-frame bps, the domain is window-wide
+    // price, so after the mid drifts an off-scale price can sit inside mn..mx.
+    const pointY = (point: QuotePoint, side: 'bid' | 'ask') => {
+      const px = point[side]!;
+      return offScale(px, point.mid) ? (px > point.mid! ? padT : h - padB) : Y(px);
+    };
 
     ctx.lineWidth = 1;
     for (let g = 0; g <= GRID; g++) {
@@ -113,17 +132,16 @@ export function QuoteCanvas() {
     const stepPath = (run: readonly QuotePoint[], side: 'bid' | 'ask') => {
       ctx.beginPath();
       run.forEach((point, i) => {
-        const px = point[side]!;
-        const x = X(point.ts), y = Y(px);
+        const x = X(point.ts), y = pointY(point, side);
         if (!i) ctx.moveTo(x, y);
-        else { ctx.lineTo(x, Y(run[i - 1][side]!)); ctx.lineTo(x, y); } // hold, then step
+        else { ctx.lineTo(x, pointY(run[i - 1], side)); ctx.lineTo(x, y); } // hold, then step
       });
     };
     const strokeRun = (run: readonly QuotePoint[], side: 'bid' | 'ask') => {
       if (run.length > 1) stepPath(run, side);
       else {
         ctx.beginPath();
-        ctx.arc(X(run[0].ts), Y(run[0][side]!), 1.35, 0, Math.PI * 2);
+        ctx.arc(X(run[0].ts), pointY(run[0], side), 1.35, 0, Math.PI * 2);
       }
       ctx.stroke();
     };
@@ -136,7 +154,8 @@ export function QuoteCanvas() {
     const byW = [...active].sort((a, b) => spreadOf(b) - spreadOf(a));
     for (const v of byW) {
       const s = d.series[v.id];
-      if (!s) continue;
+      // a pinned venue's ribbon would be clamped into a band covering half the plot
+      if (!s || pinned.has(v.id)) continue;
       for (const run of continuousQuoteRuns(s.points, 'both', startTs)) {
         if (run.length < 2) continue; // need both sides for a ribbon (one-sided venues skip)
         ctx.beginPath();
@@ -172,6 +191,25 @@ export function QuoteCanvas() {
       ctx.setLineDash([3, 3]);
       for (const run of continuousQuoteRuns(s.points, 'bid', startTs)) strokeRun(run, 'bid');
       ctx.setLineDash([]);
+    }
+
+    // OFF-SCALE labels — one per side whose CURRENT quote is off the plot, on
+    // the edge it is pinned to, so the value is never silently clipped away.
+    const edgeLabels = { top: 0, bottom: 0 };
+    ctx.textAlign = 'right';
+    for (const v of active) {
+      const last = d.series[v.id]?.points.at(-1);
+      if (!last || last.ts < startTs || last.mid === null) continue;
+      for (const side of ['ask', 'bid'] as const) {
+        const px = last[side];
+        if (px === null || !offScale(px, last.mid)) continue;
+        const above = px > last.mid;
+        const slot = above ? edgeLabels.top++ : edgeLabels.bottom++;
+        const bps = (px / last.mid - 1) * 1e4;
+        ctx.fillStyle = venueColor(v, d.theme);
+        ctx.fillText(`${above ? '▲' : '▼'} ${v.name} ${side} ${bps > 0 ? '+' : '−'}${Math.abs(bps).toFixed(0)}bps`,
+          w - padR - 4, above ? padT + 10 + slot * 11 : h - padB - 4 - slot * 11);
+      }
     }
   };
 
