@@ -14,11 +14,12 @@
     "dev:server": "npm -w server run dev",
     "dev:web": "npm -w web run dev",
     "build": "npm -w web run build",
-    "typecheck": "npm -w server run typecheck && npm -w web run typecheck",
+    "typecheck": "npm -w server run typecheck && npm -w web run typecheck && tsc -p .railway",
     "start": "npm -w server run start"
   },
   "devDependencies": {
-    "concurrently": "^10.0.5"
+    "concurrently": "^10.0.5",
+    "railway": "3.15.0"
   },
   "license": "AGPL-3.0-only",
   "repository": {
