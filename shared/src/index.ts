@@ -903,6 +903,11 @@ export type StreamMessage =
   | { ch: 'state'; data: StreamState }
   | { ch: 'quotes'; data: QuoteSnapshot }
   | { ch: 'fill'; data: Fill }
+  /** Stored fills under the tape changed server-side — a today re-read
+   *  replaced or deleted some — so a client holding a tape reloads it. Rides
+   *  the fill channel so it reaches exactly those clients; one-off, never per
+   *  tick (the egress budget), and never replayed as a topic snapshot. */
+  | { ch: 'fill'; resync: true; data?: undefined }
   | { ch: 'volume'; data: DailyVolume };
 
 export const STREAM_PATH = '/stream';

@@ -2193,7 +2193,11 @@ export class LiveDataSource extends BaseSource {
       d.byVenue[vid] = { ...plan.total };
       this.dirtyDays.add(day);
       this.snapshotMeta[rereadKey(vid)] = '';
-      if (written.deleted || written.inserted) this.dropAggregates();
+      if (written.deleted || written.inserted) {
+        this.dropAggregates();
+        // connected tapes only take per-fill upserts — a deletion needs a reload
+        this.emitMsg({ ch: 'fill', resync: true });
+      }
       this.note('backfill.reread', `${name}: re-read ${day} blocks ${start}→${end} — ${before.swaps}→${plan.total.swaps} swaps, $${Math.round(before.usd)}→$${Math.round(plan.total.usd)}; fills +${written.inserted} −${written.deleted}`, vid);
     });
   }
@@ -2239,13 +2243,16 @@ export class LiveDataSource extends BaseSource {
 
   /** First block at or after `dayStartMs` within [hi − 400k, hi] (≈ 33h at
    *  0.3s blocks, so it always holds midnight), or null when even `hi` is
-   *  earlier. A local search on the HOT pool: blockAtOrAfter bisects from
-   *  block 0, which only an archive node can serve. */
+   *  earlier. A local search rather than blockAtOrAfter, which bisects from
+   *  block 0. The bracket's lower header is deliberately older than a day, so
+   *  it alone is read from the ARCHIVE pool; every probe after it falls
+   *  between it and `hi`, inside today's span, and stays on the hot pool. */
   private async firstBlockOfDay(dayStartMs: number, hi: bigint): Promise<bigint | null> {
     const tsOf = async (bn: bigint) => Number((await hotRead(() => publicClient.getBlock({ blockNumber: bn }))).timestamp) * 1000;
     if (hi <= 0n || await tsOf(hi) < dayStartMs) return null;
     let lo = hi > 400_000n ? hi - 400_000n : 0n;
-    if (await tsOf(lo) >= dayStartMs) {
+    const loTs = Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: lo }))).timestamp) * 1000;
+    if (loTs >= dayStartMs) {
       if (lo === 0n) return 0n;
       throw new Error(`midnight is more than 400k blocks behind block ${hi}`);
     }

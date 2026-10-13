@@ -255,6 +255,20 @@ describe('subscription transport', () => {
     expect(client.ws.terminate).not.toHaveBeenCalled();
   });
 
+  it('delivers a fill resync to tape subscribers only, as a one-off event', async () => {
+    const gateway = new SubscriptionGateway(new Source());
+    cleanup.push(() => gateway.close());
+    const tape = localPeer(gateway), volume = localPeer(gateway);
+    tape.subscribe([{ channel: 'fill' }]);
+    volume.subscribe([{ channel: 'volume' }]);
+    const before = volume.frames.length;
+    gateway.onMessage({ ch: 'fill', resync: true });
+    await waitFor(() => tape.frames.length === 1);
+    expect(tape.frames[0]).toMatchObject({ seq: 1, message: { ch: 'fill', resync: true } });
+    expect(tape.frames[0].snapshot).toBeUndefined();
+    expect(volume.frames.length).toBe(before);
+  });
+
   it('releases abandoned snapshot backlog during rapid market switches', async () => {
     const source = new Source();
     const quote = source.getQuotes();
@@ -456,7 +470,7 @@ describe('execution history delivery', () => {
     await waitFor(() => a.frames.filter((f) => f.message.ch === 'quotes').length > delivered);
     push(6);
     await waitFor(() => a.frames.some((f) => f.message.ch === 'quotes' && f.message.data.block === 6));
-    expect(a.frames.some((f) => 'stats' in f.message.data)).toBe(false);
+    expect(a.frames.some((f) => 'stats' in (f.message.data ?? {}))).toBe(false);
   });
 
   it('validates the stats selection, returns empty cold windows, and does not open quote work', async () => {
