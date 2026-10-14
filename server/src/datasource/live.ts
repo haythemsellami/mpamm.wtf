@@ -663,13 +663,16 @@ export function reconcileDaySwaps(
   return changed;
 }
 
-/** Where a queued reset starts re-SETting a venue's day rows. */
-export type ResetStart = { from: 'lifetime' } | { from: 'block'; block: bigint } | { from: 'day'; day: string };
+/** Which of a venue's day rows a queued reset will re-SET: a chain replay
+ *  from its start on, or a 'fills' revision over [day, until). */
+export type ResetStart =
+  | { from: 'lifetime' } | { from: 'block'; block: bigint } | { from: 'day'; day: string }
+  | { from: 'fills'; day: string; until: string };
 
 /** A venue's history stages that will still rebuild something, read from meta
  *  (the boot reconcile runs before the first block read). */
 export interface VenueRebuild {
-  /** queued resets whose volume replay re-SETs day rows */
+  /** queued resets that will re-SET day rows */
   resets: ResetStart[];
   /** unfinished volume replay; it resumes at the start of the day holding
    *  `cursor` (absent = from its first day) */
@@ -686,8 +689,9 @@ export interface VenueRebuild {
  * stage will revisit loses its warning for good. A day is placed against a
  * stage's resume block by its fills' block span (`spans`: this venue's
  * retained days), erring toward the warning where the span cannot tell:
- *  - a queued reset re-SETs from its start day; a block start counts only
- *    once one of the day's fills is at or past it;
+ *  - a queued chain reset re-SETs from its start day; a block start counts
+ *    only once one of the day's fills is at or past it. A 'fills' revision
+ *    re-SETs only its window, and from the very fills compared here;
  *  - an unfinished volume replay checkpoints the day it is in with a partial
  *    total and re-scans it from its start, so exactly the days with a fill at
  *    or past its cursor are still to be SET;
@@ -700,15 +704,17 @@ export function rebuildExcuse(
   spans: ReadonlyMap<string, { minBlock: number; maxBlock: number }>,
   pending: VenueRebuild,
 ): string[] {
-  const top = BigInt(spans.get(change.utcDay)?.maxBlock ?? -1);
+  const d = change.utcDay;
+  const top = BigInt(spans.get(d)?.maxBlock ?? -1);
   const why: string[] = [];
-  if (pending.resets.some((r) => r.from === 'lifetime' || (r.from === 'day' ? change.utcDay >= r.day : top >= r.block))) why.push('reset queued');
+  if (pending.resets.some((r) => r.from === 'fills' && d >= r.day && d < r.until)) why.push('fills revision queued');
+  if (pending.resets.some((r) => r.from === 'lifetime' || (r.from === 'day' && d >= r.day) || (r.from === 'block' && top >= r.block))) why.push('reset queued');
   if (pending.volume && (pending.volume.cursor === undefined || top >= pending.volume.cursor)) why.push('volume replay unfinished');
   if (pending.fills) {
     const { cursor, fromDay } = pending.fills;
     let partialFrom = fromDay;
     if (cursor !== undefined) for (const [day, s] of spans) if (BigInt(s.minBlock) < cursor && day > partialFrom) partialFrom = day;
-    if (change.utcDay >= partialFrom) why.push('fills onboarding unfinished');
+    if (d >= partialFrom) why.push('fills onboarding unfinished');
   }
   return why;
 }
@@ -2115,10 +2121,11 @@ export class LiveDataSource extends BaseSource {
       const v = this.store.getMeta(key);
       return v && /^\d+$/.test(v) ? BigInt(v) : undefined;
     };
-    // Only the volume replay writes day rows: a reset or replay without it
-    // repairs no USD, so it explains nothing here.
+    // A chain reset rewrites day rows only through the volume replay; without
+    // it, it repairs no USD and explains nothing here. A 'fills' revision
+    // SETs its days itself.
     const volumeReplays = config.backfillEnabled && !!a?.backfillFromUtc;
-    const out: VenueRebuild = { resets: volumeReplays ? queued.filter((t) => t.vid === vid) : [] };
+    const out: VenueRebuild = { resets: queued.filter((t) => t.vid === vid && (t.from === 'fills' || volumeReplays)) };
     if (volumeReplays && this.store.getMeta(`backfill_done_${vid}`) !== '1') out.volume = { cursor: cursor(`backfill_cursor_${vid}`) };
     // fills count as complete only once onboarded, even with MARKOUT_BACKFILL
     // off: tail-only fills start mid-day

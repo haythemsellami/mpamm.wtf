@@ -118,6 +118,12 @@ describe('rebuildExcuse — only a day a pending stage still rebuilds is expecte
     expect(Object.keys(excused({ resets: [{ from: 'block', block: 300n }] }))).toEqual(['2026-09-20']);
   });
 
+  it('a queued fills revision covers only its [from, until) window, whatever the volume replay does', () => {
+    expect(excused({ resets: [{ from: 'fills', day: '2026-09-18', until: '2026-09-20' }] })).toEqual({
+      '2026-09-18': ['fills revision queued'], '2026-09-19': ['fills revision queued'],
+    });
+  });
+
   it('an unfinished volume replay excuses the days it has not SET yet — never one it already re-SET', () => {
     // 09-18 was SET by this very replay: a mismatch there is the replay's own misbucket
     expect(excused({ volume: { cursor: 250n } })).toEqual({
@@ -135,7 +141,9 @@ describe('rebuildExcuse — only a day a pending stage still rebuilds is expecte
   });
 
   it('names every stage that explains a day', () => {
-    expect(excused({ resets: [{ from: 'lifetime' }], volume: { cursor: 350n } })['2026-09-20'])
-      .toEqual(['reset queued', 'volume replay unfinished']);
+    expect(excused({
+      resets: [{ from: 'lifetime' }, { from: 'fills', day: '2026-09-20', until: '2026-09-21' }],
+      volume: { cursor: 350n }, fills: { cursor: 350n, fromDay: '2026-09-01' },
+    })['2026-09-20']).toEqual(['fills revision queued', 'reset queued', 'volume replay unfinished', 'fills onboarding unfinished']);
   });
 });

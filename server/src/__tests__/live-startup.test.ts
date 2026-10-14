@@ -704,14 +704,18 @@ describe('live startup archive gate', () => {
     { name: 'a reset queued from today', meta: SETTLED, reset: (d: string[]) => `test-venue:${d[2]}`, drift: [0, 1], rebuilding: [] },
     { name: 'a volume replay checkpointed between the days', meta: { 'mkfill_done_test-venue': '1', 'backfill_cursor_test-venue': '10' },
       drift: [0], rebuilding: [1], says: /volume replay unfinished/ },
-  ])('swap reconcile rewriting a closed day reports it once per boot — $name', async ({ meta, reset, drift, rebuilding, says }) => {
+    { name: 'a fills revision over the later day', meta: SETTLED, drift: [0], rebuilding: [1], says: /\(fills revision queued\)/,
+      revision: (d: string[]) => ({ id: 'r', source: 'fills' as const, from: d[1], until: d[2] }) },
+  ])('swap reconcile rewriting a closed day reports it once per boot — $name', async ({ meta, reset, revision, drift, rebuilding, says }) => {
     const DAY = 86_400_000;
     const now = Date.now();
     const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
     const noon = (ms: number) => ms - (ms % DAY) + DAY / 2;
     const d1 = noon(now - 2 * DAY), d2 = noon(now - DAY);
-    const { source, adapter } = await setup({ withAdapter: true, reset: reset?.([day(d1), day(d2), day(now)]) });
-    Object.assign(adapter, { backfillFromUtc: '2026-01-01' });   // the volume replay is what re-SETs day rows
+    const days = [day(d1), day(d2), day(now)];
+    const { source, adapter } = await setup({ withAdapter: true, reset: reset?.(days) });
+    // the volume replay is what re-SETs day rows for a chain reset
+    Object.assign(adapter, { backfillFromUtc: '2026-01-01', historyRevisions: revision ? [revision(days)] : [] });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const mk = (i: number, ts: number): Fill => ({
@@ -763,7 +767,11 @@ describe('live startup archive gate', () => {
   ])('a long swap note keeps its net and whole entries inside the note cap — $name', async ({ meta, reset, code }) => {
     const { NOTE_MSG_MAX } = await import('../notes.js');
     const { source, adapter } = await setup({ withAdapter: true, reset });
-    Object.assign(adapter, { backfillFromUtc: '2026-01-01' });
+    const window = { from: new Date(Date.now() - 9 * 86_400_000).toISOString().slice(0, 10), until: new Date().toISOString().slice(0, 10) };
+    Object.assign(adapter, {
+      backfillFromUtc: '2026-01-01',
+      historyRevisions: reset ? [{ id: 'r', source: 'fills', ...window }] : [],
+    });
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const DAY = 86_400_000;
@@ -788,7 +796,7 @@ describe('live startup archive gate', () => {
     expect(msg.length).toBeLessThanOrEqual(NOTE_MSG_MAX);
     expect(msg).not.toMatch(/…$/);                                   // scrubNote never had to cut it
     expect(msg).toContain('8 closed day(s), net -7992');
-    if (reset) expect(msg).toContain('(reset queued, volume replay unfinished, fills onboarding unfinished)');
+    if (reset) expect(msg).toContain('(fills revision queued, reset queued, volume replay unfinished, fills onboarding unfinished)');
     const listed = msg.match(/\d{4}-\d{2}-\d{2} 1999→1000/g) ?? [];
     const more = Number(msg.match(/\+(\d+) more$/)?.[1] ?? 0);
     expect(listed[0]).toBe(`${day(noons[7])} 1999→1000`);              // oldest first
