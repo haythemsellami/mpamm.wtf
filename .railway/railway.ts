@@ -1,8 +1,7 @@
-// Railway Infrastructure as Code — the successor to render.yaml (and to the
-// legacy railway.json, which new Railway services never read). Same shape as
-// production on Render: one always-on container built from the Dockerfile,
-// serving REST/WS + the built frontend on one origin, with the SQLite history
-// on a volume at /data (DB_PATH=/data/mpamm.db and WEB_DIST are baked into the
+// Production, as Railway Infrastructure as Code (the legacy railway.json is
+// never read for new services). One always-on container built from the
+// Dockerfile, serving REST/WS + the built frontend on one origin, with the
+// SQLite history on a volume at /data (DB_PATH=/data/mpamm.db and WEB_DIST are baked into the
 // Dockerfile's ENV; $PORT → API_PORT is mapped in its CMD).
 //
 //   railway config plan     # read-only diff against the linked environment
@@ -17,7 +16,7 @@ import { defineRailway, github, preserve, project, service, volume } from "railw
 
 export default defineRailway(() => {
   // Single-writer SQLite: one replica, and the volume forbids more anyway.
-  // Virginia keeps the quote critical path next to the hot RPC (as on Render);
+  // Virginia keeps the quote critical path next to the hot RPC;
   // a volume follows its service's region, and moving it later is an offline
   // migration of the whole history. Size/region pinned to the live volume:
   // left unset, a plan proposes clearing them (and volumes can't shrink).
@@ -46,7 +45,7 @@ export default defineRailway(() => {
     },
     env: {
       DATA_SOURCE: "live",
-      // cap the JS heap well under the instance limit (parity with Render)
+      // cap the JS heap; Railway bills memory by usage, so this is the budget
       NODE_OPTIONS: "--max-old-space-size=320",
       // staged rollout; enable every-head depth after a capacity check
       DEPTH_MIN_INTERVAL_MS: "1000",

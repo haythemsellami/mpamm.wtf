@@ -74,9 +74,10 @@ interface WorkerReply {
 }
 
 /**
- * The Render disk can spend hundreds of milliseconds inside a synchronous
- * SQLite commit. Keep that durability boundary intact, but execute it outside
- * the process's quote/API event loop. Calls are acknowledged only after COMMIT.
+ * A network-attached volume can spend hundreds of milliseconds inside a
+ * synchronous SQLite commit. Keep that durability boundary intact, but execute
+ * it outside the process's quote/API event loop. Calls are acknowledged only
+ * after COMMIT.
  */
 export class SnapshotWriter implements StoreWriter {
   private readonly worker: Worker;

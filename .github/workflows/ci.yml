@@ -1,11 +1,13 @@
 name: CI
 
-# Verify every push + PR. Deployment is handled by Render's native GitHub
-# auto-deploy (push to main → Render builds the Dockerfile + deploys).
+# Verify every push + PR. Deployment is handled by Railway's GitHub
+# integration (push to main → Railway builds the Dockerfile + deploys).
 #
-# paths-ignore applies to PUSH only: docs/markdown/PaaS-blueprint edits can't
-# affect typecheck, tests, the build, or the image, so on push to main (which
-# triggers Render regardless) we skip the no-op verify to save runner minutes.
+# paths-ignore applies to PUSH only: docs/markdown edits can't affect
+# typecheck, tests, the build, or the image, so on push to main (which
+# triggers Railway regardless) we skip the no-op verify to save runner minutes.
+# .railway/ is NOT ignored: railway.ts is TypeScript that `npm run typecheck`
+# checks, and it is production's source of truth.
 # pull_request ALWAYS runs — a docs-only PR still needs to produce a check run
 # so it can satisfy a required-status-check rule on main (skipping the workflow
 # entirely would leave the check missing and block the merge). `workflow_dispatch`
@@ -18,8 +20,6 @@ on:
       - 'docs/**'
       - '.github/CODEOWNERS'
       - 'LICENSE'
-      - 'render.yaml'
-      - '.railway/**'
   pull_request:
   workflow_dispatch:
 

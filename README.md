@@ -45,7 +45,7 @@ VENUES=myvenue BACKFILL=off MARKOUT_BACKFILL=off GAS_METRIC=off npm run dev
 | [docs/adapters.md](docs/adapters.md) | Writing a venue adapter — interface, correctness rules, local dev, verification, PR checklist |
 | [docs/architecture.md](docs/architecture.md) | How it works — propAMM scope, quote/fill paths, persist-forward indexer, pair-terms CEX references, data model, API |
 | [docs/spec.md](docs/spec.md) | The venue-agnostic design spec — invariants, contracts, key decisions |
-| [docs/deploy.md](docs/deploy.md) | Hosting — single container, Render blueprint, configuration knobs |
+| [docs/deploy.md](docs/deploy.md) | Hosting — single container on Railway (IaC in `.railway/`), restore runbook, configuration knobs |
 
 The pixel-level design source lives under [`design/`](design/).
 

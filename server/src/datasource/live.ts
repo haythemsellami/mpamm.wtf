@@ -1221,8 +1221,8 @@ export class LiveDataSource extends BaseSource {
     const resetWant = config.backfillReset.trim();
     if (resetWant) adoptLegacyResetMarker(this.store, resetWant, parseBackfillReset(resetWant));
     // The schema/migrations above finish on the main connection first. Every
-    // mutation after this point goes through one worker connection so Render
-    // disk latency cannot pause newHeads or quote response handling.
+    // mutation after this point goes through one worker connection so volume
+    // latency cannot pause newHeads or quote response handling.
     this.snapshotWriter = new SnapshotWriter(config.dbPath);
     this.storeWriter = this.snapshotWriter;
     this.gas.setWriter(this.snapshotWriter);
@@ -1583,8 +1583,8 @@ export class LiveDataSource extends BaseSource {
     // drop a FEW batches past the retention window now (so recentFills and
     // swap counts below never see expired rows at the head of the table);
     // any larger backlog, and the VACUUM, run on the persistence worker once
-    // it starts (kickMaintenance) — boot blocks the event loop, and Render
-    // kills a process whose health check doesn't answer.
+    // it starts (kickMaintenance) — boot blocks the event loop, stalling quotes
+    // and the WS (and a host that health-probes a live process kills it).
     const aged = this.store.pruneFillsBefore(retentionCutoffMs(Date.now(), config.fillsRetentionDays), config.pruneBootMaxBatches);
     if (aged.removed) console.log(`[mpamm] retention: pruned ${aged.removed} fill(s) at boot${aged.done ? '' : ' — backlog continues on the worker'}`);
     // load recent fills for live serving

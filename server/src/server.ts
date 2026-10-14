@@ -1,4 +1,6 @@
 import express from 'express';
+import compression from 'compression';
+import { constants as zlib } from 'node:zlib';
 import { AnalyticsPublications } from './analytics-publications.js';
 import { SubscriptionGateway } from './stream-v2.js';
 import { STREAM_V2_GZIP, STREAM_V2_JSON, SIZES_USD } from '@shared';
@@ -25,8 +27,8 @@ const DEPTH_HEARTBEAT_MS = 15_000;
 /**
  * WS compression. The stream is repetitive JSON — the ~47KB quote frame
  * deflates 6.0x and the state frame 4.6x — and NOTHING was compressing it:
- * Render's edge brotli's the REST routes but a WebSocket is an opaque upgrade
- * to it, and `ws` ships permessage-deflate off by default. That default cost
+ * a WebSocket is an opaque upgrade to any edge, and `ws` ships
+ * permessage-deflate off by default. That default cost
  * ~230KB/s per open tab (~20GB/day, ~$3/day of egress).
  *
  * `ws` disables it for a real reason — zlib on Node fragments memory under
@@ -113,10 +115,22 @@ export function startServer(source: DataSource): Server {
   const publications = new AnalyticsPublications();
   app.use(cors());
 
+  // REST + static compression happens HERE: Railway's edge forwards responses
+  // byte-for-byte (Render's used to brotli them), and the big routes are large
+  // JSON rebuilt per request (/api/fills ~0.5MB, /api/markets ~0.3MB). Brotli
+  // at quality 4, not the zlib default of 11 — 11 spends far more CPU per
+  // request than the extra bytes it saves. Never the depth SSE stream: a
+  // compressor buffers, which would hold its frames back. The analytics
+  // artifact sets its own Content-Encoding, which the middleware leaves alone.
+  app.use(compression({
+    brotli: { params: { [zlib.BROTLI_PARAM_QUALITY]: 4 } },
+    filter: (req, res) => !String(res.getHeader('Content-Type') ?? '').startsWith('text/event-stream') && compression.filter(req, res),
+  }));
+
   // HSTS (production only): once a browser has seen this over HTTPS, it forces
   // HTTPS for a year — including subdomains (www.*) — so there's no plain-http
   // hop to cache as "not secure". Guarded by NODE_ENV so it never pins localhost
-  // in dev; TLS is terminated at Render's edge, which only serves us over HTTPS.
+  // in dev; TLS is terminated at Railway's edge, which only serves us over HTTPS.
   // No `preload` directive — that's a separate, hard-to-reverse hstspreload.org opt-in.
   if (process.env.NODE_ENV === 'production') {
     app.use((_req, res, next) => {
