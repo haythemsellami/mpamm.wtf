@@ -576,6 +576,16 @@ export function createCloberVaultAdapter(): VenueAdapter {
     // $230M pre-May history, and (b) carried no swap counts. The subgraph is
     // still used for what it is authoritative for: vault-book DISCOVERY.
     backfillFromUtc: '2025-10-28',
+    // History revisions (HistoryRevision — applied once per database on deploy):
+    //   replay-midnight-0919  2026-09-18. The 2026-09-21 replay
+    //                         (BACKFILL_RESET=clober-vault:2026-09-17) ran on the
+    //                         build that stamped each chunk with ONE block time,
+    //                         so the chunk straddling 09-18→19 booked 00:00:08–
+    //                         00:01:08's 12 Takes ($1,268.38) on 09-18. The fix
+    //                         (stampChunkDays) shipped without a replay. Vault
+    //                         books are base/stable only, so the replay changes
+    //                         no other day's USD.
+    historyRevisions: [{ id: 'replay-midnight-0919', from: '2026-09-18' }],
     async discover(ctx: AdapterContext) {
       let disc: { books: Map<string, CloberBook>; markets: CloberMarket[]; vault: Set<string> };
       let authoritative = false;

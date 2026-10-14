@@ -119,6 +119,16 @@ scan is still crawling, the scan is left to cover those days itself. Revisions
 wait for a run with both `BACKFILL` and `MARKOUT_BACKFILL` on. Never edit an
 applied entry — add a new id.
 
+**A replay rewrites every closed day from `from`, not just the wrong ones**, and
+two things in those days do not come back as they were. Cross-quoted pairs
+(`*/MON`, `*/ETH`) are re-priced at the CEX mid at the time of the replay, not
+the time of the fill. Closed-day fills also lose their live markout curves,
+which have no archive (`markout-curves.ts`). Set `from` to the first wrong day.
+For a venue with cross pairs, compare the fix against that cost before
+shipping. Hanji's 2026-09-17..19 midnight misbooking (≤1.6% of each day) was
+left in place because replaying from 09-17 would have moved its late-September
+cross-pair days by 3–9%.
+
 ### Recovering a window the live tail missed
 
 ```
