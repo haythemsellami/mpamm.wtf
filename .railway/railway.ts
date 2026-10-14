@@ -12,7 +12,7 @@
 // service or the volume here makes `apply` create a NEW one beside it, with an
 // empty /data. The first boot on Railway must run on a copy of production's
 // SQLite history — an empty volume re-runs every venue-lifetime backfill from
-// scratch (docs/deploy.md → Railway bootstrap).
+// scratch (docs/deploy.md → Seeding or restoring /data).
 import { defineRailway, github, preserve, project, service, volume } from "railway/iac";
 
 export default defineRailway(() => {
@@ -31,14 +31,15 @@ export default defineRailway(() => {
     // source.start() (RPC probe, discovery, initHistory) so clients get empty
     // snapshots rather than refusals during warm-up, and /api/health answers
     // 200 throughout — so this does not wait for, or bound, the boot. A boot
-    // that fails afterwards exits non-zero and restartPolicy retries it. A
-    // readiness gate would buy nothing here: the volume already forces the old
-    // deploy down before this one starts. Railway never re-probes a live deploy.
+    // that fails afterwards exits non-zero and the restart policy retries it.
+    // A readiness gate would buy nothing here: the volume already forces the
+    // old deploy down before this one starts. Railway never re-probes a live
+    // deploy.
     healthcheck: "/api/health",
     healthcheckTimeout: 60,
+    // Restart policy is Railway's default (ON_FAILURE, 10 retries) and is left
+    // unset: Railway stores a default as null, so declaring it is perpetual drift.
     deploy: {
-      restartPolicyType: "ON_FAILURE",
-      restartPolicyMaxRetries: 10,
       // SIGTERM → final SQLite flush, force-exit after 5s (server/src/index.ts);
       // SIGKILL must not land first.
       drainingSeconds: 10,
