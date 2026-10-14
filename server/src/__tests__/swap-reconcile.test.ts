@@ -7,7 +7,8 @@
 // fixed 503→491 / 689→701 at the next boot, USD ±$1,268 off for three weeks).
 import { describe, expect, it } from 'vitest';
 import type { DailyVolume } from '@shared';
-import { describeSwapChanges, rebuildExcuse, reconcileDaySwaps, type SwapCountChange, type VenueRebuild } from '../datasource/live.js';
+import { rebuildExcuse, reconcileDaySwaps, swapNet, swapNoteMsg, type SwapCountChange, type VenueRebuild } from '../datasource/live.js';
+import { NOTE_MSG_MAX } from '../notes.js';
 
 const TODAY = '2026-09-22';
 const day = (utcDay: string, byVenue: DailyVolume['byVenue']): DailyVolume => ({ utcDay, partial: utcDay === TODAY, byVenue });
@@ -55,20 +56,37 @@ describe('reconcileDaySwaps', () => {
   });
 });
 
-describe('describeSwapChanges', () => {
+describe('swapNet / swapNoteMsg', () => {
   const c = (utcDay: string, from: number, to: number): SwapCountChange => ({ venueId: 'v', utcDay, from, to });
 
-  it('lists days in order with the net — 0 is fills moved between days', () => {
-    expect(describeSwapChanges([c('2026-09-19', 689, 701), c('2026-09-18', 503, 491)]))
-      .toBe('2026-09-18 503→491, 2026-09-19 689→701 (net 0)');
-    expect(describeSwapChanges([c('2026-09-18', 10, 13)])).toBe('2026-09-18 10→13 (net +3)');
-    expect(describeSwapChanges([c('2026-09-18', 13, 10)])).toBe('2026-09-18 13→10 (net -3)');
+  it('nets the changes — 0 is fills moved between days', () => {
+    expect(swapNet([c('2026-09-19', 689, 701), c('2026-09-18', 503, 491)])).toBe('0');
+    expect(swapNet([c('2026-09-18', 10, 13)])).toBe('+3');
+    expect(swapNet([c('2026-09-18', 13, 10)])).toBe('-3');
   });
 
-  it('caps the list so a long drift survives the note length cap', () => {
+  it('lists every day, in order, when they fit', () => {
+    expect(swapNoteMsg('h: ', [c('2026-09-19', 689, 701), c('2026-09-18', 503, 491)]))
+      .toBe('h: 2026-09-18 503→491, 2026-09-19 689→701');
+  });
+
+  it('budgets the list against the whole message, cutting whole entries', () => {
     const many = Array.from({ length: 9 }, (_, i) => c(`2026-09-${String(10 + i).padStart(2, '0')}`, 100, 101));
-    const s = describeSwapChanges(many, 3);
-    expect(s).toBe('2026-09-10 100→101, 2026-09-11 100→101, 2026-09-12 100→101, +6 more (net +9)');
+    expect(swapNoteMsg('h: ', many, 60)).toBe('h: 2026-09-10 100→101, 2026-09-11 100→101, +7 more');
+    // a head with no room for one entry still says how many there were
+    expect(swapNoteMsg('x'.repeat(55), many, 60)).toBe(`${'x'.repeat(55)}+9 more`);
+  });
+
+  it('never needs scrubNote to cut it, whatever the head and counts', () => {
+    // up to a month of 4-digit rewrites behind heads as long as the real ones get
+    const month = Array.from({ length: 31 }, (_, i) => c(`2026-08-${String(1 + i).padStart(2, '0')}`, 9_999, 1_000));
+    for (let head = 0; head <= 200; head += 10) {
+      for (let n = 1; n <= month.length; n++) {
+        const msg = swapNoteMsg('h'.repeat(head), month.slice(0, n));
+        expect(msg.length).toBeLessThanOrEqual(NOTE_MSG_MAX);
+        expect(msg).toMatch(/(9999→1000|\+\d+ more)$/);   // ends on a whole entry or the count
+      }
+    }
   });
 });
 

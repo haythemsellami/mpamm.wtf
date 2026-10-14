@@ -28,6 +28,10 @@ export function noteSubsystem(code: string): string {
   return i < 0 ? code : code.slice(0, i);
 }
 
+/** The longest message scrubNote keeps whole; past it, the tail is cut. A
+ *  note that lists items budgets against this (live.ts swapNoteMsg). */
+export const NOTE_MSG_MAX = 300;
+
 /**
  * SANITIZE anything that reaches state.notes — notes are served on
  * /api/markets, and provider error messages embed the FULL request URL,
@@ -36,7 +40,7 @@ export function noteSubsystem(code: string): string {
  */
 export function scrubNote(msg: string): string {
   const s = msg.replace(/(?:https?|wss?):\/\/\S+/gi, '<rpc>').replace(/\s+/g, ' ').trim();
-  return s.length > 300 ? s.slice(0, 297) + '…' : s;
+  return s.length > NOTE_MSG_MAX ? s.slice(0, NOTE_MSG_MAX - 3) + '…' : s;
 }
 
 /** Default sink: one line per note on stdout/stderr, so the full history

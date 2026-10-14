@@ -753,6 +753,49 @@ describe('live startup archive gate', () => {
     source.store.close();
   });
 
+  // The longest notes this can raise: eight 4-digit rewrites behind the
+  // longest heads (all three rebuild reasons; the drift sentence). The note as
+  // STORED must still carry its day count and net, and end on a whole entry —
+  // scrubNote cuts anything past NOTE_MSG_MAX mid-word.
+  it.each([
+    { name: 'drift', meta: SETTLED, reset: undefined, code: 'store.swaps.drift' },
+    { name: 'rebuilding, every reason', meta: {}, reset: 'test-venue', code: 'store.swaps.rebuilding' },
+  ])('a long swap note keeps its net and whole entries inside the note cap — $name', async ({ meta, reset, code }) => {
+    const { NOTE_MSG_MAX } = await import('../notes.js');
+    const { source, adapter } = await setup({ withAdapter: true, reset });
+    Object.assign(adapter, { backfillFromUtc: '2026-01-01' });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const DAY = 86_400_000;
+    const now = Date.now();
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const noons = Array.from({ length: 8 }, (_, k) => now - (k + 2) * DAY - ((now - (k + 2) * DAY) % DAY) + DAY / 2);
+    source.store.persistSnapshot(
+      noons.map((ms) => ({ utcDay: day(ms), partial: false, byVenue: { 'test-venue': { usd: 1, swaps: 1_999 } } })),
+      meta,
+      noons.flatMap((ms, k) => Array.from({ length: 1_000 }, (_, i): Fill => ({
+        id: `test-venue-0x${(k * 1_000 + i).toString(16)}-0`, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'ROUTER',
+        usd: 1, baseAmount: 1, execPx: 1, txHash: '0x1', to: 'x', pool: 'p', blockNumber: k * 1_000 + i, ts: ms + i,
+        markoutsBps: [null, null, null, null, null],
+      }))),
+    );
+    source.days = source.store.all();
+    source.reconcileSwapCounts();
+
+    const notes = source.notes.list().filter((n: StateNote) => n.code.startsWith('store.swaps.'));
+    expect(notes.map((n: StateNote) => n.code)).toEqual([code]);
+    const { msg } = notes[0];
+    expect(msg.length).toBeLessThanOrEqual(NOTE_MSG_MAX);
+    expect(msg).not.toMatch(/…$/);                                   // scrubNote never had to cut it
+    expect(msg).toContain('8 closed day(s), net -7992');
+    if (reset) expect(msg).toContain('(reset queued, volume replay unfinished, fills onboarding unfinished)');
+    const listed = msg.match(/\d{4}-\d{2}-\d{2} 1999→1000/g) ?? [];
+    const more = Number(msg.match(/\+(\d+) more$/)?.[1] ?? 0);
+    expect(listed[0]).toBe(`${day(noons[7])} 1999→1000`);              // oldest first
+    expect(listed.length + more).toBe(8);                             // every day listed or counted
+    source.store.close();
+  });
+
   it('drains a retention backlog on the WRITER in sweeps, then VACUUMs once there — never on the main thread', async () => {
     vi.useFakeTimers();
     const { source } = await setup();

@@ -30,7 +30,7 @@ import { VolumeStore, retentionCutoffMs, type ResetDeletes, type SnapshotResult 
 /** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
 const PRUNE_LOG_MIN_ROWS = 1_000;
 import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
-import { NoteBuffer, scrubNote } from '../notes.js';
+import { NOTE_MSG_MAX, NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
 import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, allAdapterVenueIds, validateRegistry } from '../venues/registry.js';
@@ -713,16 +713,30 @@ export function rebuildExcuse(
   return why;
 }
 
-/** "2026-09-18 503→491, 2026-09-19 689→701 (net 0)" for one venue's changes,
- *  day order. Capped below scrubNote's 300 chars so the tail of the list, not
- *  the sentence around it, is what gets cut. A net of 0 is the signature of
- *  fills booked on the wrong day; any other net, of fills missing or doubled. */
-export function describeSwapChanges(changes: readonly SwapCountChange[], max = 6): string {
-  const sorted = [...changes].sort((a, b) => (a.utcDay < b.utcDay ? -1 : a.utcDay > b.utcDay ? 1 : 0));
-  const net = sorted.reduce((s, c) => s + c.to - c.from, 0);
-  const shown = sorted.slice(0, max).map((c) => `${c.utcDay} ${c.from}→${c.to}`).join(', ');
-  const more = sorted.length > max ? `, +${sorted.length - max} more` : '';
-  return `${shown}${more} (net ${net > 0 ? '+' : ''}${net})`;
+/** A venue's rewritten counts summed, signed ("+3", "-3", "0"). 0 is the
+ *  signature of fills booked on the wrong day; any other net, of fills
+ *  missing or doubled. */
+export function swapNet(changes: readonly SwapCountChange[]): string {
+  const net = changes.reduce((s, c) => s + c.to - c.from, 0);
+  return net > 0 ? `+${net}` : String(net);
+}
+
+/**
+ * `head` followed by the changes ("2026-09-18 503→491", day order), as many
+ * as fit in `max` with the rest counted ("+3 more"). Budgeted against the
+ * WHOLE message, not a fixed count: the head's length varies (day count, net,
+ * the reasons), and scrubNote cuts anything past NOTE_MSG_MAX mid-entry. So
+ * everything a reader must not lose goes in `head`, and the list absorbs the
+ * squeeze by whole entries.
+ */
+export function swapNoteMsg(head: string, changes: readonly SwapCountChange[], max = NOTE_MSG_MAX): string {
+  const items = [...changes]
+    .sort((a, b) => (a.utcDay < b.utcDay ? -1 : a.utcDay > b.utcDay ? 1 : 0))
+    .map((c) => `${c.utcDay} ${c.from}→${c.to}`);
+  const fit = (shown: number) => head + [...items.slice(0, shown), ...(shown < items.length ? [`+${items.length - shown} more`] : [])].join(', ');
+  let shown = items.length;
+  while (shown > 0 && fit(shown).length > max) shown--;
+  return fit(shown);
 }
 
 /** Fields that make two decodes the SAME fill. Attribution labels (category,
@@ -1983,8 +1997,8 @@ export class LiveDataSource extends BaseSource {
         expected.push(c);
         for (const x of r) why.add(x);
       }
-      if (expected.length) this.note('store.swaps.rebuilding', `swap counts rewritten from fills on ${expected.length} closed day(s) still being rebuilt (${[...why].join(', ')}) — expected: ${describeSwapChanges(expected)}`, venueId);
-      if (drift.length) this.note('store.swaps.drift', `swap count drift on ${drift.length} closed day(s): ${describeSwapChanges(drift)} — counts reconciled from fills, USD was not: those days' USD may be misbucketed`, venueId);
+      if (expected.length) this.note('store.swaps.rebuilding', swapNoteMsg(`swap counts rewritten from fills on ${expected.length} closed day(s), net ${swapNet(expected)}, still being rebuilt (${[...why].join(', ')}) — expected: `, expected), venueId);
+      if (drift.length) this.note('store.swaps.drift', swapNoteMsg(`swap count drift on ${drift.length} closed day(s), net ${swapNet(drift)} — counts reconciled from fills, USD was not: those days' USD may be misbucketed: `, drift), venueId);
     }
   }
 
