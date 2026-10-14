@@ -5,9 +5,10 @@
 //   1. the `state` frame carried the immutable venue registry AND the
 //      maintainer-only `notes` buffer (~11KB of ~12KB) and was re-broadcast on
 //      every head advance plus every quote, ~6/s;
-//   2. nothing compressed the socket — Render's edge brotli's the REST routes
-//      but a WebSocket upgrade is opaque to it, and `ws` ships permessage-
-//      deflate off by default.
+//   2. nothing compressed the socket — a WebSocket upgrade is opaque to any
+//      edge, and `ws` ships permessage-deflate off by default. (REST now
+//      needs the same care: Railway's edge, unlike Render's, compresses
+//      nothing — see 'REST compression' below.)
 //
 // Both are invisible in normal use (the dashboard renders identically either
 // way), so only a test keeps them from regressing.
@@ -171,7 +172,7 @@ describe('WS compression', () => {
     await once(client, 'open');
     let wire = 0;
     // ws hands us decompressed payloads, so count the compressed bytes at the
-    // socket instead — that is what Render actually bills.
+    // socket instead — that is what the host actually bills.
     client.on('message', () => {});
     const socket = (client as unknown as { _socket: { bytesRead: number } })._socket;
     const before = socket.bytesRead;
@@ -187,5 +188,46 @@ describe('WS compression', () => {
     expect(raw).toBeGreaterThan(PERMESSAGE_DEFLATE.threshold);
     expect(wire).toBeGreaterThan(0);
     expect(wire).toBeLessThan(raw / 4); // measured ~6x on prod payloads
+  });
+});
+
+/** One raw GET: node:http does NOT decompress, so this sees what goes on the wire. */
+async function rawGet(port: number, path: string, acceptEncoding: string) {
+  const { request } = await import('node:http');
+  return new Promise<{ headers: import('node:http').IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path, headers: { 'Accept-Encoding': acceptEncoding } }, (res) => {
+      if (String(res.headers['content-type']).startsWith('text/event-stream')) { resolve({ headers: res.headers, body: Buffer.alloc(0) }); req.destroy(); return; }
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => resolve({ headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Railway's edge forwards responses byte-for-byte (Render's brotli'd them), so
+// an uncompressed REST body is billed at full size — the app must compress.
+describe('REST compression', () => {
+  it('serves JSON brotli- or gzip-encoded and byte-identical once decoded', async () => {
+    const { brotliDecompressSync, gunzipSync } = await import('node:zlib');
+    const { port } = await boot();
+    const plain = await rawGet(port, '/api/markets', 'identity');
+    const br = await rawGet(port, '/api/markets', 'br, gzip');
+    const gz = await rawGet(port, '/api/markets', 'gzip');
+
+    expect(plain.headers['content-encoding']).toBeUndefined();
+    expect(br.headers['content-encoding']).toBe('br');
+    expect(gz.headers['content-encoding']).toBe('gzip');
+    expect(brotliDecompressSync(br.body).equals(plain.body)).toBe(true);
+    expect(gunzipSync(gz.body).equals(plain.body)).toBe(true);
+    expect(br.body.length).toBeLessThan(plain.body.length / 4); // the notes buffer is very repetitive
+  });
+
+  it('never compresses the depth SSE stream (a compressor would buffer its frames)', async () => {
+    const { port } = await boot();
+    const sse = await rawGet(port, '/api/depth/stream?market=MON%2FUSDC', 'br, gzip');
+    expect(sse.headers['content-type']).toMatch(/^text\/event-stream/);
+    expect(sse.headers['content-encoding']).toBeUndefined();
   });
 });

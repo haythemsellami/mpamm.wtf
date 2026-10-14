@@ -35,6 +35,19 @@
       "env": {
         "BACKEND_URL": "https://mpamm.wtf"
       }
+    },
+    {
+      "name": "prod-sim",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "start"
+      ],
+      "port": 8787,
+      "env": {
+        "DATA_SOURCE": "sim",
+        "WEB_DIST": "../web/dist"
+      }
     }
   ]
 }

@@ -4,32 +4,41 @@ The dashboard ships as a **single container**: one Node process serves the REST/
 
 The [`Dockerfile`](../Dockerfile) builds the frontend and runs the server serving it.
 
-## Render (production — [mpamm.wtf](https://mpamm.wtf))
+## Railway (production — [mpamm.wtf](https://mpamm.wtf))
 
-[`render.yaml`](../render.yaml) is the blueprint: one Standard Docker web service pinned to **Virginia (US East)**, with an `/api/health` health check and a **persistent disk** at `/data` (`DB_PATH=/data/mpamm.db`) so the SQLite history survives deploys. Keep the service close to the hot RPC: network round-trip time is paid by every block-pinned quote frame. A region change requires a new service and disk, so copy a consistent SQLite snapshot and verify it before moving the custom domain.
+[`.railway/railway.ts`](../.railway/railway.ts) is the service definition, written as Railway Infrastructure as Code. It describes one service, `mpamm-virginia`:
+- built from `main` with the Dockerfile, one replica, pinned to **US East Metal (Virginia, `us-east4-eqdc4a`)**
+- volume `mpamm-virginia-mpamm-data-virginia` at `/data` (`DB_PATH=/data/mpamm.db`), so the SQLite history survives deploys
+- an `/api/health` rollout check
+- the RPC URLs kept as Railway-held secrets (`preserve()`)
 
-- **Deploys are Render-native**: every push to `main` builds the Dockerfile and deploys (health-gated, zero-downtime). [`ci.yml`](../.github/workflows/ci.yml) runs verification (typecheck → tests → frontend build → Docker build) on every push + PR.
-- Key service variable: `RPC_HTTP_URL` — a **trusted Monad node**, and the one that serves block-pinned quote calls. Pick it for **distance to the tip**: some providers serve a head several blocks behind, which puts that much staleness into every quote on the Execution page before any local tuning applies. Check with `eth_blockNumber` against a second node. Quotes use a dedicated zero-wait HTTP batch lane while sharing this pool's endpoint/failover state with heads and fills. Set `RPC_WS_URL` when that same hot provider exposes `eth_subscribe`/`monadNewHeads` (with `newHeads` fallback); the service automatically keeps fast HTTP head polling active as a watchdog and fallback.
-- **Set `RPC_DEPTH_URL` to a separate tip-fresh node.** The 25-point Execution curve runs in an isolated child process, so it cannot stall the main event loop; a separate endpoint also prevents it from consuming `RPC_HTTP_URL`'s connection/rate-limit budget. `RPC_DEPTH_WS_URL` is optional. If `RPC_DEPTH_URL` is omitted the worker reuses the hot node and logs a warning: CPU/event-loop isolation remains, provider-capacity isolation does not.
-- **`RPC_ARCHIVE_URL` is the other half.** The tip-freshest nodes are usually pruning fullnodes (a couple of days of history), which cannot serve the venue-lifetime backfills, `blockAtOrAfter`'s search from block 0, or the gas crawl. The archive node must serve logs, headers and receipts at any depth **and** historical `eth_getCode` (the gas tracker bisects it to date a destination's deployment) — verify with `eth_getCode` at an old block before trusting an endpoint. Set it to an archive node and the deep crawls move there while quotes stay on the fast one. Leave it unset and both ride `RPC_HTTP_URL` — the pre-split behavior. Note that failover will **not** cover this for you: a pruned block is a JSON-RPC error, which never trips the breaker, so a pruning primary with an archive *backup* stalls history instead of degrading to it.
-- **RPC failover is on by default for the HOT pool**, whose backups default to the public endpoint (`RPC_HTTP_BACKUP_URLS`). The **archive pool ships with no backup at all** (`RPC_ARCHIVE_BACKUP_URLS` defaults to empty) — the public endpoint cannot serve historical `eth_getCode`, so failing over to it would satisfy every crawl except the gas bootstrap, which would then retry forever while the pool looked healthy. Set it only to an endpoint meeting the full archive contract. Within a pool, a dead primary switches to that pool's backups and the primary is probed every minute, snapping back once it's healthy. The TopBar's amber `RPC` chip is hot-pool-only; inspect `state.rpcArchive` or `state.notes` for archive health. Heavy history crawls pause while the archive pool is on a backup; live quotes/fills keep flowing.
+Keep the service close to the hot RPC: every block-pinned quote frame pays the network round trip. A volume follows its service's region, so a region change is an offline migration of the whole history.
 
-## Railway
-
-[`.railway/railway.ts`](../.railway/railway.ts) describes the live Railway service: `mpamm-virginia` in project `enthusiastic-quietude`, built from the `main` branch with the Dockerfile, pinned to **US East Metal (Virginia, `us-east4-eqdc4a`)**, with volume `mpamm-virginia-mpamm-data-virginia` at `/data`, an `/api/health` rollout check, and the RPC URLs kept as Railway-held secrets (`preserve()`). It uses Railway Infrastructure as Code; the legacy `railway.json` format is never read for new services. `npm run typecheck` checks it against the pinned `railway` SDK. `railway config plan` (read-only) and `railway config apply` need Railway CLI **≥ 5.42.1**. Always plan before applying:
+`npm run typecheck` checks the file against the pinned `railway` SDK. `railway config plan` (read-only) and `railway config apply` need Railway CLI **≥ 5.42.1**. Always plan before applying:
 
 - **Names must match the live service.** Renaming the service or volume in the file makes `apply` create a new one beside it, with an empty `/data`.
-- **The file manages variables.** A variable set on the service but missing from the file is removed on `apply`. Add every new knob to the file; set secret values with `railway variable set KEY --stdin --skip-deploys` and declare them as `preserve()`.
+- **The file manages variables.** A variable set on the service but missing from the file is removed on `apply`. Add every new knob to the file. Set secret values with `railway variable set KEY --stdin --skip-deploys`, and declare them as `preserve()`.
 
-Differences from Render that matter here:
+**How it runs on Railway:**
 
-- **The health check proves very little.** The server binds its port before warm-up (RPC probe, discovery, history load), and `/api/health` returns 200 from that moment on. So the rollout check passes before startup finishes, and its timeout does not bound the boot. Railway never re-probes a live deploy: a boot that later fails exits and is retried by the restart policy (Railway's default: on failure, 10 retries), but a hung (not crashed) process is never restarted.
+- **Deploys come from Railway's GitHub integration:** every push to `main` builds the Dockerfile and deploys. [`ci.yml`](../.github/workflows/ci.yml) runs verification (typecheck → tests → frontend build → Docker build) on every push + PR.
 - **Every deploy has a short outage.** A volume can't be mounted by two deployments, so the old one stops before the new one starts. `drainingSeconds` must stay above the 5s shutdown flush in `server/src/index.ts`.
-- **Egress is $0.05/GB** (Render: $0.15/GB) and compute is billed by usage, not by instance size. Volume storage is billed on bytes used, so size headroom costs nothing.
+- **The health check proves very little.** The server binds its port before warm-up (RPC probe, discovery, history load), and `/api/health` returns 200 from that moment on. So the rollout check passes before startup finishes, and its timeout does not bound the boot. Railway never re-probes a live deploy. A boot that later fails exits and is retried by the restart policy (Railway's default: on failure, 10 retries), but a hung (not crashed) process is never restarted.
+- **The edge does not compress.** Railway forwards responses byte-for-byte, so the server compresses REST and static responses itself (brotli/gzip, `server.ts`) on top of the WebSocket's permessage-deflate. `stream-egress.test.ts` locks both in. Egress is billed at $0.05/GB; compute is billed by usage, not by instance size. Volume storage is billed on bytes used, so size headroom costs nothing.
+- **Domains:** `mpamm.wtf` and `www.mpamm.wtf` are custom domains on the service. DNS is at Namecheap. The root needs an **ALIAS** record (a CNAME is not allowed next to the zone's MX/TXT records), `www` takes a CNAME, and each name has its own `_railway-verify` TXT record.
+
+**RPC variables** (secrets; see the knob table below for defaults):
+
+- **`RPC_HTTP_URL` is a trusted Monad node**, and the one that serves block-pinned quote calls. Pick it for **distance to the tip**: some providers serve a head several blocks behind, which puts that much staleness into every quote on the Execution page before any local tuning applies. Check with `eth_blockNumber` against a second node. Quotes use a dedicated zero-wait HTTP batch lane while sharing this pool's endpoint/failover state with heads and fills. Set `RPC_WS_URL` when that same hot provider exposes `eth_subscribe`/`monadNewHeads` (with `newHeads` fallback); the service automatically keeps fast HTTP head polling active as a watchdog and fallback.
+- **Set `RPC_DEPTH_URL` to a separate tip-fresh node.** The 25-point Execution curve runs in an isolated child process, so it cannot stall the main event loop. A separate endpoint also prevents it from consuming `RPC_HTTP_URL`'s connection/rate-limit budget. `RPC_DEPTH_WS_URL` is optional. If `RPC_DEPTH_URL` is omitted, the worker reuses the hot node and logs a warning: CPU/event-loop isolation remains, provider-capacity isolation does not.
+- **`RPC_ARCHIVE_URL` is the other half.** The tip-freshest nodes are usually pruning fullnodes (a couple of days of history), which cannot serve the venue-lifetime backfills, `blockAtOrAfter`'s search from block 0, or the gas crawl. The archive node must serve logs, headers and receipts at any depth **and** historical `eth_getCode` (the gas tracker bisects it to date a destination's deployment). Verify with `eth_getCode` at an old block before trusting an endpoint. Set it to an archive node and the deep crawls move there while quotes stay on the fast one. Leave it unset and both ride `RPC_HTTP_URL` (the pre-split behavior). Failover will **not** cover this for you: a pruned block is a JSON-RPC error, which never trips the breaker, so a pruning primary with an archive *backup* stalls history instead of degrading to it.
+- **RPC failover is on by default for the HOT pool**, whose backups default to the public endpoint (`RPC_HTTP_BACKUP_URLS`). The **archive pool ships with no backup at all** (`RPC_ARCHIVE_BACKUP_URLS` defaults to empty). The public endpoint cannot serve historical `eth_getCode`, so failing over to it would satisfy every crawl except the gas bootstrap, which would then retry forever while the pool looked healthy. Set it only to an endpoint meeting the full archive contract. Within a pool, a dead primary switches to that pool's backups, and the primary is probed every minute and snaps back once it's healthy. The TopBar's amber `RPC` chip is hot-pool-only; inspect `state.rpcArchive` or `state.notes` for archive health. Heavy history crawls pause while the archive pool is on a backup; live quotes/fills keep flowing.
 
 ### Seeding or restoring `/data` from a snapshot
 
-This is how production history was moved from Render (2026-10-14), and how to restore it again. Never let the indexer boot on an empty or wrong `/data`: an empty volume re-runs every venue-lifetime backfill. Volume file commands and `railway ssh` need an SSH key registered with Railway (`railway ssh keys add`) **and** an active deployment, so the service first runs a holding server that answers health checks without opening the database.
+Production history was moved from Render to Railway this way on 2026-10-14. Render's final database is kept at `/data/backups/render-final-2026-10-14.db`. Use the same procedure to restore from any snapshot.
+
+Never let the indexer boot on an empty or wrong `/data`: an empty volume re-runs every venue-lifetime backfill. Volume file commands and `railway ssh` need an SSH key registered with Railway (`railway ssh keys add`) **and** an active deployment. So the service first runs a holding server that answers health checks without opening the database.
 
 1. **Hold.** Override the start command, which redeploys:
    ```bash
@@ -37,11 +46,11 @@ This is how production history was moved from Render (2026-10-14), and how to re
    {"services":{"<service-id>":{"deploy":{"startCommand":"node -e \"require('http').createServer((q,r)=>r.end('maintenance')).listen(process.env.PORT||8787)\""}}}}
    JSON
    ```
-2. **Snapshot** the source database. On Render, `render ssh` is interactive-only, but plain `ssh srv-<id>@ssh.virginia.render.com '<cmd>'` works with a registered key. The image has no `sqlite3` CLI, and Render's `/data` lacks room for a second copy, so write to `/tmp`:
+2. **Snapshot** the source database (inside a running mpamm container, e.g. `railway ssh`). The image has no `sqlite3` CLI, so use node, and write to `/tmp` when the source volume lacks room for a second copy:
    ```bash
    node -e "new (require('node:sqlite').DatabaseSync)('/data/mpamm.db',{readOnly:true}).exec(\"VACUUM INTO '/tmp/mpamm-snapshot.db'\")"
    ```
-   `VACUUM INTO` is transactionally consistent (WAL included) and drops the free pages. Stream it out with `gzip -c` over the same ssh, and compare `sha256sum` on both ends.
+   `VACUUM INTO` is transactionally consistent (WAL included) and drops the free pages. Copy it out, e.g. `gzip -1 -c … | base64` over `railway ssh`, and compare `sha256sum` on both ends.
 3. **Move the current database aside; don't delete it.** Move the `-wal`/`-shm` files too: a stale WAL replayed onto a different database corrupts it.
    ```bash
    railway ssh --service mpamm-virginia -- "mkdir -p /data/old-<date> && mv /data/mpamm.db* /data/old-<date>/"
@@ -51,8 +60,13 @@ This is how production history was moved from Render (2026-10-14), and how to re
    railway volume files --volume mpamm-virginia-mpamm-data-virginia upload ./mpamm-snapshot.db /mpamm.db.incoming
    ```
    Inside the container (`railway ssh`), check `sha256sum` and `PRAGMA integrity_check`, then `mv /data/mpamm.db.incoming /data/mpamm.db`.
-5. **Release the hold.** `railway config plan` should show the start command being cleared and nothing destructive; then `railway config apply`. The boot log must say `tail.resume: resuming: gap-filling N block(s)`. A `cold start` means the indexer did not find the restored file. Keep the snapshot-to-boot gap short: the fills tail catches up on the hot node, which keeps only a couple of days of history, and fills inside the gap lose their short-horizon markouts.
-6. **Verify** against the source host. `/api/bootstrap` should return 200 (it is 503 until history has loaded, unlike `/api/health`). Every completed day in `/api/volume` and `/api/gas` should be identical. `/api/fills` should hold the same recent ids. `state.notes` should have no `rpc.` warnings. `/api/health` `coveragePct60s` should be near 100.
+5. **Release the hold.** `railway config plan` should show the start command being cleared and nothing destructive; then `railway config apply`. The boot log must say `tail.resume: resuming: gap-filling N block(s)`; `cold start` means the indexer did not find the restored file. Keep the snapshot-to-boot gap short. The fills tail catches up on the hot node, which keeps only a couple of days of history, and fills inside the gap lose their short-horizon markouts.
+6. **Verify:**
+   - `/api/bootstrap` returns 200 (it is 503 until history has loaded, unlike `/api/health`).
+   - Every completed day in `/api/volume` and `/api/gas` matches the source.
+   - `/api/fills` holds the same recent ids.
+   - `state.notes` has no `rpc.` warnings.
+   - `/api/health` `coveragePct60s` is near 100.
 
 ## Any container host / local
 
@@ -143,7 +157,7 @@ live markouts) as they are, and replaces or deletes the rest.
 
 ## Operational notes
 
-- **Memory**: the service is tuned for small instances (`NODE_OPTIONS=--max-old-space-size=320` on a 512MB box); the leaderboard aggregation is paged and the backfills stream. If steady-state OOMs recur, move up an instance size.
+- **Memory**: the JS heap is capped at `NODE_OPTIONS=--max-old-space-size=320` (set in `.railway/railway.ts`); the leaderboard aggregation is paged and the backfills stream. Railway has no instance sizes: memory is billed by usage up to the plan's per-service limit. If steady-state OOMs recur, raise the heap cap in the file rather than looking for a bigger box.
 - **Restarts are safe everywhere**: every long job (volume backfill, markout onboarding, gas scan) is cursor-resumable, and ingest commits atomically with its cursor — a kill mid-scan never double-counts. One SQLite worker owns every post-boot mutation and acknowledges each only after COMMIT; shutdown attempts one final live snapshot and reports a failed acknowledgement before exiting.
 - **Watch `state.notes`** (`/api/markets`, and the same lines in the service log): every degradation — starving reference feed, deferred CEX archive, unreadable RPC ranges — is surfaced there, sanitized of URLs/keys. Filter `level: "warn"` for the ones that want a human, or a `code` prefix (`rpc.`, `backfill.`, `markout.`, `gas.`) for one subsystem.
 
@@ -151,6 +165,6 @@ live markouts) as they are, and replaces or deletes the rest.
 
 Quote and depth state reads require EIP-1898 `blockHash` support on hot/depth providers. Reads remain unavailable if a provider cannot serve the exact proposal; they never silently fall back to a different state. HTTP-only observation resolves a block header once per pass. The active HTTP pool selects its matching WebSocket; a backup with no configured WS uses HTTP polling. Speculative replacements clear affected server history and reset browser quote samples. Commitment upgrades alone do not compute another quote.
 
-The Render blueprint retains `DEPTH_MIN_INTERVAL_MS=1000`, matching the existing Virginia service, for the initial rollout. Execution's quote-driven block display takes effect on deployment. Enable every-head depth with `0` only after checking CPU throttling, quote latency and adapter completion on the deployed service. Update the blueprint and the service's explicit override together when enabling it. Keep `DEPTH_SAMPLES=25`. A positive interval remains an explicit capacity cap; setting `1000` restores the previous depth start rate without a code rollback. Restore the previous application image to roll back the complete change; no database migration is involved.
+`.railway/railway.ts` keeps `DEPTH_MIN_INTERVAL_MS=1000` for the initial rollout. Execution's quote-driven block display takes effect on deployment. Enable every-head depth with `0` only after checking CPU throttling, quote latency and adapter completion on the deployed service. Change it in `.railway/railway.ts` and apply; the file is the service's only source of variables. Keep `DEPTH_SAMPLES=25`. A positive interval remains an explicit capacity cap; setting `1000` restores the previous depth start rate without a code rollback. Restore the previous application image to roll back the complete change; no database migration is involved.
 
 A deadline produces missing curves, never retained prices labeled as fresh. Browser diagnostics are opt-in with `?timing=1`; `window.__mpammTiming` holds at most 600 local receipt/decode/draw/presentation-opportunity records. These records are never sent to the service.
