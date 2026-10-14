@@ -707,11 +707,15 @@ export function fillsIncompleteFrom(
 
 /**
  * Whether a pending stage will still re-SET this (venue, day)'s row. The
- * reconcile leaves such a day alone: a stage that applies replaces the row
- * and the boot after judges the result, while one that is refused or held
- * leaves the stored count, and with it the evidence, for that boot to warn
- * on. Rewriting it now would make the day look consistent whatever the
- * stage then did.
+ * reconcile leaves such a day alone, since rewriting it now would make the
+ * day look consistent whatever the stage then did. A stage that applies
+ * replaces the row, and the boot after judges the result. One that is
+ * refused is stamped settled, so the boot after finds the stored count, and
+ * with it the evidence, and warns. A 'fills' revision that is HELD stays
+ * queued, so its days stay as stored: it holds because the window's fills
+ * fail conservation, i.e. fills are missing, and a rewrite from them would
+ * write an undercount. Its own backfill.config.invalid warning, raised every
+ * boot, is the signal there.
  *
  * Scoped per DAY: a day is placed against a stage's start by the block span
  * of its fills (`maxBlock`), erring toward judging the day where the span
