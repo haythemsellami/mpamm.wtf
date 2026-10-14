@@ -136,6 +136,9 @@ export interface ResetDeletes {
   fills?: { fromBlock: bigint } | { fromDay: string };
 }
 
+/** One (day, venue) of retained fills: its count and block span. */
+export interface DayFillCount { utcDay: string; venueId: string; swaps: number; minBlock: number; maxBlock: number }
+
 /**
  * Where a targeted reset leaves a history scan's resume cursor: back at
  * `fromBlock`, but never FORWARD of where the scan already is. A scan that has
@@ -645,15 +648,21 @@ export class VolumeStore {
   /** Per-(day, venue) fill counts for fills at or after `sinceMs`. Callers
    *  pass the retention cutoff: rows before it may be mid-deletion (the boot
    *  prune is capped; the worker drains the rest later), so counting them
-   *  would under-report a partially pruned day. */
-  fillCountsByDayVenue(sinceMs = 0): Array<{ utcDay: string; venueId: string; swaps: number }> {
+   *  would under-report a partially pruned day. The block span places each
+   *  day against a history stage's resume block with no RPC (the boot
+   *  reconcile runs before the first block read). */
+  fillCountsByDayVenue(sinceMs = 0): DayFillCount[] {
     const rows = this.db.prepare(`
-      SELECT date(ts / 1000, 'unixepoch') AS utc_day, venue_id, COUNT(*) AS swaps
+      SELECT date(ts / 1000, 'unixepoch') AS utc_day, venue_id, COUNT(*) AS swaps,
+             MIN(block_number) AS min_block, MAX(block_number) AS max_block
       FROM fills
       WHERE ts >= ?
       GROUP BY utc_day, venue_id
     `).all(sinceMs) as Array<Record<string, any>>;
-    return rows.map((r) => ({ utcDay: r.utc_day, venueId: r.venue_id, swaps: Number(r.swaps) }));
+    return rows.map((r) => ({
+      utcDay: r.utc_day, venueId: r.venue_id, swaps: Number(r.swaps),
+      minBlock: Number(r.min_block), maxBlock: Number(r.max_block),
+    }));
   }
 
   // ── onboarding markout backfill (last ~30d per venue) ───────────────────────

@@ -7,7 +7,7 @@
 // fixed 503→491 / 689→701 at the next boot, USD ±$1,268 off for three weeks).
 import { describe, expect, it } from 'vitest';
 import type { DailyVolume } from '@shared';
-import { describeSwapChanges, reconcileDaySwaps, type SwapCountChange } from '../datasource/live.js';
+import { describeSwapChanges, rebuildExcuse, reconcileDaySwaps, type SwapCountChange, type VenueRebuild } from '../datasource/live.js';
 
 const TODAY = '2026-09-22';
 const day = (utcDay: string, byVenue: DailyVolume['byVenue']): DailyVolume => ({ utcDay, partial: utcDay === TODAY, byVenue });
@@ -69,5 +69,55 @@ describe('describeSwapChanges', () => {
     const many = Array.from({ length: 9 }, (_, i) => c(`2026-09-${String(10 + i).padStart(2, '0')}`, 100, 101));
     const s = describeSwapChanges(many, 3);
     expect(s).toBe('2026-09-10 100→101, 2026-09-11 100→101, 2026-09-12 100→101, +6 more (net +9)');
+  });
+});
+
+describe('rebuildExcuse — only a day a pending stage still rebuilds is expected', () => {
+  // three retained days, fills at blocks 100–199, 200–299, 300–399
+  const spans = new Map([
+    ['2026-09-18', { minBlock: 100, maxBlock: 199 }],
+    ['2026-09-19', { minBlock: 200, maxBlock: 299 }],
+    ['2026-09-20', { minBlock: 300, maxBlock: 399 }],
+  ]);
+  const DAYS = [...spans.keys()];
+  const change = (utcDay: string): SwapCountChange => ({ venueId: 'v', utcDay, from: 10, to: 11 });
+  /** the days `pending` excuses, each with its reasons */
+  const excused = (pending: Partial<VenueRebuild>) => Object.fromEntries(DAYS
+    .map((d) => [d, rebuildExcuse(change(d), spans, { resets: [], ...pending })] as const)
+    .filter(([, why]) => why.length));
+
+  it('excuses nothing when no stage is pending', () => {
+    expect(excused({})).toEqual({});
+  });
+
+  it('a queued reset covers only the days from its start', () => {
+    expect(Object.keys(excused({ resets: [{ from: 'lifetime' }] }))).toEqual(DAYS);
+    expect(Object.keys(excused({ resets: [{ from: 'day', day: '2026-09-19' }] }))).toEqual(['2026-09-19', '2026-09-20']);
+    // a reset starting today is today's re-read alone: no closed day is rebuilt
+    expect(excused({ resets: [{ from: 'day', day: TODAY }] })).toEqual({});
+    expect(Object.keys(excused({ resets: [{ from: 'block', block: 250n }] }))).toEqual(['2026-09-19', '2026-09-20']);
+    // a block past the day's last fill cannot be placed on that day: warn
+    expect(Object.keys(excused({ resets: [{ from: 'block', block: 300n }] }))).toEqual(['2026-09-20']);
+  });
+
+  it('an unfinished volume replay excuses the days it has not SET yet — never one it already re-SET', () => {
+    // 09-18 was SET by this very replay: a mismatch there is the replay's own misbucket
+    expect(excused({ volume: { cursor: 250n } })).toEqual({
+      '2026-09-19': ['volume replay unfinished'], '2026-09-20': ['volume replay unfinished'],
+    });
+    expect(Object.keys(excused({ volume: {} }))).toEqual(DAYS);   // not started: every day is still to be SET
+  });
+
+  it('an unfinished fills onboarding excuses the day its cursor sits in and later days', () => {
+    expect(Object.keys(excused({ fills: { cursor: 250n, fromDay: '2026-09-01' } }))).toEqual(['2026-09-19', '2026-09-20']);
+    // no cursor yet: the scan restarts at its window start, and days before it are untouched
+    expect(Object.keys(excused({ fills: { fromDay: '2026-09-19' } }))).toEqual(['2026-09-19', '2026-09-20']);
+    // the window start is a floor even when the cursor lags behind it
+    expect(Object.keys(excused({ fills: { cursor: 150n, fromDay: '2026-09-20' } }))).toEqual(['2026-09-20']);
+  });
+
+  it('names every stage that explains a day', () => {
+    expect(excused({ resets: [{ from: 'lifetime' }], volume: { cursor: 350n } })['2026-09-20'])
+      .toEqual(['reset queued', 'volume replay unfinished']);
   });
 });
