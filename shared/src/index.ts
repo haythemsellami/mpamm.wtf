@@ -794,8 +794,9 @@ export type NoteCode =
   | 'gas.range.skipped' | 'gas.destination.conflict' | 'gas.mode.mixed'
   // CEX reference feeds
   | 'reference.starved' | 'reference.recovered'
-  // SQLite store migrations / persistence
-  | 'store.migrated' | 'store.persist.failed'
+  // SQLite store migrations / persistence, and the boot swap-count reconcile
+  // (a closed day's stored count disagreeing with its fills)
+  | 'store.migrated' | 'store.persist.failed' | 'store.swaps.drift' | 'store.swaps.rebuilding'
   // the data source itself
   | 'source.sim';
 
@@ -820,7 +821,7 @@ export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'gas.scan.start': 'info', 'gas.series.reset': 'info', 'gas.scan.paused': 'warn',
   'gas.range.skipped': 'warn', 'gas.destination.conflict': 'warn', 'gas.mode.mixed': 'warn',
   'reference.starved': 'warn', 'reference.recovered': 'info',
-  'store.migrated': 'info', 'store.persist.failed': 'warn',
+  'store.migrated': 'info', 'store.persist.failed': 'warn', 'store.swaps.drift': 'warn', 'store.swaps.rebuilding': 'info',
   'source.sim': 'info',
 };
 

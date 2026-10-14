@@ -691,6 +691,53 @@ describe('live startup archive gate', () => {
     source.store.close();
   });
 
+  // Fills booked a day early: both counts and USD are off on two closed days.
+  // The reconcile repairs only the counts, so the rewrite itself must be loud —
+  // at warn when nothing explains it, at info while a rebuild is still running.
+  it.each([
+    { name: 'settled history', meta: { 'mkfill_done_test-venue': '1' }, reset: undefined,
+      code: 'store.swaps.drift', level: 'warn', says: /USD was not: those days' USD may be misbucketed/ },
+    { name: 'fills onboarding unfinished', meta: {}, reset: undefined,
+      code: 'store.swaps.rebuilding', level: 'info', says: /while its fills onboarding is unfinished/ },
+    { name: 'a reset queued', meta: { 'mkfill_done_test-venue': '1' }, reset: 'test-venue',
+      code: 'store.swaps.rebuilding', level: 'info', says: /while a history reset is queued for it/ },
+  ])('swap reconcile rewriting a closed day reports it once per boot — $name', async ({ meta, reset, code, level, says }) => {
+    const { source } = await setup({ withAdapter: true, reset });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const DAY = 86_400_000;
+    const now = Date.now();
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const noon = (ms: number) => ms - (ms % DAY) + DAY / 2;
+    const d1 = noon(now - 2 * DAY), d2 = noon(now - DAY);
+    const mk = (i: number, ts: number): Fill => ({
+      id: `test-venue-0x${i.toString(16)}-0`, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'ROUTER',
+      usd: 100, baseAmount: 1, execPx: 1, txHash: '0x1', to: 'x', pool: 'p', blockNumber: i, ts, markoutsBps: [null, null, null, null, null],
+    });
+    source.store.persistSnapshot([
+      { utcDay: day(d1), partial: false, byVenue: { 'test-venue': { usd: 500, swaps: 5 } } },
+      { utcDay: day(d2), partial: false, byVenue: { 'test-venue': { usd: 700, swaps: 7 } } },
+    ], meta, [
+      ...Array.from({ length: 4 }, (_, i) => mk(i, d1 + i)),
+      ...Array.from({ length: 8 }, (_, i) => mk(10 + i, d2 + i)),
+    ]);
+    source.days = source.store.all();
+    const swapNotes = () => source.notes.list().filter((n: StateNote) => n.code.startsWith('store.swaps.'));
+
+    source.reconcileSwapCounts();
+    expect(swapNotes()).toEqual([expect.objectContaining({ code, level, venue: 'test-venue' })]);
+    expect(swapNotes()[0].msg).toContain(`2 closed day(s)`);
+    expect(swapNotes()[0].msg).toContain(`${day(d1)} 5→4, ${day(d2)} 7→8 (net 0)`);
+    expect(swapNotes()[0].msg).toMatch(says);
+    const row = (ms: number) => source.days.find((x: any) => x.utcDay === day(ms))?.byVenue['test-venue'];
+    expect([row(d1), row(d2)]).toEqual([{ usd: 500, swaps: 4 }, { usd: 700, swaps: 8 }]); // counts fixed, USD not
+
+    // the next boot sees consistent counts — which is exactly why this boot had to say it
+    source.reconcileSwapCounts();
+    expect(swapNotes()).toHaveLength(1);
+    source.store.close();
+  });
+
   it('drains a retention backlog on the WRITER in sweeps, then VACUUMs once there — never on the main thread', async () => {
     vi.useFakeTimers();
     const { source } = await setup();

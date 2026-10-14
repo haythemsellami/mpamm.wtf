@@ -620,6 +620,61 @@ export function purgeVenueFills(
   for (const id of ids) state.countedIds.delete(id);
 }
 
+/** A closed day whose stored, non-zero swap count the boot reconcile rewrote. */
+export interface SwapCountChange { venueId: string; utcDay: string; from: number; to: number }
+
+/**
+ * SET each day's per-venue swap count to its retained-fills count, and return
+ * the rewrites that were EVIDENCE: a closed day whose stored count was
+ * non-zero and differed.
+ *
+ * The rewrite only ever fixes the count. A replay that booked fills onto the
+ * wrong day moved their USD too, and that stays wrong, so a silent rewrite
+ * hides the only sign of it: the next boot sees a consistent day. The
+ * 2026-09-21 replay booked 12 clober-vault fills a day early; this rewrite
+ * quietly took 09-18/09-19 from 503/689 to 491/701 while USD stayed ±$1,268
+ * off for three weeks.
+ *
+ * A stored 0 is not evidence: it marks a day whose volume we have but not its
+ * count (subgraph seed, or a row a reset deleted that the replay has not
+ * rebuilt yet). Filling it in is this rewrite's job. Today is the live
+ * tail's, mid-accrual by definition.
+ */
+export function reconcileDaySwaps(
+  days: DailyVolume[],
+  counts: Iterable<{ utcDay: string; venueId: string; swaps: number }>,
+  today: string,
+): SwapCountChange[] {
+  const byDay = new Map<string, Map<string, number>>();
+  for (const c of counts) {
+    let m = byDay.get(c.utcDay); if (!m) { m = new Map(); byDay.set(c.utcDay, m); }
+    m.set(c.venueId, c.swaps);
+  }
+  const changed: SwapCountChange[] = [];
+  for (const d of days) {
+    const m = byDay.get(d.utcDay);
+    if (!m) continue;
+    for (const [venueId, swaps] of m) {
+      const vd = (d.byVenue[venueId] ??= { usd: 0, swaps: 0 });
+      if (d.utcDay < today && vd.swaps > 0 && vd.swaps !== swaps) changed.push({ venueId, utcDay: d.utcDay, from: vd.swaps, to: swaps });
+      vd.swaps = swaps;
+    }
+  }
+  return changed;
+}
+
+/** "2026-09-18 503→491, 2026-09-19 689→701 (net 0)" for one venue's changes,
+ *  day order. Capped below scrubNote's 300 chars so the tail of the list, not
+ *  the sentence around it, is what gets cut. A net of 0 is the signature of
+ *  fills booked on the wrong day; any other net, of fills missing or doubled. */
+export function describeSwapChanges(changes: readonly SwapCountChange[], max = 6): string {
+  const sorted = [...changes].sort((a, b) => (a.utcDay < b.utcDay ? -1 : a.utcDay > b.utcDay ? 1 : 0));
+  const net = sorted.reduce((s, c) => s + c.to - c.from, 0);
+  const shown = sorted.slice(0, max).map((c) => `${c.utcDay} ${c.from}→${c.to}`).join(', ');
+  const more = sorted.length > max ? `, +${sorted.length - max} more` : '';
+  return `${shown}${more} (net ${net > 0 ? '+' : ''}${net})`;
+}
+
 /** Fields that make two decodes the SAME fill. Attribution labels (category,
  *  `to`, router) are excluded: they are best-effort enrichment a second pass
  *  can label differently, and replacing a live fill over a label would throw
@@ -1846,24 +1901,48 @@ export class LiveDataSource extends BaseSource {
    * per-fill record — so the protocol breakdown is accurate across the retention
    * window immediately. Days with no retained fills (older than retention, or a
    * subgraph-seeded day) keep swaps 0: we have their volume, not the count.
+   *
+   * A rewrite of a closed day's non-zero count is reported, never silent (see
+   * reconcileDaySwaps): it is the last trace of a day booked from the wrong
+   * fills, whose USD this does not repair. One note per venue per boot.
    */
   private reconcileSwapCounts(): void {
-    const byDay = new Map<string, Map<string, number>>();
+    const now = Date.now();
+    const today = utcDay(now);
     // only days inside retention: the cutoff is day-aligned and nothing at or
     // after it is ever pruned, so those days are complete — while an expired
     // day may be half-deleted (boot prune capped at PRUNE_BOOT_MAX_BATCHES),
     // and overwriting its persisted swaps with the remainder would corrupt it.
-    for (const c of this.store.fillCountsByDayVenue(retentionCutoffMs(Date.now(), config.fillsRetentionDays))) {
-      let m = byDay.get(c.utcDay); if (!m) { m = new Map(); byDay.set(c.utcDay, m); }
-      m.set(c.venueId, c.swaps);
+    const changes = reconcileDaySwaps(this.days, this.store.fillCountsByDayVenue(retentionCutoffMs(now, config.fillsRetentionDays)), today);
+    if (!changes.length) return;
+    const byVenue = new Map<string, SwapCountChange[]>();
+    for (const c of changes) byVenue.set(c.venueId, [...(byVenue.get(c.venueId) ?? []), c]);
+    // an invalid entry repairs nothing, so it must not excuse a drift
+    const queued = new Set(this.resetTargets(today).flatMap((t) =>
+      t.vid && t.from !== 'invalid' && !resetAlreadyApplied(this.store, t) ? [t.vid] : []));
+    for (const [venueId, list] of byVenue) {
+      const days = describeSwapChanges(list);
+      const why = this.historyRebuilding(venueId, queued);
+      if (why) this.note('store.swaps.rebuilding', `swap counts rewritten from fills on ${list.length} closed day(s) while ${why} — expected until it finishes: ${days}`, venueId);
+      else this.note('store.swaps.drift', `swap count drift on ${list.length} closed day(s): ${days} — counts reconciled from fills, USD was not: those days' USD may be misbucketed`, venueId);
     }
-    for (const d of this.days) {
-      const m = byDay.get(d.utcDay);
-      if (!m) continue;
-      for (const [venueId, swaps] of m) {
-        (d.byVenue[venueId] ??= { usd: 0, swaps: 0 }).swaps = swaps;
-      }
-    }
+  }
+
+  /**
+   * Why a venue's day rows and its fills may legitimately disagree at boot, or
+   * null when they must match. Either side can be mid-rebuild: a reset deletes
+   * both and the two scans restore them separately, so one restart between
+   * them leaves a partial day on one side. The stages key their markers on the
+   * adapter's FIRST venue. Fills count as complete only once onboarded, even
+   * with MARKOUT_BACKFILL off: tail-only fills start mid-day.
+   */
+  private historyRebuilding(venueId: string, queued: ReadonlySet<string>): string | null {
+    const a = ADAPTERS.find((x) => x.venues().some((v) => v.id === venueId));
+    const vid = (a && this.vidOf(a)) ?? venueId;
+    if (queued.has(vid)) return 'a history reset is queued for it';
+    if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') return 'its fills onboarding is unfinished';
+    if (config.backfillEnabled && a?.backfillFromUtc && this.store.getMeta(`backfill_done_${vid}`) !== '1') return 'its volume replay is unfinished';
+    return null;
   }
 
   /**
