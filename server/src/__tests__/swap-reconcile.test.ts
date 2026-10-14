@@ -7,7 +7,7 @@
 // fixed 503→491 / 689→701 at the next boot, USD ±$1,268 off for three weeks).
 import { describe, expect, it } from 'vitest';
 import type { DailyVolume } from '@shared';
-import { rebuildExcuse, reconcileDaySwaps, swapNet, swapNoteMsg, type SwapCountChange, type VenueRebuild } from '../datasource/live.js';
+import { fillsIncompleteFrom, rebuildExcuse, reconcileDaySwaps, swapNet, swapNoteMsg, type SwapCountChange, type VenueRebuild } from '../datasource/live.js';
 import { NOTE_MSG_MAX } from '../notes.js';
 
 const TODAY = '2026-09-22';
@@ -132,18 +132,34 @@ describe('rebuildExcuse — only a day a pending stage still rebuilds is expecte
     expect(Object.keys(excused({ volume: {} }))).toEqual(DAYS);   // not started: every day is still to be SET
   });
 
-  it('an unfinished fills onboarding excuses the day its cursor sits in and later days', () => {
-    expect(Object.keys(excused({ fills: { cursor: 250n, fromDay: '2026-09-01' } }))).toEqual(['2026-09-19', '2026-09-20']);
-    // no cursor yet: the scan restarts at its window start, and days before it are untouched
-    expect(Object.keys(excused({ fills: { fromDay: '2026-09-19' } }))).toEqual(['2026-09-19', '2026-09-20']);
-    // the window start is a floor even when the cursor lags behind it
-    expect(Object.keys(excused({ fills: { cursor: 150n, fromDay: '2026-09-20' } }))).toEqual(['2026-09-20']);
-  });
-
   it('names every stage that explains a day', () => {
     expect(excused({
       resets: [{ from: 'lifetime' }, { from: 'fills', day: '2026-09-20', until: '2026-09-21' }],
-      volume: { cursor: 350n }, fills: { cursor: 350n, fromDay: '2026-09-01' },
-    })['2026-09-20']).toEqual(['fills revision queued', 'reset queued', 'volume replay unfinished', 'fills onboarding unfinished']);
+      volume: { cursor: 350n },
+    })['2026-09-20']).toEqual(['fills revision queued', 'reset queued', 'volume replay unfinished']);
+  });
+});
+
+describe('fillsIncompleteFrom — days the reconcile must not rewrite yet', () => {
+  const spans = new Map([
+    ['2026-09-18', { minBlock: 100 }],
+    ['2026-09-19', { minBlock: 200 }],
+    ['2026-09-20', { minBlock: 300 }],
+  ]);
+
+  it('starts at the day the onboarding cursor sits in', () => {
+    expect(fillsIncompleteFrom(spans, { cursor: 250n, fromDay: '2026-09-01' })).toBe('2026-09-19');
+  });
+
+  it('holds back a complete day when the cursor sits exactly on the next midnight — it waits, it is not erased', () => {
+    // 09-19 is fully scanned and 300 may be 09-20's first block, but nothing
+    // past the cursor can tell. Skipping keeps 09-19's stored count for the
+    // boot after onboarding finishes, which then judges it against whole fills.
+    expect(fillsIncompleteFrom(spans, { cursor: 300n, fromDay: '2026-09-01' })).toBe('2026-09-19');
+  });
+
+  it('with no cursor, starts at the scan window — and the window is a floor', () => {
+    expect(fillsIncompleteFrom(spans, { fromDay: '2026-09-19' })).toBe('2026-09-19');
+    expect(fillsIncompleteFrom(spans, { cursor: 150n, fromDay: '2026-09-20' })).toBe('2026-09-20');
   });
 });

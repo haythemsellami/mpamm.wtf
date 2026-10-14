@@ -25,7 +25,7 @@ import {
 } from '../chain/rpc.js';
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
-import { VolumeStore, retentionCutoffMs, type ResetDeletes, type SnapshotResult } from '../db.js';
+import { VolumeStore, retentionCutoffMs, type DayFillCount, type ResetDeletes, type SnapshotResult } from '../db.js';
 
 /** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
 const PRUNE_LOG_MIN_ROWS = 1_000;
@@ -677,9 +677,32 @@ export interface VenueRebuild {
   /** unfinished volume replay; it resumes at the start of the day holding
    *  `cursor` (absent = from its first day) */
   volume?: { cursor?: bigint };
-  /** unfinished fills onboarding; complete below `cursor`, scanning nothing
-   *  before `fromDay` (its window start) */
-  fills?: { cursor?: bigint; fromDay: string };
+}
+
+/**
+ * The first day whose stored fills may be INCOMPLETE while a venue's fills
+ * onboarding is unfinished (or never ran: MARKOUT_BACKFILL off leaves the
+ * table tail-only, starting mid-day). The reconcile leaves these days alone:
+ * the fills are not the authority there yet. Rewriting from them would write
+ * an undercount, and since onboarding writes no day row, nothing would bring
+ * the stored count back for a later boot to compare once the fills are whole.
+ *
+ * Fills are complete below `cursor`, but it is not day-aligned and the days
+ * past it may hold no fills at all (a reset deleted them). So the day it sits
+ * in is taken to be the newest day with a fill below it. Where the cursor is
+ * in fact on a later day, that day is complete and merely waits: skipping
+ * keeps evidence for a later boot, it never erases it. With no cursor the scan
+ * restarts at its window start `fromDay`, which is also a floor: the scan
+ * never reaches earlier days.
+ */
+export function fillsIncompleteFrom(
+  spans: ReadonlyMap<string, { minBlock: number }>,
+  onboarding: { cursor?: bigint; fromDay: string },
+): string {
+  let from = onboarding.fromDay;
+  const { cursor } = onboarding;
+  if (cursor !== undefined) for (const [day, s] of spans) if (BigInt(s.minBlock) < cursor && day > from) from = day;
+  return from;
 }
 
 /**
@@ -694,10 +717,10 @@ export interface VenueRebuild {
  *    re-SETs only its window, and from the very fills compared here;
  *  - an unfinished volume replay checkpoints the day it is in with a partial
  *    total and re-scans it from its start, so exactly the days with a fill at
- *    or past its cursor are still to be SET;
- *  - an unfinished fills onboarding is complete below its cursor, which is
- *    not day-aligned: the day it sits in is taken to be the newest day with a
- *    fill below it, and that day and later ones may still be missing fills.
+ *    or past its cursor are still to be SET.
+ * Each re-SETs the day row, so a downgraded day is judged again on the boot
+ * after: a replay that misbooks it then shows up as drift. Unfinished fills
+ * onboarding is not an excuse: it writes no day row (see fillsIncompleteFrom).
  */
 export function rebuildExcuse(
   change: SwapCountChange,
@@ -710,12 +733,6 @@ export function rebuildExcuse(
   if (pending.resets.some((r) => r.from === 'fills' && d >= r.day && d < r.until)) why.push('fills revision queued');
   if (pending.resets.some((r) => r.from === 'lifetime' || (r.from === 'day' && d >= r.day) || (r.from === 'block' && top >= r.block))) why.push('reset queued');
   if (pending.volume && (pending.volume.cursor === undefined || top >= pending.volume.cursor)) why.push('volume replay unfinished');
-  if (pending.fills) {
-    const { cursor, fromDay } = pending.fills;
-    let partialFrom = fromDay;
-    if (cursor !== undefined) for (const [day, s] of spans) if (BigInt(s.minBlock) < cursor && day > partialFrom) partialFrom = day;
-    if (d >= partialFrom) why.push('fills onboarding unfinished');
-  }
   return why;
 }
 
@@ -2078,6 +2095,8 @@ export class LiveDataSource extends BaseSource {
    * reconcileDaySwaps): it is the last trace of a day booked from the wrong
    * fills, whose USD this does not repair. At most one warn (drift) and one
    * info (days a pending stage still rebuilds — rebuildExcuse) per venue per boot.
+   * Days whose fills may still be incomplete are not rewritten at all
+   * (fillsIncompleteFrom), so their evidence waits for a boot that can judge it.
    */
   private reconcileSwapCounts(): void {
     const now = Date.now();
@@ -2087,20 +2106,39 @@ export class LiveDataSource extends BaseSource {
     // day may be half-deleted (boot prune capped at PRUNE_BOOT_MAX_BATCHES),
     // and overwriting its persisted swaps with the remainder would corrupt it.
     const counts = this.store.fillCountsByDayVenue(retentionCutoffMs(now, config.fillsRetentionDays));
-    const changes = reconcileDaySwaps(this.days, counts, today);
+    const spans = new Map<string, Map<string, DayFillCount>>();
+    for (const c of counts) {
+      let m = spans.get(c.venueId); if (!m) { m = new Map(); spans.set(c.venueId, m); }
+      m.set(c.utcDay, c);
+    }
+    const incompleteFrom = new Map<string, string>();
+    for (const [venueId, m] of spans) {
+      const { a, vid } = this.historyVenue(venueId);
+      // fills count as complete only once onboarded, even with
+      // MARKOUT_BACKFILL off: then they are tail-only and start mid-day
+      if (this.store.getMeta(`mkfill_done_${vid}`) === '1') continue;
+      incompleteFrom.set(venueId, fillsIncompleteFrom(m, {
+        cursor: this.metaBlock(`mkfill_cursor_${vid}`),
+        fromDay: fillsScanFromDay(a?.backfillFromUtc, now, config.markoutBackfillDays),
+      }));
+    }
+    const authoritative = counts.filter((c) => {
+      const from = incompleteFrom.get(c.venueId);
+      return from === undefined || c.utcDay < from;
+    });
+    const changes = reconcileDaySwaps(this.days, authoritative, today);
     if (!changes.length) return;
     // an invalid entry repairs nothing, so it must not excuse a drift
     const queued = this.resetTargets(today).filter((t): t is Exclude<BackfillResetTarget, { from: 'invalid' }> =>
       !!t.vid && t.from !== 'invalid' && !resetAlreadyApplied(this.store, t));
     for (const venueId of new Set(changes.map((c) => c.venueId))) {
-      const spans = new Map(counts.filter((c) => c.venueId === venueId).map((c) => [c.utcDay, c]));
-      const pending = this.pendingRebuild(venueId, queued, now);
+      const pending = this.pendingRebuild(venueId, queued);
       const drift: SwapCountChange[] = [];
       const expected: SwapCountChange[] = [];
       const why = new Set<string>();
       for (const c of changes) {
         if (c.venueId !== venueId) continue;
-        const r = rebuildExcuse(c, spans, pending);
+        const r = rebuildExcuse(c, spans.get(venueId)!, pending);
         if (!r.length) { drift.push(c); continue; }
         expected.push(c);
         for (const x of r) why.add(x);
@@ -2110,28 +2148,28 @@ export class LiveDataSource extends BaseSource {
     }
   }
 
-  /**
-   * What this boot's history stages will still rebuild for a venue (see
-   * VenueRebuild). The stages key their markers on the adapter's FIRST venue.
-   */
-  private pendingRebuild(venueId: string, queued: readonly Exclude<BackfillResetTarget, { from: 'invalid' }>[], nowMs: number): VenueRebuild {
+  /** The adapter that owns `venueId`, and the id its history stages key their
+   *  markers on: the adapter's FIRST venue. */
+  private historyVenue(venueId: string): { a?: VenueAdapter; vid: string } {
     const a = ADAPTERS.find((x) => x.venues().some((v) => v.id === venueId));
-    const vid = (a && this.vidOf(a)) ?? venueId;
-    const cursor = (key: string) => {
-      const v = this.store.getMeta(key);
-      return v && /^\d+$/.test(v) ? BigInt(v) : undefined;
-    };
+    return { a, vid: (a && this.vidOf(a)) ?? venueId };
+  }
+
+  /** a stored block cursor, or undefined when unset (or not a block). */
+  private metaBlock(key: string): bigint | undefined {
+    const v = this.store.getMeta(key);
+    return v && /^\d+$/.test(v) ? BigInt(v) : undefined;
+  }
+
+  /** What this boot's history stages will still re-SET for a venue (see VenueRebuild). */
+  private pendingRebuild(venueId: string, queued: readonly Exclude<BackfillResetTarget, { from: 'invalid' }>[]): VenueRebuild {
+    const { a, vid } = this.historyVenue(venueId);
     // A chain reset rewrites day rows only through the volume replay; without
     // it, it repairs no USD and explains nothing here. A 'fills' revision
     // SETs its days itself.
     const volumeReplays = config.backfillEnabled && !!a?.backfillFromUtc;
     const out: VenueRebuild = { resets: queued.filter((t) => t.vid === vid && (t.from === 'fills' || volumeReplays)) };
-    if (volumeReplays && this.store.getMeta(`backfill_done_${vid}`) !== '1') out.volume = { cursor: cursor(`backfill_cursor_${vid}`) };
-    // fills count as complete only once onboarded, even with MARKOUT_BACKFILL
-    // off: tail-only fills start mid-day
-    if (this.store.getMeta(`mkfill_done_${vid}`) !== '1') {
-      out.fills = { cursor: cursor(`mkfill_cursor_${vid}`), fromDay: fillsScanFromDay(a?.backfillFromUtc, nowMs, config.markoutBackfillDays) };
-    }
+    if (volumeReplays && this.store.getMeta(`backfill_done_${vid}`) !== '1') out.volume = { cursor: this.metaBlock(`backfill_cursor_${vid}`) };
     return out;
   }
 
