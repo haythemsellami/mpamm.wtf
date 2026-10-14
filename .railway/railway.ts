@@ -8,21 +8,23 @@
 //   railway config plan     # read-only diff against the linked environment
 //   railway config apply    # needs Railway CLI >= 5.42.1
 //
-// `source` is deliberately NOT declared. The first deploy must boot on a copy of
-// production's SQLite history, not an empty volume — an empty one re-runs every
-// venue-lifetime backfill from scratch. So apply creates the service, volume and
-// settings with nothing to build; the snapshot is uploaded; only then is the
-// GitHub repo connected, once, by hand (docs/deploy.md → Railway bootstrap).
-import { defineRailway, preserve, project, service, volume } from "railway/iac";
+// Names match the live service (`railway config pull`): renaming either the
+// service or the volume here makes `apply` create a NEW one beside it, with an
+// empty /data. The first boot on Railway must run on a copy of production's
+// SQLite history — an empty volume re-runs every venue-lifetime backfill from
+// scratch (docs/deploy.md → Railway bootstrap).
+import { defineRailway, github, preserve, project, service, volume } from "railway/iac";
 
 export default defineRailway(() => {
   // Single-writer SQLite: one replica, and the volume forbids more anyway.
   // Virginia keeps the quote critical path next to the hot RPC (as on Render);
   // a volume follows its service's region, and moving it later is an offline
-  // migration of the whole history.
-  const data = volume("mpamm-data");
+  // migration of the whole history. Size/region pinned to the live volume:
+  // left unset, a plan proposes clearing them (and volumes can't shrink).
+  const data = volume("mpamm-virginia-mpamm-data-virginia", { region: "us-east4-eqdc4a", sizeMB: 50_000 });
 
-  const mpamm = service("mpamm", {
+  const mpamm = service("mpamm-virginia", {
+    source: github("haythemsellami/mpamm.wtf", { branch: "main", rootDirectory: "." }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     replicas: { "us-east4-eqdc4a": 1 },
     // Proves only that the process bound $PORT. index.ts binds BEFORE
