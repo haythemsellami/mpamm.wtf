@@ -665,6 +665,21 @@ export class VolumeStore {
     }));
   }
 
+  /** One venue's stored fills summed per UTC day over [fromMs, toMs), each fill
+   *  on its OWN timestamp's day. This is what a 'fills' history revision SETs
+   *  the day buckets to. Callers keep the window inside retention (see
+   *  fillCountsByDayVenue for why a pruned edge would under-report). */
+  fillTotalsByDay(venueId: string, fromMs: number, toMs: number): Array<{ utcDay: string; usd: number; swaps: number }> {
+    const rows = this.db.prepare(`
+      SELECT date(ts / 1000, 'unixepoch') AS utc_day, SUM(usd) AS usd, COUNT(*) AS swaps
+      FROM fills
+      WHERE venue_id = ? AND ts >= ? AND ts < ?
+      GROUP BY utc_day
+      ORDER BY utc_day
+    `).all(venueId, fromMs, toMs) as Array<Record<string, any>>;
+    return rows.map((r) => ({ utcDay: r.utc_day, usd: Number(r.usd), swaps: Number(r.swaps) }));
+  }
+
   // ── onboarding markout backfill (last ~30d per venue) ───────────────────────
   /** Insert fills only if ABSENT (ON CONFLICT DO NOTHING) — the onboarding fill
    *  scan re-decodes ranges the live tail may have already persisted, and must

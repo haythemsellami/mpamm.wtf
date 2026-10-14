@@ -8,6 +8,7 @@
 // with only a handful of block reads for the chunk that straddles and no extra
 // reads for the ones that do not.
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { stampChunkDays } from '../datasource/live.js';
 import { utcDay } from '../util.js';
 import { RpcReadUnavailableError } from '../chain/failover.js';
@@ -103,4 +104,69 @@ describe('stampChunkDays', () => {
     const a = archive({ down: true });
     await expect(stampChunkDays(range(1000, 1010), a.tsOf)).rejects.toBeInstanceOf(RpcReadUnavailableError);
   });
+});
+
+/** Real chunks from the replay that wrote the bad rows (fixtures/replay-midnight-2026-09.json). */
+interface RecordedChunk {
+  venue: string;
+  fromBlock: number;
+  toBlock: number;
+  /** [block, header unix seconds, fills stored for it, their usd], in getLogs order */
+  blocks: [number, number, number, number][];
+}
+const recorded = (JSON.parse(readFileSync(new URL('./fixtures/replay-midnight-2026-09.json', import.meta.url), 'utf8')) as { chunks: RecordedChunk[] }).chunks;
+
+/** Each chunk's fills bucketed by `stampOf`, as the replay's accumulator does. */
+function bucket(c: RecordedChunk, stampOf: (bn: bigint) => number): Record<string, { swaps: number; usd: number }> {
+  const out: Record<string, { swaps: number; usd: number }> = {};
+  for (const [bn, , fills, usd] of c.blocks) {
+    if (!fills) continue;
+    const e = (out[utcDay(stampOf(BigInt(bn)))] ??= { swaps: 0, usd: 0 });
+    e.swaps += fills;
+    e.usd = Math.round((e.usd + usd) * 1e6) / 1e6;
+  }
+  return out;
+}
+
+// The 2026-09-21 replay (poe/hanji/capricorn/clober-vault from 2026-09-17) ran
+// on the one-stamp build, and its closed days were never replayed after this
+// fix shipped. These are the exact chunks behind the rows it left in prod:
+// clober-vault 09-18 +$1,268.383 / 09-19 −$1,268.383, hanji 09-17 +$16,169.545
+// and 09-18→19 $30,819.084. Swap counts there look right only because boot
+// re-derives them from the fills table (reconcileSwapCounts); USD it never does.
+describe('stampChunkDays — the real chunks the 2026-09-21 replay misbooked', () => {
+  // [venue, chunk start, the later day, what the one-stamp replay moved onto the earlier day]
+  const cases: [string, number, string, { swaps: number; usd: number }][] = [
+    ['clober-vault', 106027672, '2026-09-19', { swaps: 12, usd: 1268.383263 }],
+    ['hanji', 105742672, '2026-09-18', { swaps: 7, usd: 16169.545015 }],
+    ['hanji', 106027672, '2026-09-19', { swaps: 43, usd: 30819.084254 }],
+  ];
+
+  for (const [venue, fromBlock, laterDay, moved] of cases) {
+    const c = recorded.find((x) => x.venue === venue && x.fromBlock === fromBlock)!;
+    const timeMs = new Map(c.blocks.map(([bn, sec]) => [BigInt(bn), sec * 1000]));
+    const ownDay = (bn: bigint) => timeMs.get(bn)!;
+
+    it(`${venue} ${c.fromBlock}..${c.toBlock}: every fill lands on its own block's day`, async () => {
+      const reads: bigint[] = [];
+      const blocks = [...timeMs.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      const stamp = (await stampChunkDays(blocks, async (bn) => { reads.push(bn); return ownDay(bn); }))!;
+      for (const bn of blocks) expect(utcDay(stamp(bn)), `block ${bn}`).toBe(utcDay(ownDay(bn)));
+      expect(bucket(c, stamp)).toEqual(bucket(c, ownDay));
+      expect(bucket(c, stamp)[laterDay]).toEqual(moved);
+      expect(reads.length).toBeLessThanOrEqual(2 + Math.ceil(Math.log2(blocks.length)) + 1);
+    });
+
+    // Guards the fixture itself: the rule this replaced (the first log block's
+    // time for the whole chunk) must reproduce exactly the prod discrepancy.
+    it(`${venue} ${c.fromBlock}..${c.toBlock}: the one-stamp rule reproduces the rows prod still has`, () => {
+      const anchorMs = c.blocks[0][1] * 1000;
+      const oneStamp = bucket(c, () => anchorMs);
+      expect(oneStamp[laterDay]).toBeUndefined();
+      const earlierDay = utcDay(anchorMs);
+      const own = bucket(c, ownDay);
+      expect(Math.round((oneStamp[earlierDay].usd - own[earlierDay].usd) * 1e6) / 1e6).toBe(moved.usd);
+      expect(oneStamp[earlierDay].swaps - own[earlierDay].swaps).toBe(moved.swaps);
+    });
+  }
 });

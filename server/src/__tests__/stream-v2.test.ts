@@ -269,6 +269,39 @@ describe('subscription transport', () => {
     expect(volume.frames.length).toBe(before);
   });
 
+  it('delivers a volume resync to Volume subscribers only, as a one-off event', async () => {
+    const gateway = new SubscriptionGateway(new Source());
+    cleanup.push(() => gateway.close());
+    const volume = localPeer(gateway), tape = localPeer(gateway);
+    volume.subscribe([{ channel: 'volume' }]);
+    tape.subscribe([{ channel: 'fill' }]);
+    gateway.onMessage({ ch: 'volume', resync: true });
+    await waitFor(() => volume.frames.length === 1);
+    expect(volume.frames[0]).toMatchObject({ seq: 1, message: { ch: 'volume', resync: true } });
+    expect(volume.frames[0].snapshot).toBeUndefined();
+    expect(tape.frames.length).toBe(0);
+  });
+
+  /** a history revision's resync lands while today's (compressed) bucket is
+   *  encoding, and the next tick arrives before it finishes: latest-wins would
+   *  replace the resync, and the tab would keep the misbooked closed days */
+  it('never coalesces away a pending volume resync', async () => {
+    const gateway = new SubscriptionGateway(new Source());
+    cleanup.push(() => gateway.close());
+    const volume = localPeer(gateway);
+    volume.subscribe([{ channel: 'volume' }]);
+    // enough venues that the envelope crosses the 512-byte compression threshold
+    const today = (usd: number) => ({ utcDay: '2026-10-15', partial: true,
+      byVenue: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`venue-${i}`, { usd: usd + i, swaps: i }])) });
+    gateway.onMessage({ ch: 'volume', data: today(1) });
+    gateway.onMessage({ ch: 'volume', resync: true });
+    gateway.onMessage({ ch: 'volume', data: today(2) });
+    await waitFor(() => volume.frames.length === 2);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(volume.frames.map((f) => ('resync' in f.message ? 'resync' : (f.message as { data: { byVenue: Record<string, { usd: number }> } }).data.byVenue['venue-0'].usd)))
+      .toEqual([1, 'resync']);
+  });
+
   it('releases abandoned snapshot backlog during rapid market switches', async () => {
     const source = new Source();
     const quote = source.getQuotes();

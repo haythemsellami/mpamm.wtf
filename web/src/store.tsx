@@ -346,7 +346,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           && (msg.data.revision ?? 0) === (current.revision ?? 0)) return;
         setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1);
       }
-      else if (msg.ch === 'volume') { if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data)); }
+      else if (msg.ch === 'volume') {
+        // closed days changed server-side (a history revision): reload them
+        if ('resync' in msg) { loadSnapshot(); return; }
+        if (snapshotLoaded.v) setVolume((prev) => mergeDay(prev, msg.data));
+      }
       else if (msg.ch === 'fill') {
         // stored fills changed server-side (deletions included): reload the tape
         if ('resync' in msg) { loadSnapshot(); return; }
