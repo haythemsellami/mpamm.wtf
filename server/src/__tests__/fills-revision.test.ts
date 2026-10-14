@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Fill } from '@shared';
 import { VolumeStore } from '../db.js';
-import { planFillsRevision, revisionTargets } from '../datasource/live.js';
+import { planFillsRevision, revisionTargets, unpersistedFillsIn } from '../datasource/live.js';
 
 type Totals = Map<string, { usd: number; swaps: number }>;
 const totals = (rows: [string, number, number][]): Totals => new Map(rows.map(([d, usd, swaps]) => [d, { usd, swaps }]));
@@ -152,5 +152,29 @@ describe('VolumeStore.fillTotalsByDay', () => {
       { utcDay: '2026-09-19', usd: 4, swaps: 1 },
     ]);
     store.close();
+  });
+});
+
+describe('unpersistedFillsIn — fills a revision must wait for', () => {
+  const at = (id: string, ts: string, venueId = 'hanji'): Fill => ({
+    id, venueId, market: 'MON/USDC', side: 'buy', category: 'UNKNOWN', usd: 1, baseAmount: 1, execPx: 1,
+    txHash: `0x${id}`, to: 'x', pool: 'p', blockNumber: 1, ts: Date.parse(ts), markoutsBps: [null, null, null, null, null],
+  });
+  const from = Date.parse('2026-09-17T00:00:00Z'), to = Date.parse('2026-09-20T00:00:00Z');
+
+  /** a gap-filled fill past its last markout horizon joins only `dirty` (the
+   *  persistence queue), never `pending` (markout aging); it is still unwritten */
+  it('counts a fill queued for the next snapshot', () => {
+    expect(unpersistedFillsIn({ dirty: [at('late', '2026-09-18T00:00:08Z')], inflight: [] }, 'hanji', from, to)).toBe(1);
+  });
+
+  it('counts a fill inside an uncommitted snapshot, once even if also re-queued', () => {
+    const f = at('a', '2026-09-19T00:00:35Z');
+    expect(unpersistedFillsIn({ dirty: [f], inflight: [[f], [at('b', '2026-09-17T12:00:00Z')]] }, 'hanji', from, to)).toBe(2);
+  });
+
+  it('ignores other venues and fills outside the window', () => {
+    const owners = { dirty: [at('poe', '2026-09-18T00:00:00Z', 'poe'), at('today', '2026-09-20T00:00:00Z')], inflight: [[at('old', '2026-09-16T23:59:59Z')]] };
+    expect(unpersistedFillsIn(owners, 'hanji', from, to)).toBe(0);
   });
 });

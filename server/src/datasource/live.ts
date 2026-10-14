@@ -728,6 +728,24 @@ export function revisionTargets(vid: string, revisions: readonly HistoryRevision
   });
 }
 
+/** Fills of `vid` in [fromMs, toMs) that are not in the table yet: queued
+ *  for the next snapshot (`dirty`, the persistence queue — NOT `pending`,
+ *  the markout-aging queue, which a fill past its last horizon never joins),
+ *  or inside a snapshot that has not committed. A 'fills' revision summing
+ *  the table without them would undercount their day for good. */
+export function unpersistedFillsIn(
+  owners: { dirty: Iterable<Fill>; inflight: Iterable<readonly Fill[]> },
+  vid: string,
+  fromMs: number,
+  toMs: number,
+): number {
+  const inWindow = (f: Fill) => f.venueId === vid && f.ts >= fromMs && f.ts < toMs;
+  const ids = new Set<string>();
+  for (const f of owners.dirty) if (inWindow(f)) ids.add(f.id);
+  for (const batch of owners.inflight) for (const f of batch) if (inWindow(f)) ids.add(f.id);
+  return ids.size;
+}
+
 /** How far a 'fills' window's stored total may drift from its fills' total.
  *  Moving fills between days conserves the sum exactly for stable-quoted
  *  pairs; cross pairs carry the gap between the two times they were priced
@@ -2156,12 +2174,7 @@ export class LiveDataSource extends BaseSource {
   private async applyFillsRevision(t: BackfillResetTarget & { from: 'fills' }, nowMs: number, today: string, label: string): Promise<string | null> {
     const fromMs = Date.parse(`${t.day}T00:00:00Z`);
     const untilMs = Date.parse(`${t.until}T00:00:00Z`);
-    const inWindow = (f: Fill) => f.venueId === t.vid && f.ts >= fromMs && f.ts < untilMs;
-    // Not in the table yet: queued for the next snapshot, or inside one that
-    // has not committed. Summing without them would undercount their day.
-    let unpersisted = 0;
-    for (const f of this.pending) if (inWindow(f)) unpersisted++;
-    for (const batch of this.inflightFills) for (const f of batch) if (inWindow(f)) unpersisted++;
+    const unpersisted = unpersistedFillsIn({ dirty: this.dirty, inflight: this.inflightFills }, t.vid, fromMs, untilMs);
     const stored = new Map<string, { usd: number; swaps: number }>();
     for (const d of this.days) {
       const v = d.byVenue[t.vid];
@@ -2189,7 +2202,13 @@ export class LiveDataSource extends BaseSource {
       return null;
     }
     const acc = new Map(plan.days.map((d) => [d.utcDay, { usd: d.usd, swaps: d.swaps }]));
-    await this.writeSnapshot({ days: this.mergeBackfill(t.vid, acc), meta: { [resetMarker(t)]: t.spec }, fills: [] });
+    const changed = this.mergeBackfill(t.vid, acc);
+    await this.writeSnapshot({ days: changed, meta: { [resetMarker(t)]: t.spec }, fills: [] });
+    // An open Volume tab loads closed days ONCE (the REST snapshot) and only
+    // merges `volume` frames after that, which normally carry today. Push the
+    // re-derived days so it stops showing the misbooked rows before a reload.
+    // These frames go out once per revision, never per tick (egress budget).
+    for (const d of changed) this.emitMsg({ ch: 'volume', data: this.cloneDay(d) });
     const usd = (n: number) => `$${n.toFixed(2)}`;
     const moves = plan.days.map((d) => `${d.utcDay} ${usd(d.was?.usd ?? 0)}→${usd(d.usd)}`).join(', ');
     return `${label} — re-derived from retained fills: ${moves}`;

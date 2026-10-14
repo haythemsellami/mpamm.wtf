@@ -492,15 +492,18 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }
 
-function mergeDay(days: DailyVolume[], d: DailyVolume): DailyVolume[] {
-  // the WS only ever carries TODAY's bucket — when a delta for a NEW day
-  // arrives (first tick after UTC midnight), close every older partial flag,
-  // or an overnight session renders yesterday dimmed as "(today, partial)".
+export function mergeDay(days: DailyVolume[], d: DailyVolume): DailyVolume[] {
+  // The WS carries TODAY's bucket, plus a one-off frame for each closed day a
+  // history revision re-derived. When a delta for a NEW day arrives (first
+  // tick after UTC midnight), close every older partial flag, or an overnight
+  // session renders yesterday dimmed as "(today, partial)".
   const closeOld = (x: DailyVolume) => (x.partial && x.utcDay < d.utcDay ? { ...x, partial: false } : x);
   const i = days.findIndex((x) => x.utcDay === d.utcDay);
-  if (i === -1) return [...days.map(closeOld), d];
   const next = days.map(closeOld);
-  next[i] = d;
+  if (i !== -1) { next[i] = d; return next; }
+  // a day the list does not hold goes in date order, never after today
+  const at = next.findIndex((x) => x.utcDay > d.utcDay);
+  if (at === -1) next.push(d); else next.splice(at, 0, d);
   return next;
 }
 
