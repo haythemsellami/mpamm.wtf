@@ -230,6 +230,20 @@ describe('fill snapshot resynchronization', () => {
     expect(dashboard.fills.map((f) => f.id)).toEqual(['old', 'recovered']);
   });
 
+  /** a history revision re-derived CLOSED days: frames only carry today, so
+   *  the Volume tab reloads its snapshot rather than keep the old rows */
+  it('reloads closed days on a volume resync', async () => {
+    window.history.replaceState(null, '', '/volume');
+    const snapshot = await vi.mocked(api.fetchMarkets)();
+    snapshot.volume = [{ utcDay: '2026-09-19', byVenue: { hanji: { usd: 1825544.12, swaps: 2200 } }, partial: false }];
+    await mount();
+    expect(dashboard.volume[0].byVenue.hanji?.usd).toBe(1825544.12);
+    vi.mocked(api.fetchMarkets).mockResolvedValueOnce({ ...snapshot,
+      volume: [{ utcDay: '2026-09-19', byVenue: { hanji: { usd: 1855888.73, swaps: 2200 } }, partial: false }] });
+    await act(async () => message({ ch: 'volume', resync: true }));
+    expect(dashboard.volume[0].byVenue.hanji?.usd).toBe(1855888.73);
+  });
+
   it('ignores an older REST response when reconnect requests overlap', async () => {
     await mount();
     const older = deferred<Fill[]>(), newer = deferred<Fill[]>();

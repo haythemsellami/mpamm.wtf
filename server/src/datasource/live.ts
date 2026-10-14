@@ -2204,11 +2204,12 @@ export class LiveDataSource extends BaseSource {
     const acc = new Map(plan.days.map((d) => [d.utcDay, { usd: d.usd, swaps: d.swaps }]));
     const changed = this.mergeBackfill(t.vid, acc);
     await this.writeSnapshot({ days: changed, meta: { [resetMarker(t)]: t.spec }, fills: [] });
-    // An open Volume tab loads closed days ONCE (the REST snapshot) and only
-    // merges `volume` frames after that, which normally carry today. Push the
-    // re-derived days so it stops showing the misbooked rows before a reload.
-    // These frames go out once per revision, never per tick (egress budget).
-    for (const d of changed) this.emitMsg({ ch: 'volume', data: this.cloneDay(d) });
+    // An open Volume tab loads closed days ONCE (the REST snapshot) and then
+    // only merges `volume` frames, which carry today. One resync makes it
+    // reload, rather than one frame per day: the gateway coalesces a burst of
+    // compressed frames down to its last, which would strand the middle days.
+    // Sent once per revision, never per tick (egress budget).
+    this.emitMsg({ ch: 'volume', resync: true });
     const usd = (n: number) => `$${n.toFixed(2)}`;
     const moves = plan.days.map((d) => `${d.utcDay} ${usd(d.was?.usd ?? 0)}→${usd(d.usd)}`).join(', ');
     return `${label} — re-derived from retained fills: ${moves}`;

@@ -908,7 +908,12 @@ export type StreamMessage =
    *  the fill channel so it reaches exactly those clients; one-off, never per
    *  tick (the egress budget), and never replayed as a topic snapshot. */
   | { ch: 'fill'; resync: true; data?: undefined }
-  | { ch: 'volume'; data: DailyVolume };
+  | { ch: 'volume'; data: DailyVolume }
+  /** CLOSED days' volume changed server-side (a history revision re-derived
+   *  them), so a client holding the Volume snapshot reloads it. Frames carry
+   *  only today; this is the one way a closed day reaches an open tab. Sent
+   *  once per revision, never per tick, never replayed as a topic snapshot. */
+  | { ch: 'volume'; resync: true; data?: undefined };
 
 export const STREAM_PATH = '/stream';
 
