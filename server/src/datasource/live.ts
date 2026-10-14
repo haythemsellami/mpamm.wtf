@@ -696,23 +696,101 @@ export function mergeIntoRing(ring: readonly Fill[], inserted: readonly Fill[], 
  * record and re-run on every boot. Either mistake comes back `invalid`, which
  * the apply pass reports loudly on every boot WITHOUT stamping (a stamp could
  * land on a shared marker) — and history-revisions.test.ts fails on.
+ *
+ * A 'fills' revision needs both ends as days, `from` < `until`. An `until` on
+ * a chain replay is invalid rather than ignored: the replay cannot stop
+ * there, and a reader would assume it does.
  */
 export function revisionTargets(vid: string, revisions: readonly HistoryRevision[] | undefined): BackfillResetTarget[] {
   const uses = new Map<string, number>();
   for (const r of revisions ?? []) uses.set(r.id.trim(), (uses.get(r.id.trim()) ?? 0) + 1);
   return (revisions ?? []).map((r) => {
     const id = r.id.trim();
-    const spec = `${vid}#${id}:${r.from ?? 'lifetime'}`;
     const marker = `history_revision_${vid}_${id}`;
-    const [parsed] = parseBackfillReset(r.from === undefined ? vid : `${vid}:${r.from}`);
     // EVERY occurrence of a shared id is invalid, the first included: a valid
     // first one would apply, and the invalid twin would still share its marker.
-    const dup = (uses.get(id) ?? 0) > 1;
-    if (!/^[\w.-]+$/.test(id) || dup || !parsed || parsed.from === 'block' || parsed.from === 'invalid') {
+    const badId = !/^[\w.-]+$/.test(id) || (uses.get(id) ?? 0) > 1;
+    if (r.source === 'fills') {
+      const spec = `${vid}#${id}:fills:${r.from ?? ''}..${r.until ?? ''}`;
+      const ok = !badId && r.from !== undefined && r.until !== undefined
+        && isUtcDay(r.from) && isUtcDay(r.until) && r.from < r.until;
+      return ok
+        ? { vid, spec, marker, from: 'fills' as const, day: r.from!, until: r.until! }
+        : { vid, spec, marker, from: 'invalid' as const };
+    }
+    const spec = `${vid}#${id}:${r.from ?? 'lifetime'}`;
+    const [parsed] = parseBackfillReset(r.from === undefined ? vid : `${vid}:${r.from}`);
+    if (badId || r.until !== undefined || (r.source !== undefined && r.source !== 'chain')
+      || !parsed || parsed.from === 'block' || parsed.from === 'invalid') {
       return { vid, spec, marker, from: 'invalid' as const };
     }
     return { ...parsed, spec, marker };
   });
+}
+
+/** How far a 'fills' window's stored total may drift from its fills' total.
+ *  Moving fills between days conserves the sum exactly for stable-quoted
+ *  pairs; cross pairs carry the gap between the two times they were priced
+ *  (0.01% across hanji's 2026-09-17..19). A larger gap means fills are
+ *  missing, and SETting the days from them would destroy volume. */
+export const FILLS_REVISION_TOLERANCE = 0.005;
+
+/**
+ * Decide a 'fills' history revision: SET each venue-day in [from, until) to
+ * the sum of its retained fills, or say why not. Pure so every refusal is
+ * unit-testable (fills-revision.test.ts).
+ *
+ *  - 'wait' (not stamped, re-checked next pass): the window is not closed
+ *    yet; the venue's volume or fills scan is still running (a pending
+ *    replay will rewrite these days, or the fills are still partial); or
+ *    fills in the window are not persisted yet.
+ *  - 'refuse' (stamped, warned): the window starts before fills retention.
+ *    Pruned days can never be summed. A database that young (fresh, or a dev
+ *    copy) built those days with the current replay anyway.
+ *  - 'hold' (not stamped, warned, re-checked next boot): the stored total and
+ *    the fills total disagree beyond FILLS_REVISION_TOLERANCE. That is missing
+ *    fills, not misbucketed ones, and needs a human.
+ */
+export function planFillsRevision(opts: {
+  from: string;
+  /** exclusive */
+  until: string;
+  today: string;
+  /** the first UTC day fills retention still keeps whole */
+  retainedFrom: string;
+  /** the venue's volume backfill AND fills onboarding are both done */
+  scansDone: boolean;
+  /** in-memory fills in the window that are not yet persisted */
+  unpersisted: number;
+  /** the venue's stored day buckets in the window (absent = no row) */
+  stored: ReadonlyMap<string, { usd: number; swaps: number }>;
+  /** the venue's fills summed per own-timestamp day over the window */
+  fills: ReadonlyMap<string, { usd: number; swaps: number }>;
+}):
+  | { action: 'wait' | 'refuse' | 'hold'; reason: string }
+  | { action: 'apply'; days: Array<{ utcDay: string; usd: number; swaps: number; was?: { usd: number; swaps: number } }> } {
+  const { from, until, today, retainedFrom, stored, fills } = opts;
+  if (until > today) return { action: 'wait', reason: `window ends ${until}, which has not closed yet (today is ${today})` };
+  if (from < retainedFrom) {
+    return { action: 'refuse', reason: `window starts ${from}, before fills retention (${retainedFrom}): those fills are pruned, so the days cannot be re-derived` };
+  }
+  if (!opts.scansDone) return { action: 'wait', reason: 'the venue\'s volume backfill or fills onboarding is still running' };
+  if (opts.unpersisted > 0) return { action: 'wait', reason: `${opts.unpersisted} fill(s) in the window are not persisted yet` };
+  let storedUsd = 0, fillsUsd = 0;
+  for (const v of stored.values()) storedUsd += v.usd;
+  for (const v of fills.values()) fillsUsd += v.usd;
+  const drift = Math.abs(storedUsd - fillsUsd);
+  if (drift > 0.01 && drift > FILLS_REVISION_TOLERANCE * Math.max(storedUsd, fillsUsd)) {
+    return {
+      action: 'hold',
+      reason: `stored $${storedUsd.toFixed(2)} vs fills $${fillsUsd.toFixed(2)} over the window: re-bucketing conserves the total, so fills are missing — not applied`,
+    };
+  }
+  const days = [...new Set([...stored.keys(), ...fills.keys()])]
+    .filter((d) => d >= from && d < until)
+    .sort()
+    .map((utcDay) => ({ utcDay, ...(fills.get(utcDay) ?? { usd: 0, swaps: 0 }), was: stored.get(utcDay) }));
+  return { action: 'apply', days };
 }
 
 /**
@@ -842,6 +920,8 @@ export type BackfillResetTarget = {
   | { from: 'lifetime' }
   | { from: 'block'; block: bigint }
   | { from: 'day'; day: string }
+  /** a 'fills' HistoryRevision: re-derive [day, until) from retained fills */
+  | { from: 'fills'; day: string; until: string }
   | { from: 'invalid' }
 );
 
@@ -1427,11 +1507,15 @@ export class LiveDataSource extends BaseSource {
     if (!config.backfillEnabled && !config.markoutBackfill) return false;   // nothing would run them
     const active = new Set(ADAPTERS.flatMap((a) => a.venues().map((v) => v.id)));
     // an invalid revision is never stamped, and only a code fix clears it — it
-    // must not re-launch the history pass every rediscovery tick meanwhile
+    // must not re-launch the history pass every rediscovery tick meanwhile.
+    // A held 'fills' revision is the same: it needs a human, not a re-check.
     return this.resetTargets(utcDay())
       .some((target) => active.has(target.vid) && !(target.marker && target.from === 'invalid')
-        && !resetAlreadyApplied(this.store, target));
+        && !this.heldRevisions.has(resetMarker(target)) && !resetAlreadyApplied(this.store, target));
   }
+  /** 'fills' revisions this process found unsafe (planFillsRevision 'hold'):
+   *  left unstamped, so the next boot re-checks and re-warns. */
+  private heldRevisions = new Set<string>();
 
   stop(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
@@ -1934,7 +2018,7 @@ export class LiveDataSource extends BaseSource {
 
       if (t.from === 'invalid') {
         this.noteOnce('backfill.config.invalid', t.marker
-          ? `history revision '${t.spec}' is invalid — expected a unique id ([A-Za-z0-9_.-]) and from: YYYY-MM-DD or omitted`
+          ? `history revision '${t.spec}' is invalid — expected a unique id ([A-Za-z0-9_.-]) and from: YYYY-MM-DD or omitted (source 'fills': from < until, both YYYY-MM-DD; until only with 'fills')`
           : `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
         // An invalid REVISION is a code bug that only a fix clears; stamping it
         // could also land on a valid twin's marker (shared id) and re-arm it.
@@ -1967,6 +2051,14 @@ export class LiveDataSource extends BaseSource {
           ? `backfill reset: '${t.vid}' is a CEX reference, which has no history to reset — skipped`
           : `backfill reset: no adapter declares venue '${t.vid}' — skipped`);
         await settle();
+        continue;
+      }
+      // A 'fills' revision re-derives closed days from stored rows: no chain
+      // read, no delete, no re-read of today. It settles itself, because its
+      // stamp commits in the same snapshot as its days.
+      if (t.from === 'fills') {
+        const line = await this.applyFillsRevision(t, nowMs, today, label);
+        if (line) applied.push(line);
         continue;
       }
       // A start ON today has no closed day to replay: it is the re-read alone.
@@ -2052,6 +2144,55 @@ export class LiveDataSource extends BaseSource {
     // adoptLegacyResetMarker has run once.
     if (want) await this.storeWriter.setMeta('backfill_reset_applied', want);
     if (applied.length) this.note('backfill.reset', `history reset applied — ${applied.join('; ')}`);
+  }
+
+  /**
+   * Apply one 'fills' revision (planFillsRevision decides whether it can).
+   * The re-derived days and the revision's marker commit in ONE snapshot, so
+   * a crash can never stamp the revision without its days. Days written
+   * without the stamp simply re-apply next boot, to the same values.
+   * Returns the applied-note line, or null when this pass applied nothing.
+   */
+  private async applyFillsRevision(t: BackfillResetTarget & { from: 'fills' }, nowMs: number, today: string, label: string): Promise<string | null> {
+    const fromMs = Date.parse(`${t.day}T00:00:00Z`);
+    const untilMs = Date.parse(`${t.until}T00:00:00Z`);
+    const inWindow = (f: Fill) => f.venueId === t.vid && f.ts >= fromMs && f.ts < untilMs;
+    // Not in the table yet: queued for the next snapshot, or inside one that
+    // has not committed. Summing without them would undercount their day.
+    let unpersisted = 0;
+    for (const f of this.pending) if (inWindow(f)) unpersisted++;
+    for (const batch of this.inflightFills) for (const f of batch) if (inWindow(f)) unpersisted++;
+    const stored = new Map<string, { usd: number; swaps: number }>();
+    for (const d of this.days) {
+      const v = d.byVenue[t.vid];
+      if (v && d.utcDay >= t.day && d.utcDay < t.until) stored.set(d.utcDay, { usd: v.usd, swaps: v.swaps });
+    }
+    const plan = planFillsRevision({
+      from: t.day,
+      until: t.until,
+      today,
+      retainedFrom: utcDay(retentionCutoffMs(nowMs, config.fillsRetentionDays)),
+      scansDone: this.store.getMeta(`backfill_done_${t.vid}`) === '1' && this.store.getMeta(`mkfill_done_${t.vid}`) === '1',
+      unpersisted,
+      stored,
+      fills: new Map(this.store.fillTotalsByDay(t.vid, fromMs, untilMs).map((r) => [r.utcDay, { usd: r.usd, swaps: r.swaps }])),
+    });
+    if (plan.action === 'wait') {
+      this.noteOnce('backfill.deferred', `${label} waits — ${plan.reason}`, t.vid);
+      return null;
+    }
+    if (plan.action !== 'apply') {
+      this.note('backfill.config.invalid', `${label} ${plan.reason}`, t.vid);
+      // a pruned window never comes back; a conservation gap needs a human
+      if (plan.action === 'refuse') await this.storeWriter.setMeta(resetMarker(t), t.spec);
+      else this.heldRevisions.add(resetMarker(t));
+      return null;
+    }
+    const acc = new Map(plan.days.map((d) => [d.utcDay, { usd: d.usd, swaps: d.swaps }]));
+    await this.writeSnapshot({ days: this.mergeBackfill(t.vid, acc), meta: { [resetMarker(t)]: t.spec }, fills: [] });
+    const usd = (n: number) => `$${n.toFixed(2)}`;
+    const moves = plan.days.map((d) => `${d.utcDay} ${usd(d.was?.usd ?? 0)}→${usd(d.usd)}`).join(', ');
+    return `${label} — re-derived from retained fills: ${moves}`;
   }
 
   /** Run `fn` between two tail cycles: no fill is ingested, and the cursor

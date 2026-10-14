@@ -176,6 +176,17 @@ export function createHanjiAdapter(): VenueAdapter {
     // seed daily volume by replaying OrderPlaced on-chain from the CLOBs'
     // deployment day (2026-06-05). Background — see live.ts.
     backfillFromUtc: '2026-06-05',
+    // History revisions (HistoryRevision — applied once per database on deploy):
+    //   replay-0921-midnight  2026-09-17..19 from fills. The 2026-09-21 replay
+    //                         (BACKFILL_RESET=hanji:2026-09-17) stamped each chunk
+    //                         with ONE block time, which booked 7 fills
+    //                         ($16,169.55) of 09-18 on 09-17 and 43 ($30,819.08) of
+    //                         09-19 on 09-18. The fills match an independent
+    //                         recount of the chain (7,163 trades, every id and
+    //                         day). A chain replay was ruled out: it would
+    //                         re-price every later day's cross pairs at the
+    //                         deploy-time mid (−3% to −9% on 09-28..10-07).
+    historyRevisions: [{ id: 'replay-0921-midnight', source: 'fills', from: '2026-09-17', until: '2026-09-20' }],
 
     async discover(ctx: AdapterContext) {
       const res = await ctx.client.multicall({

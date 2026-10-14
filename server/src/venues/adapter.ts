@@ -176,6 +176,26 @@ export interface HistoryRevision {
   /** first UTC day (YYYY-MM-DD) whose stored history is wrong; omit for the
    *  whole lifetime. Today is valid: only today's prefix is re-read. */
   from?: string;
+  /**
+   * Where the corrected history comes from. 'chain' (the default) is the
+   * replay above. 'fills' re-derives each closed day in [from, until) from
+   * the venue's RETAINED fills: it SETs the day's volume to their sum, and
+   * reads no chain, deletes nothing and re-prices nothing.
+   *
+   * Use 'fills' only when the fills are right and the day buckets are not,
+   * i.e. fills were booked on the wrong day. A replay would rewrite every
+   * day from `from` to yesterday. It re-prices cross-quoted pairs at the
+   * replay's CEX mid and drops closed-day fills' live markout curves, which
+   * cannot be rebuilt. 'fills' changes only the window.
+   *
+   * The window must be inside fills retention when the build boots (a
+   * pruned day has nothing to sum). The window's total must also be
+   * conserved: moving fills between days cannot change it.
+   */
+  source?: 'chain' | 'fills';
+  /** 'fills' only, and required there: the first UTC day AFTER the window
+   *  (exclusive). It must close before the revision can apply. */
+  until?: string;
 }
 
 /** Optional historical seed returned by `backfill()`. */
