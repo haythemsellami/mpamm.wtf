@@ -335,7 +335,9 @@ export class GasTracker {
       // anchor; a venue whose destinations all predate its anchor was
       // necessarily covered from birth and is left untouched. At worst this
       // re-scans a bounded, provably-sufficient tail once. Probe failure →
-      // return WITHOUT storing the fingerprint so the next tick retries.
+      // return WITHOUT storing the fingerprint so the next tick retries. That
+      // holds the venue's whole tail, permanently on a pruning archive (no
+      // historical getCode, no provable day boundary), so it is noted.
       try {
         const anchor = this.store.getMeta(fromKey) ?? sinceDay;
         const days: string[] = [];
@@ -366,7 +368,10 @@ export class GasTracker {
             this.note('gas.series.reset', `${name}: verifying quote-update coverage — rebuilding from ${day}`, vid);
           }
         }
-      } catch { return; }
+      } catch (e) {
+        this.note('gas.scan.paused', `${name}: quote-update coverage check failed (${(e as Error).message}); gas tail held, retried next pass`, vid);
+        return;
+      }
     }
     await this.writer.setMeta(sigKey, sig);
     // one-time migration: rows seeded before gas_from existed came from the
