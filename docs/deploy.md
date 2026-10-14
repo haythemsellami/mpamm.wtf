@@ -133,6 +133,40 @@ scan is still crawling, the scan is left to cover those days itself. Revisions
 wait for a run with both `BACKFILL` and `MARKOUT_BACKFILL` on. Never edit an
 applied entry — add a new id.
 
+**A replay rewrites every closed day from `from`, not just the wrong ones**, and
+two things in those days do not come back as they were. Cross-quoted pairs
+(`*/MON`, `*/ETH`) are re-priced at the CEX mid at the time of the replay, not
+the time of the fill. Closed-day fills also lose their live markout curves,
+which have no archive (`markout-curves.ts`). Set `from` to the first wrong day.
+For a venue with cross pairs, compare the fix against that cost before
+shipping.
+
+**When the fills are right and only the days are wrong** (fills booked on the
+wrong UTC day), re-derive the days from the fills instead:
+
+```ts
+historyRevisions: [{ id: 'replay-0921-midnight', source: 'fills', from: '2026-09-17', until: '2026-09-20' }],
+```
+
+It SETs each venue-day in `[from, until)` to the sum of that venue's retained
+fills and commits the days with the revision's marker in one snapshot. It
+reads no chain, deletes nothing, re-prices nothing and touches no other day.
+It runs only when that is safe:
+
+- It **waits** while the window has not closed, while the venue's volume
+  backfill or fills onboarding is still running, or while fills in the window
+  are not persisted yet.
+- It is **refused** (warned, and stamped) when the window starts before fills
+  retention, because pruned days cannot be summed. Ship it before `from` ages
+  out: `FILLS_RETENTION_DAYS` (31) days after `from`.
+- It is **held** (warned, re-checked each boot) when the window's stored total
+  and its fills total differ by more than 0.5%. Moving fills between days
+  conserves the total, so a bigger gap means fills are missing.
+
+The 2026-09-21 replay's midnight misbooking for clober-vault (09-18..19) and
+hanji (09-17..19) was repaired this way. A chain replay for hanji would have
+moved its late-September cross-pair days by 3–9%.
+
 ### Recovering a window the live tail missed
 
 ```

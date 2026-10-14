@@ -141,7 +141,7 @@ export class SubscriptionGateway {
       }
       const selected = this.select(group.topic, message, baselineIds);
       if (!selected) continue;
-      if (selected.ch === 'volume') {
+      if (selected.ch === 'volume' && !('resync' in selected)) {
         const json = JSON.stringify(selected.data);
         if (json === group.lastJson) continue;
         group.lastJson = json;
@@ -172,7 +172,14 @@ export class SubscriptionGateway {
 
   private publish(group: Group, message: TopicMessage): void {
     if (!group.peers.size) return;
-    if (group.encoding) { group.pending = message; this.metrics.coalesced++; return; }
+    if (group.encoding) {
+      // Latest wins, except over a pending resync: the client reloads its whole
+      // snapshot on that, which already holds anything the newer frame carries.
+      // Replacing it would leave the client on stale rows with nothing to say so.
+      if (!(group.pending && 'resync' in group.pending)) group.pending = message;
+      this.metrics.coalesced++;
+      return;
+    }
     // Track catalogs only when publishing: a coalesced pending state must
     // keep its catalog until the update actually reaches the shared stream.
     if (message.ch === 'state') {
