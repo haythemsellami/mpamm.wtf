@@ -49,6 +49,13 @@ export default defineRailway(() => {
       NODE_OPTIONS: "--max-old-space-size=320",
       // staged rollout; enable every-head depth after a capacity check
       DEPTH_MIN_INTERVAL_MS: "1000",
+      DEPTH: "on",
+      DEPTH_SAMPLES: "25",
+      // the devcore fleet serves 1000-block getLogs (the public endpoint ~100)
+      BACKFILL_CHUNK: "1000",
+      // The applied value is remembered in the DB (meta backfill_reset_applied*),
+      // so carrying it over with the history is a no-op; CHANGING it re-runs.
+      BACKFILL_RESET: "metric:2026-10-12",
       // Secrets: set with `railway variable set`, never in this file. The URLs
       // are DIFFERENT jobs (docs/deploy.md): hot = tip freshness, depth = curve
       // capacity isolation, archive = retention. Unset secondaries reuse hot.
@@ -57,6 +64,8 @@ export default defineRailway(() => {
       RPC_DEPTH_URL: preserve(),
       RPC_DEPTH_WS_URL: preserve(),
       RPC_ARCHIVE_URL: preserve(),
+      RPC_HTTP_BACKUP_URLS: preserve(),
+      RPC_ARCHIVE_BACKUP_URLS: preserve(),
     },
     volumeMounts: { "/data": data },
   });
