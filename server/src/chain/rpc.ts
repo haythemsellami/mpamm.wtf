@@ -230,12 +230,31 @@ export async function probeArchiveChain(): Promise<RpcVerifyResult> {
 }
 
 /** Earliest block whose timestamp >= `targetSec`, by binary search over [0, hi]
- *  (~log2(hi) getBlock calls). Maps a backfill start date → a start block. A
- *  pruned/missing block just pushes the search higher.
+ *  (~log2(hi) getBlock calls), or `hi` when no block up to it qualifies (a
+ *  future target; refuseResetStart in datasource/live.ts relies on it). Maps a
+ *  backfill start date → a start block.
+ *
+ *  The answer is PROVEN, never inferred: the search ends only when reads of
+ *  adjacent blocks bracket it, ts(ans−1) < target <= ts(ans). Block 0 needs no
+ *  read below it, and the `hi` fallback needs no read of `hi` (it is returned
+ *  either way). Callers persist the result as a day boundary, where an answer
+ *  off by one block books that block to the wrong day.
+ *
+ *  A failed probe says nothing about its block. The first pass treats it as
+ *  part of a pruned prefix and looks higher, which is cheap and right when the
+ *  answer is above it. If the failure was an archive hole (devcore's "error
+ *  getting block header from triedb and archive" stretches) or a transient
+ *  error at or above the answer, that pass ends with the bracket still open and
+ *  unread blocks under its top. Later passes search below the lowest failure
+ *  instead, moving away from it. A hole covering ans−1 or ans cannot be
+ *  routed around: it spends the failure budget and throws, and every caller
+ *  retries.
  *
  *  Rides the ARCHIVE pool: the search probes mid-points across the whole chain
  *  (the first probe is ~block hi/2), so on a pruning fullnode nearly every early
- *  probe 404s, the failure budget below is spent in seconds, and it throws. */
+ *  probe 404s, the failure budget below is spent in seconds, and it throws. A
+ *  target older than the node's retention throws too: the block below the
+ *  first retained one is unreadable, so no answer there can be proven. */
 export async function blockAtOrAfter(
   targetSec: number,
   hi: bigint,
@@ -247,28 +266,55 @@ export async function blockAtOrAfter(
   },
   generation: () => number = archiveRpcGeneration,
 ): Promise<bigint> {
-  let lo = 0n, h = hi, ans = hi;
-  // a single failed probe usually IS a pruned block (search higher), but a
-  // string of failures is an RPC brownout — converging to `hi` then would hand
-  // callers a head-anchored "start", which they make PERMANENT (backfill
-  // done-flags, gas_from). Fail loud instead; every caller retries later.
+  // The answer is always in (below, above], and only reads move either end:
+  // `below` is the highest block read with ts < target (−1: none yet), `above`
+  // the lowest read with ts >= target (`hi` until one is). The loop ends when
+  // they are adjacent, so the answer is proven.
+  let below = -1n, above = hi;
+  // The probe window [lo, top], always inside the bracket. A failure moves one
+  // edge past the failed block, which stays unread inside the bracket.
+  let lo = 0n, top = hi - 1n;
+  // A probe failure moves neither end of the bracket, so a brownout can never
+  // converge to `hi` (a head-anchored "start" that callers would persist as
+  // backfill done-flags or gas_from). The budget bounds the work; every caller
+  // retries a throw.
   let failures = 0;
-  while (lo <= h) {
-    const mid = lo + (h - lo) / 2n;
-    let ts: number | undefined;
+  const failed: bigint[] = [];
+  let reopened = false;
+  while (above - below > 1n) {
+    if (lo <= below) lo = below + 1n;
+    if (top >= above) top = above - 1n;
+    if (lo > top) {
+      // The window is spent but the bracket is open: failures moved it past
+      // blocks it never read. Search under the lowest failure left in the
+      // bracket, or the whole bracket again (retrying the failed blocks) when
+      // that failure sits right on `below`.
+      const f = failed.reduce<bigint | undefined>((m, b) => (b > below && b < above && (m === undefined || b < m) ? b : m), undefined);
+      lo = below + 1n;
+      top = f !== undefined && f - 1n > below ? f - 1n : above - 1n;
+      reopened = true;
+    }
+    const mid = lo + (top - lo) / 2n;
+    let ts: number;
     try { ts = Number((await guardRpcRead(() => getBlock(mid), unavailable, generation)).timestamp); }
     catch (e) {
-      // A timeout/transport outage/429 says nothing about this block. Advancing
-      // `lo` on it biases the search late, and callers persist that answer as a
-      // permanent backfill/reset boundary. Only an answer-level missing/pruned
-      // block may move the lower bound; availability failures hold the caller.
+      // A timeout/transport outage/429 says nothing about this block, and
+      // routing around it would spend the budget on a pool that is not
+      // serving. Hold the caller; only an answer-level error is routed around.
       if (isAvailabilityFailure(e)) throw e;
-      if (++failures > 8) throw new Error(`blockAtOrAfter: ${failures} probe failures — RPC unhealthy, not converging to head`);
-      lo = mid + 1n; continue;
+      if (++failures > 8) {
+        throw new Error(`blockAtOrAfter: ${failures} probe failures (last at block ${mid}) — cannot prove the first block at/after ${targetSec} in ${below + 1n}..${above}`);
+      }
+      failed.push(mid);
+      // First pass: assume a pruned prefix and look higher. A reopened window
+      // starts under the lowest failure, so it shrinks from the top instead:
+      // looking higher is what walked the first pass into the hole.
+      if (reopened) top = mid - 1n; else lo = mid + 1n;
+      continue;
     }
-    if (ts >= targetSec) { ans = mid; h = mid - 1n; } else { lo = mid + 1n; }
+    if (ts >= targetSec) above = mid; else below = mid;
   }
-  return ans;
+  return above;
 }
 
 /**
