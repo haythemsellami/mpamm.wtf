@@ -381,7 +381,7 @@ export async function pairMidSeries(market: string, fromMs: number, toMs: number
         quote = await binanceKlineSeries(crossSym, '1m', fromMs - pad, toMs);
       } else {
         // ONE source on every host, and the live one. This used to be Bybit 1m
-        // klines falling back to Binance when api.bybit.com 403'd (Render US),
+        // klines falling back to Binance when api.bybit.com 403'd (US hosts),
         // so prod and local marked the same fill against different crosses
         // (1.0002 vs 1.00032 — 1.2bp on a 2026-09-29 Hanji fill), and Bybit's
         // kline close is a last trade on a 0.0001 tick (1bp steps) where the

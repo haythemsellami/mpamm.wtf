@@ -887,7 +887,7 @@ export interface MarketsResponse {
  * every connected tab. Two fields dominated it and neither had to be there:
  * `venues` is an immutable registry (1.3KB) and `notes` is maintainer telemetry
  * the dashboard never renders (10KB) — together ~11KB of a ~12KB frame, which
- * was ~27% of ALL egress from the service (Render bandwidth audit, 2026-09).
+ * was ~27% of ALL egress from the service (bandwidth audit, 2026-09).
  *
  * So the registry rides the hello frame ONCE per connection and `notes` never
  * rides the stream at all. Both remain on `GET /api/markets` — which is

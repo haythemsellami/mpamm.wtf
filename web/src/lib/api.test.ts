@@ -74,7 +74,7 @@ describe('connectDepth', () => {
 
 
 // A dashboard people leave open for days was streaming ~230KB/s to tabs nobody
-// was looking at — the single largest line on the Render bill (2026-09). These
+// was looking at — the single largest line on the hosting bill (2026-09). These
 // pin the suspend/resume contract: no bytes to a hidden tab, no thrash on a
 // quick alt-tab, and a resume that heals through the SAME path a real drop uses.
 describe('suspending a hidden tab', () => {

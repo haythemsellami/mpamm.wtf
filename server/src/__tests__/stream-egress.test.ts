@@ -1,4 +1,4 @@
-// The stream protocol's cost per connected tab. A Render bandwidth audit
+// The stream protocol's cost per connected tab. A bandwidth audit
 // (2026-09) measured 228KB/s to every open dashboard — 20GB/day, ~$3/day each —
 // from two causes this file locks down:
 //
@@ -6,9 +6,9 @@
 //      maintainer-only `notes` buffer (~11KB of ~12KB) and was re-broadcast on
 //      every head advance plus every quote, ~6/s;
 //   2. nothing compressed the socket — a WebSocket upgrade is opaque to any
-//      edge, and `ws` ships permessage-deflate off by default. (REST now
-//      needs the same care: Railway's edge, unlike Render's, compresses
-//      nothing — see 'REST compression' below.)
+//      edge, and `ws` ships permessage-deflate off by default. (REST needs
+//      the same care: Railway's edge compresses nothing — see 'REST
+//      compression' below.)
 //
 // Both are invisible in normal use (the dashboard renders identically either
 // way), so only a test keeps them from regressing.
@@ -206,8 +206,8 @@ async function rawGet(port: number, path: string, acceptEncoding: string) {
   });
 }
 
-// Railway's edge forwards responses byte-for-byte (Render's brotli'd them), so
-// an uncompressed REST body is billed at full size — the app must compress.
+// Railway's edge forwards responses byte-for-byte, so an uncompressed REST
+// body is billed at full size — the app must compress.
 describe('REST compression', () => {
   it('serves JSON brotli- or gzip-encoded and byte-identical once decoded', async () => {
     const { brotliDecompressSync, gunzipSync } = await import('node:zlib');
