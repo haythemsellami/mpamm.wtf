@@ -28,12 +28,12 @@ afterEach(() => {
   }
 });
 
-async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?: boolean } = {}) {
+async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?: boolean; markoutBackfill?: 'on' | 'off' } = {}) {
   const path = join(tmpdir(), `live-startup-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   paths.push(path);
   vi.stubEnv('DB_PATH', path);
   vi.stubEnv('BACKFILL', 'on');
-  vi.stubEnv('MARKOUT_BACKFILL', 'on');
+  vi.stubEnv('MARKOUT_BACKFILL', opts.markoutBackfill ?? 'on');
   vi.stubEnv('GAS_METRIC', 'on');
   if (opts.reset) vi.stubEnv('BACKFILL_RESET', opts.reset);
   vi.resetModules();
@@ -677,7 +677,7 @@ describe('live startup archive gate', () => {
     source.store.persistSnapshot([
       { utcDay: day(expiredTs), partial: false, byVenue: { 'test-venue': { usd: 1, swaps: expiredCount } } },
       { utcDay: day(retainedTs), partial: false, byVenue: { 'test-venue': { usd: 1, swaps: 0 } } },
-    ], {}, [
+    ], { 'mkfill_done_test-venue': '1' }, [
       ...Array.from({ length: expiredCount }, (_, i) => mk(i, expiredTs + i)),
       mk(expiredCount, retainedTs), mk(expiredCount + 1, retainedTs + 1), mk(expiredCount + 2, retainedTs + 2),
     ]);
@@ -688,6 +688,187 @@ describe('live startup archive gate', () => {
     const swaps = (d: string) => source.days.find((x: any) => x.utcDay === d)?.byVenue['test-venue']?.swaps;
     expect(swaps(day(expiredTs))).toBe(expiredCount); // persisted total kept, not the 2k remainder
     expect(swaps(day(retainedTs))).toBe(3);           // retained days still reconcile from fills
+    source.store.close();
+  });
+
+  // Fills booked a day early: both counts and USD are off on two closed days.
+  // The reconcile repairs only the counts, so the rewrite itself must be loud.
+  // A day it cannot judge yet (fills incomplete, or a pending stage will re-SET
+  // it) is left exactly as stored, so the evidence survives to a boot that can.
+  // Day 1 holds fills at blocks 0–3, day 2 at 10–17; `drift` = the days
+  // rewritten and warned, every other day must be untouched.
+  const SETTLED = { 'mkfill_done_test-venue': '1', 'backfill_done_test-venue': '1' };
+  it.each([
+    { name: 'settled history', meta: SETTLED, drift: [0, 1] },
+    { name: 'fills onboarding unfinished', meta: { 'backfill_done_test-venue': '1' }, drift: [] },
+    { name: 'fills never onboarded, MARKOUT_BACKFILL off', meta: { 'backfill_done_test-venue': '1' }, markoutBackfill: 'off' as const, drift: [] },
+    { name: 'a lifetime reset queued', meta: SETTLED, reset: () => 'test-venue', drift: [] },
+    { name: 'a reset queued from the later day', meta: SETTLED, reset: (d: string[]) => `test-venue:${d[1]}`, drift: [0] },
+    { name: 'a reset queued from today', meta: SETTLED, reset: (d: string[]) => `test-venue:${d[2]}`, drift: [0, 1] },
+    { name: 'a volume replay checkpointed between the days', meta: { 'mkfill_done_test-venue': '1', 'backfill_cursor_test-venue': '10' }, drift: [0] },
+    { name: 'a fills revision over the later day', meta: SETTLED, drift: [0],
+      revision: (d: string[]) => ({ id: 'r', source: 'fills' as const, from: d[1], until: d[2] }) },
+  ])('swap reconcile rewrites and reports only the closed days it can judge — $name', async ({ meta, reset, revision, markoutBackfill, drift: rewritten }) => {
+    const drift: readonly number[] = rewritten;
+    const DAY = 86_400_000;
+    const now = Date.now();
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const noon = (ms: number) => ms - (ms % DAY) + DAY / 2;
+    const d1 = noon(now - 2 * DAY), d2 = noon(now - DAY);
+    const days = [day(d1), day(d2), day(now)];
+    const { source, adapter } = await setup({ withAdapter: true, reset: reset?.(days), markoutBackfill });
+    // the volume replay is what re-SETs day rows for a chain reset
+    Object.assign(adapter, { backfillFromUtc: '2026-01-01', historyRevisions: revision ? [revision(days)] : [] });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const mk = (i: number, ts: number): Fill => ({
+      id: `test-venue-0x${i.toString(16)}-0`, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'ROUTER',
+      usd: 100, baseAmount: 1, execPx: 1, txHash: '0x1', to: 'x', pool: 'p', blockNumber: i, ts, markoutsBps: [null, null, null, null, null],
+    });
+    source.store.persistSnapshot([
+      { utcDay: day(d1), partial: false, byVenue: { 'test-venue': { usd: 500, swaps: 5 } } },
+      { utcDay: day(d2), partial: false, byVenue: { 'test-venue': { usd: 700, swaps: 7 } } },
+    ], meta, [
+      ...Array.from({ length: 4 }, (_, i) => mk(i, d1 + i)),
+      ...Array.from({ length: 8 }, (_, i) => mk(10 + i, d2 + i)),
+    ]);
+    source.days = source.store.all();
+    const swapNotes = () => source.notes.list().filter((n: StateNote) => n.code.startsWith('store.swaps.'));
+
+    source.reconcileSwapCounts();
+    const rewrites = [`${day(d1)} 5→4`, `${day(d2)} 7→8`];
+    if (!drift.length) expect(swapNotes()).toEqual([]);
+    else {
+      expect(swapNotes()).toEqual([expect.objectContaining({ code: 'store.swaps.drift', level: 'warn', venue: 'test-venue' })]);
+      const { msg } = swapNotes()[0];
+      expect(msg).toContain(`${drift.length} closed day(s)`);
+      expect(msg).toMatch(/USD was not: those days' USD may be misbucketed/);
+      rewrites.forEach((r, i) => (drift.includes(i) ? expect(msg).toContain(r) : expect(msg).not.toContain(r)));
+    }
+    const row = (ms: number) => source.days.find((x: any) => x.utcDay === day(ms))?.byVenue['test-venue'];
+    expect([row(d1), row(d2)]).toEqual([
+      { usd: 500, swaps: drift.includes(0) ? 4 : 5 },   // counts fixed, USD not — or left as stored
+      { usd: 700, swaps: drift.includes(1) ? 8 : 7 },
+    ]);
+
+    // the next boot sees consistent counts — which is exactly why this boot had to say it
+    const raised = swapNotes().length;
+    source.reconcileSwapCounts();
+    expect(swapNotes()).toHaveLength(raised);
+    source.store.close();
+  });
+
+  // A queued revision is not a repair until it applies: applyFillsRevision can
+  // refuse one (window past retention) or hold it (totals not conserved). The
+  // day it would have rebuilt was left as stored, so once the revision is
+  // settled without rebuilding it, the next boot still has the evidence.
+  it('a day held for a queued revision that is then refused is still reported', async () => {
+    const { source, adapter } = await setup({ withAdapter: true });
+    const { revisionTargets, resetMarker } = await import('../datasource/live.js');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const DAY = 86_400_000;
+    const now = Date.now();
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const d1 = now - 2 * DAY - ((now - 2 * DAY) % DAY) + DAY / 2;
+    const revision = { id: 'r', source: 'fills' as const, from: day(d1), until: day(now) };
+    Object.assign(adapter, { backfillFromUtc: '2026-01-01', historyRevisions: [revision] });
+    const mk = (i: number): Fill => ({
+      id: `test-venue-0x${i.toString(16)}-0`, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'ROUTER',
+      usd: 100, baseAmount: 1, execPx: 1, txHash: '0x1', to: 'x', pool: 'p', blockNumber: i, ts: d1 + i, markoutsBps: [null, null, null, null, null],
+    });
+    source.store.persistSnapshot([{ utcDay: day(d1), partial: false, byVenue: { 'test-venue': { usd: 500, swaps: 5 } } }],
+      SETTLED, [mk(0), mk(1), mk(2), mk(3)]);
+    source.days = source.store.all();
+    const swapNotes = () => source.notes.list().filter((n: StateNote) => n.code.startsWith('store.swaps.'));
+    const swaps = () => source.days.find((x: any) => x.utcDay === day(d1))?.byVenue['test-venue']?.swaps;
+
+    source.reconcileSwapCounts();
+    expect(swaps()).toBe(5);              // left for the revision
+    expect(swapNotes()).toEqual([]);
+
+    // refused: stamped as settled, and nothing rebuilt
+    const [target] = revisionTargets('test-venue', [revision]);
+    source.store.persistSnapshot([], { [resetMarker(target)]: target.spec }, []);
+    source.reconcileSwapCounts();
+    expect(swaps()).toBe(4);
+    expect(swapNotes()).toEqual([expect.objectContaining({ code: 'store.swaps.drift', level: 'warn' })]);
+    expect(swapNotes()[0].msg).toContain(`${day(d1)} 5→4`);
+    source.store.close();
+  });
+
+  // The longest note this can raise: eight 4-digit rewrites behind the drift
+  // sentence. The note as STORED must still carry its day count and net, and
+  // end on a whole entry — scrubNote cuts anything past NOTE_MSG_MAX mid-word.
+  it('a long swap note keeps its net and whole entries inside the note cap', async () => {
+    const { NOTE_MSG_MAX } = await import('../notes.js');
+    const { source, adapter } = await setup({ withAdapter: true });
+    Object.assign(adapter, { backfillFromUtc: '2026-01-01' });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const DAY = 86_400_000;
+    const now = Date.now();
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const noons = Array.from({ length: 8 }, (_, k) => now - (k + 2) * DAY - ((now - (k + 2) * DAY) % DAY) + DAY / 2);
+    source.store.persistSnapshot(
+      noons.map((ms) => ({ utcDay: day(ms), partial: false, byVenue: { 'test-venue': { usd: 1, swaps: 1_999 } } })),
+      SETTLED,
+      noons.flatMap((ms, k) => Array.from({ length: 1_000 }, (_, i): Fill => ({
+        id: `test-venue-0x${(k * 1_000 + i).toString(16)}-0`, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'ROUTER',
+        usd: 1, baseAmount: 1, execPx: 1, txHash: '0x1', to: 'x', pool: 'p', blockNumber: k * 1_000 + i, ts: ms + i,
+        markoutsBps: [null, null, null, null, null],
+      }))),
+    );
+    source.days = source.store.all();
+    source.reconcileSwapCounts();
+
+    const notes = source.notes.list().filter((n: StateNote) => n.code.startsWith('store.swaps.'));
+    expect(notes.map((n: StateNote) => n.code)).toEqual(['store.swaps.drift']);
+    const { msg } = notes[0];
+    expect(msg.length).toBeLessThanOrEqual(NOTE_MSG_MAX);
+    expect(msg).not.toMatch(/…$/);                                   // scrubNote never had to cut it
+    expect(msg).toContain('8 closed day(s), net -7992');
+    const listed = msg.match(/\d{4}-\d{2}-\d{2} 1999→1000/g) ?? [];
+    const more = Number(msg.match(/\+(\d+) more$/)?.[1] ?? 0);
+    expect(more).toBeGreaterThan(0);                                  // the budget, not the count, cut the list
+    expect(listed[0]).toBe(`${day(noons[7])} 1999→1000`);              // oldest first
+    expect(listed.length + more).toBe(8);                             // every day listed or counted
+    source.store.close();
+  });
+
+  // A day left alone while fills onboarding runs keeps its evidence: the boot
+  // after onboarding finishes compares it against whole fills, and warns.
+  // Rewriting it from partial fills would have erased that for good, since
+  // onboarding writes no day row.
+  it('a mismatch held back during fills onboarding is reported once the fills are whole', async () => {
+    const { source } = await setup({ withAdapter: true });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const DAY = 86_400_000;
+    const now = Date.now();
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const d1 = now - 2 * DAY - ((now - 2 * DAY) % DAY) + DAY / 2;
+    const mk = (i: number): Fill => ({
+      id: `test-venue-0x${i.toString(16)}-0`, venueId: 'test-venue', market: 'MON/USDC', side: 'buy', category: 'ROUTER',
+      usd: 100, baseAmount: 1, execPx: 1, txHash: '0x1', to: 'x', pool: 'p', blockNumber: i, ts: d1 + i, markoutsBps: [null, null, null, null, null],
+    });
+    // onboarding stopped at block 2: blocks 0–1 scanned, the rest of the day not yet
+    source.store.persistSnapshot([{ utcDay: day(d1), partial: false, byVenue: { 'test-venue': { usd: 500, swaps: 5 } } }],
+      { 'mkfill_cursor_test-venue': '2' }, [mk(0), mk(1)]);
+    source.days = source.store.all();
+    const swapNotes = () => source.notes.list().filter((n: StateNote) => n.code.startsWith('store.swaps.'));
+    const swaps = () => source.days.find((x: any) => x.utcDay === day(d1))?.byVenue['test-venue']?.swaps;
+
+    source.reconcileSwapCounts();
+    expect(swaps()).toBe(5);              // not lowered to the 2 fills scanned so far
+    expect(swapNotes()).toEqual([]);
+
+    // onboarding finishes: the day's 4 fills are whole, and 5 was never right
+    source.store.persistSnapshot([], { 'mkfill_done_test-venue': '1' }, [mk(2), mk(3)]);
+    source.reconcileSwapCounts();
+    expect(swaps()).toBe(4);
+    expect(swapNotes()).toEqual([expect.objectContaining({ code: 'store.swaps.drift', level: 'warn' })]);
+    expect(swapNotes()[0].msg).toContain(`${day(d1)} 5→4`);
     source.store.close();
   });
 

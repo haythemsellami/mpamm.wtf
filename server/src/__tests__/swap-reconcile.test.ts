@@ -1,0 +1,150 @@
+// The boot swap-count reconcile (live.ts reconcileDaySwaps) and what it reports.
+//
+// The reconcile SETs each retained day's swap count from its fills, and never
+// touches USD. A replay that booked fills onto the wrong day leaves both off;
+// a silent rewrite fixes the count and erases the only sign that USD is still
+// wrong (2026-09-21: 12 clober-vault fills booked a day early, counts quietly
+// fixed 503→491 / 689→701 at the next boot, USD ±$1,268 off for three weeks).
+import { describe, expect, it } from 'vitest';
+import type { DailyVolume } from '@shared';
+import { fillsIncompleteFrom, pendingReSet, reconcileDaySwaps, swapNet, swapNoteMsg, type SwapCountChange, type VenueRebuild } from '../datasource/live.js';
+import { NOTE_MSG_MAX } from '../notes.js';
+
+const TODAY = '2026-09-22';
+const day = (utcDay: string, byVenue: DailyVolume['byVenue']): DailyVolume => ({ utcDay, partial: utcDay === TODAY, byVenue });
+
+describe('reconcileDaySwaps', () => {
+  it('reports a closed day whose non-zero count it changed — the misbucket pair', () => {
+    const days = [
+      day('2026-09-18', { 'clober-vault': { usd: 50_000, swaps: 503 } }),
+      day('2026-09-19', { 'clober-vault': { usd: 70_000, swaps: 689 } }),
+    ];
+    const changes = reconcileDaySwaps(days, [
+      { utcDay: '2026-09-18', venueId: 'clober-vault', swaps: 491 },
+      { utcDay: '2026-09-19', venueId: 'clober-vault', swaps: 701 },
+    ], TODAY);
+    expect(changes).toEqual([
+      { venueId: 'clober-vault', utcDay: '2026-09-18', from: 503, to: 491 },
+      { venueId: 'clober-vault', utcDay: '2026-09-19', from: 689, to: 701 },
+    ]);
+    // the counts are still rewritten, and USD is left exactly as stored
+    expect(days.map((d) => d.byVenue['clober-vault'])).toEqual([{ usd: 50_000, swaps: 491 }, { usd: 70_000, swaps: 701 }]);
+  });
+
+  it('fills in a stored 0 or a missing venue silently — that is the job, not evidence', () => {
+    const days = [day('2026-09-18', { metric: { usd: 9_000, swaps: 0 } })];
+    const changes = reconcileDaySwaps(days, [
+      { utcDay: '2026-09-18', venueId: 'metric', swaps: 40 },
+      { utcDay: '2026-09-18', venueId: 'poe', swaps: 7 },
+    ], TODAY);
+    expect(changes).toEqual([]);
+    expect(days[0].byVenue).toEqual({ metric: { usd: 9_000, swaps: 40 }, poe: { usd: 0, swaps: 7 } });
+  });
+
+  it('never reports today, an unchanged count, or a day with no retained fills', () => {
+    const days = [
+      day('2026-09-10', { metric: { usd: 1, swaps: 12 } }),   // no fills retained: untouched
+      day('2026-09-20', { metric: { usd: 1, swaps: 30 } }),   // matches its fills
+      day(TODAY, { metric: { usd: 1, swaps: 5 } }),           // the tail's, mid-accrual
+    ];
+    const changes = reconcileDaySwaps(days, [
+      { utcDay: '2026-09-20', venueId: 'metric', swaps: 30 },
+      { utcDay: TODAY, venueId: 'metric', swaps: 9 },
+    ], TODAY);
+    expect(changes).toEqual([]);
+    expect(days.map((d) => d.byVenue.metric.swaps)).toEqual([12, 30, 9]);
+  });
+});
+
+describe('swapNet / swapNoteMsg', () => {
+  const c = (utcDay: string, from: number, to: number): SwapCountChange => ({ venueId: 'v', utcDay, from, to });
+
+  it('nets the changes — 0 is fills moved between days', () => {
+    expect(swapNet([c('2026-09-19', 689, 701), c('2026-09-18', 503, 491)])).toBe('0');
+    expect(swapNet([c('2026-09-18', 10, 13)])).toBe('+3');
+    expect(swapNet([c('2026-09-18', 13, 10)])).toBe('-3');
+  });
+
+  it('lists every day, in order, when they fit', () => {
+    expect(swapNoteMsg('h: ', [c('2026-09-19', 689, 701), c('2026-09-18', 503, 491)]))
+      .toBe('h: 2026-09-18 503→491, 2026-09-19 689→701');
+  });
+
+  it('budgets the list against the whole message, cutting whole entries', () => {
+    const many = Array.from({ length: 9 }, (_, i) => c(`2026-09-${String(10 + i).padStart(2, '0')}`, 100, 101));
+    expect(swapNoteMsg('h: ', many, 60)).toBe('h: 2026-09-10 100→101, 2026-09-11 100→101, +7 more');
+    // a head with no room for one entry still says how many there were
+    expect(swapNoteMsg('x'.repeat(55), many, 60)).toBe(`${'x'.repeat(55)}+9 more`);
+  });
+
+  it('never needs scrubNote to cut it, whatever the head and counts', () => {
+    // up to a month of 4-digit rewrites behind heads as long as the real ones get
+    const month = Array.from({ length: 31 }, (_, i) => c(`2026-08-${String(1 + i).padStart(2, '0')}`, 9_999, 1_000));
+    for (let head = 0; head <= 200; head += 10) {
+      for (let n = 1; n <= month.length; n++) {
+        const msg = swapNoteMsg('h'.repeat(head), month.slice(0, n));
+        expect(msg.length).toBeLessThanOrEqual(NOTE_MSG_MAX);
+        expect(msg).toMatch(/(9999→1000|\+\d+ more)$/);   // ends on a whole entry or the count
+      }
+    }
+  });
+});
+
+describe('pendingReSet — only a day a pending stage will still re-SET is held back', () => {
+  // three retained days, fills at blocks 100–199, 200–299, 300–399
+  const DAYS = [
+    { utcDay: '2026-09-18', maxBlock: 199 },
+    { utcDay: '2026-09-19', maxBlock: 299 },
+    { utcDay: '2026-09-20', maxBlock: 399 },
+  ];
+  /** the days `pending` holds back */
+  const held = (pending: Partial<VenueRebuild>) => DAYS.filter((d) => pendingReSet(d, { resets: [], ...pending })).map((d) => d.utcDay);
+
+  it('holds nothing back when no stage is pending', () => {
+    expect(held({})).toEqual([]);
+  });
+
+  it('a queued chain reset holds back only the days from its start', () => {
+    expect(held({ resets: [{ from: 'lifetime' }] })).toEqual(DAYS.map((d) => d.utcDay));
+    expect(held({ resets: [{ from: 'day', day: '2026-09-19' }] })).toEqual(['2026-09-19', '2026-09-20']);
+    // a reset starting today is today's re-read alone: no closed day is rebuilt
+    expect(held({ resets: [{ from: 'day', day: TODAY }] })).toEqual([]);
+    expect(held({ resets: [{ from: 'block', block: 250n }] })).toEqual(['2026-09-19', '2026-09-20']);
+    // a block past the day's last fill cannot be placed on that day: judged now
+    expect(held({ resets: [{ from: 'block', block: 300n }] })).toEqual(['2026-09-20']);
+  });
+
+  it('a queued fills revision holds back only its [from, until) window', () => {
+    expect(held({ resets: [{ from: 'fills', day: '2026-09-18', until: '2026-09-20' }] })).toEqual(['2026-09-18', '2026-09-19']);
+  });
+
+  it('an unfinished volume replay holds back the days it has not SET yet — never one it already re-SET', () => {
+    // 09-18 was SET by this very replay: a mismatch there is the replay's own misbucket
+    expect(held({ volume: { cursor: 250n } })).toEqual(['2026-09-19', '2026-09-20']);
+    expect(held({ volume: {} })).toEqual(DAYS.map((d) => d.utcDay));   // not started: every day is still to be SET
+  });
+});
+
+describe('fillsIncompleteFrom — days the reconcile must not rewrite yet', () => {
+  const spans = new Map([
+    ['2026-09-18', { minBlock: 100 }],
+    ['2026-09-19', { minBlock: 200 }],
+    ['2026-09-20', { minBlock: 300 }],
+  ]);
+
+  it('starts at the day the onboarding cursor sits in', () => {
+    expect(fillsIncompleteFrom(spans, { cursor: 250n, fromDay: '2026-09-01' })).toBe('2026-09-19');
+  });
+
+  it('holds back a complete day when the cursor sits exactly on the next midnight — it waits, it is not erased', () => {
+    // 09-19 is fully scanned and 300 may be 09-20's first block, but nothing
+    // past the cursor can tell. Skipping keeps 09-19's stored count for the
+    // boot after onboarding finishes, which then judges it against whole fills.
+    expect(fillsIncompleteFrom(spans, { cursor: 300n, fromDay: '2026-09-01' })).toBe('2026-09-19');
+  });
+
+  it('with no cursor, starts at the scan window — and the window is a floor', () => {
+    expect(fillsIncompleteFrom(spans, { fromDay: '2026-09-19' })).toBe('2026-09-19');
+    expect(fillsIncompleteFrom(spans, { cursor: 150n, fromDay: '2026-09-20' })).toBe('2026-09-20');
+  });
+});

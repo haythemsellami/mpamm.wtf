@@ -25,12 +25,12 @@ import {
 } from '../chain/rpc.js';
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
-import { VolumeStore, retentionCutoffMs, type ResetDeletes, type SnapshotResult } from '../db.js';
+import { VolumeStore, retentionCutoffMs, type DayFillCount, type ResetDeletes, type SnapshotResult } from '../db.js';
 
 /** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
 const PRUNE_LOG_MIN_ROWS = 1_000;
 import { directStoreWriter, SnapshotWriter, type SnapshotWrite, type StoreWriter } from '../persistence.js';
-import { NoteBuffer, scrubNote } from '../notes.js';
+import { NOTE_MSG_MAX, NoteBuffer, scrubNote } from '../notes.js';
 import { utcDay, annotateCex } from '../util.js';
 import { seedSources } from './seed.js';
 import { ADAPTERS, REFERENCES, venueMeta, venueIds, allVenueIds, allAdapterVenueIds, validateRegistry } from '../venues/registry.js';
@@ -618,6 +618,154 @@ export function purgeVenueFills(
   }
   state.fills.splice(0, state.fills.length, ...state.fills.filter((f) => !dropped(f)));
   for (const id of ids) state.countedIds.delete(id);
+}
+
+/** A closed day whose stored, non-zero swap count the boot reconcile rewrote. */
+export interface SwapCountChange { venueId: string; utcDay: string; from: number; to: number }
+
+/**
+ * SET each day's per-venue swap count to its retained-fills count, and return
+ * the rewrites that were EVIDENCE: a closed day whose stored count was
+ * non-zero and differed.
+ *
+ * The rewrite only ever fixes the count. A replay that booked fills onto the
+ * wrong day moved their USD too, and that stays wrong, so a silent rewrite
+ * hides the only sign of it: the next boot sees a consistent day. The
+ * 2026-09-21 replay booked 12 clober-vault fills a day early; this rewrite
+ * quietly took 09-18/09-19 from 503/689 to 491/701 while USD stayed ±$1,268
+ * off for three weeks.
+ *
+ * A stored 0 is not evidence: it marks a day whose volume we have but not its
+ * count (subgraph seed, or a row a reset deleted that the replay has not
+ * rebuilt yet). Filling it in is this rewrite's job. Today is the live
+ * tail's, mid-accrual by definition.
+ */
+export function reconcileDaySwaps(
+  days: DailyVolume[],
+  counts: Iterable<{ utcDay: string; venueId: string; swaps: number }>,
+  today: string,
+): SwapCountChange[] {
+  const byDay = new Map<string, Map<string, number>>();
+  for (const c of counts) {
+    let m = byDay.get(c.utcDay); if (!m) { m = new Map(); byDay.set(c.utcDay, m); }
+    m.set(c.venueId, c.swaps);
+  }
+  const changed: SwapCountChange[] = [];
+  for (const d of days) {
+    const m = byDay.get(d.utcDay);
+    if (!m) continue;
+    for (const [venueId, swaps] of m) {
+      const vd = (d.byVenue[venueId] ??= { usd: 0, swaps: 0 });
+      if (d.utcDay < today && vd.swaps > 0 && vd.swaps !== swaps) changed.push({ venueId, utcDay: d.utcDay, from: vd.swaps, to: swaps });
+      vd.swaps = swaps;
+    }
+  }
+  return changed;
+}
+
+/** Which of a venue's day rows a queued reset will re-SET: a chain replay
+ *  from its start on, or a 'fills' revision over [day, until). */
+export type ResetStart =
+  | { from: 'lifetime' } | { from: 'block'; block: bigint } | { from: 'day'; day: string }
+  | { from: 'fills'; day: string; until: string };
+
+/** A venue's history stages that will still re-SET day rows, read from meta
+ *  (the boot reconcile runs before the first block read). */
+export interface VenueRebuild {
+  /** queued resets that will re-SET day rows */
+  resets: ResetStart[];
+  /** unfinished volume replay; it resumes at the start of the day holding
+   *  `cursor` (absent = from its first day) */
+  volume?: { cursor?: bigint };
+}
+
+/**
+ * The first day whose stored fills may be INCOMPLETE while a venue's fills
+ * onboarding is unfinished (or never ran: MARKOUT_BACKFILL off leaves the
+ * table tail-only, starting mid-day). The reconcile leaves these days alone:
+ * the fills are not the authority there yet. Rewriting from them would write
+ * an undercount, and since onboarding writes no day row, nothing would bring
+ * the stored count back for a later boot to compare once the fills are whole.
+ *
+ * Fills are complete below `cursor`, but it is not day-aligned and the days
+ * past it may hold no fills at all (a reset deleted them). So the day it sits
+ * in is taken to be the newest day with a fill below it. Where the cursor is
+ * in fact on a later day, that day is complete and merely waits: skipping
+ * keeps evidence for a later boot, it never erases it. With no cursor the scan
+ * restarts at its window start `fromDay`, which is also a floor: the scan
+ * never reaches earlier days.
+ */
+export function fillsIncompleteFrom(
+  spans: ReadonlyMap<string, { minBlock: number }>,
+  onboarding: { cursor?: bigint; fromDay: string },
+): string {
+  let from = onboarding.fromDay;
+  const { cursor } = onboarding;
+  if (cursor !== undefined) for (const [day, s] of spans) if (BigInt(s.minBlock) < cursor && day > from) from = day;
+  return from;
+}
+
+/**
+ * Whether a pending stage will still re-SET this (venue, day)'s row. The
+ * reconcile leaves such a day alone, since rewriting it now would make the
+ * day look consistent whatever the stage then did. A stage that applies
+ * replaces the row, and the boot after judges the result. One that is
+ * refused is stamped settled, so the boot after finds the stored count, and
+ * with it the evidence, and warns. A 'fills' revision that is HELD stays
+ * queued, so its days stay as stored: it holds because the window's fills
+ * fail conservation, i.e. fills are missing, and a rewrite from them would
+ * write an undercount. Its own backfill.config.invalid warning, raised every
+ * boot, is the signal there.
+ *
+ * Scoped per DAY: a day is placed against a stage's start by the block span
+ * of its fills (`maxBlock`), erring toward judging the day where the span
+ * cannot tell:
+ *  - a queued chain reset re-SETs from its start day; a block start counts
+ *    only once one of the day's fills is at or past it. A 'fills' revision
+ *    re-SETs only its [day, until) window;
+ *  - an unfinished volume replay checkpoints the day it is in with a partial
+ *    total and re-scans it from its start, so exactly the days with a fill at
+ *    or past its cursor are still to be SET.
+ */
+export function pendingReSet(day: { utcDay: string; maxBlock: number }, pending: VenueRebuild): boolean {
+  const d = day.utcDay;
+  const top = BigInt(day.maxBlock);
+  const covers = (r: ResetStart): boolean => {
+    switch (r.from) {
+      case 'lifetime': return true;
+      case 'day': return d >= r.day;
+      case 'fills': return d >= r.day && d < r.until;
+      case 'block': return top >= r.block;
+    }
+  };
+  if (pending.resets.some(covers)) return true;
+  return !!pending.volume && (pending.volume.cursor === undefined || top >= pending.volume.cursor);
+}
+
+/** A venue's rewritten counts summed, signed ("+3", "-3", "0"). 0 is the
+ *  signature of fills booked on the wrong day; any other net, of fills
+ *  missing or doubled. */
+export function swapNet(changes: readonly SwapCountChange[]): string {
+  const net = changes.reduce((s, c) => s + c.to - c.from, 0);
+  return net > 0 ? `+${net}` : String(net);
+}
+
+/**
+ * `head` followed by the changes ("2026-09-18 503→491", day order), as many
+ * as fit in `max` with the rest counted ("+3 more"). Budgeted against the
+ * WHOLE message, not a fixed count: the head's length varies with the day
+ * count and net, and scrubNote cuts anything past NOTE_MSG_MAX mid-entry. So
+ * everything a reader must not lose goes in `head`, and the list absorbs the
+ * squeeze by whole entries.
+ */
+export function swapNoteMsg(head: string, changes: readonly SwapCountChange[], max = NOTE_MSG_MAX): string {
+  const items = [...changes]
+    .sort((a, b) => (a.utcDay < b.utcDay ? -1 : a.utcDay > b.utcDay ? 1 : 0))
+    .map((c) => `${c.utcDay} ${c.from}→${c.to}`);
+  const fit = (shown: number) => head + [...items.slice(0, shown), ...(shown < items.length ? [`+${items.length - shown} more`] : [])].join(', ');
+  let shown = items.length;
+  while (shown > 0 && fit(shown).length > max) shown--;
+  return fit(shown);
 }
 
 /** Fields that make two decodes the SAME fill. Attribution labels (category,
@@ -1948,24 +2096,77 @@ export class LiveDataSource extends BaseSource {
    * per-fill record — so the protocol breakdown is accurate across the retention
    * window immediately. Days with no retained fills (older than retention, or a
    * subgraph-seeded day) keep swaps 0: we have their volume, not the count.
+   *
+   * A rewrite of a closed day's non-zero count is reported, never silent (see
+   * reconcileDaySwaps): it is the last trace of a day booked from the wrong
+   * fills, whose USD this does not repair. One warn per venue per boot.
+   *
+   * So a closed day is rewritten only when this boot can judge it. Two kinds
+   * are left exactly as stored, unrewritten and unreported, until a later boot
+   * can: days whose fills may still be incomplete (fillsIncompleteFrom), and
+   * days a pending stage will re-SET (pendingReSet). Rewriting either would
+   * erase the evidence while nothing guarantees a fix.
    */
   private reconcileSwapCounts(): void {
-    const byDay = new Map<string, Map<string, number>>();
+    const now = Date.now();
+    const today = utcDay(now);
     // only days inside retention: the cutoff is day-aligned and nothing at or
     // after it is ever pruned, so those days are complete — while an expired
     // day may be half-deleted (boot prune capped at PRUNE_BOOT_MAX_BATCHES),
     // and overwriting its persisted swaps with the remainder would corrupt it.
-    for (const c of this.store.fillCountsByDayVenue(retentionCutoffMs(Date.now(), config.fillsRetentionDays))) {
-      let m = byDay.get(c.utcDay); if (!m) { m = new Map(); byDay.set(c.utcDay, m); }
-      m.set(c.venueId, c.swaps);
+    const counts = this.store.fillCountsByDayVenue(retentionCutoffMs(now, config.fillsRetentionDays));
+    const spans = new Map<string, Map<string, DayFillCount>>();
+    for (const c of counts) {
+      let m = spans.get(c.venueId); if (!m) { m = new Map(); spans.set(c.venueId, m); }
+      m.set(c.utcDay, c);
     }
-    for (const d of this.days) {
-      const m = byDay.get(d.utcDay);
-      if (!m) continue;
-      for (const [venueId, swaps] of m) {
-        (d.byVenue[venueId] ??= { usd: 0, swaps: 0 }).swaps = swaps;
-      }
+    // an invalid entry repairs nothing, so it must not hold a day back
+    const queued = this.resetTargets(today).filter((t): t is Exclude<BackfillResetTarget, { from: 'invalid' }> =>
+      !!t.vid && t.from !== 'invalid' && !resetAlreadyApplied(this.store, t));
+    const held = new Map<string, (c: DayFillCount) => boolean>();
+    for (const [venueId, m] of spans) {
+      const { a, vid } = this.historyVenue(venueId);
+      // fills count as complete only once onboarded, even with
+      // MARKOUT_BACKFILL off: then they are tail-only and start mid-day
+      const incompleteFrom = this.store.getMeta(`mkfill_done_${vid}`) === '1' ? undefined : fillsIncompleteFrom(m, {
+        cursor: this.metaBlock(`mkfill_cursor_${vid}`),
+        fromDay: fillsScanFromDay(a?.backfillFromUtc, now, config.markoutBackfillDays),
+      });
+      const pending = this.pendingRebuild(venueId, queued);
+      held.set(venueId, (c) => (incompleteFrom !== undefined && c.utcDay >= incompleteFrom) || pendingReSet(c, pending));
     }
+    // today is the live tail's, rewritten as always
+    const judged = counts.filter((c) => c.utcDay >= today || !held.get(c.venueId)!(c));
+    const changes = reconcileDaySwaps(this.days, judged, today);
+    for (const venueId of new Set(changes.map((c) => c.venueId))) {
+      const drift = changes.filter((c) => c.venueId === venueId);
+      this.note('store.swaps.drift', swapNoteMsg(`swap count drift on ${drift.length} closed day(s), net ${swapNet(drift)} — counts reconciled from fills, USD was not: those days' USD may be misbucketed: `, drift), venueId);
+    }
+  }
+
+  /** The adapter that owns `venueId`, and the id its history stages key their
+   *  markers on: the adapter's FIRST venue. */
+  private historyVenue(venueId: string): { a?: VenueAdapter; vid: string } {
+    const a = ADAPTERS.find((x) => x.venues().some((v) => v.id === venueId));
+    return { a, vid: (a && this.vidOf(a)) ?? venueId };
+  }
+
+  /** a stored block cursor, or undefined when unset (or not a block). */
+  private metaBlock(key: string): bigint | undefined {
+    const v = this.store.getMeta(key);
+    return v && /^\d+$/.test(v) ? BigInt(v) : undefined;
+  }
+
+  /** What this boot's history stages will still re-SET for a venue (see VenueRebuild). */
+  private pendingRebuild(venueId: string, queued: readonly Exclude<BackfillResetTarget, { from: 'invalid' }>[]): VenueRebuild {
+    const { a, vid } = this.historyVenue(venueId);
+    // A chain reset rewrites day rows only through the volume replay; without
+    // it, it repairs no USD and explains nothing here. A 'fills' revision
+    // SETs its days itself.
+    const volumeReplays = config.backfillEnabled && !!a?.backfillFromUtc;
+    const out: VenueRebuild = { resets: queued.filter((t) => t.vid === vid && (t.from === 'fills' || volumeReplays)) };
+    if (volumeReplays && this.store.getMeta(`backfill_done_${vid}`) !== '1') out.volume = { cursor: this.metaBlock(`backfill_cursor_${vid}`) };
+    return out;
   }
 
   /**
