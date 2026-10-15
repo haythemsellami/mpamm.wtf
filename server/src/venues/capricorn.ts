@@ -430,6 +430,9 @@ export function createCapricornAdapter(): VenueAdapter {
     // OracleRegistry receive no update txs. The feed they read sits one hop
     // further, so trace the quote to find it.
     gasSources: () => [{ mode: 'logs' as const, address: PUSH_FEED, topic0: PUSH_FEED_UPDATE_TOPIC }],
+    // The first lifetime scan (2026-10-15) ran before the tracker could price
+    // old pushes by block receipts, so it skipped every April–August chunk.
+    gasRevisions: [{ id: 'receipts-by-block' }],
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
       // A pool announced mid-range must be admitted BEFORE this range's Swaps

@@ -36,3 +36,10 @@ describe('capricorn quote-update gas', () => {
     expect(Number(BigInt(FX.gasUsed) * BigInt(FX.effectiveGasPrice)) / 1e18).toBeCloseTo(0.0101643, 10);
   });
 });
+
+describe('capricorn gas revision', () => {
+  it('rebuilds the lifetime once, after the scan that skipped chunks it could not price', () => {
+    // no `from`: the skipped chunks span April–August, from the series anchor on
+    expect(createCapricornAdapter().gasRevisions).toEqual([{ id: 'receipts-by-block' }]);
+  });
+});
