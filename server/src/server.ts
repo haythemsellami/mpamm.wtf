@@ -116,12 +116,12 @@ export function startServer(source: DataSource): Server {
   app.use(cors());
 
   // REST + static compression happens HERE: Railway's edge forwards responses
-  // byte-for-byte (Render's used to brotli them), and the big routes are large
-  // JSON rebuilt per request (/api/fills ~0.5MB, /api/markets ~0.3MB). Brotli
-  // at quality 4, not the zlib default of 11 — 11 spends far more CPU per
-  // request than the extra bytes it saves. Never the depth SSE stream: a
-  // compressor buffers, which would hold its frames back. The analytics
-  // artifact sets its own Content-Encoding, which the middleware leaves alone.
+  // byte-for-byte, and the big routes are large JSON rebuilt per request
+  // (/api/fills ~0.5MB, /api/markets ~0.3MB). Brotli at quality 4, not the
+  // zlib default of 11 — 11 spends far more CPU per request than the extra
+  // bytes it saves. Never the depth SSE stream: a compressor buffers, which
+  // would hold its frames back. The analytics artifact sets its own
+  // Content-Encoding, which the middleware leaves alone.
   app.use(compression({
     brotli: { params: { [zlib.BROTLI_PARAM_QUALITY]: 4 } },
     filter: (req, res) => !String(res.getHeader('Content-Type') ?? '').startsWith('text/event-stream') && compression.filter(req, res),

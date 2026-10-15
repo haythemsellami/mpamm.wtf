@@ -117,7 +117,7 @@ export const config = {
   // Binance spot so it stays on Bybit. Symbols come from the asset registry.
   // Defaults are Binance's OFFICIAL public market-data mirror (binance.vision):
   // identical engine data + the same REST/WS interfaces, but NOT geo-blocked —
-  // api.binance.com returns HTTP 451 from US IPs (e.g. Render Oregon), which
+  // api.binance.com returns HTTP 451 from US IPs (e.g. US cloud hosts), which
   // silently starved the BTC/ETH references in prod. We only consume public
   // market data, so the mirror is strictly the better default everywhere.
   binanceRest: env.BINANCE_REST_URL ?? 'https://data-api.binance.vision',

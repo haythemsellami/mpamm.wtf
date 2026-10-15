@@ -3394,7 +3394,7 @@ export class LiveDataSource extends BaseSource {
     // Surface a starving reference feed LOUDLY (state.notes): with no base mid
     // there are no reference rows, no venue bps anchors and no markouts for that
     // asset's pairs — they silently vanish from the UI otherwise (this is exactly
-    // how the geo-blocked Binance feed on Render hid BTC/ETH; feeds swallow their
+    // how a geo-blocked Binance feed hid BTC/ETH in prod; feeds swallow their
     // own connection errors, so the mid is the observable signal). Grace period
     // covers the normal cold-start warmup.
     if (quoteStartedAt - this.bootMs > 60_000) {

@@ -36,7 +36,7 @@ Keep the service close to the hot RPC: every block-pinned quote frame pays the n
 
 ### Seeding or restoring `/data` from a snapshot
 
-Production history was moved from Render to Railway this way on 2026-10-14. Render's final database is kept at `/data/backups/render-final-2026-10-14.db`. Use the same procedure to restore from any snapshot.
+Use this procedure to seed production history onto the volume, or to restore it from any snapshot.
 
 Never let the indexer boot on an empty or wrong `/data`: an empty volume re-runs every venue-lifetime backfill. Volume file commands and `railway ssh` need an SSH key registered with Railway (`railway ssh keys add`) **and** an active deployment. So the service first runs a holding server that answers health checks without opening the database.
 
