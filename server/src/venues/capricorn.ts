@@ -18,11 +18,11 @@ import { createQuoteOutageReporter } from './quote-health.js';
  *   Pool.quoteExactIn(tokenIn, amountIn)              → executable, fee-inclusive out
  *   Pool.Swap(…, amount0, amount1, reserve0, reserve1) → the landed fill
  *
- * Prices reach the pool through PricingEngine → OracleRegistry, which reads a
- * PUSH/Pyth feed keyed by the pool's `oracleId` (staleness bounded on-chain by
- * maxPushPriceAge / pythValidTimePeriod). Nothing Capricorn-funded writes to
- * those contracts — see the gasSources note at the bottom for why this adapter
- * deliberately has none.
+ * Prices reach the pool through PricingEngine → OracleRegistry, which reads
+ * Capricorn's own push feed (PUSH_FEED) keyed by the pool's `oracleId`
+ * (staleness bounded on-chain by maxPushPriceAge / pythValidTimePeriod).
+ * Capricorn's keeper pays for those pushes, so they are its quote-update burn
+ * — see gasSources.
  *
  * Addresses + ABIs: KyberNetwork/kyberswap-dex-lib `pkg/liquidity-source/
  * capricorn-pamm` (Capricorn's own docs publish no mainnet addresses). Every
@@ -53,6 +53,18 @@ const CAPRICORN_VENUE: VenueMeta = {
 
 /** CapricornPammFactory on Monad. */
 const FACTORY = '0x010cf4f9e3a79dd2fe11760d76a75df6c0656631' as const;
+
+/** The push price feed (a proxy) behind every pool's quote: a debug_traceCall
+ *  of quoteExactIn on both pools reaches it through PricingEngine →
+ *  OracleRegistry at every date sampled from 2026-04-02 to 2026-10-15, and
+ *  touches no other price source. Capricorn's own: created by the deployer of
+ *  the factory, engine and registry (0xD9D86152…). One EOA (0xb346437c…)
+ *  pushes it every few minutes, ~300 a day at a flat 99,650 limit (≈0.0102
+ *  MON each). The contract is unverified, so the push event is known only by
+ *  its topic0. It enumerates every push: on 2026-10-12 the pusher's nonce rose
+ *  by 303 and the feed emitted this event in 303 txs. */
+const PUSH_FEED = '0x7ddf62c41e9b3fbfd5ac77ae7f387fd91487ba8a' as const;
+const PUSH_FEED_UPDATE_TOPIC = '0x34b3a9772b8366e24c6c25cd6ccf6ffad5b57015a64ef0ea726b3b5cfc159425' as const;
 
 /**
  * The pools that exist today. NOT a trusted list: every field below is
@@ -411,13 +423,13 @@ export function createCapricornAdapter(): VenueAdapter {
     // third-party router flow as the venue's own periphery.
     entryPoints: () => admittedPools.map((p) => ({ address: p.pool })),
 
-    // QUOTE_UPDATE_BURN: deliberately ABSENT. Capricorn does not self-fund its
-    // quote freshness — the PricingEngine reads through to an OracleRegistry
-    // backed by a Pyth feed (pythValidTimePeriod/maxPushPriceAge are the only
-    // staleness knobs, and the pool holds just an oracleId). Verified on-chain:
-    // ZERO transactions land on either the PricingEngine or the OracleRegistry,
-    // so there is no Capricorn-funded update destination to key a tracker on.
-    // Per docs/adapters.md, absence is the honest value here — not zero.
+    // QUOTE_UPDATE_BURN: the keeper's pushes to PUSH_FEED (~300 a day, ~3 MON).
+    // Logs mode on the push event: exact tx counts, and the receipt-sampled
+    // cost is close because every push pays the same flat limit. An earlier
+    // build declared the venue NOT self-funded, because the PricingEngine and
+    // OracleRegistry receive no update txs. The feed they read sits one hop
+    // further, so trace the quote to find it.
+    gasSources: () => [{ mode: 'logs' as const, address: PUSH_FEED, topic0: PUSH_FEED_UPDATE_TOPIC }],
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
       // A pool announced mid-range must be admitted BEFORE this range's Swaps

@@ -1,0 +1,23 @@
+{
+  "_source": "Monad mainnet tx 0x19caa9c875a38dbcd596e33c6ef99811a3114ba17820173ad43eb969fd338f5c (block 113625806, 2026-10-15T13:31:56.000Z): eth_getTransactionReceipt + eth_getTransactionByHash. A Capricorn price push: EOA 0xb346437c… → push feed 0x7ddf62c4… (proxy), selector 0x25bd1cf0, one log from the feed.",
+  "hash": "0x19caa9c875a38dbcd596e33c6ef99811a3114ba17820173ad43eb969fd338f5c",
+  "from": "0xb346437c3767fdba99c8f73de790db8669c3ea93",
+  "to": "0x7ddf62c41e9b3fbfd5ac77ae7f387fd91487ba8a",
+  "selector": "0x25bd1cf0",
+  "blockNumber": 113625806,
+  "status": "success",
+  "gasLimit": "0x18542",
+  "gasUsed": "0x18542",
+  "effectiveGasPrice": "0x17bfac7c00",
+  "logs": [
+    {
+      "address": "0x7ddf62c41e9b3fbfd5ac77ae7f387fd91487ba8a",
+      "topics": [
+        "0x34b3a9772b8366e24c6c25cd6ccf6ffad5b57015a64ef0ea726b3b5cfc159425",
+        "0x4c09ef490619129335c4ca2303761513b58138dbe3f5a859c01beb4946c502f2"
+      ],
+      "data": "0x0000000000000000000000000000000000000000000000026f3dc3bdd87bb7a0000000000000000000000000000000000000000000000000000000006ad0d5cc",
+      "logIndex": 287
+    }
+  ]
+}
