@@ -22,7 +22,7 @@ export type StoreMutation =
   | { kind: 'resetVenueHistory'; venueId: string; deletes: ResetDeletes; fromBlock?: bigint }
   | { kind: 'applyGas'; rows: GasWrite[]; cursorKey: string; cursorVal: string }
   | { kind: 'resetGas'; venueId: string }
-  | { kind: 'resetGasFrom'; venueId: string; fromDay: string }
+  | { kind: 'resetGasFrom'; venueId: string; fromDay: string; cursor: string }
   | { kind: 'insertFillsIfAbsent'; fills: Fill[] }
   | { kind: 'reconcileFills'; deleteIds: string[]; insert: Fill[] }
   | { kind: 'applyRemarks'; rows: RemarkWrite[] }
@@ -38,7 +38,7 @@ export interface StoreWriter {
   resetVenueHistory(venueId: string, deletes: ResetDeletes, fromBlock?: bigint): Promise<{ volume: number; fills: number }>;
   applyGas(rows: GasWrite[], cursorKey: string, cursorVal: string): Promise<void>;
   resetGas(venueId: string): Promise<void>;
-  resetGasFrom(venueId: string, fromDay: string): Promise<void>;
+  resetGasFrom(venueId: string, fromDay: string, cursor: string): Promise<void>;
   insertFillsIfAbsent(fills: Fill[]): Promise<number>;
   /** see VolumeStore.reconcileFills */
   reconcileFills(deleteIds: string[], insert: Fill[]): Promise<{ deleted: number; inserted: number }>;
@@ -57,7 +57,7 @@ export function directStoreWriter(store: VolumeStore): StoreWriter {
     resetVenueHistory: async (venueId, deletes, fromBlock) => store.resetVenueHistory(venueId, deletes, fromBlock),
     applyGas: async (rows, cursorKey, cursorVal) => store.applyGas(rows, cursorKey, cursorVal),
     resetGas: async (venueId) => store.resetGas(venueId),
-    resetGasFrom: async (venueId, fromDay) => store.resetGasFrom(venueId, fromDay),
+    resetGasFrom: async (venueId, fromDay, cursor) => store.resetGasFrom(venueId, fromDay, cursor),
     insertFillsIfAbsent: async (fills) => store.insertFillsIfAbsent(fills),
     reconcileFills: async (deleteIds, insert) => store.reconcileFills(deleteIds, insert),
     applyRemarks: async (rows) => store.applyRemarks(rows),
@@ -120,7 +120,7 @@ export class SnapshotWriter implements StoreWriter {
     return this.request({ kind: 'applyGas', rows, cursorKey, cursorVal });
   }
   resetGas(venueId: string): Promise<void> { return this.request({ kind: 'resetGas', venueId }); }
-  resetGasFrom(venueId: string, fromDay: string): Promise<void> { return this.request({ kind: 'resetGasFrom', venueId, fromDay }); }
+  resetGasFrom(venueId: string, fromDay: string, cursor: string): Promise<void> { return this.request({ kind: 'resetGasFrom', venueId, fromDay, cursor }); }
   insertFillsIfAbsent(fills: Fill[]): Promise<number> { return this.request({ kind: 'insertFillsIfAbsent', fills }); }
   reconcileFills(deleteIds: string[], insert: Fill[]): Promise<{ deleted: number; inserted: number }> {
     return this.request({ kind: 'reconcileFills', deleteIds, insert });

@@ -18,8 +18,15 @@ import { GasTracker, gasSourcesSignature } from '../gas.js';
 import { VolumeStore } from '../db.js';
 import type { GasRevision, GasSource, VenueAdapter } from '../venues/adapter.js';
 
+// first block of each UTC day the tests rewind to (sinceUtc = 2025-01-01)
 const SEEDED_BLOCK = 1_000n;
-vi.mock('../chain/rpc.js', () => ({ blockAtOrAfter: vi.fn(async () => SEEDED_BLOCK) }));
+const FEB15 = 5_000n;
+const MAR10 = 6_000n;
+vi.mock('../chain/rpc.js', () => ({
+  blockAtOrAfter: vi.fn(async (ts: number) => (
+    { '2025-02-15': 5_000n, '2025-03-10': 6_000n } as Record<string, bigint>
+  )[new Date(ts * 1000).toISOString().slice(0, 10)] ?? 1_000n),
+}));
 
 const DAY0 = 1_750_000_000; // 2025-06-15 — every log buckets into one UTC day
 const DAY0_UTC = '2025-06-15';
@@ -156,11 +163,12 @@ describe('gas revisions', () => {
     },
   });
   const rows = (store: VolumeStore) => store.gasDays('2099-01-01').filter((d) => d.byVenue['v']).map((d) => d.utcDay);
-  const withHistory = (store: VolumeStore) => {
+  const withHistory = (store: VolumeStore, cursor = '9000') => {
     store.applyGas([
       { utcDay: '2025-02-01', venueId: 'v', mon: 1, txs: 10 },
       { utcDay: '2025-03-01', venueId: 'v', mon: 2, txs: 20 },
-    ], 'gas_cursor_v', '9000');
+      { utcDay: '2025-03-20', venueId: 'v', mon: 3, txs: 30 },
+    ], 'gas_cursor_v', cursor);
   };
 
   it('a lifetime revision wipes the series once and re-scans from sinceUtc', async () => {
@@ -197,7 +205,53 @@ describe('gas revisions', () => {
     expect(notes).toContain("gas.series.reset v: gas revision 'r2' — rebuilding from 2025-02-15");
     expect(rows(store)).toEqual(['2025-02-01']);
     expect(store.getMeta('gas_from_v')).toBe('2025-01-01'); // the series anchor never moves
-    expect(BigInt(store.getMeta('gas_cursor_v')!)).toBe(SEEDED_BLOCK + 800n);
+    expect(BigInt(store.getMeta('gas_cursor_v')!)).toBe(FEB15 + 800n);
+    unlinkSync(path);
+  });
+
+  it('never moves the cursor FORWARD: a scan that has not reached `from` keeps reading from where it is', async () => {
+    const { store, path } = freshStore();
+    seed(store, 2_000n);
+    store.applyGas([{ utcDay: '2025-01-10', venueId: 'v', mon: 1, txs: 10 }], 'gas_cursor_v', '2000');
+    const tracker = new GasTracker(quietClient(10_000n), store, [adapterWith([{ id: 'r', from: '2025-02-15' }])], () => {}, () => false, 1);
+
+    await (tracker as any).pass();
+    tracker.stop();
+    expect(rows(store)).toEqual(['2025-01-10']);
+    expect(BigInt(store.getMeta('gas_cursor_v')!)).toBe(2_000n + 800n); // not FEB15: 2000→5000 would go unread
+    unlinkSync(path);
+  });
+
+  it('two pending partial revisions: the later one cannot skip the earlier one\'s range', async () => {
+    const { store, path } = freshStore();
+    seed(store, 9_000n);
+    withHistory(store);
+    const tracker = new GasTracker(quietClient(10_000n), store, [adapterWith([{ id: 'a', from: '2025-02-15' }, { id: 'b', from: '2025-03-10' }])], () => {}, () => false, 1);
+
+    await (tracker as any).pass();
+    tracker.stop();
+    expect(rows(store)).toEqual(['2025-02-01']);
+    expect(BigInt(store.getMeta('gas_cursor_v')!)).toBe(FEB15 + 800n); // not MAR10
+    expect(store.getMeta('gas_rev_v_a')).toBeTruthy();
+    expect(store.getMeta('gas_rev_v_b')).toBeTruthy();
+    unlinkSync(path);
+  });
+
+  it('a restart between the wipe and the marker re-applies cleanly — never a re-seed from the series start', async () => {
+    const { store, path } = freshStore();
+    seed(store, 9_000n);
+    withHistory(store);
+    // the first boot committed the partial wipe (cursor included), then stopped
+    store.resetGasFrom('v', '2025-03-10', String(MAR10));
+    const notes: string[] = [];
+    const tracker = new GasTracker(quietClient(10_000n), store, [adapterWith([{ id: 'r', from: '2025-03-10' }])], (code) => { notes.push(code); }, () => false, 1);
+
+    await (tracker as any).pass();
+    tracker.stop();
+    expect(notes).not.toContain('gas.scan.start'); // a cursorless restart would re-seed at 2025-01-01 and re-add Feb + Mar 1
+    expect(store.gasDays('2099-01-01').filter((d) => d.byVenue['v']).map((d) => [d.utcDay, d.byVenue['v'].txs]))
+      .toEqual([['2025-02-01', 10], ['2025-03-01', 20]]);
+    expect(BigInt(store.getMeta('gas_cursor_v')!)).toBe(MAR10 + 800n);
     unlinkSync(path);
   });
 

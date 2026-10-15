@@ -362,9 +362,7 @@ export class GasTracker {
           const covered = single && window.length > 0
             && hasCoverageEvidence(window, this.store.gasNonzeroDays(vid, window[0], window[window.length - 1]));
           if (!covered) {
-            const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
-            await this.writer.resetGasFrom(vid, day);
-            await this.writer.setMeta(cursorKey, String(startBlock));
+            await this.rewindGasTo(vid, day, head, cursorKey);
             this.note('gas.series.reset', `${name}: verifying quote-update coverage — rebuilding from ${day}`, vid);
           }
         }
@@ -385,9 +383,7 @@ export class GasTracker {
       if (this.store.getMeta(cursorKey)) {
         const from = rev.from && rev.from > sinceDay ? rev.from : null;
         if (from) {
-          const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${from}T00:00:00Z`) / 1000), head));
-          await this.writer.resetGasFrom(vid, from);
-          await this.writer.setMeta(cursorKey, String(startBlock));
+          await this.rewindGasTo(vid, from, head, cursorKey);
         } else {
           await this.writer.resetGas(vid);
         }
@@ -451,9 +447,7 @@ export class GasTracker {
           const blk = await this.rpc(() => this.client.getBlock({ blockNumber: earliest }));
           const day = utcDay(Number(blk.timestamp) * 1000);
           if (day > sinceDay) {
-            const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
-            await this.writer.resetGasFrom(vid, day);
-            await this.writer.setMeta(cursorKey, String(startBlock));
+            await this.rewindGasTo(vid, day, head, cursorKey);
             this.note('gas.series.reset', `${name}: quote-update destination added — rebuilding from ${day} (earlier history unaffected)`, vid);
             return;
           }
@@ -462,6 +456,18 @@ export class GasTracker {
     }
     await this.writer.resetGas(vid);
     this.note('gas.series.reset', `${name}: quote-update destination set changed — re-scanning venue lifetime`, vid);
+  }
+
+  /** Wipe rows from `day` on and rewind the cursor to `day`'s first block —
+   *  never FORWARD: a scan that has not reached `day` yet (a rebuild still in
+   *  progress, or an earlier revision in the same pass) keeps its cursor, or
+   *  the blocks in between would never be read. The wipe and the cursor commit
+   *  in one transaction (VolumeStore.resetGasFrom). */
+  private async rewindGasTo(vid: string, day: string, head: bigint, cursorKey: string): Promise<void> {
+    const dayStart = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
+    const cur = this.store.getMeta(cursorKey);
+    const resume = cur && BigInt(cur) < dayStart ? BigInt(cur) : dayStart;
+    await this.writer.resetGasFrom(vid, day, String(resume));
   }
 
   /** First block where `addr` has code (its deployment), or null when it has
