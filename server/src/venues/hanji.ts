@@ -76,7 +76,10 @@ const FAST_QUOTER_HELPER = '0x237dB58fea34A35A8543b44C217d221606cE7788' as const
  *  by tx frequency, since the fleet rotates senders every push. To audit the
  *  WHOLE set you must sample across the venue lifetime, not recent blocks: a
  *  retired generation is invisible today, which is how gen0 stayed unlisted
- *  from the start. Append below; the gas tracker re-scans from the earliest
+ *  from the start. A Hanji-owned quoter that keeps receiving pushes NEXT TO
+ *  the current generation is not a cutover — trace a book's quote
+ *  (debug_traceCall on the helper) to see which quoter it reads; see
+ *  XAUT_FAST_QUOTER. Append below; the gas tracker re-scans from the earliest
  *  ADDED contract's creation day whenever this set changes (gas.ts:
  *  reconcileSourceChange), so earlier history is preserved. */
 const FAST_QUOTERS = [
@@ -90,6 +93,19 @@ const FAST_QUOTERS = [
   '0xf5b5f7f8ef84419c030dfc44771734810ea36d70', // gen7 — deployed 2026-08-25 10:58:54 UTC → ~2026-09-21 18:10 UTC
   '0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b', // gen8 — deployed 2026-09-21 17:57:30 UTC (block 106814526), active
 ] as const;
+
+/** A SECOND live FastQuoter, beside the current generation rather than after
+ *  it: deployed 2026-09-21 18:16:24 UTC (block 106818279, 19 min after gen8),
+ *  owner() 0xA24D2aF7…, pushed by the same rotating fleet both directly
+ *  (updatePrices, 37,000 limit) and through the FastLane relay. It prices
+ *  Hanji's XAUt0/USDC book (CLOB 0xa49d9ea9…, proxy 0x88687e49… — traced:
+ *  that book reads it, none of KNOWN_MARKETS does), which is not a registered
+ *  pair, so the venue carries none of its volume. Its burn is counted anyway:
+ *  QUOTE_UPDATE_BURN is what Hanji's keeper spends, and leaving this out
+ *  understated it by ~31% (2026-10-12: ~92k pushes, ~1,560 MON of ~5,060).
+ *  The cost is that Hanji's burn-per-$1M ratio includes a market whose
+ *  volume it does not. Untracked from creation until 2026-10-15. */
+const XAUT_FAST_QUOTER = '0x1fb37a1e6dc03a523bba106cb25e398e8608a010' as const;
 
 /** FASTLANE ROUTE (gen8+): from ~2026-09-22 the keeper also pushes through
  *  FastLane's AuctionHandler — `flashExecutionBid(bidAmount, txHashes,
@@ -105,9 +121,10 @@ const FAST_QUOTERS = [
  *  Hanji's: sent from the same rotating keeper fleet). Only gen8+ carry the
  *  fastLaneCall selector (gen0–7 bytecode lacks it), so the route is scoped
  *  to FASTLANE_QUOTERS: adding it rebuilds from gen8's creation day, not
- *  the lifetime. Example: tx 0x644e6bbe…7a13. */
+ *  the lifetime. Example: tx 0x644e6bbe…7a13. XAUT_FAST_QUOTER takes the
+ *  same route (example: tx 0xc874430a…). */
 const FASTLANE_AUCTION_HANDLER = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58' as const;
-const FASTLANE_QUOTERS = ['0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b'] as const;
+const FASTLANE_QUOTERS = ['0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b', XAUT_FAST_QUOTER] as const;
 
 /** Hanji markets (team-provided, tokens verified on-chain via getConfig).
  *  `market` is the @shared pair symbol; base/quote are TOKENS registry keys. */
@@ -312,6 +329,7 @@ export function createHanjiAdapter(): VenueAdapter {
     // build tracked 0x0000a8fd…8888 — another protocol's pool (mistaken
     // trace inference, since replaced by this team-confirmed destination).
     // gen8+ pushes also arrive via the FastLane relay — see FASTLANE_AUCTION_HANDLER.
+    // XAUT_FAST_QUOTER is counted too, though no tracked market reads it.
     gasSources() {
       const fastLane = new Set<string>(FASTLANE_QUOTERS);
       return [
