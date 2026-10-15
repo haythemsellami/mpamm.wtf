@@ -52,8 +52,9 @@ describe('persistence worker', () => {
     expect(read.recentFills(1)[0]?.markoutsBps).toEqual([2, 3, null, null, null]);
     expect(read.gasDays('2026-08-25')[0]?.byVenue.test).toEqual({ mon: 0.25, txs: 2 });
 
-    await writer.resetGasFrom('test', '2026-08-25');
+    await writer.resetGasFrom('test', '2026-08-25', '400');
     expect(read.gasDays('2026-08-25')).toEqual([]);
+    expect(read.getMeta('gas_cursor_test')).toBe('400');
     expect(await writer.resetVenueHistory('test', {
       beforeDay: '2026-08-26', volume: {}, fills: { fromBlock: 123n },
     }, 123n)).toEqual({ volume: 1, fills: 1 });

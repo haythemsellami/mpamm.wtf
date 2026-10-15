@@ -362,9 +362,7 @@ export class GasTracker {
           const covered = single && window.length > 0
             && hasCoverageEvidence(window, this.store.gasNonzeroDays(vid, window[0], window[window.length - 1]));
           if (!covered) {
-            const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
-            await this.writer.resetGasFrom(vid, day);
-            await this.writer.setMeta(cursorKey, String(startBlock));
+            await this.rewindGasTo(vid, day, head, cursorKey);
             this.note('gas.series.reset', `${name}: verifying quote-update coverage — rebuilding from ${day}`, vid);
           }
         }
@@ -374,6 +372,25 @@ export class GasTracker {
       }
     }
     await this.writer.setMeta(sigKey, sig);
+    // GAS REVISIONS (adapter.ts GasRevision): a series accrued WRONG under an
+    // unchanged destination set, which no fingerprint can detect. The marker
+    // is written after the wipe, so a crash in between repeats the wipe and
+    // only loses re-scan progress. A venue with no cursor has nothing stored
+    // to fix: its first scan already reads the corrected history.
+    for (const rev of a.gasRevisions ?? []) {
+      const revKey = `gas_rev_${vid}_${rev.id}`;
+      if (this.store.getMeta(revKey)) continue;
+      if (this.store.getMeta(cursorKey)) {
+        const from = rev.from && rev.from > sinceDay ? rev.from : null;
+        if (from) {
+          await this.rewindGasTo(vid, from, head, cursorKey);
+        } else {
+          await this.writer.resetGas(vid);
+        }
+        this.note('gas.series.reset', `${name}: gas revision '${rev.id}' — rebuilding from ${from ?? sinceDay}`, vid);
+      }
+      await this.writer.setMeta(revKey, new Date().toISOString());
+    }
     // one-time migration: rows seeded before gas_from existed came from the
     // old shallow (30d) horizon — wipe them WITH their cursor and re-scan from
     // the venue's start (additive rows + a deeper scan would double-count).
@@ -430,9 +447,7 @@ export class GasTracker {
           const blk = await this.rpc(() => this.client.getBlock({ blockNumber: earliest }));
           const day = utcDay(Number(blk.timestamp) * 1000);
           if (day > sinceDay) {
-            const startBlock = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
-            await this.writer.resetGasFrom(vid, day);
-            await this.writer.setMeta(cursorKey, String(startBlock));
+            await this.rewindGasTo(vid, day, head, cursorKey);
             this.note('gas.series.reset', `${name}: quote-update destination added — rebuilding from ${day} (earlier history unaffected)`, vid);
             return;
           }
@@ -441,6 +456,18 @@ export class GasTracker {
     }
     await this.writer.resetGas(vid);
     this.note('gas.series.reset', `${name}: quote-update destination set changed — re-scanning venue lifetime`, vid);
+  }
+
+  /** Wipe rows from `day` on and rewind the cursor to `day`'s first block —
+   *  never FORWARD: a scan that has not reached `day` yet (a rebuild still in
+   *  progress, or an earlier revision in the same pass) keeps its cursor, or
+   *  the blocks in between would never be read. The wipe and the cursor commit
+   *  in one transaction (VolumeStore.resetGasFrom). */
+  private async rewindGasTo(vid: string, day: string, head: bigint, cursorKey: string): Promise<void> {
+    const dayStart = await this.rpc(() => blockAtOrAfter(Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000), head));
+    const cur = this.store.getMeta(cursorKey);
+    const resume = cur && BigInt(cur) < dayStart ? BigInt(cur) : dayStart;
+    await this.writer.resetGasFrom(vid, day, String(resume));
   }
 
   /** First block where `addr` has code (its deployment), or null when it has
@@ -567,8 +594,10 @@ export class GasTracker {
             await Promise.all(sample.slice(i, i + POOL).map(async (h) => {
               for (let r = 0; r < 3; r++) {
                 try {
-                  const rc = await this.rpc(() => this.client.getTransactionReceipt({ hash: h as `0x${string}` }));
-                  sampledMon += Number(rc.gasUsed * rc.effectiveGasPrice) / 1e18;
+                  // await BEFORE the +=: `x += await f()` reads x first, so
+                  // concurrent samples would overwrite each other's adds
+                  const mon = await this.receiptMon(h, txBlocks.get(h)!);
+                  sampledMon += mon;
                   sampledN++;
                   return;
                 } catch (e) {
@@ -605,6 +634,28 @@ export class GasTracker {
       await sleep(config.backfillPaceMs);
     }
     await this.commit(vid, acc, cursorKey, cursor);
+  }
+
+  /** One tx's exact MON (gasUsed × effectiveGasPrice). By hash first; when the
+   *  node answers "not found", from its block's receipts instead. The archive
+   *  drops the tx-hash index for old txs while still serving
+   *  eth_getBlockReceipts at any depth (devcore, 2026-10-15: by-hash lookups
+   *  return null below roughly block 90-105M). Without the fallback a deep
+   *  logs-mode scan skips every chunk it cannot price. Capricorn's first
+   *  lifetime scan lost April–August that way. */
+  private async receiptMon(hash: string, blockNumber: bigint): Promise<number> {
+    try {
+      const rc = await this.rpc(() => this.client.getTransactionReceipt({ hash: hash as `0x${string}` }));
+      return Number(rc.gasUsed * rc.effectiveGasPrice) / 1e18;
+    } catch (e) {
+      if ((e as Error)?.name !== 'TransactionReceiptNotFoundError') throw e;
+    }
+    const receipts = await this.rpc(() => this.client.request({ method: 'eth_getBlockReceipts', params: [`0x${blockNumber.toString(16)}`] } as any) as Promise<any[] | null>);
+    const rc = (receipts ?? []).find((x) => String(x?.transactionHash).toLowerCase() === hash);
+    // a log's tx missing from its own block's receipts is a node fault: throw
+    // so the caller retries, then skips the sample LOUDLY as before
+    if (!rc) throw new Error(`receipt ${hash} not in block ${blockNumber} receipts`);
+    return Number(BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice)) / 1e18;
   }
 
   // ── blocks mode: no events — sample block receipts, scale by stride ────────

@@ -17,7 +17,7 @@ function apply(mutation: StoreMutation): unknown {
     case 'resetVenueHistory': return store.resetVenueHistory(mutation.venueId, mutation.deletes, mutation.fromBlock);
     case 'applyGas': return store.applyGas(mutation.rows, mutation.cursorKey, mutation.cursorVal);
     case 'resetGas': return store.resetGas(mutation.venueId);
-    case 'resetGasFrom': return store.resetGasFrom(mutation.venueId, mutation.fromDay);
+    case 'resetGasFrom': return store.resetGasFrom(mutation.venueId, mutation.fromDay, mutation.cursor);
     case 'insertFillsIfAbsent': return store.insertFillsIfAbsent(mutation.fills);
     case 'reconcileFills': return store.reconcileFills(mutation.deleteIds, mutation.insert);
     case 'applyRemarks': return store.applyRemarks(mutation.rows);

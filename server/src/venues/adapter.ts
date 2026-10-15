@@ -198,6 +198,26 @@ export interface HistoryRevision {
   until?: string;
 }
 
+/**
+ * A one-shot rebuild of this venue's gas series, declared next to the change
+ * that needs it. A destination-set change already rebuilds itself (gas.ts
+ * reconcileSourceChange); this is for a series accrued WRONG under an
+ * unchanged set, e.g. by a scan that skipped chunks it could not price.
+ *
+ * The gas tracker wipes the series from `from` (the venue lifetime when
+ * omitted) together with its cursor, then re-scans it. Applied once per
+ * database, keyed on `id`: never edit an applied entry, add a new id. A venue
+ * whose gas scan has not started yet is only marked applied, since its first
+ * scan reads the fixed history anyway.
+ */
+export interface GasRevision {
+  /** stable, unique per venue — the marker that records it as applied */
+  id: string;
+  /** first UTC day (YYYY-MM-DD) whose stored burn is wrong; omit for the
+   *  whole lifetime */
+  from?: string;
+}
+
 /** Optional historical seed returned by `backfill()`. */
 export interface AdapterBackfill {
   /** closed-day per-venue volume to merge into the store (usd; swaps defaults to 0). */
@@ -229,6 +249,11 @@ export interface VenueAdapter {
    *  not an operator setting. Applies to `venues()[0]`, the venue the core's
    *  history scans book this adapter's fills under. See HistoryRevision. */
   historyRevisions?: readonly HistoryRevision[];
+  /** Rebuild the stored QUOTE_UPDATE_BURN series after it was accrued wrong —
+   *  the gas counterpart of `historyRevisions`, which never touches gas. Same
+   *  contract: ONCE per database, on the first boot of the build that declares
+   *  it. See GasRevision. */
+  gasRevisions?: readonly GasRevision[];
   /** Optional live bid/ask per market×size for the Execution tab. Every chain
    *  read must use `blockNumber`: one published matrix represents exactly one
    *  Monad block rather than a mixture of adjacent `latest` states.

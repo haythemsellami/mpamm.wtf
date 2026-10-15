@@ -220,13 +220,15 @@ describe('VolumeStore.resetGasFrom', () => {
   const hanjiDays = (store: VolumeStore) =>
     store.gasDays('2026-07-20').flatMap((d) => (d.byVenue['hanji'] ? [d.utcDay] : []));
 
-  it('wipes only rows >= fromDay for that venue, drops its cursor, keeps gas_from and other venues', () => {
+  it('wipes only rows >= fromDay for that venue, replaces its cursor, keeps gas_from and other venues', () => {
     const { store, path } = freshStore();
     seed(store);
-    store.resetGasFrom('hanji', '2026-07-16');
+    store.resetGasFrom('hanji', '2026-07-16', '88100000');
 
     expect(hanjiDays(store)).toEqual(['2026-06-30', '2026-07-10']);
-    expect(store.getMeta('gas_cursor_hanji')).toBeUndefined();
+    // the replacement cursor commits WITH the wipe: a cursorless window would
+    // let a restart re-seed from the series start and add the kept days again
+    expect(store.getMeta('gas_cursor_hanji')).toBe('88100000');
     expect(store.getMeta('gas_from_hanji')).toBe('2026-06-05'); // series anchor untouched
     const poe = store.gasDays('2026-07-20').find((d) => d.utcDay === '2026-07-10')?.byVenue['poe'];
     expect(poe?.mon).toBe(800); // other venue untouched
@@ -237,17 +239,17 @@ describe('VolumeStore.resetGasFrom', () => {
   it('fromDay at the series start behaves like a full row wipe (boundary day inclusive)', () => {
     const { store, path } = freshStore();
     seed(store);
-    store.resetGasFrom('hanji', '2026-06-30');
+    store.resetGasFrom('hanji', '2026-06-30', '88000000');
     expect(hanjiDays(store)).toEqual([]);
     unlinkSync(path);
   });
 
-  it('fromDay after every row wipes nothing but still drops the cursor (rescan of an empty tail)', () => {
+  it('fromDay after every row wipes nothing but still replaces the cursor (rescan of an empty tail)', () => {
     const { store, path } = freshStore();
     seed(store);
-    store.resetGasFrom('hanji', '2026-07-20');
+    store.resetGasFrom('hanji', '2026-07-20', '88150000');
     expect(hanjiDays(store)).toEqual(['2026-06-30', '2026-07-10', '2026-07-16', '2026-07-19']);
-    expect(store.getMeta('gas_cursor_hanji')).toBeUndefined();
+    expect(store.getMeta('gas_cursor_hanji')).toBe('88150000');
     unlinkSync(path);
   });
 
