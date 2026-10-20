@@ -847,7 +847,10 @@ export function mergeIntoRing(ring: readonly Fill[], inserted: readonly Fill[], 
  *
  * A 'fills' revision needs both ends as days, `from` < `until`. An `until` on
  * a chain replay is invalid rather than ignored: the replay cannot stop
- * there, and a reader would assume it does.
+ * there, and a reader would assume it does. A 'markets' revision needs a day
+ * `from` and registered market symbols, and takes no `until` (it ends on the
+ * day it first runs); `markets` on any other source is invalid, since only
+ * 'markets' would scope anything by them.
  */
 export function revisionTargets(vid: string, revisions: readonly HistoryRevision[] | undefined): BackfillResetTarget[] {
   const uses = new Map<string, number>();
@@ -862,13 +865,22 @@ export function revisionTargets(vid: string, revisions: readonly HistoryRevision
       const spec = `${vid}#${id}:fills:${r.from ?? ''}..${r.until ?? ''}`;
       const ok = !badId && r.from !== undefined && r.until !== undefined
         && isUtcDay(r.from) && isUtcDay(r.until) && r.from < r.until;
-      return ok
+      return ok && r.markets === undefined
         ? { vid, spec, marker, from: 'fills' as const, day: r.from!, until: r.until! }
+        : { vid, spec, marker, from: 'invalid' as const };
+    }
+    if (r.source === 'markets') {
+      const markets = [...new Set((r.markets ?? []).map((m) => m.trim()))].sort();
+      const spec = `${vid}#${id}:markets:${r.from ?? ''}:${markets.join(',')}`;
+      const ok = !badId && r.from !== undefined && isUtcDay(r.from) && r.until === undefined
+        && markets.length > 0 && markets.every((m) => !!pairOf(m));
+      return ok
+        ? { vid, spec, marker, from: 'markets' as const, day: r.from!, markets }
         : { vid, spec, marker, from: 'invalid' as const };
     }
     const spec = `${vid}#${id}:${r.from ?? 'lifetime'}`;
     const [parsed] = parseBackfillReset(r.from === undefined ? vid : `${vid}:${r.from}`);
-    if (badId || r.until !== undefined || (r.source !== undefined && r.source !== 'chain')
+    if (badId || r.until !== undefined || r.markets !== undefined || (r.source !== undefined && r.source !== 'chain')
       || !parsed || parsed.from === 'block' || parsed.from === 'invalid') {
       return { vid, spec, marker, from: 'invalid' as const };
     }
@@ -957,6 +969,77 @@ export function planFillsRevision(opts: {
     .sort()
     .map((utcDay) => ({ utcDay, ...(fills.get(utcDay) ?? { usd: 0, swaps: 0 }), was: stored.get(utcDay) }));
   return { action: 'apply', days };
+}
+
+/**
+ * The last day a 'markets' revision adds to: the days the PREVIOUS build
+ * decoded, which nothing else will recount.
+ *
+ * It starts as the day the revision first runs. That day's hours before the
+ * deploy were decoded without the markets, its hours after by this build's
+ * tail (whose fills the held check skips). Where the venue's volume replay is
+ * unfinished, every day from the one it resumes on is SET by this build, the
+ * markets included, so the window ends the day before. A fresh database
+ * (replay not started) therefore ends it before it begins. Re-checked every
+ * run: a chain reset landing while the revision waits rewinds the replay, and
+ * the window shrinks with it. It never grows. Pure (history-revisions.test.ts).
+ */
+export function marketsRevisionThrough(opts: {
+  /** persisted by an earlier run; absent on the first */
+  through?: string;
+  today: string;
+  /** the venue's volume replay: finished (or none), or the day it resumes on */
+  replay: { done: true } | { done: false; resumeDay: string };
+}): string {
+  let through = opts.through ?? opts.today;
+  if (!opts.replay.done) {
+    const dayBefore = utcDay(Date.parse(`${opts.replay.resumeDay}T00:00:00Z`) - 86_400_000);
+    if (dayBefore < through) through = dayBefore;
+  }
+  return through;
+}
+
+/**
+ * What one scanned range of a 'markets' revision adds: the listed markets'
+ * fills that are not held yet, summed per own-timestamp day.
+ *
+ * A HELD fill (stored, or still queued for the store) was decoded by this
+ * build and is already in its day. Adding it again would count it twice. A
+ * new fill is added to its day wherever it falls, but inserted only inside
+ * retention (`retainedFromMs`): an older row would just be pruned. Pure
+ * (history-revisions.test.ts).
+ */
+export function planMarketsAdd(
+  fills: readonly Fill[],
+  markets: ReadonlySet<string>,
+  held: (id: string) => boolean,
+  retainedFromMs: number,
+): { days: Map<string, { usd: number; swaps: number }>; insert: Fill[]; held: number } {
+  const days = new Map<string, { usd: number; swaps: number }>();
+  const insert: Fill[] = [];
+  const seen = new Set<string>();
+  let heldCount = 0;
+  for (const f of fills) {
+    if (!markets.has(f.market) || seen.has(f.id)) continue;   // a re-tailed duplicate collapses
+    seen.add(f.id);
+    if (held(f.id)) { heldCount++; continue; }
+    const day = utcDay(f.ts);
+    const d = days.get(day) ?? { usd: 0, swaps: 0 };
+    d.usd += f.usd; d.swaps += 1;
+    days.set(day, d);
+    if (f.ts >= retainedFromMs) insert.push(f);
+  }
+  return { days, insert, held: heldCount };
+}
+
+/** A 'markets' revision's running total, persisted with its cursor so the
+ *  applied note reports every pass, not just the last one. */
+export function parseMarketsAdded(v: string | undefined): { swaps: number; usd: number } {
+  try {
+    const o = JSON.parse(v ?? '');
+    if (Number.isFinite(o?.swaps) && Number.isFinite(o?.usd)) return { swaps: o.swaps, usd: o.usd };
+  } catch { /* unset */ }
+  return { swaps: 0, usd: 0 };
 }
 
 /**
@@ -1088,6 +1171,8 @@ export type BackfillResetTarget = {
   | { from: 'day'; day: string }
   /** a 'fills' HistoryRevision: re-derive [day, until) from retained fills */
   | { from: 'fills'; day: string; until: string }
+  /** a 'markets' HistoryRevision: add these markets' history from `day` */
+  | { from: 'markets'; day: string; markets: string[] }
   | { from: 'invalid' }
 );
 
@@ -1127,6 +1212,9 @@ export function refuseResetStart(t: BackfillResetTarget, today: string, bootHead
   }
   if (t.from === 'day' && t.day > today) {
     return `start ${t.day} is in the future (today is ${today}) — skipped rather than anchoring the replay to head`;
+  }
+  if (t.from === 'markets' && t.day > today) {
+    return `start ${t.day} is in the future (today is ${today}) — there is no history to add`;
   }
   return null;
 }
@@ -1621,7 +1709,7 @@ export class LiveDataSource extends BaseSource {
       // the tail finish first; the deep SET then becomes the final exact value
       // instead of a later tail increment double-counting the overlap.
       await this.waitForTailBoundary(closedEnd);
-      await this.applyBackfillReset(nowMs);
+      await this.applyBackfillReset(nowMs, closedEnd);
       if (historyRunRolled(runDay)) throw new HistoryDayRolledError(runDay);
       if (config.markoutBackfill) {
         try { await this.markoutOnboarding(nowMs, closedEnd); }
@@ -2162,9 +2250,13 @@ export class LiveDataSource extends BaseSource {
     const { a, vid } = this.historyVenue(venueId);
     // A chain reset rewrites day rows only through the volume replay; without
     // it, it repairs no USD and explains nothing here. A 'fills' revision
-    // SETs its days itself.
+    // SETs its days itself. A 'markets' revision re-SETs nothing: it adds a
+    // fill to a day and to the table in one commit, so its days stay judgeable.
     const volumeReplays = config.backfillEnabled && !!a?.backfillFromUtc;
-    const out: VenueRebuild = { resets: queued.filter((t) => t.vid === vid && (t.from === 'fills' || volumeReplays)) };
+    const out: VenueRebuild = {
+      resets: queued.filter((t): t is Exclude<typeof t, { from: 'markets' }> =>
+        t.vid === vid && t.from !== 'markets' && (t.from === 'fills' || volumeReplays)),
+    };
     if (volumeReplays && this.store.getMeta(`backfill_done_${vid}`) !== '1') out.volume = { cursor: this.metaBlock(`backfill_cursor_${vid}`) };
     return out;
   }
@@ -2215,7 +2307,9 @@ export class LiveDataSource extends BaseSource {
     return targets;
   }
 
-  private async applyBackfillReset(nowMs: number): Promise<void> {
+  /** `closedEnd` is the last block of the last closed day: the bound of the
+   *  one entry kind that reads the chain here ('markets'). */
+  private async applyBackfillReset(nowMs: number, closedEnd: bigint): Promise<void> {
     const want = config.backfillReset.trim();
     const today = utcDay(nowMs);
     const targets = this.resetTargets(today);
@@ -2237,7 +2331,7 @@ export class LiveDataSource extends BaseSource {
 
       if (t.from === 'invalid') {
         this.noteOnce('backfill.config.invalid', t.marker
-          ? `history revision '${t.spec}' is invalid — expected a unique id ([A-Za-z0-9_.-]) and from: YYYY-MM-DD or omitted (source 'fills': from < until, both YYYY-MM-DD; until only with 'fills')`
+          ? `history revision '${t.spec}' is invalid — expected a unique id ([A-Za-z0-9_.-]) and from: YYYY-MM-DD or omitted (source 'fills': from < until, both YYYY-MM-DD; until only with 'fills'; source 'markets': from YYYY-MM-DD and registered markets)`
           : `backfill reset: cannot parse '${t.spec}' — expected vid, vid:<block> or vid:YYYY-MM-DD`);
         // An invalid REVISION is a code bug that only a fix clears; stamping it
         // could also land on a valid twin's marker (shared id) and re-arm it.
@@ -2277,6 +2371,13 @@ export class LiveDataSource extends BaseSource {
       // stamp commits in the same snapshot as its days.
       if (t.from === 'fills') {
         const line = await this.applyFillsRevision(t, nowMs, today, label);
+        if (line) applied.push(line);
+        continue;
+      }
+      // A 'markets' revision adds rows and fills itself, and settles itself:
+      // its stamp waits for the last day of its window to close.
+      if (t.from === 'markets') {
+        const line = await this.applyMarketsRevision(adapter, t, nowMs, today, closedEnd, label);
         if (line) applied.push(line);
         continue;
       }
@@ -2414,6 +2515,191 @@ export class LiveDataSource extends BaseSource {
     const usd = (n: number) => `$${n.toFixed(2)}`;
     const moves = plan.days.map((d) => `${d.utcDay} ${usd(d.was?.usd ?? 0)}→${usd(d.usd)}`).join(', ');
     return `${label} — re-derived from retained fills: ${moves}`;
+  }
+
+  /**
+   * Apply one 'markets' revision: ADD the listed markets' history over the
+   * days the previous build decoded (marketsRevisionThrough), and nothing
+   * else. ARCHIVE pool, from `from` to the window's last closed block. Each
+   * flush's day increments, inserted fills, resume cursor and running total
+   * commit in ONE snapshot, so a crash never adds a range twice. The stamp
+   * waits until the window's last day has closed and been read.
+   *
+   * It runs in the reset pass, AHEAD of the fills onboarding and the volume
+   * replay, and that order keeps the held check sound: the onboarding stores
+   * fills without adding them to a day, so it must never reach a window day
+   * before this scan does. A failure therefore throws and holds the history
+   * pass behind it; only an archive range that stays unreadable is skipped,
+   * loudly, as the replay does.
+   *
+   * Returns the applied-note line, or null while it waits.
+   */
+  private async applyMarketsRevision(
+    a: VenueAdapter, t: BackfillResetTarget & { from: 'markets' }, nowMs: number, today: string, closedEnd: bigint, label: string,
+  ): Promise<string | null> {
+    const marker = resetMarker(t);
+    const cursorKey = `${marker}_cursor`, throughKey = `${marker}_through`, addedKey = `${marker}_added`;
+    const startOf = (day: string) => Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000);
+
+    // The volume replay re-SETs every day from the one it resumes on, with
+    // this build: those are not this revision's to add to.
+    let replay: { done: true } | { done: false; resumeDay: string } = { done: true };
+    if (a.backfillFromUtc && this.store.getMeta(`backfill_done_${t.vid}`) !== '1') {
+      const cb = this.metaBlock(`backfill_cursor_${t.vid}`);
+      const resumeDay = cb === undefined
+        ? a.backfillFromUtc
+        : utcDay(Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: cb > closedEnd ? closedEnd : cb }))).timestamp) * 1000);
+      replay = { done: false, resumeDay };
+    }
+    const stored = this.store.getMeta(throughKey) || undefined;
+    const through = marketsRevisionThrough({ through: stored, today, replay });
+    if (through !== stored) await this.storeWriter.setMeta(throughKey, through);
+    if (through < t.day) {
+      await this.storeWriter.setMeta(marker, t.spec);
+      return `${label} — nothing to add: the volume replay decodes ${t.markets.join(', ')} with this build from ${t.day}`;
+    }
+
+    const seed = seedSources(a);
+    if (seed.action === 'defer') {
+      this.noteOnce('backfill.deferred', `${label} waits — ${seed.reason}`, t.vid);
+      return null;
+    }
+    if (seed.action === 'skip') {
+      this.note('backfill.config.invalid', `${label} — the venue lands no fills, so it has no market history to add`, t.vid);
+      await this.storeWriter.setMeta(marker, t.spec);
+      return null;
+    }
+
+    const throughClosed = through < today;
+    const end = throughClosed ? (await blockAtOrAfter(startOf(through) + 86_400, closedEnd + 1n)) - 1n : closedEnd;
+    let cursor = this.metaBlock(cursorKey) ?? await blockAtOrAfter(startOf(t.day), closedEnd + 1n);
+    const markets = new Set(t.markets);
+    let added = parseMarketsAdded(this.store.getMeta(addedKey));
+    const before = added.swaps;
+
+    if (cursor <= end) {
+      const retainedFromMs = retentionCutoffMs(nowMs, config.fillsRetentionDays);
+      const floor = BigInt(config.getLogsMinChunk);
+      const maxChunk = BigInt(config.backfillChunk);
+      let chunk = maxChunk;
+      let sinceFlush = 0, tries = 0, availabilityAttempts = 0;
+      const kept: Fill[] = [];
+      this.noteOnce('backfill.start', `${label}: adding ${t.markets.join(', ')} — blocks ${cursor}→${end} (${t.day}..${through})`, t.vid);
+      while (cursor <= end) {
+        if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
+        await holdWhileDegraded();
+        const to = cursor + chunk - 1n > end ? end : cursor + chunk - 1n;
+        let batches: any[][];
+        try {
+          batches = await allPreferAvailability(seed.all.map((s) => {
+            const span = sourceSpan(s, cursor, to);
+            return span ? archiveRead(() => archiveClient.getLogs({ address: s.address as any, fromBlock: span.from, toBlock: span.to, events: s.events as any } as any) as Promise<any[]>) : Promise.resolve([]);
+          }));
+          if (chunk < maxChunk) chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n;
+        } catch (e) {
+          // Unreachable/throttled ≠ unreadable — hold, never shrink or skip.
+          if (isAvailabilityFailure(e)) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
+          if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; continue; }
+          if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; }
+          // Unreadable at the floor: an archive hole, which retrying across boots
+          // cannot fix. Skip it loudly, as the replay does — never silently.
+          this.note('backfill.range.skipped', `${label}: the RPC archive could not serve blocks ${cursor}→${to} (${(e as Error).message}) — skipped; ${t.markets.join(', ')} fills there are not added`, t.vid);
+          batches = seed.all.map(() => []);
+        }
+        tries = 0;
+        // A decode error (a price leg still warming) is not a hole: it throws,
+        // holding the pass. The timestamp is a placeholder until the market
+        // filter has run: decode only stamps it (VenueAdapter.decode), so real
+        // ones are read for the kept fills' blocks alone, not every log's.
+        const bundle: LogBundle = {};
+        seed.all.forEach((s, i) => { bundle[s.key] = batches[i]; });
+        const fills = batches.some((b) => b.length)
+          ? this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, () => 0, new Set()), 'revision fill')
+            .filter((f) => f.venueId === t.vid && markets.has(f.market))
+          : [];
+        try {
+          const blocks = [...new Set(fills.map((f) => f.blockNumber))];
+          const ts = new Map<number, number>();
+          for (let i = 0; i < blocks.length; i += 15) {
+            await Promise.all(blocks.slice(i, i + 15).map(async (bn) => {
+              ts.set(bn, Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: BigInt(bn) }))).timestamp) * 1000);
+            }));
+          }
+          for (const f of fills) f.ts = ts.get(f.blockNumber)!;
+        } catch (e) {
+          if (isAvailabilityFailure(e)) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
+          throw e;
+        }
+        availabilityAttempts = 0;
+        kept.push(...fills);
+        cursor = to + 1n;
+        if (++sinceFlush >= config.backfillMergeEvery || cursor > end) {
+          added = await this.commitMarketsAdd(t, kept, markets, retainedFromMs, { [cursorKey]: String(cursor) }, addedKey, added);
+          kept.length = 0;
+          sinceFlush = 0;
+        }
+        await sleep(config.backfillPaceMs);
+      }
+      // An open Volume tab loads closed days once (REST) and then merges only
+      // today's frames: one resync makes it reload the days this pass added.
+      if (added.swaps > before) this.emitMsg({ ch: 'volume', resync: true });
+    }
+
+    if (!throughClosed) {
+      this.noteOnce('backfill.deferred', `${label} waits for ${through} to close: its hours before this build were decoded without ${t.markets.join(', ')}`, t.vid);
+      return null;
+    }
+    await this.storeWriter.setMeta(marker, t.spec);
+    return `${label} — added ${added.swaps} ${t.markets.join(', ')} fill(s), $${added.usd.toFixed(2)}, over ${t.day}..${through}`;
+  }
+
+  /**
+   * One flush of a 'markets' revision: the plan's day increments, its new
+   * fills, the resume cursor and the running total, in ONE snapshot. HELD is
+   * what the store has plus what is still on its way there: just after the
+   * window's last day closes, the tail's fills of that day may be in neither
+   * place yet but the queue. Memory takes the increments first and gives them
+   * back if the write fails; snapshots commit in order, so none cut before
+   * this one can land after it with the old value.
+   */
+  private async commitMarketsAdd(
+    t: BackfillResetTarget & { from: 'markets' },
+    kept: readonly Fill[],
+    markets: ReadonlySet<string>,
+    retainedFromMs: number,
+    meta: Record<string, string>,
+    addedKey: string,
+    added: { swaps: number; usd: number },
+  ): Promise<{ swaps: number; usd: number }> {
+    const ids = [...new Set(kept.map((f) => f.id))];
+    const held = new Set(this.store.fillsByIds(ids).map((f) => f.id));
+    for (const owner of [this.fills, this.dirty, this.pending]) for (const f of owner) held.add(f.id);
+    for (const batch of this.inflightFills) for (const f of batch) held.add(f.id);
+    const plan = planMarketsAdd(kept, markets, (id) => held.has(id), retainedFromMs);
+
+    const touched: Array<{ d: DailyVolume; was?: { usd: number; swaps: number } }> = [];
+    const total = { ...added };
+    for (const [day, add] of plan.days) {
+      let d = this.days.find((x) => x.utcDay === day);
+      if (!d) { d = this.emptyDay(day, false); this.days.push(d); }
+      const was = d.byVenue[t.vid];
+      d.byVenue[t.vid] = { usd: (was?.usd ?? 0) + add.usd, swaps: (was?.swaps ?? 0) + add.swaps };
+      touched.push({ d, was });
+      total.swaps += add.swaps;
+      total.usd += add.usd;
+    }
+    if (touched.length) this.days.sort((x, y) => (x.utcDay < y.utcDay ? -1 : 1));
+    try {
+      await this.writeSnapshot({ days: touched.map((x) => x.d), meta: { ...meta, [addedKey]: JSON.stringify(total) }, fills: plan.insert });
+    } catch (e) {
+      for (const { d, was } of touched) {
+        if (was) d.byVenue[t.vid] = was;
+        else delete d.byVenue[t.vid];
+      }
+      throw e;
+    }
+    if (plan.insert.length) this.dropAggregates();
+    return total;
   }
 
   /** Run `fn` between two tail cycles: no fill is ingested, and the cursor

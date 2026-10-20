@@ -797,6 +797,106 @@ describe('live startup archive gate', () => {
     source.store.close();
   });
 
+  // A 'markets' revision ADDS a newly listed market's history (live.ts
+  // applyMarketsRevision). It must leave every other market's row alone, skip
+  // the fills this build's tail already stored (counted once, by the tail),
+  // keep rows and fills consistent for the boot reconcile, and stay unstamped
+  // until the day it first ran on has closed.
+  async function marketsRevisionScene(meta: Record<string, string>) {
+    vi.stubEnv('BACKFILL_PACE_MS', '0');
+    vi.stubEnv('BACKFILL_CHUNK', '500');
+    vi.stubEnv('BACKFILL_MERGE_EVERY', '1');
+    const { source, adapter } = await setup({ withAdapter: true });
+    const rpc = await import('../chain/rpc.js') as any;
+    const live = await import('../datasource/live.js');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const DAY = 86_400_000;
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const now = Date.now();
+    const d1 = Date.parse(`${day(now - 2 * DAY)}T00:00:00Z`), d2 = d1 + DAY;
+    // 1,000 blocks a UTC day, block 1,000 = d1's midnight
+    const tsOfBlock = (b: number) => d1 + (b - 1_000) * (DAY / 1_000);
+    const blockAt = (ms: number) => 1_000 + Math.ceil((ms - d1) / (DAY / 1_000));
+    const closedEnd = BigInt(blockAt(d2 + DAY) - 1);
+    const logs = [
+      { id: 'x1', market: 'XAUt/USDC', usd: 100, blockNumber: 1_200n },
+      { id: 'm1', market: 'MON/USDC', usd: 999, blockNumber: 1_300n },
+      { id: 'x2', market: 'XAUt/USDC', usd: 40, blockNumber: 2_100n },
+      { id: 'm2', market: 'MON/USDC', usd: 500, blockNumber: 2_400n },
+      { id: 'x3', market: 'XAUt/USDC', usd: 60, blockNumber: 2_700n },   // the tail's: already stored
+    ];
+    const toFill = (l: typeof logs[number], ts: number): Fill => ({
+      id: `test-venue-${l.id}`, venueId: 'test-venue', market: l.market, side: 'buy', category: 'UNKNOWN', usd: l.usd, baseAmount: 1,
+      execPx: l.usd, txHash: '0x1', to: 'x', pool: 'p', blockNumber: Number(l.blockNumber), ts, markoutsBps: [null, null, null, null, null],
+    });
+    rpc.archiveClient.getLogs = vi.fn(async ({ fromBlock, toBlock }: any) => logs.filter((l) => l.blockNumber >= fromBlock && l.blockNumber <= toBlock));
+    rpc.archiveClient.getBlock = vi.fn(async ({ blockNumber }: any) => ({ timestamp: BigInt(Math.floor(tsOfBlock(Number(blockNumber)) / 1_000)) }));
+    rpc.blockAtOrAfter.mockImplementation(async (sec: number, hi: bigint) => { const b = BigInt(blockAt(sec * 1_000)); return b > hi ? hi : b; });
+    const revision = { id: 'm', source: 'markets' as const, from: day(d1), markets: ['XAUt/USDC'] };
+    Object.assign(adapter, {
+      backfillFromUtc: '2026-01-01',
+      historyRevisions: [revision],
+      logSources: () => [{ key: 'swaps', address: '0x0000000000000000000000000000000000000001', events: [], kind: 'fills' }],
+      decode: vi.fn(async (_ctx: unknown, bundle: any, tsOf: (bn: bigint) => number) => bundle.swaps.map((l: any) => toFill(l, tsOf(l.blockNumber)))),
+    });
+    // what the previous build stored: no XAUt, except the tail's x3 on d2
+    source.store.persistSnapshot([
+      { utcDay: day(d1), partial: false, byVenue: { 'test-venue': { usd: 999, swaps: 1 } } },
+      { utcDay: day(d2), partial: false, byVenue: { 'test-venue': { usd: 560, swaps: 2 } } },
+    ], meta, [toFill(logs[1], tsOfBlock(1_300)), toFill(logs[3], tsOfBlock(2_400)), toFill(logs[4], tsOfBlock(2_700))]);
+    source.days = source.store.all();
+    const [target] = live.revisionTargets('test-venue', [revision]);
+    const marker = live.resetMarker(target);
+    const row = (ms: number) => source.days.find((x: any) => x.utcDay === day(ms))?.byVenue['test-venue'];
+    const storedRow = (ms: number) => source.store.all().find((x: any) => x.utcDay === day(ms))?.byVenue['test-venue'];
+    return { source, rpc, live, target, marker, row, storedRow, d1, d2, now, closedEnd, day };
+  }
+
+  it("a 'markets' revision adds only the listed market's unheld fills, then stamps once its first day has closed", async () => {
+    const s = await marketsRevisionScene({ 'mkfill_done_test-venue': '1', 'backfill_done_test-venue': '1' });
+    const { source, rpc, live, target, marker, d1, d2, now, closedEnd } = s;
+
+    await source.applyBackfillReset(now, closedEnd);
+    // x1 → d1 and x2 → d2 added; x3 held (the tail's), MON untouched
+    for (const read of [s.row, s.storedRow]) expect([read(d1), read(d2)]).toEqual([{ usd: 1_099, swaps: 2 }, { usd: 600, swaps: 3 }]);
+    expect(source.store.fillsByIds(['test-venue-x1', 'test-venue-x2']).map((f: Fill) => f.id).sort()).toEqual(['test-venue-x1', 'test-venue-x2']);
+    // real timestamps only for the kept fills' blocks — never for every log
+    expect(rpc.archiveClient.getBlock.mock.calls.map(([a]: any) => Number(a.blockNumber)).sort()).toEqual([1_200, 2_100, 2_700]);
+    expect(source.store.getMeta(`${marker}_cursor`)).toBe(String(closedEnd + 1n));
+    // today is the first day: it waits for it to close
+    expect(live.resetAlreadyApplied(source.store, target)).toBe(false);
+    // rows and fills agree, so the boot reconcile has nothing to rewrite
+    source.reconcileSwapCounts();
+    expect(source.notes.list().filter((n: StateNote) => n.code.startsWith('store.swaps.'))).toEqual([]);
+
+    // a later run on the same day reads nothing new and adds nothing
+    rpc.archiveClient.getLogs.mockClear();
+    await source.applyBackfillReset(now, closedEnd);
+    expect(rpc.archiveClient.getLogs).not.toHaveBeenCalled();
+    expect(s.storedRow(d2)).toEqual({ usd: 600, swaps: 3 });
+
+    // the first day has closed (as if it had been yesterday): stamped, rows unchanged
+    source.store.persistSnapshot([], { [`${marker}_through`]: s.day(d2) }, []);
+    await source.applyBackfillReset(now, closedEnd);
+    expect(live.resetAlreadyApplied(source.store, target)).toBe(true);
+    expect([s.storedRow(d1), s.storedRow(d2)]).toEqual([{ usd: 1_099, swaps: 2 }, { usd: 600, swaps: 3 }]);
+    expect(source.notes.list().some((n: StateNote) => n.code === 'backfill.reset' && n.msg.includes('added 2 XAUt/USDC fill(s), $140.00'))).toBe(true);
+    source.store.close();
+  });
+
+  /** a fresh database: the volume replay has not run, and decodes the market
+   *  with this build when it does — adding it here would count it twice */
+  it("a 'markets' revision on a database whose volume replay never ran adds nothing and is settled", async () => {
+    const s = await marketsRevisionScene({});
+    const { source, rpc, live, target, d1, d2, now, closedEnd } = s;
+    await source.applyBackfillReset(now, closedEnd);
+    expect(live.resetAlreadyApplied(source.store, target)).toBe(true);
+    expect(rpc.archiveClient.getLogs).not.toHaveBeenCalled();
+    expect([s.storedRow(d1), s.storedRow(d2)]).toEqual([{ usd: 999, swaps: 1 }, { usd: 560, swaps: 2 }]);
+    source.store.close();
+  });
+
   // The longest note this can raise: eight 4-digit rewrites behind the drift
   // sentence. The note as STORED must still carry its day count and net, and
   // end on a whole entry — scrubNote cuts anything past NOTE_MSG_MAX mid-word.

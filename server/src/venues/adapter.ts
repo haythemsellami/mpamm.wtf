@@ -191,11 +191,24 @@ export interface HistoryRevision {
    * The window must be inside fills retention when the build boots (a
    * pruned day has nothing to sum). The window's total must also be
    * conserved: moving fills between days cannot change it.
+   *
+   * 'markets' ADDS the history of markets this build starts decoding that
+   * were already trading (`markets`), and touches nothing else. It reads the
+   * chain from `from` like the replay but keeps only those markets' fills:
+   * each one not stored yet is inserted and added to its day. Every other
+   * row stays as stored, so no cross pair is re-priced and no markout curve
+   * is dropped. It covers the days the PREVIOUS build decoded, through the
+   * day it first runs, and finishes once that day has closed; today's rows
+   * after the deploy are the tail's. Use it for a newly listed market, never
+   * to fix a decode: a fill it would add is, by definition, missing.
    */
-  source?: 'chain' | 'fills';
+  source?: 'chain' | 'fills' | 'markets';
   /** 'fills' only, and required there: the first UTC day AFTER the window
    *  (exclusive). It must close before the revision can apply. */
   until?: string;
+  /** 'markets' only, and required there: the registered market symbols
+   *  (@shared PAIRS) whose history this revision adds. */
+  markets?: readonly string[];
 }
 
 /**
@@ -289,7 +302,10 @@ export interface VenueAdapter {
    *  skipped). Use it to avoid a confident label when attribution is unavailable
    *  (e.g. tag a fill `UNKNOWN` instead of `DIRECT`). If this method throws, the
    *  core holds the cursor and retries the whole range; catch and skip individual
-   *  malformed/irrelevant logs locally. */
+   *  malformed/irrelevant logs locally. `tsOf(block)` is only ever stamped onto
+   *  `Fill.ts`, never branched on: history scans pass an approximation (the
+   *  volume replay's chunk-day stamp, a 'markets' revision's placeholder) and
+   *  correct the fills they keep. */
   decode(ctx: AdapterContext, logs: LogBundle, tsOf: (bn: bigint) => number, failedSources: Set<string>): Fill[] | Promise<Fill[]>;
 }
 

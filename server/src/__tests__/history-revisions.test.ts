@@ -13,7 +13,8 @@ import { join } from 'node:path';
 import type { Fill } from '@shared';
 import { VolumeStore, rewindCursor } from '../db.js';
 import {
-  carriedRereadTarget, markResetApplied, mergeIntoRing, planReread, rereadKey, resetAlreadyApplied, resetMarker, revisionTargets,
+  carriedRereadTarget, markResetApplied, marketsRevisionThrough, mergeIntoRing, parseMarketsAdded, planMarketsAdd, planReread,
+  refuseResetStart, rereadKey, resetAlreadyApplied, resetMarker, revisionTargets,
 } from '../datasource/live.js';
 import { ADAPTERS } from '../venues/registry.js';
 
@@ -165,6 +166,102 @@ describe('revisionTargets', () => {
     const s = memStore();
     markResetApplied(s, revisionTargets('metric', [{ id: 'v1', from: '2026-10-12' }])[0]);
     expect(resetAlreadyApplied(s, revisionTargets('metric', [{ id: 'v1', from: '2026-10-11' }])[0])).toBe(false);
+  });
+});
+
+describe("revisionTargets — 'markets'", () => {
+  it('is an add for registered markets from a day, with its own marker', () => {
+    const [t] = revisionTargets('hanji', [{ id: 'xaut-book', source: 'markets', from: '2026-09-21', markets: ['XAUt/USDC'] }]);
+    expect(t).toMatchObject({
+      vid: 'hanji', from: 'markets', day: '2026-09-21', markets: ['XAUt/USDC'], marker: 'history_revision_hanji_xaut-book',
+    });
+  });
+
+  it('reads the same however the markets are listed — the spec is the marker value', () => {
+    const [a] = revisionTargets('hanji', [{ id: 'm', source: 'markets', from: '2026-09-21', markets: ['XAUt/USDC', 'MON/USDC'] }]);
+    const [b] = revisionTargets('hanji', [{ id: 'm', source: 'markets', from: '2026-09-21', markets: [' MON/USDC', 'XAUt/USDC', 'MON/USDC'] }]);
+    expect(a.spec).toBe(b.spec);
+  });
+
+  it('rejects no start, an until, no markets, an unregistered market — and markets on any other source', () => {
+    const ts = revisionTargets('hanji', [
+      { id: 'a', source: 'markets', markets: ['XAUt/USDC'] },
+      { id: 'b', source: 'markets', from: '2026-09-21', until: '2026-10-01', markets: ['XAUt/USDC'] },
+      { id: 'c', source: 'markets', from: '2026-09-21', markets: [] },
+      { id: 'd', source: 'markets', from: '2026-09-21', markets: ['XAUt0/USDC'] },
+      { id: 'e', from: '2026-09-21', markets: ['XAUt/USDC'] },
+      { id: 'f', source: 'fills', from: '2026-09-21', until: '2026-09-22', markets: ['XAUt/USDC'] },
+    ]);
+    expect(ts.map((t) => t.from)).toEqual(['invalid', 'invalid', 'invalid', 'invalid', 'invalid', 'invalid']);
+  });
+
+  it('refuses a start after today — there is nothing to add', () => {
+    const [t] = revisionTargets('hanji', [{ id: 'm', source: 'markets', from: '2026-10-21', markets: ['XAUt/USDC'] }]);
+    expect(refuseResetStart(t, '2026-10-20', 0n)).toMatch(/future/);
+    expect(refuseResetStart({ ...t, day: '2026-10-20' } as typeof t, '2026-10-20', 0n)).toBeNull();
+  });
+});
+
+describe('marketsRevisionThrough — the days the previous build decoded', () => {
+  const TODAY = '2026-10-20';
+
+  it('a settled venue: through the day the revision first runs, then held there', () => {
+    expect(marketsRevisionThrough({ today: TODAY, replay: { done: true } })).toBe(TODAY);
+    expect(marketsRevisionThrough({ through: TODAY, today: '2026-10-21', replay: { done: true } })).toBe(TODAY);
+  });
+
+  /** a fresh database: the replay has not started, so this build decodes every
+   *  day itself — the window ends before it begins */
+  it('ends the day before an unfinished volume replay resumes', () => {
+    expect(marketsRevisionThrough({ today: TODAY, replay: { done: false, resumeDay: '2026-06-05' } })).toBe('2026-06-04');
+    expect(marketsRevisionThrough({ today: TODAY, replay: { done: false, resumeDay: '2026-10-02' } })).toBe('2026-10-01');
+  });
+
+  /** a chain reset landing while the revision waits rewinds the replay: the
+   *  days it re-SETs are no longer the revision's — and a finished replay never
+   *  widens the window again */
+  it('shrinks behind a later reset, and never grows', () => {
+    const shrunk = marketsRevisionThrough({ through: TODAY, today: '2026-10-21', replay: { done: false, resumeDay: '2026-10-15' } });
+    expect(shrunk).toBe('2026-10-14');
+    expect(marketsRevisionThrough({ through: shrunk, today: '2026-10-22', replay: { done: true } })).toBe('2026-10-14');
+  });
+});
+
+describe('planMarketsAdd — what one scanned range adds', () => {
+  const NOON = Date.parse('2026-10-14T12:00:00Z');
+  const RETAINED = Date.parse('2026-10-01T00:00:00Z');
+  const xaut = (id: string, over: Partial<Fill> = {}) => fill(id, { venueId: 'hanji', market: 'XAUt/USDC', usd: 700, ts: NOON, ...over });
+  const MARKETS = new Set(['XAUt/USDC']);
+
+  it('adds only the listed markets, each fill to its own day', () => {
+    const plan = planMarketsAdd([
+      xaut('a'), xaut('b', { usd: 300, ts: NOON + 86_400_000 }), fill('m', { venueId: 'hanji', market: 'MON/USDC', ts: NOON }),
+    ], MARKETS, () => false, RETAINED);
+    expect(Object.fromEntries(plan.days)).toEqual({ '2026-10-14': { usd: 700, swaps: 1 }, '2026-10-15': { usd: 300, swaps: 1 } });
+    expect(plan.insert.map((f) => f.id)).toEqual(['a', 'b']);
+  });
+
+  /** a held fill was decoded by this build (the tail's half of the deploy
+   *  day): it is in its day already, and adding it would count it twice */
+  it('skips a held fill entirely, and a duplicate decode once', () => {
+    const plan = planMarketsAdd([xaut('a'), xaut('a'), xaut('t')], MARKETS, (id) => id === 't', RETAINED);
+    expect(Object.fromEntries(plan.days)).toEqual({ '2026-10-14': { usd: 700, swaps: 1 } });
+    expect(plan.insert.map((f) => f.id)).toEqual(['a']);
+    expect(plan.held).toBe(1);
+  });
+
+  it('adds a fill older than retention to its day without inserting a row the prune would delete', () => {
+    const old = xaut('o', { ts: Date.parse('2026-09-24T08:00:00Z') });
+    const plan = planMarketsAdd([old], MARKETS, () => false, RETAINED);
+    expect(plan.days.get('2026-09-24')).toEqual({ usd: 700, swaps: 1 });
+    expect(plan.insert).toEqual([]);
+  });
+});
+
+describe('parseMarketsAdded', () => {
+  it('reads the persisted running total, and anything else as nothing yet', () => {
+    expect(parseMarketsAdded('{"swaps":3,"usd":12.5}')).toEqual({ swaps: 3, usd: 12.5 });
+    for (const v of [undefined, '', 'x', '{}', '{"swaps":"3","usd":1}']) expect(parseMarketsAdded(v)).toEqual({ swaps: 0, usd: 0 });
   });
 });
 
