@@ -192,8 +192,15 @@ disk. The rules:
   inherited unfinished makes it **wait** until the replay is done, then add
   what the replay did not reach: the deploy day's older hours when it stopped
   before that day closed. On a fresh database that is usually nothing. A
-  chain reset or today re-read of the venue since hands every block from its
-  start day to this build, and the revision stops there.
+  chain reset of the venue since hands every block from its start day to
+  this build, and the revision stops there. That applies only when the reset
+  rebuilds volume; with `BACKFILL=off` it keeps every closed row, and only
+  today, which its re-read replaces, changes hands. A today re-read inherited
+  from a previous run does the same.
+- Until it applies, the boot swap reconcile leaves the venue's days from
+  `from` alone, on every boot whatever stages run. A fill the onboarding
+  stored there is not counted yet, and rewriting from it would count it
+  twice once the revision adds it.
 - It runs ahead of the fills onboarding and the volume replay in each history
   pass, and a failure holds that pass behind it. An archive range that stays
   unreadable is skipped and warned, as the replay does.

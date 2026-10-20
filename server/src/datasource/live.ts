@@ -2244,7 +2244,14 @@ export class LiveDataSource extends BaseSource {
         fromDay: fillsScanFromDay(a?.backfillFromUtc, now, config.markoutBackfillDays),
       });
       const pending = this.pendingRebuild(venueId, queued);
-      held.set(venueId, (c) => (incompleteFrom !== undefined && c.utcDay >= incompleteFrom) || pendingReSet(c, pending));
+      // A 'markets' revision still to apply ADDS swaps for fills that may
+      // already be stored: the onboarding stores one without counting it.
+      // Rewritten from those fills first, the day would count them twice.
+      // Held whatever stages run this boot: a stage switched off defers the
+      // revision, it does not drop it.
+      const addsFrom = this.pendingMarketsFrom(a, vid);
+      held.set(venueId, (c) => (incompleteFrom !== undefined && c.utcDay >= incompleteFrom) || pendingReSet(c, pending)
+        || (addsFrom !== undefined && c.utcDay >= addsFrom));
     }
     // today is the live tail's, rewritten as always
     const judged = counts.filter((c) => c.utcDay >= today || !held.get(c.venueId)!(c));
@@ -2273,8 +2280,8 @@ export class LiveDataSource extends BaseSource {
     const { a, vid } = this.historyVenue(venueId);
     // A chain reset rewrites day rows only through the volume replay; without
     // it, it repairs no USD and explains nothing here. A 'fills' revision
-    // SETs its days itself. A 'markets' revision re-SETs nothing: it adds a
-    // fill to a day and to the table in one commit, so its days stay judgeable.
+    // SETs its days itself. A 'markets' revision re-SETs nothing; the days it
+    // adds to are held on their own (reconcileSwapCounts).
     const volumeReplays = config.backfillEnabled && !!a?.backfillFromUtc;
     const out: VenueRebuild = {
       resets: queued.filter((t): t is Exclude<typeof t, { from: 'markets' }> =>
@@ -2470,7 +2477,9 @@ export class LiveDataSource extends BaseSource {
         volumeEnabled: config.backfillEnabled,
         fillsEnabled: config.markoutBackfill,
       });
-      await this.ownMarketsFrom(t.vid, from?.day ?? '0000-01-01');
+      // the replay re-SETs closed days only when it rebuilds volume; without
+      // it, only today changes hands (the re-read below replaces it)
+      await this.ownMarketsFrom(t.vid, deletes.volume ? (from?.day ?? '0000-01-01') : today);
       const dropped = await this.storeWriter.resetVenueHistory(t.vid, deletes, from?.block);
       purgeVenueDays(this.days, t.vid, deletes);
       purgeVenueFills({ fills: this.fills, pending: this.pending, dirty: this.dirty, countedIds: this.countedIds }, t.vid, deletes);
@@ -2702,16 +2711,24 @@ export class LiveDataSource extends BaseSource {
    * build, which did not know the markets — and the volume replay it inherits
    * unfinished, which will decode them itself (marketsRevisionWindow). Written
    * whatever stages are on and before the tail reads a block: no later boot
-   * can tell its own tail's blocks from an older build's.
+   * can tell its own tail's blocks from an older build's. Every boot also
+   * hands today to this build when it inherits a pending today re-read.
    */
   private recordMarketsRevisionStarts(b0: bigint): void {
     const meta: Record<string, string> = {};
+    const today = utcDay();
     for (const a of ADAPTERS) {
       const vid = this.vidOf(a);
       if (!vid) continue;
+      // A today re-read a previous run left pending resumes after this, from
+      // midnight, with this build (runRereads): today is its, as for a reset
+      // (ownMarketsFrom). Any of the adapter's venues can carry one.
+      const rereadToday = a.venues().some((v) => this.store.getMeta(rereadKey(v.id)) === today);
       for (const t of revisionTargets(vid, a.historyRevisions)) {
         if (t.from !== 'markets' || resetAlreadyApplied(this.store, t)) continue;
         const keys = marketsRevisionKeys(resetMarker(t));
+        const owned = this.store.getMeta(keys.owned);
+        if (rereadToday && (!owned || today < owned)) meta[keys.owned] = today;
         if (this.store.getMeta(keys.b0)) continue;
         meta[keys.b0] = String(b0);
         if (a.backfillFromUtc && this.store.getMeta(`backfill_done_${vid}`) !== '1') {
@@ -2720,6 +2737,16 @@ export class LiveDataSource extends BaseSource {
       }
     }
     if (Object.keys(meta).length) this.store.persistSnapshot([], meta, []);
+  }
+
+  /** The earliest `from` of the venue's 'markets' revisions still to apply,
+   *  whatever stages run this boot (a switched-off stage defers a revision). */
+  private pendingMarketsFrom(a: VenueAdapter | undefined, vid: string): string | undefined {
+    let from: string | undefined;
+    for (const t of revisionTargets(vid, a?.historyRevisions)) {
+      if (t.from === 'markets' && !resetAlreadyApplied(this.store, t) && (!from || t.day < from)) from = t.day;
+    }
+    return from;
   }
 
   /**

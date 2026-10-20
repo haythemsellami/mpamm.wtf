@@ -28,11 +28,11 @@ afterEach(() => {
   }
 });
 
-async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?: boolean; markoutBackfill?: 'on' | 'off' } = {}) {
+async function setup(opts: { reset?: string; withAdapter?: boolean; withQuotes?: boolean; markoutBackfill?: 'on' | 'off'; backfill?: 'on' | 'off' } = {}) {
   const path = join(tmpdir(), `live-startup-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   paths.push(path);
   vi.stubEnv('DB_PATH', path);
-  vi.stubEnv('BACKFILL', 'on');
+  vi.stubEnv('BACKFILL', opts.backfill ?? 'on');
   vi.stubEnv('MARKOUT_BACKFILL', opts.markoutBackfill ?? 'on');
   vi.stubEnv('GAS_METRIC', 'on');
   if (opts.reset) vi.stubEnv('BACKFILL_RESET', opts.reset);
@@ -803,24 +803,29 @@ describe('live startup archive gate', () => {
   // alone, count a fill the onboarding stored but never added, leave the days
   // a volume replay or reset re-SETs to them, and keep rows and fills
   // consistent for the boot reconcile.
-  async function marketsRevisionScene(meta: Record<string, string>, opts: { b0?: number; replay?: string } = {}) {
+  async function marketsRevisionScene(meta: Record<string, string>, opts: {
+    b0?: number; replay?: string; setup?: { reset?: (d2: string) => string; backfill?: 'on' | 'off'; markoutBackfill?: 'on' | 'off' };
+  } = {}) {
     vi.stubEnv('BACKFILL_PACE_MS', '0');
     vi.stubEnv('BACKFILL_CHUNK', '500');
     vi.stubEnv('BACKFILL_MERGE_EVERY', '1');
-    const { source, adapter } = await setup({ withAdapter: true });
-    const rpc = await import('../chain/rpc.js') as any;
-    const live = await import('../datasource/live.js');
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(console, 'log').mockImplementation(() => {});
     const DAY = 86_400_000;
     const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
     const now = Date.now();
     const d1 = Date.parse(`${day(now - 2 * DAY)}T00:00:00Z`), d2 = d1 + DAY;
+    const { source, adapter } = await setup({
+      withAdapter: true, reset: opts.setup?.reset?.(day(d2)), backfill: opts.setup?.backfill, markoutBackfill: opts.setup?.markoutBackfill,
+    });
+    const rpc = await import('../chain/rpc.js') as any;
+    const live = await import('../datasource/live.js');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
     // 1,000 blocks a UTC day, block 1,000 = d1's midnight
     const tsOfBlock = (b: number) => d1 + (b - 1_000) * (DAY / 1_000);
     const blockAt = (ms: number) => 1_000 + Math.ceil((ms - d1) / (DAY / 1_000));
     const closedEnd = BigInt(blockAt(d2 + DAY) - 1);
     source.deepEnd = closedEnd + 1n;
+    source.bootHead = closedEnd + 10_000n;
     const logs = [
       { id: 'x1', market: 'XAUt/USDC', usd: 100, blockNumber: 1_200n },
       { id: 'm1', market: 'MON/USDC', usd: 999, blockNumber: 1_300n },
@@ -861,15 +866,23 @@ describe('live startup archive gate', () => {
     const persist = vi.spyOn(source, 'persist');
     const emits = vi.spyOn(source, 'emitMsg');
     const storedRow = (ms: number) => source.store.all().find((x: any) => x.utcDay === day(ms))?.byVenue['test-venue'];
+    const row = (ms: number) => source.days.find((x: any) => x.utcDay === day(ms))?.byVenue['test-venue'];
+    const swapNotes = () => source.notes.list().filter((n: StateNote) => n.code.startsWith('store.swaps.'));
     const remarkCursor = 'mkhist_cursor_test-venue_XAUt/USDC';
     const resyncs = () => emits.mock.calls.filter(([m]: any) => m.ch === 'volume' && m.resync).length;
     const fillIds = () => source.store.fillsByIds(['test-venue-x1', 'test-venue-x2', 'test-venue-x3']).map((f: Fill) => f.id).sort();
-    return { source, rpc, live, target, marker, keys, storedRow, d1, d2, now, closedEnd, day, persist, remarkCursor, resyncs, fillIds };
+    return { source, rpc, live, target, marker, keys, storedRow, row, swapNotes, d1, d2, now, closedEnd, day, persist, remarkCursor, resyncs, fillIds };
   }
   it("a 'markets' revision adds the listed market's older-build fills — a stored one too — and stamps", async () => {
     // a markout sweep already walked the market through d2
     const s = await marketsRevisionScene({ ...SETTLED, 'mkhist_cursor_test-venue_XAUt/USDC': '2099-01-01' });
     const { source, rpc, live, target, keys, d1, d2, now, closedEnd } = s;
+
+    // the boot reconcile runs first: x1 is stored but not yet in d1's count,
+    // and the revision is what adds it — rewritten here, it would count twice
+    source.reconcileSwapCounts();
+    expect(s.row(d1)).toEqual({ usd: 999, swaps: 1 });
+    expect(s.swapNotes()).toEqual([]);
 
     // a sweep holds the remark lock: the cursor rewind must wait for it, or the
     // sweep would write its own later cursor over the rewind
@@ -983,6 +996,29 @@ describe('live startup archive gate', () => {
     source.store.close();
   });
 
+  /** a boot with a history stage off defers the revision; the reconcile must
+   *  hold its days all the same */
+  it("the boot reconcile holds a deferred 'markets' revision's days", async () => {
+    const s = await marketsRevisionScene(SETTLED, { setup: { markoutBackfill: 'off' } });
+    s.source.reconcileSwapCounts();
+    expect([s.row(s.d1), s.row(s.d2)]).toEqual([{ usd: 999, swaps: 1 }, { usd: 560, swaps: 2 }]);
+    expect(s.swapNotes()).toEqual([]);
+    s.source.store.close();
+  });
+
+  /** an operator reset hands its replayed days to this build only if it
+   *  rebuilds volume; with BACKFILL off it keeps every closed row, and only
+   *  today (its re-read) changes hands */
+  it.each([
+    { backfill: 'on' as const, owned: 'd2' },
+    { backfill: 'off' as const, owned: 'today' },
+  ])("an operator reset with BACKFILL=$backfill hands the 'markets' revision's blocks from $owned", async ({ backfill, owned }) => {
+    const s = await marketsRevisionScene(SETTLED, { setup: { reset: (d2) => `test-venue:${d2}`, backfill } });
+    await s.source.applyBackfillReset(s.now, s.closedEnd);
+    expect(s.source.store.getMeta(s.keys.owned)).toBe(owned === 'd2' ? s.day(s.d2) : s.day(s.now));
+    s.source.store.close();
+  });
+
   /** b0 is recorded once, on the first boot that declares the revision —
    *  whatever stages are on — with the replay it inherits */
   it("records a 'markets' revision's first tail block and inherited replay once", async () => {
@@ -995,6 +1031,16 @@ describe('live startup archive gate', () => {
     source.recordMarketsRevisionStarts(5_000n);
     source.recordMarketsRevisionStarts(9_000n);
     expect([source.store.getMeta(keys.b0), source.store.getMeta(keys.replay)]).toEqual(['5000', '777']);
+    expect(source.store.getMeta(keys.owned)).toBeUndefined();
+    // a today re-read a previous run left pending resumes from midnight with
+    // this build: today is its — without moving an earlier claim
+    const today = new Date().toISOString().slice(0, 10);
+    source.store.persistSnapshot([], { 'reread_day_test-venue': today }, []);
+    source.recordMarketsRevisionStarts(9_000n);
+    expect(source.store.getMeta(keys.owned)).toBe(today);
+    source.store.persistSnapshot([], { [keys.owned]: '2026-01-02' }, []);
+    source.recordMarketsRevisionStarts(9_000n);
+    expect(source.store.getMeta(keys.owned)).toBe('2026-01-02');
     source.store.close();
   });
 
