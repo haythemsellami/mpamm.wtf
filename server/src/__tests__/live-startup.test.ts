@@ -846,18 +846,41 @@ describe('live startup archive gate', () => {
       { utcDay: day(d2), partial: false, byVenue: { 'test-venue': { usd: 560, swaps: 2 } } },
     ], meta, [toFill(logs[1], tsOfBlock(1_300)), toFill(logs[3], tsOfBlock(2_400)), toFill(logs[4], tsOfBlock(2_700))]);
     source.days = source.store.all();
+    // no live tail runs here: a gate runs at once, as between two tail cycles
+    source.inTail = vi.fn((fn: () => Promise<unknown>) => fn());
+    const persist = vi.spyOn(source, 'persist');
+    const emits = vi.spyOn(source, 'emitMsg');
     const [target] = live.revisionTargets('test-venue', [revision]);
     const marker = live.resetMarker(target);
     const row = (ms: number) => source.days.find((x: any) => x.utcDay === day(ms))?.byVenue['test-venue'];
     const storedRow = (ms: number) => source.store.all().find((x: any) => x.utcDay === day(ms))?.byVenue['test-venue'];
-    return { source, rpc, live, target, marker, row, storedRow, d1, d2, now, closedEnd, day };
+    const remarkCursor = 'mkhist_cursor_test-venue_XAUt/USDC';
+    const resyncs = () => emits.mock.calls.filter(([m]: any) => m.ch === 'volume' && m.resync).length;
+    return { source, rpc, live, target, marker, row, storedRow, d1, d2, now, closedEnd, day, persist, remarkCursor, resyncs };
   }
 
   it("a 'markets' revision adds only the listed market's unheld fills, then stamps once its first day has closed", async () => {
-    const s = await marketsRevisionScene({ 'mkfill_done_test-venue': '1', 'backfill_done_test-venue': '1' });
+    // a markout sweep already walked the market through d2 — before any XAUt fill existed
+    const s = await marketsRevisionScene({
+      'mkfill_done_test-venue': '1', 'backfill_done_test-venue': '1', 'mkhist_cursor_test-venue_XAUt/USDC': '2099-01-01',
+    });
     const { source, rpc, live, target, marker, d1, d2, now, closedEnd } = s;
 
-    await source.applyBackfillReset(now, closedEnd);
+    // a sweep holds the remark lock: the cursor rewind must wait for it, or the
+    // sweep would write its own later cursor over the rewind
+    source.remarkRunning = true;
+    const applied = source.applyBackfillReset(now, closedEnd);
+    await vi.waitFor(() => expect(source.store.getMeta(`${marker}_remark`)).toBe('1'));   // inserted, rewind owed
+    expect(source.store.getMeta(s.remarkCursor)).toBe('2099-01-01');                        // ...and held back
+    source.remarkRunning = false;
+    await applied;
+    // the tail's state reached disk before the first day row was written
+    expect(s.persist).toHaveBeenCalledWith(true);
+    expect(s.persist.mock.invocationCallOrder[0]).toBeLessThan(rpc.archiveClient.getLogs.mock.invocationCallOrder[0]);
+    // the sweep walks the inserted days again, and the debt is paid
+    expect(source.store.getMeta(s.remarkCursor)).toBe(s.day(d1));
+    expect(source.store.getMeta(`${marker}_remark`)).toBe('');
+    expect(s.resyncs()).toBe(1);
     // x1 → d1 and x2 → d2 added; x3 held (the tail's), MON untouched
     for (const read of [s.row, s.storedRow]) expect([read(d1), read(d2)]).toEqual([{ usd: 1_099, swaps: 2 }, { usd: 600, swaps: 3 }]);
     expect(source.store.fillsByIds(['test-venue-x1', 'test-venue-x2']).map((f: Fill) => f.id).sort()).toEqual(['test-venue-x1', 'test-venue-x2']);
@@ -882,6 +905,32 @@ describe('live startup archive gate', () => {
     expect(live.resetAlreadyApplied(source.store, target)).toBe(true);
     expect([s.storedRow(d1), s.storedRow(d2)]).toEqual([{ usd: 1_099, swaps: 2 }, { usd: 600, swaps: 3 }]);
     expect(source.notes.list().some((n: StateNote) => n.code === 'backfill.reset' && n.msg.includes('added 2 XAUt/USDC fill(s), $140.00'))).toBe(true);
+    source.store.close();
+  });
+
+  /** a later range failing after earlier batches committed: those days are
+   *  final, so open Volume tabs still reload them and the markout cursor is
+   *  still rewound — the retry, finding them already added, would do neither */
+  it("a 'markets' revision that fails part-way still resyncs and rewinds what it committed, and its retry adds the rest once", async () => {
+    const s = await marketsRevisionScene({ 'mkfill_done_test-venue': '1', 'backfill_done_test-venue': '1', 'mkhist_cursor_test-venue_XAUt/USDC': '2099-01-01' });
+    const { source, live, target, marker, d1, d2, now, closedEnd } = s;
+    const adapter = (await import('../venues/registry.js')).ADAPTERS[0] as any;
+    const decode = adapter.decode.getMockImplementation();
+    adapter.decode.mockImplementation(async (ctx: unknown, bundle: any, tsOf: any) => {
+      if (bundle.swaps.some((l: any) => l.blockNumber >= 2_000n)) throw new Error('price leg still warming');
+      return decode(ctx, bundle, tsOf);
+    });
+    await expect(source.applyBackfillReset(now, closedEnd)).rejects.toThrow('price leg still warming');
+    expect(s.storedRow(d1)).toEqual({ usd: 1_099, swaps: 2 });     // x1 committed
+    expect(s.storedRow(d2)).toEqual({ usd: 560, swaps: 2 });       // nothing yet
+    expect(s.resyncs()).toBe(1);
+    expect(source.store.getMeta(s.remarkCursor)).toBe(s.day(d1));
+    expect(source.store.getMeta(`${marker}_remark`)).toBe('');
+
+    adapter.decode.mockImplementation(decode);
+    await source.applyBackfillReset(now, closedEnd);
+    expect([s.storedRow(d1), s.storedRow(d2)]).toEqual([{ usd: 1_099, swaps: 2 }, { usd: 600, swaps: 3 }]);
+    expect(live.resetAlreadyApplied(source.store, target)).toBe(false);   // still today's window
     source.store.close();
   });
 

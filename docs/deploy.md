@@ -191,6 +191,9 @@ day increments, fills and cursor in one snapshot. The rules:
 - It runs ahead of the fills onboarding and the volume replay in each history
   pass, and a failure holds that pass behind it. An archive range that stays
   unreadable is skipped and warned, as the replay does.
+- Inserted fills get archive markouts from the remark sweep. Each pass that
+  inserted rewinds the listed markets' remark cursors to `from`, under the
+  remark lock, since a sweep that ran mid-scan has already walked past them.
 
 Hanji's XAUt0/USDC book (listed 2026-10-20 after trading $2.41M unlisted since
 09-24) shipped this way. A chain replay would have re-priced the ~53% of

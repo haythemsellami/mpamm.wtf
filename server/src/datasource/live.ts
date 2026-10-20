@@ -2539,6 +2539,7 @@ export class LiveDataSource extends BaseSource {
   ): Promise<string | null> {
     const marker = resetMarker(t);
     const cursorKey = `${marker}_cursor`, throughKey = `${marker}_through`, addedKey = `${marker}_added`;
+    const remarkKey = `${marker}_remark`;
     const startOf = (day: string) => Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000);
 
     // The volume replay re-SETs every day from the one it resumes on, with
@@ -2577,72 +2578,84 @@ export class LiveDataSource extends BaseSource {
     let added = parseMarketsAdded(this.store.getMeta(addedKey));
     const before = added.swaps;
 
-    if (cursor <= end) {
-      const retainedFromMs = retentionCutoffMs(nowMs, config.fillsRetentionDays);
-      const floor = BigInt(config.getLogsMinChunk);
-      const maxChunk = BigInt(config.backfillChunk);
-      let chunk = maxChunk;
-      let sinceFlush = 0, tries = 0, availabilityAttempts = 0;
-      const kept: Fill[] = [];
-      this.noteOnce('backfill.start', `${label}: adding ${t.markets.join(', ')} — blocks ${cursor}→${end} (${t.day}..${through})`, t.vid);
-      while (cursor <= end) {
-        if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
-        await holdWhileDegraded();
-        const to = cursor + chunk - 1n > end ? end : cursor + chunk - 1n;
-        let batches: any[][];
-        try {
-          batches = await allPreferAvailability(seed.all.map((s) => {
-            const span = sourceSpan(s, cursor, to);
-            return span ? archiveRead(() => archiveClient.getLogs({ address: s.address as any, fromBlock: span.from, toBlock: span.to, events: s.events as any } as any) as Promise<any[]>) : Promise.resolve([]);
-          }));
-          if (chunk < maxChunk) chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n;
-        } catch (e) {
-          // Unreachable/throttled ≠ unreadable — hold, never shrink or skip.
-          if (isAvailabilityFailure(e)) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
-          if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; continue; }
-          if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; }
-          // Unreadable at the floor: an archive hole, which retrying across boots
-          // cannot fix. Skip it loudly, as the replay does — never silently.
-          this.note('backfill.range.skipped', `${label}: the RPC archive could not serve blocks ${cursor}→${to} (${(e as Error).message}) — skipped; ${t.markets.join(', ')} fills there are not added`, t.vid);
-          batches = seed.all.map(() => []);
-        }
-        tries = 0;
-        // A decode error (a price leg still warming) is not a hole: it throws,
-        // holding the pass. The timestamp is a placeholder until the market
-        // filter has run: decode only stamps it (VenueAdapter.decode), so real
-        // ones are read for the kept fills' blocks alone, not every log's.
-        const bundle: LogBundle = {};
-        seed.all.forEach((s, i) => { bundle[s.key] = batches[i]; });
-        const fills = batches.some((b) => b.length)
-          ? this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, () => 0, new Set()), 'revision fill')
-            .filter((f) => f.venueId === t.vid && markets.has(f.market))
-          : [];
-        try {
-          const blocks = [...new Set(fills.map((f) => f.blockNumber))];
-          const ts = new Map<number, number>();
-          for (let i = 0; i < blocks.length; i += 15) {
-            await Promise.all(blocks.slice(i, i + 15).map(async (bn) => {
-              ts.set(bn, Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: BigInt(bn) }))).timestamp) * 1000);
+    try {
+      if (cursor <= end) {
+        // The tail's fills, days and cursor go to disk BEFORE this scan builds on
+        // them, inside the gate so nothing ingests in between. A day row this
+        // writes carries the tail's in-memory part of that day (the window's last
+        // day, just closed): left unflushed, a crash would re-tail those fills
+        // over a row that already counts them.
+        await this.inTail(() => this.persist(true));
+        const retainedFromMs = retentionCutoffMs(nowMs, config.fillsRetentionDays);
+        const floor = BigInt(config.getLogsMinChunk);
+        const maxChunk = BigInt(config.backfillChunk);
+        let chunk = maxChunk;
+        let sinceFlush = 0, tries = 0, availabilityAttempts = 0;
+        const kept: Fill[] = [];
+        this.noteOnce('backfill.start', `${label}: adding ${t.markets.join(', ')} — blocks ${cursor}→${end} (${t.day}..${through})`, t.vid);
+        while (cursor <= end) {
+          if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
+          await holdWhileDegraded();
+          const to = cursor + chunk - 1n > end ? end : cursor + chunk - 1n;
+          let batches: any[][];
+          try {
+            batches = await allPreferAvailability(seed.all.map((s) => {
+              const span = sourceSpan(s, cursor, to);
+              return span ? archiveRead(() => archiveClient.getLogs({ address: s.address as any, fromBlock: span.from, toBlock: span.to, events: s.events as any } as any) as Promise<any[]>) : Promise.resolve([]);
             }));
+            if (chunk < maxChunk) chunk = chunk * 2n > maxChunk ? maxChunk : chunk * 2n;
+          } catch (e) {
+            // Unreachable/throttled ≠ unreadable — hold, never shrink or skip.
+            if (isAvailabilityFailure(e)) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
+            if (chunk > floor) { chunk = chunk / 2n > floor ? chunk / 2n : floor; continue; }
+            if (++tries <= 5) { await sleep(config.backfillPaceMs * 25 * tries); continue; }
+            // Unreadable at the floor: an archive hole, which retrying across boots
+            // cannot fix. Skip it loudly, as the replay does — never silently.
+            this.note('backfill.range.skipped', `${label}: the RPC archive could not serve blocks ${cursor}→${to} (${(e as Error).message}) — skipped; ${t.markets.join(', ')} fills there are not added`, t.vid);
+            batches = seed.all.map(() => []);
           }
-          for (const f of fills) f.ts = ts.get(f.blockNumber)!;
-        } catch (e) {
-          if (isAvailabilityFailure(e)) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
-          throw e;
+          tries = 0;
+          // A decode error (a price leg still warming) is not a hole: it throws,
+          // holding the pass. The timestamp is a placeholder until the market
+          // filter has run: decode only stamps it (VenueAdapter.decode), so real
+          // ones are read for the kept fills' blocks alone, not every log's.
+          const bundle: LogBundle = {};
+          seed.all.forEach((s, i) => { bundle[s.key] = batches[i]; });
+          const fills = batches.some((b) => b.length)
+            ? this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, () => 0, new Set()), 'revision fill')
+              .filter((f) => f.venueId === t.vid && markets.has(f.market))
+            : [];
+          try {
+            const blocks = [...new Set(fills.map((f) => f.blockNumber))];
+            const ts = new Map<number, number>();
+            for (let i = 0; i < blocks.length; i += 15) {
+              await Promise.all(blocks.slice(i, i + 15).map(async (bn) => {
+                ts.set(bn, Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: BigInt(bn) }))).timestamp) * 1000);
+              }));
+            }
+            for (const f of fills) f.ts = ts.get(f.blockNumber)!;
+          } catch (e) {
+            if (isAvailabilityFailure(e)) { await sleep(archiveRetryDelayMs(++availabilityAttempts)); continue; }
+            throw e;
+          }
+          availabilityAttempts = 0;
+          kept.push(...fills);
+          cursor = to + 1n;
+          if (++sinceFlush >= config.backfillMergeEvery || cursor > end) {
+            added = await this.commitMarketsAdd(t, kept, markets, retainedFromMs, { [cursorKey]: String(cursor) }, addedKey, remarkKey, added);
+            kept.length = 0;
+            sinceFlush = 0;
+          }
+          await sleep(config.backfillPaceMs);
         }
-        availabilityAttempts = 0;
-        kept.push(...fills);
-        cursor = to + 1n;
-        if (++sinceFlush >= config.backfillMergeEvery || cursor > end) {
-          added = await this.commitMarketsAdd(t, kept, markets, retainedFromMs, { [cursorKey]: String(cursor) }, addedKey, added);
-          kept.length = 0;
-          sinceFlush = 0;
-        }
-        await sleep(config.backfillPaceMs);
       }
-      // An open Volume tab loads closed days once (REST) and then merges only
-      // today's frames: one resync makes it reload the days this pass added.
+    } finally {
+      // However the pass ends, what it committed stays committed. An open
+      // Volume tab loads closed days once (REST) and then merges only today's
+      // frames: one resync makes it reload the days this pass added. The
+      // listed markets' markout cursors are rewound over the fills it inserted.
       if (added.swaps > before) this.emitMsg({ ch: 'volume', resync: true });
+      await this.rewindRemarkCursors(t, remarkKey);
     }
 
     if (!throughClosed) {
@@ -2669,6 +2682,7 @@ export class LiveDataSource extends BaseSource {
     retainedFromMs: number,
     meta: Record<string, string>,
     addedKey: string,
+    remarkKey: string,
     added: { swaps: number; usd: number },
   ): Promise<{ swaps: number; usd: number }> {
     const ids = [...new Set(kept.map((f) => f.id))];
@@ -2690,7 +2704,10 @@ export class LiveDataSource extends BaseSource {
     }
     if (touched.length) this.days.sort((x, y) => (x.utcDay < y.utcDay ? -1 : 1));
     try {
-      await this.writeSnapshot({ days: touched.map((x) => x.d), meta: { ...meta, [addedKey]: JSON.stringify(total) }, fills: plan.insert });
+      // inserted fills owe a markout-cursor rewind (rewindRemarkCursors): the
+      // debt commits with them, so a crash before the rewind cannot drop it
+      const owed = plan.insert.length ? { [remarkKey]: '1' } : {};
+      await this.writeSnapshot({ days: touched.map((x) => x.d), meta: { ...meta, ...owed, [addedKey]: JSON.stringify(total) }, fills: plan.insert });
     } catch (e) {
       for (const { d, was } of touched) {
         if (was) d.byVenue[t.vid] = was;
@@ -2700,6 +2717,35 @@ export class LiveDataSource extends BaseSource {
     }
     if (plan.insert.length) this.dropAggregates();
     return total;
+  }
+
+  /**
+   * Point the listed markets' markout-remark cursors back at the revision's
+   * start, so the sweep walks the days it inserted fills into. The sweep
+   * writes its cursor for EVERY day it walks, so one that ran mid-scan has
+   * already passed days whose fills arrived after it: they would never be
+   * marked. Taken under the remark lock, because a sweep already walking would
+   * write its own, later cursor over an unlocked rewind. Owed (`remarkKey`)
+   * from the commit that inserted, so a crash in between retries it.
+   */
+  private async rewindRemarkCursors(t: BackfillResetTarget & { from: 'markets' }, remarkKey: string): Promise<void> {
+    if (this.store.getMeta(remarkKey) !== '1') return;
+    while (this.remarkRunning) {
+      if (this.loopsStopped) throw new Error('source stopped while a markout sweep held the remark lock');
+      await sleep(1_000);
+    }
+    this.remarkRunning = true;
+    try {
+      const meta: Record<string, string> = { [remarkKey]: '' };
+      for (const market of t.markets) {
+        const key = `mkhist_cursor_${t.vid}_${market}`;
+        const cur = this.store.getMeta(key);
+        if (cur && cur > t.day) meta[key] = t.day;
+      }
+      await this.writeSnapshot({ days: [], meta, fills: [] });
+    } finally {
+      this.remarkRunning = false;
+    }
   }
 
   /** Run `fn` between two tail cycles: no fill is ingested, and the cursor
