@@ -1,6 +1,6 @@
 {
-  "recordedAt": "2026-09-18T09:39:07.395Z",
-  "block": 105857551,
+  "recordedAt": "2026-10-20T16:11:11.819Z",
+  "block": 115084407,
   "method": "Actual getConfig multicall at one pinned Monad block; no transactions.",
   "markets": [
     {
@@ -110,6 +110,25 @@
         "0",
         "0xc071cE4e12c5DDE00334b4276f29a852e1CD5711",
         "0xb291c65723E8e175365d313eC12A8787d5CE66E9",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "XAUt/USDC",
+      "address": "0xa49d9ea941e4adb7e60aeee49fd6c9fb122925ab",
+      "result": [
+        "100",
+        "1",
+        "0x01bFF41798a0BcF287b996046Ca68b395DbC1071",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x6c01FFB0711f2A71DA423607ce89350a1Cb291C8",
+        "0x6850D4362AE0b5954AdA7BEa717828757b7dBA1a",
         "500000000000000000",
         "100000000000000",
         "0",

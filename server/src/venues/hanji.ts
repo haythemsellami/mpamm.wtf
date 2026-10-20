@@ -99,12 +99,10 @@ const FAST_QUOTERS = [
  *  owner() 0xA24D2aF7…, pushed by the same rotating fleet both directly
  *  (updatePrices, 37,000 limit) and through the FastLane relay. It prices
  *  Hanji's XAUt0/USDC book (CLOB 0xa49d9ea9…, proxy 0x88687e49… — traced:
- *  that book reads it, none of KNOWN_MARKETS does), which is not a registered
- *  pair, so the venue carries none of its volume. Its burn is counted anyway:
- *  QUOTE_UPDATE_BURN is what Hanji's keeper spends, and leaving this out
- *  understated it by ~31% (2026-10-12: ~92k pushes, ~1,560 MON of ~5,060).
- *  The cost is that Hanji's burn-per-$1M ratio includes a market whose
- *  volume it does not. Untracked from creation until 2026-10-15. */
+ *  that book reads it, none of the other markets does). Leaving it out
+ *  understated QUOTE_UPDATE_BURN by ~31% (2026-10-12: ~92k pushes, ~1,560
+ *  MON of ~5,060). Untracked from creation until 2026-10-15; the book's own
+ *  volume until 2026-10-20 (see KNOWN_MARKETS). */
 const XAUT_FAST_QUOTER = '0x1fb37a1e6dc03a523bba106cb25e398e8608a010' as const;
 
 /** FASTLANE ROUTE (gen8+): from ~2026-09-22 the keeper also pushes through
@@ -127,7 +125,15 @@ const FASTLANE_AUCTION_HANDLER = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58' as
 const FASTLANE_QUOTERS = ['0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b', XAUT_FAST_QUOTER] as const;
 
 /** Hanji markets (team-provided, tokens verified on-chain via getConfig).
- *  `market` is the @shared pair symbol; base/quote are TOKENS registry keys. */
+ *  `market` is the @shared pair symbol; base/quote are TOKENS registry keys.
+ *
+ *  XAUt/USDC is made by a SECOND Hanji vault, not the LPManager behind the
+ *  rest: 0xff0cC147… (the same implementation 0x33b2a20d…, owner 0xA24D2aF7…)
+ *  holds every resting order on that book, priced by XAUT_FAST_QUOTER. It
+ *  traded from 2026-09-24 (block 107603137) but went unlisted until
+ *  2026-10-20 — 3,332 fills, $2.41M — though the pair was registered on
+ *  2026-09-16: the gas audit took it for unregistered. Recovered by the
+ *  'xaut-book' revision below. */
 const KNOWN_MARKETS = [
   { market: 'MON/USDC', clob: '0xC35b1Ca1a2C398A21df5783b3a5eA6A2D56f298F', proxy: '0x1aeD222dda944a87703c918745b11bE13f8eEf10', baseTok: 'WMON', quoteTok: 'USDC' },
   { market: 'ETH/USDC', clob: '0xAC652E05Ac4B2e9eCaE5C65595E4E4E2734F61Cc', proxy: '0x0ACBA24cecd750bAdB3179FB9eE3F2Cd27431778', baseTok: 'WETH', quoteTok: 'USDC' },
@@ -135,6 +141,7 @@ const KNOWN_MARKETS = [
   { market: 'MON/ETH', clob: '0xBe717AEdc2cdc0a4d3903B7A6a70691942E72793', proxy: '0xc4aDcB94D0dce7fc84e180fAE3621Df13ad37e06', baseTok: 'WMON', quoteTok: 'WETH' },
   { market: 'cbBTC/MON', clob: '0x77ED4fcB978fa0CE78799064cB38D12FE7c3ce7d', proxy: '0x012e06b56EEE881603E47748931dC38EfaBf54eF', baseTok: 'CBBTC', quoteTok: 'WMON' },
   { market: 'cbBTC/ETH', clob: '0x8A89f08d3B5aB37f634f2B4dCf2DB29Ecf9938c7', proxy: '0x05e028d33fA727168bC9396bDAc5Cab387c8a196', baseTok: 'CBBTC', quoteTok: 'WETH' },
+  { market: 'XAUt/USDC', clob: '0xa49d9ea941e4adb7e60aeee49fd6c9fb122925ab', proxy: '0x88687e499846ce3037e63754a6e2e7b53483c70e', baseTok: 'XAUT0', quoteTok: 'USDC' },
 ] as const;
 
 const lobAbi = parseAbi([
@@ -203,7 +210,16 @@ export function createHanjiAdapter(): VenueAdapter {
     //                         day). A chain replay was ruled out: it would
     //                         re-price every later day's cross pairs at the
     //                         deploy-time mid (−3% to −9% on 09-28..10-07).
-    historyRevisions: [{ id: 'replay-0921-midnight', source: 'fills', from: '2026-09-17', until: '2026-09-20' }],
+    //   xaut-book             ADDS the XAUt/USDC book's history (KNOWN_MARKETS)
+    //                         from the CLOB's creation day; no fill predates
+    //                         it. A chain replay from there would re-price the
+    //                         ~53% of Hanji's volume quoted in ETH or MON at the
+    //                         deploy-time mid: about −$5.1M (−6.9%) against
+    //                         +$2.41M recovered (estimated 2026-10-20).
+    historyRevisions: [
+      { id: 'replay-0921-midnight', source: 'fills', from: '2026-09-17', until: '2026-09-20' },
+      { id: 'xaut-book', source: 'markets', from: '2026-09-21', markets: ['XAUt/USDC'] },
+    ],
 
     async discover(ctx: AdapterContext) {
       const res = await ctx.client.multicall({
@@ -329,7 +345,7 @@ export function createHanjiAdapter(): VenueAdapter {
     // build tracked 0x0000a8fd…8888 — another protocol's pool (mistaken
     // trace inference, since replaced by this team-confirmed destination).
     // gen8+ pushes also arrive via the FastLane relay — see FASTLANE_AUCTION_HANDLER.
-    // XAUT_FAST_QUOTER is counted too, though no tracked market reads it.
+    // XAUT_FAST_QUOTER prices the XAUt/USDC book.
     gasSources() {
       const fastLane = new Set<string>(FASTLANE_QUOTERS);
       return [
