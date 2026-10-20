@@ -972,64 +972,86 @@ export function planFillsRevision(opts: {
 }
 
 /**
- * The last day a 'markets' revision adds to: the days the PREVIOUS build
- * decoded, which nothing else will recount.
+ * The block ranges a 'markets' revision adds, and whether more may follow.
  *
- * It starts as the day the revision first runs. That day's hours before the
- * deploy were decoded without the markets, its hours after by this build's
- * tail (whose fills the held check skips). Where the venue's volume replay is
- * unfinished, every day from the one it resumes on is SET by this build, the
- * markets included, so the window ends the day before. A fresh database
- * (replay not started) therefore ends it before it begins. Re-checked every
- * run: a chain reset landing while the revision waits rewinds the replay, and
- * the window shrinks with it. It never grows. Pure (history-revisions.test.ts).
+ * Its scope is everything an OLDER build decoded: blocks from `from`'s first
+ * block up to `b0`, the first block this build's tail read. The older build
+ * did not know the markets, so none of their fills there were counted. From
+ * `b0` on, the tail counts them. Two kinds of history stage carve days out,
+ * because they re-SET them with this build, markets included:
+ *  - a volume replay pending when this build first booted, from the day it
+ *    resumed on to wherever it ends (`replay.end`, exclusive, once done). An
+ *    unfinished one leaves the rest unknown, so the revision waits: it may yet
+ *    stop before the deploy day, whose older-build hours are then this
+ *    revision's alone;
+ *  - a chain reset or today re-read of the venue since (`ownedFrom`), which
+ *    hands every block from its start to this build.
+ * Pure (history-revisions.test.ts).
  */
-export function marketsRevisionThrough(opts: {
-  /** persisted by an earlier run; absent on the first */
-  through?: string;
-  today: string;
-  /** the venue's volume replay: finished (or none), or the day it resumes on */
-  replay: { done: true } | { done: false; resumeDay: string };
-}): string {
-  let through = opts.through ?? opts.today;
-  if (!opts.replay.done) {
-    const dayBefore = utcDay(Date.parse(`${opts.replay.resumeDay}T00:00:00Z`) - 86_400_000);
-    if (dayBefore < through) through = dayBefore;
-  }
-  return through;
+export function marketsRevisionWindow(opts: {
+  /** first block of `from` */
+  start: bigint;
+  b0: bigint;
+  replay?: { from: bigint; end?: bigint };
+  ownedFrom?: bigint;
+}): { ranges: Array<readonly [bigint, bigint]>; pending: boolean } {
+  const cap = opts.ownedFrom !== undefined && opts.ownedFrom < opts.b0 ? opts.ownedFrom : opts.b0;
+  const ranges: Array<readonly [bigint, bigint]> = [];
+  const push = (a: bigint, b: bigint) => { if (a < b) ranges.push([a, b] as const); };
+  const r = opts.replay;
+  if (!r) { push(opts.start, cap); return { ranges, pending: false }; }
+  push(opts.start, r.from < cap ? r.from : cap);
+  if (r.end === undefined) return { ranges, pending: r.from < cap };
+  push(r.end > opts.start ? r.end : opts.start, cap);
+  return { ranges, pending: false };
 }
 
 /**
  * What one scanned range of a 'markets' revision adds: the listed markets'
- * fills that are not held yet, summed per own-timestamp day.
+ * fills, summed per own-timestamp day.
  *
- * A HELD fill (stored, or still queued for the store) was decoded by this
- * build and is already in its day. Adding it again would count it twice. A
- * new fill is added to its day wherever it falls, but inserted only inside
- * retention (`retainedFromMs`): an older row would just be pruned. Pure
- * (history-revisions.test.ts).
+ * Every one is added to its day. The range is the older build's
+ * (marketsRevisionWindow), and nothing there counted these markets — a STORED
+ * fill included: the fills onboarding stores a fill without adding it to any
+ * day. A fill is inserted only when it is not stored yet (an upsert would wipe
+ * its markouts) and only inside retention (`retainedFromMs`), since an older
+ * row would just be pruned. Pure (history-revisions.test.ts).
  */
 export function planMarketsAdd(
   fills: readonly Fill[],
   markets: ReadonlySet<string>,
-  held: (id: string) => boolean,
+  stored: (id: string) => boolean,
   retainedFromMs: number,
-): { days: Map<string, { usd: number; swaps: number }>; insert: Fill[]; held: number } {
+): { days: Map<string, { usd: number; swaps: number }>; insert: Fill[] } {
   const days = new Map<string, { usd: number; swaps: number }>();
   const insert: Fill[] = [];
   const seen = new Set<string>();
-  let heldCount = 0;
   for (const f of fills) {
     if (!markets.has(f.market) || seen.has(f.id)) continue;   // a re-tailed duplicate collapses
     seen.add(f.id);
-    if (held(f.id)) { heldCount++; continue; }
     const day = utcDay(f.ts);
     const d = days.get(day) ?? { usd: 0, swaps: 0 };
     d.usd += f.usd; d.swaps += 1;
     days.set(day, d);
-    if (f.ts >= retainedFromMs) insert.push(f);
+    if (f.ts >= retainedFromMs && !stored(f.id)) insert.push(f);
   }
-  return { days, insert, held: heldCount };
+  return { days, insert };
+}
+
+/** The meta keys a 'markets' revision keeps next to its marker. */
+export function marketsRevisionKeys(marker: string) {
+  return {
+    /** first block this build's tail read */
+    b0: `${marker}_b0`,
+    /** the volume replay inherited unfinished: its cursor block, or 'start' */
+    replay: `${marker}_replay`,
+    /** earliest day a later chain reset or re-read handed to this build */
+    owned: `${marker}_owned`,
+    cursor: `${marker}_cursor`,
+    added: `${marker}_added`,
+    /** a markout-cursor rewind is owed */
+    remark: `${marker}_remark`,
+  };
 }
 
 /** A 'markets' revision's running total, persisted with its cursor so the
@@ -2019,6 +2041,7 @@ export class LiveDataSource extends BaseSource {
       if (lpb) this.note('tail.gap.skipped', `gap of ${gap} block(s) exceeds GAPFILL_MAX_BLOCKS=${config.gapFillMaxBlocks} — resuming at tip; the gap's fills are NOT decoded (recover with BACKFILL_RESET)`);
       else this.note('tail.resume', 'cold start — today builds forward from now');
     }
+    this.recordMarketsRevisionStarts(this.lastBlock + 1n);
   }
 
   /** Storage maintenance, all on the persistence worker so the event loop
@@ -2385,6 +2408,7 @@ export class LiveDataSource extends BaseSource {
       // Resolving its block would also be pointless work — the re-read always
       // starts at midnight.
       if (t.from === 'day' && t.day === today) {
+        await this.ownMarketsFrom(t.vid, today);
         await this.queueReread(t.vid, today);
         await settle();
         applied.push(`${t.vid} today only — re-reading ${today} from midnight`);
@@ -2430,6 +2454,7 @@ export class LiveDataSource extends BaseSource {
         continue;
       }
       if (from !== undefined && from.day === today) {
+        await this.ownMarketsFrom(t.vid, today);
         await this.queueReread(t.vid, today);
         await settle();
         applied.push(`${t.vid} today only — re-reading ${today} from midnight`);
@@ -2445,6 +2470,7 @@ export class LiveDataSource extends BaseSource {
         volumeEnabled: config.backfillEnabled,
         fillsEnabled: config.markoutBackfill,
       });
+      await this.ownMarketsFrom(t.vid, from?.day ?? '0000-01-01');
       const dropped = await this.storeWriter.resetVenueHistory(t.vid, deletes, from?.block);
       purgeVenueDays(this.days, t.vid, deletes);
       purgeVenueFills({ fills: this.fills, pending: this.pending, dirty: this.dirty, countedIds: this.countedIds }, t.vid, deletes);
@@ -2519,18 +2545,15 @@ export class LiveDataSource extends BaseSource {
 
   /**
    * Apply one 'markets' revision: ADD the listed markets' history over the
-   * days the previous build decoded (marketsRevisionThrough), and nothing
-   * else. ARCHIVE pool, from `from` to the window's last closed block. Each
-   * flush's day increments, inserted fills, resume cursor and running total
-   * commit in ONE snapshot, so a crash never adds a range twice. The stamp
-   * waits until the window's last day has closed and been read.
+   * blocks an older build decoded (marketsRevisionWindow), and nothing else.
+   * ARCHIVE pool. Each flush's day increments, inserted fills, resume cursor
+   * and running total commit in ONE snapshot, so a crash never adds a range
+   * twice; it is stamped once every range is read.
    *
-   * It runs in the reset pass, AHEAD of the fills onboarding and the volume
-   * replay, and that order keeps the held check sound: the onboarding stores
-   * fills without adding them to a day, so it must never reach a window day
-   * before this scan does. A failure therefore throws and holds the history
-   * pass behind it; only an archive range that stays unreadable is skipped,
-   * loudly, as the replay does.
+   * A flush runs inside the tail gate, after the tail's own fills, days and
+   * cursor reach disk. The day holding `b0` is the tail's too (today, at
+   * first): left unflushed, a crash would re-tail its part of a row this
+   * write already carries.
    *
    * Returns the applied-note line, or null while it waits.
    */
@@ -2538,28 +2561,15 @@ export class LiveDataSource extends BaseSource {
     a: VenueAdapter, t: BackfillResetTarget & { from: 'markets' }, nowMs: number, today: string, closedEnd: bigint, label: string,
   ): Promise<string | null> {
     const marker = resetMarker(t);
-    const cursorKey = `${marker}_cursor`, throughKey = `${marker}_through`, addedKey = `${marker}_added`;
-    const remarkKey = `${marker}_remark`;
+    const keys = marketsRevisionKeys(marker);
     const startOf = (day: string) => Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000);
-
-    // The volume replay re-SETs every day from the one it resumes on, with
-    // this build: those are not this revision's to add to.
-    let replay: { done: true } | { done: false; resumeDay: string } = { done: true };
-    if (a.backfillFromUtc && this.store.getMeta(`backfill_done_${t.vid}`) !== '1') {
-      const cb = this.metaBlock(`backfill_cursor_${t.vid}`);
-      const resumeDay = cb === undefined
-        ? a.backfillFromUtc
-        : utcDay(Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: cb > closedEnd ? closedEnd : cb }))).timestamp) * 1000);
-      replay = { done: false, resumeDay };
+    // recorded at the first boot of this build (recordMarketsRevisionStarts),
+    // which runs before any history pass; absent only if that boot failed early
+    const b0 = this.metaBlock(keys.b0);
+    if (b0 === undefined) {
+      this.noteOnce('backfill.deferred', `${label} waits — this build's first tail block was not recorded; retried after a restart`, t.vid);
+      return null;
     }
-    const stored = this.store.getMeta(throughKey) || undefined;
-    const through = marketsRevisionThrough({ through: stored, today, replay });
-    if (through !== stored) await this.storeWriter.setMeta(throughKey, through);
-    if (through < t.day) {
-      await this.storeWriter.setMeta(marker, t.spec);
-      return `${label} — nothing to add: the volume replay decodes ${t.markets.join(', ')} with this build from ${t.day}`;
-    }
-
     const seed = seedSources(a);
     if (seed.action === 'defer') {
       this.noteOnce('backfill.deferred', `${label} waits — ${seed.reason}`, t.vid);
@@ -2571,28 +2581,44 @@ export class LiveDataSource extends BaseSource {
       return null;
     }
 
-    const throughClosed = through < today;
-    const end = throughClosed ? (await blockAtOrAfter(startOf(through) + 86_400, closedEnd + 1n)) - 1n : closedEnd;
-    let cursor = this.metaBlock(cursorKey) ?? await blockAtOrAfter(startOf(t.day), closedEnd + 1n);
-    const markets = new Set(t.markets);
-    let added = parseMarketsAdded(this.store.getMeta(addedKey));
-    const before = added.swaps;
+    // Resolve the window's edges to blocks. `hi` bounds every lookup: the
+    // history pass's head, which is at or past b0.
+    const hi = (this.deepEnd > closedEnd ? this.deepEnd : closedEnd) + 1n;
+    const dayBlock = (day: string) => blockAtOrAfter(startOf(day), hi);
+    let replay: { from: bigint; end?: bigint } | undefined;
+    const replayAt = this.store.getMeta(keys.replay);
+    if (replayAt) {
+      // the replay re-scans the day its cursor is in from that day's start
+      const resumeDay = replayAt === 'start'
+        ? a.backfillFromUtc!
+        : utcDay(Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: BigInt(replayAt) }))).timestamp) * 1000);
+      const done = this.store.getMeta(`backfill_done_${t.vid}`) === '1';
+      replay = { from: await dayBlock(resumeDay), ...(done ? { end: this.metaBlock(`backfill_cursor_${t.vid}`) ?? hi } : {}) };
+    }
+    const owned = this.store.getMeta(keys.owned);
+    const window = marketsRevisionWindow({
+      start: await dayBlock(t.day),
+      b0,
+      ...(replay ? { replay } : {}),
+      ...(owned ? { ownedFrom: owned <= t.day ? 0n : await dayBlock(owned) } : {}),
+    });
 
+    let cursor = this.metaBlock(keys.cursor) ?? 0n;
+    const markets = new Set(t.markets);
+    let added = parseMarketsAdded(this.store.getMeta(keys.added));
+    const before = added.swaps;
     try {
-      if (cursor <= end) {
-        // The tail's fills, days and cursor go to disk BEFORE this scan builds on
-        // them, inside the gate so nothing ingests in between. A day row this
-        // writes carries the tail's in-memory part of that day (the window's last
-        // day, just closed): left unflushed, a crash would re-tail those fills
-        // over a row that already counts them.
-        await this.inTail(() => this.persist(true));
-        const retainedFromMs = retentionCutoffMs(nowMs, config.fillsRetentionDays);
-        const floor = BigInt(config.getLogsMinChunk);
-        const maxChunk = BigInt(config.backfillChunk);
-        let chunk = maxChunk;
+      const retainedFromMs = retentionCutoffMs(nowMs, config.fillsRetentionDays);
+      const floor = BigInt(config.getLogsMinChunk);
+      const maxChunk = BigInt(config.backfillChunk);
+      let chunk = maxChunk;
+      for (const [from, until] of window.ranges) {
+        if (cursor < from) cursor = from;
+        if (cursor >= until) continue;
+        const end = until - 1n;
         let sinceFlush = 0, tries = 0, availabilityAttempts = 0;
         const kept: Fill[] = [];
-        this.noteOnce('backfill.start', `${label}: adding ${t.markets.join(', ')} — blocks ${cursor}→${end} (${t.day}..${through})`, t.vid);
+        this.noteOnce('backfill.start', `${label}: adding ${t.markets.join(', ')} — blocks ${cursor}→${end}`, t.vid);
         while (cursor <= end) {
           if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
           await holdWhileDegraded();
@@ -2642,7 +2668,11 @@ export class LiveDataSource extends BaseSource {
           kept.push(...fills);
           cursor = to + 1n;
           if (++sinceFlush >= config.backfillMergeEvery || cursor > end) {
-            added = await this.commitMarketsAdd(t, kept, markets, retainedFromMs, { [cursorKey]: String(cursor) }, addedKey, remarkKey, added);
+            const next = cursor;
+            added = await this.inTail(async () => {
+              await this.persist(true);
+              return this.commitMarketsAdd(t, kept, markets, retainedFromMs, { [keys.cursor]: String(next) }, keys, added);
+            });
             kept.length = 0;
             sinceFlush = 0;
           }
@@ -2655,25 +2685,68 @@ export class LiveDataSource extends BaseSource {
       // frames: one resync makes it reload the days this pass added. The
       // listed markets' markout cursors are rewound over the fills it inserted.
       if (added.swaps > before) this.emitMsg({ ch: 'volume', resync: true });
-      await this.rewindRemarkCursors(t, remarkKey);
+      await this.rewindRemarkCursors(t, keys.remark);
     }
 
-    if (!throughClosed) {
-      this.noteOnce('backfill.deferred', `${label} waits for ${through} to close: its hours before this build were decoded without ${t.markets.join(', ')}`, t.vid);
+    if (window.pending) {
+      this.noteOnce('backfill.deferred', `${label} waits for the venue's volume replay: the days it does not reach are this revision's to add`, t.vid);
       return null;
     }
     await this.storeWriter.setMeta(marker, t.spec);
-    return `${label} — added ${added.swaps} ${t.markets.join(', ')} fill(s), $${added.usd.toFixed(2)}, over ${t.day}..${through}`;
+    return `${label} — added ${added.swaps} ${t.markets.join(', ')} fill(s), $${added.usd.toFixed(2)}, from ${t.day} to block ${b0 - 1n}`;
+  }
+
+  /**
+   * First boot of a build that declares a 'markets' revision: record `b0`, the
+   * first block its tail reads — every block below it was decoded by an older
+   * build, which did not know the markets — and the volume replay it inherits
+   * unfinished, which will decode them itself (marketsRevisionWindow). Written
+   * whatever stages are on and before the tail reads a block: no later boot
+   * can tell its own tail's blocks from an older build's.
+   */
+  private recordMarketsRevisionStarts(b0: bigint): void {
+    const meta: Record<string, string> = {};
+    for (const a of ADAPTERS) {
+      const vid = this.vidOf(a);
+      if (!vid) continue;
+      for (const t of revisionTargets(vid, a.historyRevisions)) {
+        if (t.from !== 'markets' || resetAlreadyApplied(this.store, t)) continue;
+        const keys = marketsRevisionKeys(resetMarker(t));
+        if (this.store.getMeta(keys.b0)) continue;
+        meta[keys.b0] = String(b0);
+        if (a.backfillFromUtc && this.store.getMeta(`backfill_done_${vid}`) !== '1') {
+          meta[keys.replay] = this.store.getMeta(`backfill_cursor_${vid}`) || 'start';
+        }
+      }
+    }
+    if (Object.keys(meta).length) this.store.persistSnapshot([], meta, []);
+  }
+
+  /**
+   * A chain reset or today re-read of `vid` from `day` hands every block from
+   * that day's start to this build. Its pending 'markets' revisions must not
+   * add there (marketsRevisionWindow's `ownedFrom`): the replay or re-read
+   * counts those markets itself. The earliest such day wins. Called before the
+   * reset changes anything, so a crash in between re-applies both.
+   */
+  private async ownMarketsFrom(vid: string, day: string): Promise<void> {
+    const { a, vid: hv } = this.historyVenue(vid);
+    const meta: Record<string, string> = {};
+    for (const t of revisionTargets(hv, a?.historyRevisions)) {
+      if (t.from !== 'markets' || resetAlreadyApplied(this.store, t)) continue;
+      const key = marketsRevisionKeys(resetMarker(t)).owned;
+      const was = this.store.getMeta(key);
+      if (!was || day < was) meta[key] = day;
+    }
+    if (Object.keys(meta).length) await this.writeSnapshot({ days: [], meta, fills: [] });
   }
 
   /**
    * One flush of a 'markets' revision: the plan's day increments, its new
-   * fills, the resume cursor and the running total, in ONE snapshot. HELD is
-   * what the store has plus what is still on its way there: just after the
-   * window's last day closes, the tail's fills of that day may be in neither
-   * place yet but the queue. Memory takes the increments first and gives them
-   * back if the write fails; snapshots commit in order, so none cut before
-   * this one can land after it with the old value.
+   * fills, the resume cursor and the running total, in ONE snapshot. Memory
+   * takes the increments first and gives them back if the write fails;
+   * snapshots commit in order, so none cut before this one can land after it
+   * with the old value.
    */
   private async commitMarketsAdd(
     t: BackfillResetTarget & { from: 'markets' },
@@ -2681,15 +2754,14 @@ export class LiveDataSource extends BaseSource {
     markets: ReadonlySet<string>,
     retainedFromMs: number,
     meta: Record<string, string>,
-    addedKey: string,
-    remarkKey: string,
+    keys: ReturnType<typeof marketsRevisionKeys>,
     added: { swaps: number; usd: number },
   ): Promise<{ swaps: number; usd: number }> {
     const ids = [...new Set(kept.map((f) => f.id))];
-    const held = new Set(this.store.fillsByIds(ids).map((f) => f.id));
-    for (const owner of [this.fills, this.dirty, this.pending]) for (const f of owner) held.add(f.id);
-    for (const batch of this.inflightFills) for (const f of batch) held.add(f.id);
-    const plan = planMarketsAdd(kept, markets, (id) => held.has(id), retainedFromMs);
+    const stored = new Set(this.store.fillsByIds(ids).map((f) => f.id));
+    for (const owner of [this.fills, this.dirty, this.pending]) for (const f of owner) stored.add(f.id);
+    for (const batch of this.inflightFills) for (const f of batch) stored.add(f.id);
+    const plan = planMarketsAdd(kept, markets, (id) => stored.has(id), retainedFromMs);
 
     const touched: Array<{ d: DailyVolume; was?: { usd: number; swaps: number } }> = [];
     const total = { ...added };
@@ -2706,8 +2778,8 @@ export class LiveDataSource extends BaseSource {
     try {
       // inserted fills owe a markout-cursor rewind (rewindRemarkCursors): the
       // debt commits with them, so a crash before the rewind cannot drop it
-      const owed = plan.insert.length ? { [remarkKey]: '1' } : {};
-      await this.writeSnapshot({ days: touched.map((x) => x.d), meta: { ...meta, ...owed, [addedKey]: JSON.stringify(total) }, fills: plan.insert });
+      const owed = plan.insert.length ? { [keys.remark]: '1' } : {};
+      await this.writeSnapshot({ days: touched.map((x) => x.d), meta: { ...meta, ...owed, [keys.added]: JSON.stringify(total) }, fills: plan.insert });
     } catch (e) {
       for (const { d, was } of touched) {
         if (was) d.byVenue[t.vid] = was;

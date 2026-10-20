@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import type { Fill } from '@shared';
 import { VolumeStore, rewindCursor } from '../db.js';
 import {
-  carriedRereadTarget, markResetApplied, marketsRevisionThrough, mergeIntoRing, parseMarketsAdded, planMarketsAdd, planReread,
+  carriedRereadTarget, markResetApplied, marketsRevisionWindow, mergeIntoRing, parseMarketsAdded, planMarketsAdd, planReread,
   refuseResetStart, rereadKey, resetAlreadyApplied, resetMarker, revisionTargets,
 } from '../datasource/live.js';
 import { ADAPTERS } from '../venues/registry.js';
@@ -202,28 +202,44 @@ describe("revisionTargets — 'markets'", () => {
   });
 });
 
-describe('marketsRevisionThrough — the days the previous build decoded', () => {
-  const TODAY = '2026-10-20';
+describe('marketsRevisionWindow — the blocks an older build decoded', () => {
+  // `from` = block 1,000; this build's tail started at 2,500 (mid-deploy-day,
+  // whose midnight is 2,000)
+  const W = (o: Partial<Parameters<typeof marketsRevisionWindow>[0]>) =>
+    marketsRevisionWindow({ start: 1_000n, b0: 2_500n, ...o });
 
-  it('a settled venue: through the day the revision first runs, then held there', () => {
-    expect(marketsRevisionThrough({ today: TODAY, replay: { done: true } })).toBe(TODAY);
-    expect(marketsRevisionThrough({ through: TODAY, today: '2026-10-21', replay: { done: true } })).toBe(TODAY);
+  it("a settled venue: everything before the tail, the deploy day's older hours included", () => {
+    expect(W({})).toEqual({ ranges: [[1_000n, 2_500n]], pending: false });
   });
 
-  /** a fresh database: the replay has not started, so this build decodes every
-   *  day itself — the window ends before it begins */
-  it('ends the day before an unfinished volume replay resumes', () => {
-    expect(marketsRevisionThrough({ today: TODAY, replay: { done: false, resumeDay: '2026-06-05' } })).toBe('2026-06-04');
-    expect(marketsRevisionThrough({ today: TODAY, replay: { done: false, resumeDay: '2026-10-02' } })).toBe('2026-10-01');
+  /** an unfinished replay re-SETs from the day it resumes on, with this build:
+   *  what lies before it is known now, what it leaves past its end is not */
+  it('an unfinished replay: the days before it now, and a wait', () => {
+    expect(W({ replay: { from: 1_500n } })).toEqual({ ranges: [[1_000n, 1_500n]], pending: true });
   });
 
-  /** a chain reset landing while the revision waits rewinds the replay: the
-   *  days it re-SETs are no longer the revision's — and a finished replay never
-   *  widens the window again */
-  it('shrinks behind a later reset, and never grows', () => {
-    const shrunk = marketsRevisionThrough({ through: TODAY, today: '2026-10-21', replay: { done: false, resumeDay: '2026-10-15' } });
-    expect(shrunk).toBe('2026-10-14');
-    expect(marketsRevisionThrough({ through: shrunk, today: '2026-10-22', replay: { done: true } })).toBe('2026-10-14');
+  /** the replay only reaches CLOSED days: done before the deploy day closed,
+   *  it stops at that day's midnight and leaves its older hours to no one */
+  it('a replay that finished before the deploy day closed leaves its older hours to the revision', () => {
+    expect(W({ replay: { from: 1_500n, end: 2_000n } })).toEqual({ ranges: [[1_000n, 1_500n], [2_000n, 2_500n]], pending: false });
+  });
+
+  it('a replay that finished after it closed covered them', () => {
+    expect(W({ replay: { from: 1_500n, end: 3_000n } })).toEqual({ ranges: [[1_000n, 1_500n]], pending: false });
+  });
+
+  it('a fresh database: the replay covers it all, unless it stops short of the tail', () => {
+    expect(W({ replay: { from: 500n } })).toEqual({ ranges: [], pending: true });
+    expect(W({ replay: { from: 500n, end: 2_000n } })).toEqual({ ranges: [[2_000n, 2_500n]], pending: false });
+    expect(W({ replay: { from: 500n, end: 2_600n } })).toEqual({ ranges: [], pending: false });
+  });
+
+  /** a chain reset or re-read since hands every block from its start to this
+   *  build — and with nothing left before it, nothing waits on a replay */
+  it('a later reset caps the window at its start', () => {
+    expect(W({ ownedFrom: 1_800n })).toEqual({ ranges: [[1_000n, 1_800n]], pending: false });
+    expect(W({ ownedFrom: 0n, replay: { from: 1_500n } })).toEqual({ ranges: [], pending: false });
+    expect(W({ ownedFrom: 3_000n })).toEqual({ ranges: [[1_000n, 2_500n]], pending: false });
   });
 });
 
@@ -241,13 +257,13 @@ describe('planMarketsAdd — what one scanned range adds', () => {
     expect(plan.insert.map((f) => f.id)).toEqual(['a', 'b']);
   });
 
-  /** a held fill was decoded by this build (the tail's half of the deploy
-   *  day): it is in its day already, and adding it would count it twice */
-  it('skips a held fill entirely, and a duplicate decode once', () => {
-    const plan = planMarketsAdd([xaut('a'), xaut('a'), xaut('t')], MARKETS, (id) => id === 't', RETAINED);
-    expect(Object.fromEntries(plan.days)).toEqual({ '2026-10-14': { usd: 700, swaps: 1 } });
+  /** the fills onboarding stores a fill without adding it to a day: stored is
+   *  not counted, so it is added — but never re-inserted (an upsert would wipe
+   *  its markouts) */
+  it('adds a stored fill without inserting it again, and a duplicate decode once', () => {
+    const plan = planMarketsAdd([xaut('a'), xaut('a'), xaut('s')], MARKETS, (id) => id === 's', RETAINED);
+    expect(Object.fromEntries(plan.days)).toEqual({ '2026-10-14': { usd: 1_400, swaps: 2 } });
     expect(plan.insert.map((f) => f.id)).toEqual(['a']);
-    expect(plan.held).toBe(1);
   });
 
   it('adds a fill older than retention to its day without inserting a row the prune would delete', () => {

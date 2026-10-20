@@ -194,13 +194,14 @@ export interface HistoryRevision {
    *
    * 'markets' ADDS the history of markets this build starts decoding that
    * were already trading (`markets`), and touches nothing else. It reads the
-   * chain from `from` like the replay but keeps only those markets' fills:
-   * each one not stored yet is inserted and added to its day. Every other
+   * chain from `from` like the replay but keeps only those markets' fills,
+   * and adds each to its day (inserting the fill unless stored). Every other
    * row stays as stored, so no cross pair is re-priced and no markout curve
-   * is dropped. It covers the days the PREVIOUS build decoded, through the
-   * day it first runs, and finishes once that day has closed; today's rows
-   * after the deploy are the tail's. Use it for a newly listed market, never
-   * to fix a decode: a fill it would add is, by definition, missing.
+   * is dropped. Its scope is every block an OLDER build decoded: up to the
+   * first block this build's tail read, recorded on its first boot, minus
+   * the days a volume replay or reset re-SETs with this build. Use it for a
+   * newly listed market, never to fix a decode: a fill it adds is, by
+   * definition, one no earlier build counted.
    */
   source?: 'chain' | 'fills' | 'markets';
   /** 'fills' only, and required there: the first UTC day AFTER the window

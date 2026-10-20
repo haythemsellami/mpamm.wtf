@@ -176,18 +176,24 @@ historyRevisions: [{ id: 'xaut-book', source: 'markets', from: '2026-09-21', mar
 ```
 
 It reads the chain from `from` (archive pool, cursor-resumable) and keeps only
-the listed markets' fills. Each one not already stored is inserted (inside
-retention) and added to its day. Every other market's row is left as stored:
-nothing is deleted, re-priced or stripped of its curve. Each flush commits its
-day increments, fills and cursor in one snapshot. The rules:
+the listed markets' fills. Each one is added to its day, and inserted unless
+stored already (the fills onboarding may have stored it without counting it).
+Every other market's row is left as stored: nothing is deleted, re-priced or
+stripped of its curve. Each flush commits its day increments, fills and
+cursor in one snapshot, inside the tail gate after the tail's own state is on
+disk. The rules:
 
-- Its window is the days the previous build decoded, which ends on the day the
-  revision first runs. It **waits**, unstamped, until that day closes and has
-  been read; the hours after the deploy are the tail's, and the held-fill check
-  keeps them from counting twice.
-- Days a pending volume replay will re-SET are not its own. On a fresh database
-  it is **stamped with nothing to add**, because the replay decodes the market
-  itself.
+- Its scope is everything an older build decoded: up to `b0`, the first block
+  this build's tail read, recorded on the build's first boot whatever stages
+  are on. Below `b0` no build counted these markets; from `b0` the tail does.
+  So the deploy day's hours before the deploy are added at once, not after
+  midnight.
+- Days a volume replay re-SETs with this build are not its own. A replay
+  inherited unfinished makes it **wait** until the replay is done, then add
+  what the replay did not reach: the deploy day's older hours when it stopped
+  before that day closed. On a fresh database that is usually nothing. A
+  chain reset or today re-read of the venue since hands every block from its
+  start day to this build, and the revision stops there.
 - It runs ahead of the fills onboarding and the volume replay in each history
   pass, and a failure holds that pass behind it. An archive range that stays
   unreadable is skipped and warned, as the replay does.
