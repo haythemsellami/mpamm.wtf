@@ -167,6 +167,51 @@ The 2026-09-21 replay's midnight misbooking for clober-vault (09-18..19) and
 hanji (09-17..19) was repaired this way. A chain replay for hanji would have
 moved its late-September cross-pair days by 3–9%.
 
+**When a venue lists a market it had been missing** (it traded, but the
+adapter did not decode it), add that market's history instead of replaying
+the venue:
+
+```ts
+historyRevisions: [{ id: 'xaut-book', source: 'markets', from: '2026-09-21', markets: ['XAUt/USDC'] }],
+```
+
+It reads the chain from `from` (archive pool, cursor-resumable) and keeps only
+the listed markets' fills. Each one is added to its day, and inserted unless
+stored already (the fills onboarding may have stored it without counting it).
+Every other market's row is left as stored: nothing is deleted, re-priced or
+stripped of its curve. Each flush commits its day increments, fills and
+cursor in one snapshot, inside the tail gate after the tail's own state is on
+disk. The rules:
+
+- Its scope is everything an older build decoded: up to `b0`, the first block
+  this build's tail read, recorded on the build's first boot whatever stages
+  are on. Below `b0` no build counted these markets; from `b0` the tail does.
+  So the deploy day's hours before the deploy are added at once, not after
+  midnight.
+- Days a volume replay re-SETs with this build are not its own. A replay
+  inherited unfinished makes it **wait** until the replay is done, then add
+  what the replay did not reach: the deploy day's older hours when it stopped
+  before that day closed. On a fresh database that is usually nothing. A
+  chain reset of the venue since hands every block from its start day to
+  this build, and the revision stops there. That applies only when the reset
+  rebuilds volume; with `BACKFILL=off` it keeps every closed row, and only
+  today, which its re-read replaces, changes hands. A today re-read inherited
+  from a previous run does the same.
+- Until it applies, the boot swap reconcile leaves the venue's days from
+  `from` alone, on every boot whatever stages run. A fill the onboarding
+  stored there is not counted yet, and rewriting from it would count it
+  twice once the revision adds it.
+- It runs ahead of the fills onboarding and the volume replay in each history
+  pass, and a failure holds that pass behind it. An archive range that stays
+  unreadable is skipped and warned, as the replay does.
+- Inserted fills get archive markouts from the remark sweep. Each pass that
+  inserted rewinds the listed markets' remark cursors to `from`, under the
+  remark lock, since a sweep that ran mid-scan has already walked past them.
+
+Hanji's XAUt0/USDC book (listed 2026-10-20 after trading $2.41M unlisted since
+09-24) shipped this way. A chain replay would have re-priced the ~53% of
+Hanji's volume quoted in ETH or MON, costing about −$5.1M.
+
 ### Recovering a window the live tail missed
 
 ```

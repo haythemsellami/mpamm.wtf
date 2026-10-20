@@ -55,6 +55,6 @@ describe('Hanji discovery commits a complete validated set', () => {
     expect(() => adapter.logSources()).toThrow('Hanji discovery unavailable');
     fail(); await adapter.discover(ctx);
     expect(adapter.quoteMarkets!()).toEqual(fixture.markets.map((market) => market.market));
-    expect(adapter.logSources()[0].address).toHaveLength(6);
+    expect(adapter.logSources()[0].address).toHaveLength(fixture.markets.length);
   });
 });
