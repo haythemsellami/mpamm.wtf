@@ -18,8 +18,8 @@
     "start": "npm -w server run start"
   },
   "devDependencies": {
-    "concurrently": "^10.0.5",
-    "railway": "3.15.0"
+    "concurrently": "^10.0.6",
+    "railway": "3.16.0"
   },
   "license": "AGPL-3.0-only",
   "repository": {
