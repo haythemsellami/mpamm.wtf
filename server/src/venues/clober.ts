@@ -165,6 +165,33 @@ export async function discoverClober(client: PublicClient, getLogs: AdapterConte
   return { books, markets: assembleCloberMarkets(books), vault };
 }
 
+/** Clober's own fallback for its Monad subgraph: @clober/v2-sdk 1.0.3
+ *  (constants/chain-configs/subgraph.js, FALLBACK_SUBGRAPH_URL for chain 143)
+ *  and app.clober.io both try it when the Goldsky primary fails. Goldsky has
+ *  answered 404 "Subgraph not found" for every Clober subgraph since at least
+ *  2026-10-27. Without an authoritative discovery, decode() holds every range
+ *  that contains a Take, and that cursor is the live tail every venue shares. */
+export const CLOBER_SUBGRAPH_FALLBACK_URL = 'https://api.subgraph.ormilabs.com/api/public/27ad58eb-e12c-4b7b-8df8-0560d8e26b37/subgraphs/v2-subgraph-monad/latest/gn';
+
+/** The endpoints to try, in order: the configured one (SUBGRAPH_URL), then
+ *  Clober's fallback, once each. */
+export function cloberSubgraphUrls(primary: string): string[] {
+  return [...new Set([primary, CLOBER_SUBGRAPH_FALLBACK_URL].filter(Boolean))];
+}
+
+/** Run one whole read against each endpoint in turn; the first to succeed
+ *  wins. Whole reads, not single requests: two indexers can stand at
+ *  different heights, and paging across both could skip or repeat a book.
+ *  Throws with every endpoint's failure when none answers. */
+export async function withCloberSubgraph<T>(urls: readonly string[], read: (url: string) => Promise<T>): Promise<{ value: T; url: string }> {
+  const failures: string[] = [];
+  for (const url of urls) {
+    try { return { value: await read(url), url }; }
+    catch (e) { failures.push(`${new URL(url).host}: ${(e as Error).message}`); }
+  }
+  throw new Error(`subgraph unavailable (${failures.join('; ')})`);
+}
+
 /**
  * Discover Clober books from the subgraph (docs/architecture.md: history) — the public RPC
  * can't enumerate them. Yields each base/stable book's id + base/quote + unitSize,
@@ -589,11 +616,14 @@ export function createCloberVaultAdapter(): VenueAdapter {
       let disc: { books: Map<string, CloberBook>; markets: CloberMarket[]; vault: Set<string> };
       let authoritative = false;
       try {
-        disc = await discoverCloberViaSubgraph(ctx.config.subgraphUrl);
+        const urls = cloberSubgraphUrls(ctx.config.subgraphUrl);
+        const res = await withCloberSubgraph(urls, discoverCloberViaSubgraph);
+        disc = res.value;
         authoritative = true;
-        ctx.note('venue.discovery', `Clober: subgraph discovery (${disc.vault.size} vault book(s))`);
-      } catch {
-        ctx.note('venue.discovery.degraded', 'Clober: subgraph discovery failed; trying recent Open logs');
+        const via = res.url === urls[0] ? '' : ` via fallback ${new URL(res.url).host}`;
+        ctx.note('venue.discovery', `Clober: subgraph discovery (${disc.vault.size} vault book(s))${via}`);
+      } catch (e) {
+        ctx.note('venue.discovery.degraded', `Clober: subgraph discovery failed (${(e as Error).message}); trying recent Open logs`);
         try { disc = await discoverClober(ctx.client, ctx.getLogs, 2000); } catch { disc = { books: new Map(), markets: [], vault: new Set() }; }
       }
       // MERGE (don't replace): a periodic re-discovery can only ADD/refresh vault
@@ -652,7 +682,10 @@ export function createCloberVaultAdapter(): VenueAdapter {
         .map((l) => (l.args?.bookId === undefined ? undefined : String(l.args.bookId)))
         .filter((id): id is string => !!id && vault.has(id) && !books.has(id) && !ignoredVaultBooks.has(id)))];
       if (missingVaultBookIds.length) {
-        const resolved = await discoverCloberBooksById(ctx.config.subgraphUrl, missingVaultBookIds);
+        const { value: resolved } = await withCloberSubgraph(
+          cloberSubgraphUrls(ctx.config.subgraphUrl),
+          (url) => discoverCloberBooksById(url, missingVaultBookIds),
+        );
         let changed = false;
         for (const [id, b] of resolved.books) { books.set(id, b); ignoredVaultBooks.delete(id); changed = true; }
         for (const id of resolved.ignored) ignoredVaultBooks.add(id);

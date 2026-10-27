@@ -111,7 +111,7 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | `BACKFILL=off` · `BACKFILL_CHUNK` · `BACKFILL_PACE_MS` | venue-lifetime volume backfill |
 | `MARKOUT_BACKFILL=off` · `MARKOUT_BACKFILL_DAYS` | onboarding markout backfill (archived CEX prices) |
 | `GAS_METRIC=off` · `GAS_SAMPLE_STRIDE_BLOCKS` | QUOTE_UPDATE_BURN tracker |
-| `SUBGRAPH_URL` | Clober discovery subgraph override |
+| `SUBGRAPH_URL` | Clober discovery subgraph override (the endpoint tried first; Clober's own Ormi Labs fallback is always tried after it) |
 | `BACKFILL_RESET=spec[,spec]` | operator override for a one-shot re-scan of a venue's history (the normal path is a `historyRevisions` entry in the adapter — see below). Volume backfill AND fills/markout onboarding for closed days, plus a re-read of today. `venue` replays the lifetime; `venue:<block>` or `venue:YYYY-MM-DD` replays only from there (today included). `@n` is a re-run nonce, never a start (`venue@2`). Each entry is remembered once applied, so change it to re-run |
 
 ### Re-deriving history after an adapter change
