@@ -3,7 +3,7 @@ import type { QuoteRow, Fill, Side, VenueMeta } from '@shared';
 import { TOKENS, pairFor } from '@shared';
 import { shortHex, toUnits } from '../util.js';
 import type { VenueAdapter, AdapterContext, LogBundle } from './adapter.js';
-import { createQuoteOutageReporter } from './quote-health.js';
+import { createQuoteOutageLatch, quoteOutageReason, type MulticallOutcome, type QuoteOutage } from './quote-health.js';
 
 /**
  * Crystal Vault adapter — Crystal is a multi-market on-chain CLOB (verified
@@ -106,6 +106,24 @@ const PER_SIDE_BAND_BPS = 2_000;
 
 const M128 = (1n << 128n) - 1n;
 
+/** Why a frame that asked every leg produced no row. Every leg failing is
+ *  the multicall reporter's case, worded the same way. Otherwise the book
+ *  answered and holds nothing within the band at any size (a row needs only
+ *  a partial fill), which is the vault's state, not an adapter fault. */
+function crystalOutage(res: readonly MulticallOutcome[]): QuoteOutage {
+  const name = CRYSTAL_VENUE.name;
+  const all = quoteOutageReason(res);
+  if (all) return { reason: all, msg: `${name} quotes unavailable — all ${res.length} legs failed with "${all}" (venue disabled, or the ABI drifted from the contract)` };
+  const band = `within ±${PER_SIDE_BAND_BPS} bps of mid`;
+  const failures = res.filter((r) => r.status === 'failure');
+  if (failures.length) {
+    const why = quoteOutageReason(failures)!; // every entry failed, so never null
+    return { reason: `some getQuote calls failed with "${why}"`, msg: `${name} quotes unavailable — ${failures.length} of ${res.length} getQuote calls failed with "${why}", and no answered side fills ${band}` };
+  }
+  const reason = `no book side fills ${band}`;
+  return { reason, msg: `${name} quotes unavailable — ${reason}: the vault's ladder is empty or priced away from mid, not an adapter fault` };
+}
+
 interface CrystalBook {
   market: `0x${string}`;
   /** human quote-per-base → raw book price (scaleFactor × 10^qDec / 10^bDec). */
@@ -114,7 +132,9 @@ interface CrystalBook {
 }
 
 export function createCrystalAdapter(): VenueAdapter {
-  const reportOutage = createQuoteOutageReporter(CRYSTAL_VENUE.name);
+  // the verdict is on executable rows, not reverts: every leg can answer and
+  // still fill nothing in band, and that must not read as a recovery
+  const reportOutage = createQuoteOutageLatch(CRYSTAL_VENUE.name);
   const pair = pairFor('MON', QUOTE_TOK);
   const base = TOKENS[BASE_TOK], quote = TOKENS[QUOTE_TOK];
   let book: CrystalBook | undefined;
@@ -174,8 +194,6 @@ export function createCrystalAdapter(): VenueAdapter {
         allowFailure: true,
         blockNumber,
       });
-      if (reportOutage(ctx, res)) return [];
-
       const rows: QuoteRow[] = [];
       const ts = Date.now();
       const human = (raw: bigint, dec: number) => Number(raw) / 10 ** dec;
@@ -201,6 +219,7 @@ export function createCrystalAdapter(): VenueAdapter {
           feeBps: b.feeBps, ts,
         });
       }
+      reportOutage(ctx, rows.length ? null : crystalOutage(res));
       return rows;
     },
 

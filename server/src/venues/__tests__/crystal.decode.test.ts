@@ -168,4 +168,42 @@ describe('Crystal Vault quote (recorded getQuote at block 117,081,122)', () => {
     expect(rows.map((r) => r.filledFull)).toEqual([true, true, false, false]);
     expect(FX.quote.legs[4].result[0]).not.toBe(FX.quote.legs[4].args[4]);
   });
+
+  /** A frame where every getQuote leg ANSWERS but fills nothing in band is
+   *  still dark: it must replace a call-failure outage with its own reason,
+   *  never announce a recovery, which only executable rows may do. */
+  it('announces recovery only when executable rows return', async () => {
+    type Phase = 'reverted' | 'empty' | 'recorded';
+    let phase: Phase = 'reverted';
+    const raised: Array<[string, string]> = [];
+    const leg = (args: readonly unknown[]) => {
+      if (phase === 'reverted') return { status: 'failure', error: Object.assign(new Error('reverted'), { reason: 'market paused' }) };
+      if (phase === 'empty') return { status: 'success', result: [0n, 0n] };
+      const rec = FX.quote.legs.find((l: any) => JSON.stringify(l.args) === str(args));
+      return { status: rec.status, result: rec.result.map(BigInt) };
+    };
+    const live = {
+      ...ctx,
+      client: { ...ctx.client, multicall: async (p: any) => (p.contracts[0].functionName === 'getQuote' ? p.contracts.map((c: any) => leg(c.args)) : ctx.client.multicall(p)) },
+      note: (code: string, msg: string) => { raised.push([code, msg]); },
+    };
+    const a = createCrystalAdapter();
+    await a.discover(live);
+    raised.length = 0;
+    const frame = async (p: Phase) => { phase = p; return a.quote!(live, [100, 1000, 10000, 100000], BigInt(FX.quote.block)); };
+
+    expect(await frame('reverted')).toEqual([]);
+    expect(raised).toEqual([['venue.quote.unavailable', 'Crystal Vault quotes unavailable — all 8 legs failed with "market paused" (venue disabled, or the ABI drifted from the contract)']]);
+    expect(await frame('reverted')).toEqual([]);
+    expect(raised).toHaveLength(1); // the same outage is on the record once
+
+    expect(await frame('empty')).toEqual([]);
+    expect(raised.map(([code]) => code)).toEqual(['venue.quote.unavailable', 'venue.quote.unavailable']);
+    expect(raised[1][1]).toContain('no book side fills within ±2000 bps of mid');
+
+    expect(await frame('recorded')).toHaveLength(4);
+    expect(raised[2]).toEqual(['venue.quote.recovered', 'Crystal Vault quoting again (was "no book side fills within ±2000 bps of mid")']);
+    expect(await frame('recorded')).toHaveLength(4);
+    expect(raised).toHaveLength(3);
+  });
 });
