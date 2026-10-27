@@ -73,7 +73,8 @@ const WOO_ROUTER = '0x4c4af8dbc524681930a27b2f1af5bcc8062e6fb7' as const;
  * log-less `postStateList` call from WOOFi's keeper, so the gas tracker can
  * only sample blocks for txs sent to these (see gasSources). A rotated-out
  * oracle stays listed: dropping a destination rescans the venue's whole gas
- * series instead of just adding the new one.
+ * series instead of just adding the new one. An oracle rotated in after
+ * this list is discovered and persisted (see `oracles` in the adapter).
  *
  *  - 0x2a3755…: from the pool's initialize until block 76,272,194
  *    (2026-05-22 13:43 UTC); keeper 0x03ac0b1b…, last push 2026-05-07.
@@ -87,6 +88,25 @@ const KNOWN_WOORACLES: readonly `0x${string}`[] = [
   '0x2a375567f5e13f6bd74fda7627df3b1af6bfa5a6',
   '0xf9b0c8ee13ae2fc0665764ecbdb417685dea8081',
 ];
+
+/** ctx.state key holding the Wooracles discovered beyond KNOWN_WOORACLES. */
+const OBSERVED_ORACLES_KEY = 'observed_wooracles';
+
+/** The persisted list, or [] when nothing has been stored. Unreadable state
+ *  throws: treating it as empty would shrink the gas set it exists to keep. */
+export function readObservedOracles(raw: string | undefined): `0x${string}`[] {
+  if (raw === undefined) return [];
+  let list: unknown;
+  try {
+    list = JSON.parse(raw);
+  } catch {
+    list = null;
+  }
+  if (!Array.isArray(list) || !list.every((o) => typeof o === 'string' && /^0x[0-9a-f]{40}$/.test(o))) {
+    throw new Error(`WOOFi persisted Wooracle list is unreadable: ${raw.slice(0, 80)}`);
+  }
+  return list as `0x${string}`[];
+}
 
 /** The pool's quote token — fixed at initialize (WooPPV2 has no setter), and
  *  the unit of `swapVol`. Discovery fails loud if the chain says otherwise. */
@@ -238,8 +258,14 @@ interface QuoteLeg {
 export function createWoofiAdapter(): VenueAdapter {
   /** markets whose two tokens are both listed — merged, never shrunk. */
   const quotable = new Map<string, QuoteMarket>();
-  /** the oracle the pool reads now; null until discovery has read it. */
-  let currentOracle: `0x${string}` | null = null;
+  /** Every Wooracle the pool has been seen pricing from — append-only, so a
+   *  rotation can only ever ADD a gas destination. One discovered after the
+   *  KNOWN_WOORACLES pin is persisted (ctx.state): kept in memory only, a
+   *  restart after the NEXT rotation would forget it, and the shrunken set
+   *  would rebuild the gas series without its burn. */
+  const oracles = new Set<`0x${string}`>(KNOWN_WOORACLES);
+  /** false until discovery has read the live oracle and persisted it. */
+  let oracleResolved = false;
   // Every leg reverting is venue-wide (paused, oracle infeasible, ABI drift),
   // not a thin market — name it instead of vanishing (venues/quote-health.ts).
   const reportOutage = createQuoteOutageReporter(WOOFI_VENUE.name);
@@ -294,11 +320,19 @@ export function createWoofiAdapter(): VenueAdapter {
     }
     if (!found) throw new Error('WOOFi discovered no registered markets');
 
-    const o = oracle.toLowerCase() as `0x${string}`;
-    if (!KNOWN_WOORACLES.includes(o)) {
-      ctx.note('venue.upgraded', `WOOFi sPMM: the pool now prices off Wooracle ${shortHex(o)} — its pushes are tracked, but add it to KNOWN_WOORACLES so a later rotation cannot drop its burn history`);
+    // Reload what earlier boots observed before adding the live one, so this
+    // boot never reports a smaller set than the last.
+    for (const o of readObservedOracles(ctx.state?.get(OBSERVED_ORACLES_KEY))) oracles.add(o);
+    const live = oracle.toLowerCase() as `0x${string}`;
+    if (!oracles.has(live)) {
+      // persist BEFORE the set grows: a throw here leaves the gas cursor held
+      // on the previous set rather than reporting one a restart would shrink.
+      const observed = [...oracles, live].filter((o) => !KNOWN_WOORACLES.includes(o));
+      await ctx.state?.set(OBSERVED_ORACLES_KEY, JSON.stringify(observed));
+      oracles.add(live);
+      ctx.note('venue.upgraded', `WOOFi sPMM: the pool now prices off Wooracle ${shortHex(live)} — its pushes are tracked from here on; pin it in KNOWN_WOORACLES so a fresh database tracks it too`);
     }
-    currentOracle = o;
+    oracleResolved = true;
     ctx.note('venue.discovery', `WOOFi sPMM: ${found} registered market(s) across ${listed.size - 1} listed base token(s) at block ${blockNumber}`);
   };
 
@@ -388,8 +422,8 @@ export function createWoofiAdapter(): VenueAdapter {
     // 1000-block stride lands on a push ~10 times a day: a day's figure
     // carries ~±30% sampling noise, a week's ~±12%.
     gasSources() {
-      if (!currentOracle) throw new Error('WOOFi Wooracle not resolved yet'); // hold the gas cursor
-      return [{ mode: 'blocks' as const, address: [...new Set([...KNOWN_WOORACLES, currentOracle])] }];
+      if (!oracleResolved) throw new Error('WOOFi Wooracle not resolved yet'); // hold the gas cursor
+      return [{ mode: 'blocks' as const, address: [...oracles] }];
     },
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {

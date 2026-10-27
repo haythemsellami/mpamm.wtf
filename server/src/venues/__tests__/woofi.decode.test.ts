@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { parseEventLogs } from 'viem';
 import { TOKENS } from '@shared';
-import { WOOPP, createWoofiAdapter, decodeWoofiSwap, woofiMarketFor, woofiMarkets } from '../woofi.js';
+import { WOOPP, createWoofiAdapter, decodeWoofiSwap, readObservedOracles, woofiMarketFor, woofiMarkets } from '../woofi.js';
+import type { AdapterState } from '../adapter.js';
 
 /**
  * Fixture-based tests — REAL logs recorded from WOOFi's WooPPV2 on Monad
@@ -283,7 +284,7 @@ const QUERY_AT_117080000: Record<string, bigint> = {
 const CAP_EXCEEDED = Object.assign(new Error('The contract function "query" reverted with the following signature:\n0xa4875a49'), { name: 'ContractFunctionExecutionError' });
 
 const PRICES: Record<string, number> = { USDC: 1, WETH: 2300, CBBTC: 80_000, WBTC: 80_000, WMON: 0.02 };
-function stubCtx(opts: { notes?: Array<{ code: string; msg: string }>; quoteToken?: string; oracle?: string; queryLive?: boolean; multicalls?: any[] } = {}) {
+function stubCtx(opts: { notes?: Array<{ code: string; msg: string }>; quoteToken?: string; oracle?: string; queryLive?: boolean; multicalls?: any[]; state?: AdapterState } = {}) {
   const lower = (a: string) => a.toLowerCase();
   const listed = new Map(Object.entries(LISTED).map(([a, v]) => [lower(a), v]));
   const recorded = new Map(Object.entries(QUERY_AT_117080000).map(([k, v]) => [lower(k), v]));
@@ -311,6 +312,7 @@ function stubCtx(opts: { notes?: Array<{ code: string; msg: string }>; quoteToke
       tokenForUsd: (k: string, usd: number) => usd / PRICES[k],
     },
     note: (code: string, msg: string) => { opts.notes?.push({ code, msg }); },
+    state: opts.state,
   } as any;
 }
 
@@ -349,6 +351,55 @@ describe('WOOFi discovery', () => {
       '0x00000000000000000000000000000000000000aa',
     ]);
     expect(notes.map((n) => n.code)).toContain('venue.upgraded');
+  });
+
+  // ctx.state as the live indexer provides it: durable across adapter
+  // instances (restarts), with a set that resolves after commit.
+  const memoryState = (): AdapterState & { data: Map<string, string> } => {
+    const data = new Map<string, string>();
+    return { data, get: (k) => data.get(k), set: async (k, v) => { data.set(k, v); } };
+  };
+  const A = '0x00000000000000000000000000000000000000aa';
+  const B = '0x00000000000000000000000000000000000000bb';
+  const KNOWN = ['0x2a375567f5e13f6bd74fda7627df3b1af6bfa5a6', '0xf9b0c8ee13ae2fc0665764ecbdb417685dea8081'];
+
+  it('keeps every oracle across successive rotations and a restart — the gas set only grows', async () => {
+    const state = memoryState();
+    const before = createWoofiAdapter();
+    await before.discover(stubCtx({ state, oracle: A }));
+    await before.discover(stubCtx({ state, oracle: B })); // A rotated out
+    expect(before.gasSources!()[0].address).toEqual([...KNOWN, A, B]);
+
+    // restart after the rotation: A is no longer live and not pinned, yet
+    // dropping it would rebuild the series without its burn.
+    const after = createWoofiAdapter();
+    await after.discover(stubCtx({ state, oracle: B }));
+    expect(after.gasSources!()[0].address).toEqual([...KNOWN, A, B]);
+    expect(readObservedOracles(state.data.get('observed_wooracles'))).toEqual([A, B]);
+  });
+
+  it('holds the gas cursor on the old set when the new oracle cannot be persisted', async () => {
+    const state = memoryState();
+    const adapter = createWoofiAdapter();
+    await adapter.discover(stubCtx({ state }));
+    state.set = async () => { throw new Error('disk full'); };
+    await expect(adapter.discover(stubCtx({ state, oracle: A }))).rejects.toThrow('disk full');
+    expect(adapter.gasSources!()[0].address).toEqual(KNOWN);
+
+    const fresh = createWoofiAdapter();
+    await expect(fresh.discover(stubCtx({ state, oracle: A }))).rejects.toThrow('disk full');
+    expect(() => fresh.gasSources!()).toThrow('not resolved');
+  });
+
+  it('refuses unreadable persisted state rather than shrinking the set', async () => {
+    expect(readObservedOracles(undefined)).toEqual([]);
+    expect(() => readObservedOracles('not json')).toThrow('unreadable');
+    expect(() => readObservedOracles('["0xAA"]')).toThrow('unreadable');
+    const state = memoryState();
+    state.data.set('observed_wooracles', '{');
+    const adapter = createWoofiAdapter();
+    await expect(adapter.discover(stubCtx({ state }))).rejects.toThrow('unreadable');
+    expect(() => adapter.gasSources!()).toThrow('not resolved');
   });
 });
 
