@@ -102,6 +102,32 @@ describe('clober adapter discovery through the fallback', () => {
     expect(fills[0]).toMatchObject({ venueId: 'clober-vault', market: 'MON/USDC' });
   });
 
+  // A vault book known from LiquidityVault.Open but with no metadata yet sends
+  // decode() to the by-id lookup. A primary that answers 200 WITHOUT the book
+  // (an indexer behind the chain) must not end that lookup.
+  const VAULT_OPEN = { args: { bookIdA: BigInt(VAULT_BOOKS[0].id), bookIdB: BigInt(VAULT_BOOKS[1].id) } };
+  const EMPTY = () => json(200, { data: { books: [] } });
+
+  it('retries the by-id lookup on the fallback when the primary answers without the book', async () => {
+    const asked = stubFetch({ [GOLDSKY]: EMPTY, [CLOBER_SUBGRAPH_FALLBACK_URL]: BOOKS });
+    const ctx = ctxWith([]);
+    const a = createCloberVaultAdapter();
+    await a.discover(ctx); // authoritative: the primary answered (no vault books yet)
+    const fills = await a.decode(ctx, { take: [TAKE_LOG], bmOpen: [], vaultOpen: [VAULT_OPEN], router: [] } as any, () => 1_783_600_000_000, new Set());
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({ venueId: 'clober-vault', market: 'MON/USDC' });
+    expect(asked).toEqual([GOLDSKY, GOLDSKY, CLOBER_SUBGRAPH_FALLBACK_URL]); // discovery, by-id, by-id retry
+  });
+
+  it('holds the range when no endpoint has the book', async () => {
+    stubFetch({ [GOLDSKY]: EMPTY, [CLOBER_SUBGRAPH_FALLBACK_URL]: EMPTY });
+    const ctx = ctxWith([]);
+    const a = createCloberVaultAdapter();
+    await a.discover(ctx);
+    await expect(a.decode(ctx, { take: [TAKE_LOG], bmOpen: [], vaultOpen: [VAULT_OPEN], router: [] } as any, () => 0, new Set()))
+      .rejects.toThrow(`subgraph unavailable (api.goldsky.com: missing metadata for vault book ${VAULT_BOOKS[0].id}; api.subgraph.ormilabs.com: missing metadata for vault book ${VAULT_BOOKS[0].id})`);
+  });
+
   it('when every endpoint fails, says why and still holds a range with a Take', async () => {
     stubFetch({ [GOLDSKY]: NOT_FOUND, [CLOBER_SUBGRAPH_FALLBACK_URL]: TOO_MANY });
     const notes: string[] = [];

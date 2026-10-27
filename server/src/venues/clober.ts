@@ -684,7 +684,14 @@ export function createCloberVaultAdapter(): VenueAdapter {
       if (missingVaultBookIds.length) {
         const { value: resolved } = await withCloberSubgraph(
           cloberSubgraphUrls(ctx.config.subgraphUrl),
-          (url) => discoverCloberBooksById(url, missingVaultBookIds),
+          async (url) => {
+            const r = await discoverCloberBooksById(url, missingVaultBookIds);
+            // An endpoint that answers without a requested book (an indexer
+            // behind the chain) is a failed read, not an answer. The next one
+            // may have the book, and the check below holds the tail anyway.
+            if (r.missing.size) throw new Error(`missing metadata for vault book ${[...r.missing][0]}`);
+            return r;
+          },
         );
         let changed = false;
         for (const [id, b] of resolved.books) { books.set(id, b); ignoredVaultBooks.delete(id); changed = true; }
