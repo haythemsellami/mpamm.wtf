@@ -69,10 +69,12 @@ import { createQuoteOutageLatch, quoteOutageReason, type MulticallOutcome, type 
 // backfillFromUtc = the market's first trade (2026-09-20 06:20 UTC, a $5
 // trade by an outside maker): the replay covers the whole book even though
 // only the vault's legs count.
-// color: green in both themes — the one hue family the venue palette lacked.
-// Nearest neighbour under CVD simulation is ΔE2000 7.3 (Uniswap, protan) light
-// and 6.7 (Lunarbase, tritan) dark; contrast 6.9 / 11.2 on the two surfaces.
-const CRYSTAL_VENUE: VenueMeta = { id: 'crystal', name: 'Crystal Vault', color: { light: '#166534', dark: '#4ADE80' }, kind: 'clob', role: 'venue', sinceUtc: '2026-09-22' };
+// color: raspberry in both themes. Green went to WOOFi (#00613A), which the
+// first pick (#166534) sat ΔE2000 1.1 from under tritan simulation. Nearest
+// neighbour now, across normal/protan/deutan/tritan: 9.7 (Capricorn, tritan)
+// light and 8.1 (POE, tritan) dark; 11.7 / 15.2 from Capricorn and 17.5 /
+// 18.3 from Hanji in normal vision. Contrast 6.2 / 4.6 on the two surfaces.
+const CRYSTAL_VENUE: VenueMeta = { id: 'crystal', name: 'Crystal Vault', color: { light: '#AD2B62', dark: '#D14781' }, kind: 'clob', role: 'venue', sinceUtc: '2026-09-22' };
 
 const CRYSTAL = '0x508254c838b2e936b0631440c5c6e3ab3a4a98bd' as const;
 const CRYSTAL_VAULT = '0x020f863a6212a9ed5caa73a087e62acd371b7334' as const;

@@ -29,6 +29,19 @@ import { createQuoteOutageReporter } from './quote-health.js';
 
 export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as const;
 
+/** The keeper's push event since the upgrade to 0x709ba375… (block
+ *  115,729,249 · 2026-10-22 22:21:05 UTC). From then on, the price path
+ *  (selector 0x59558d29) and the risk-params path (0x4cb2db39) emit THIS event
+ *  instead of MakerPricesPushed / MakerRiskParamsPushed. Both upgrades since
+ *  then (incl. 0x96ab5405…, 2026-10-27) kept it. Its indexed word is the kind
+ *  of push: 1 prices, 2 risk params, plus 4 and 8 on newer paths. That
+ *  implementation is unverified, so only the hash is known.
+ *  Like MakerPricesPushed before it, it also fires inside TAKERBOT's own taker
+ *  trades that push prices (~500 a day). The series has always counted those
+ *  txs, so keying on this topic keeps the series the same as before the
+ *  upgrade. */
+const PARAMS_PUSHED_TOPIC = '0x5d4a925bedf1997523e2a7480533bd37c5b48ab9315c13dfbb289dcae70ec9cb' as const;
+
 const THOGAMM_VENUE: VenueMeta = {
   id: 'thogamm',
   name: 'ThogAMM',
@@ -363,14 +376,25 @@ export function createThogammAdapter(): VenueAdapter {
 
     entryPoints: () => [{ address: THOGAMM_ADDRESS }],
 
-    // TAKERBOT's keeper self-funds price/risk pushes to the proxy. Both update
-    // paths emit one exact event, so destination-keyed log mode follows keeper
-    // rotation and counts transactions without block-sampling estimates.
-    gasSources: () => [{
-      mode: 'logs' as const,
-      address: THOGAMM_ADDRESS,
-      events: [event('MakerPricesPushed'), event('MakerRiskParamsPushed')],
-    }],
+    // TAKERBOT's keeper self-funds price/risk pushes to the proxy. Every push
+    // emits exactly one event, so destination-keyed log mode follows keeper
+    // rotation and counts transactions without block-sampling estimates. Which
+    // event depends on the implementation: the named pair until the 2026-10-22
+    // upgrade, PARAMS_PUSHED_TOPIC after it. Keep both — a rebuild re-reads
+    // the earlier blocks — and the tracker counts each tx once across sources.
+    gasSources: () => [
+      {
+        mode: 'logs' as const,
+        address: THOGAMM_ADDRESS,
+        events: [event('MakerPricesPushed'), event('MakerRiskParamsPushed')],
+      },
+      { mode: 'logs' as const, address: THOGAMM_ADDRESS, topic0: PARAMS_PUSHED_TOPIC },
+    ],
+    // From the 2026-10-22 upgrade on, the series matched nothing: the keeper's
+    // ~220k daily pushes went uncounted and the gas chart dropped ThogAMM
+    // after 10-22. Adding a topic on the same address leaves the destination
+    // fingerprint unchanged, so the rebuild has to be declared.
+    gasRevisions: [{ id: 'params-pushed-topic', from: '2026-10-22' }],
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
       const upgrades = logs.upgrades ?? [];
