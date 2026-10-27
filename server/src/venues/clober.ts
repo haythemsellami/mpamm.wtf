@@ -179,6 +179,13 @@ export function cloberSubgraphUrls(primary: string): string[] {
   return [...new Set([primary, CLOBER_SUBGRAPH_FALLBACK_URL].filter(Boolean))];
 }
 
+/** An endpoint's host for notes and errors, or undefined when it does not
+ *  parse. Never throws: SUBGRAPH_URL is not validated, and a throw while
+ *  reporting one endpoint would skip the endpoints after it. */
+export function cloberEndpointLabel(url: string): string | undefined {
+  try { return new URL(url).host; } catch { return undefined; }
+}
+
 /** Run one whole read against each endpoint in turn; the first to succeed
  *  wins. Whole reads, not single requests: two indexers can stand at
  *  different heights, and paging across both could skip or repeat a book.
@@ -186,8 +193,12 @@ export function cloberSubgraphUrls(primary: string): string[] {
 export async function withCloberSubgraph<T>(urls: readonly string[], read: (url: string) => Promise<T>): Promise<{ value: T; url: string }> {
   const failures: string[] = [];
   for (const url of urls) {
+    const host = cloberEndpointLabel(url);
+    // Skipped, not fetched: fetch's error would quote the value back, and the
+    // note scrubber only strips well-formed URLs (the value may hold a key).
+    if (!host) { failures.push('SUBGRAPH_URL is not a valid URL'); continue; }
     try { return { value: await read(url), url }; }
-    catch (e) { failures.push(`${new URL(url).host}: ${(e as Error).message}`); }
+    catch (e) { failures.push(`${host}: ${(e as Error).message}`); }
   }
   throw new Error(`subgraph unavailable (${failures.join('; ')})`);
 }
@@ -620,7 +631,7 @@ export function createCloberVaultAdapter(): VenueAdapter {
         const res = await withCloberSubgraph(urls, discoverCloberViaSubgraph);
         disc = res.value;
         authoritative = true;
-        const via = res.url === urls[0] ? '' : ` via fallback ${new URL(res.url).host}`;
+        const via = res.url === urls[0] ? '' : ` via fallback ${cloberEndpointLabel(res.url) ?? 'endpoint'}`;
         ctx.note('venue.discovery', `Clober: subgraph discovery (${disc.vault.size} vault book(s))${via}`);
       } catch (e) {
         ctx.note('venue.discovery.degraded', `Clober: subgraph discovery failed (${(e as Error).message}); trying recent Open logs`);

@@ -82,6 +82,24 @@ describe('clober subgraph endpoints', () => {
     expect(asked).toEqual([GOLDSKY]);
   });
 
+  // SUBGRAPH_URL is not validated (config.ts). An override missing its scheme
+  // must still leave the fallback reachable, and must never be quoted back.
+  const MALFORMED = 'api.goldsky.com/api/public/project_x/subgraphs/v2-subgraph-monad/gn?apiKey=secret';
+
+  it('skips a malformed SUBGRAPH_URL and still reaches the fallback', async () => {
+    const asked = stubFetch({ [CLOBER_SUBGRAPH_FALLBACK_URL]: BOOKS });
+    const { url } = await withCloberSubgraph(cloberSubgraphUrls(MALFORMED), discoverCloberViaSubgraph);
+    expect(url).toBe(CLOBER_SUBGRAPH_FALLBACK_URL);
+    expect(asked).toEqual([CLOBER_SUBGRAPH_FALLBACK_URL]); // never fetched
+  });
+
+  it('reports a malformed SUBGRAPH_URL without quoting it', async () => {
+    stubFetch({ [CLOBER_SUBGRAPH_FALLBACK_URL]: TOO_MANY });
+    const err = await withCloberSubgraph(cloberSubgraphUrls(MALFORMED), discoverCloberViaSubgraph).catch((e: Error) => e);
+    expect((err as Error).message).toBe('subgraph unavailable (SUBGRAPH_URL is not a valid URL; api.subgraph.ormilabs.com: subgraph 429)');
+    expect((err as Error).message).not.toContain('secret');
+  });
+
   it('names every endpoint and its failure when none answers', async () => {
     stubFetch({ [GOLDSKY]: NOT_FOUND, [CLOBER_SUBGRAPH_FALLBACK_URL]: TOO_MANY });
     await expect(withCloberSubgraph(cloberSubgraphUrls(GOLDSKY), discoverCloberViaSubgraph))
