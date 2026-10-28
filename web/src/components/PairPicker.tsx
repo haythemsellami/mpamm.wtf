@@ -175,8 +175,9 @@ function PairOption({ id, market, selected, highlighted, venues, onHover, onPick
   onHover: () => void; onPick: () => void;
 }) {
   const [base, quote] = market.split('/');
+  const names = venues.map((v) => v.name).join(', ');
   return (
-    <div id={id} role="option" aria-selected={selected}
+    <div id={id} role="option" aria-selected={selected} aria-describedby={venues.length ? `${id}-v` : undefined}
       // mousedown would blur the input (and lose the keyboard); the click still fires.
       onMouseDown={(e) => e.preventDefault()}
       // mousemove, not mouseenter: arrow keys scroll the list under a resting
@@ -191,9 +192,14 @@ function PairOption({ id, market, selected, highlighted, venues, onHover, onPick
         {base}<span style={{ color: selected ? undefined : C.dim2 }}>/{quote}</span>
       </span>
       {venues.length > 0 && (
-        <span aria-hidden="true" title={venues.map((v) => v.name).join(' · ')} style={{ display: 'flex', gap: 3, flex: 'none' }}>
-          {venues.map((v) => <span key={v.id} style={{ width: 6, height: 6, borderRadius: '50%', background: v.color }} />)}
-        </span>
+        <>
+          <span aria-hidden="true" title={names} style={{ display: 'flex', gap: 3, flex: 'none' }}>
+            {venues.map((v) => <span key={v.id} style={{ width: 6, height: 6, borderRadius: '50%', background: v.color }} />)}
+          </span>
+          {/* the dots, for screen readers: a description, not part of the name,
+              so the option is still announced (and matched) as just the pair. */}
+          <span id={`${id}-v`} hidden>{`${venues.length} ${venues.length === 1 ? 'venue' : 'venues'}: ${names}`}</span>
+        </>
       )}
     </div>
   );

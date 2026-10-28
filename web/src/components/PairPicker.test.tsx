@@ -56,6 +56,20 @@ describe('PairPicker', () => {
     expect(container.querySelector('[role="listbox"]')).toBeNull();
   });
 
+  it('describes the venues quoting each pair without changing its name', async () => {
+    const venuesFor = (m: string) => (m === 'MON/USDC'
+      ? [{ id: 'a', name: 'Alpha', color: '#000' }, { id: 'b', name: 'Beta', color: '#fff' }]
+      : [{ id: 'a', name: 'Alpha', color: '#000' }]);
+    await act(async () => root.render(<PairPicker markets={['MON/USDC', 'BTC/USDC']} value="MON/USDC" onChange={() => {}} venuesFor={venuesFor} />));
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-haspopup]')!.click());
+    const description = (o: Element) => document.getElementById(o.getAttribute('aria-describedby')!)?.textContent;
+    const [mon, btc] = container.querySelectorAll('[role="option"]');
+    expect(description(mon)).toBe('2 venues: Alpha, Beta');
+    expect(description(btc)).toBe('1 venue: Alpha');
+    // hidden: out of the option's name-from-content, still read as its description
+    expect(document.getElementById(mon.getAttribute('aria-describedby')!)?.hidden).toBe(true);
+  });
+
   it('closes on Escape without changing the pair', async () => {
     const onChange = await render();
     await key('Escape');
