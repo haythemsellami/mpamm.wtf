@@ -334,10 +334,18 @@ export async function bybitBookMidSeries(symbol: string, fromMs: number, toMs: n
  *  archive for part of the window isn't published yet. */
 async function assetUsdtSeries(assetKey: string, fromMs: number, toMs: number): Promise<StepSeries | null> {
   const a = assetOf(assetKey);
-  if (!a) return null;
+  if (!a || a.cex === 'kraken') return null;
   return a.cex === 'binance'
     ? binanceKlineSeries(a.cexSymbol, '1s', fromMs - STALE_BASE_MS, toMs)
     : bybitBookMidSeries(a.cexSymbol, fromMs - STALE_BASE_MS, toMs, STALE_BASE_MS);
+}
+
+/** No matching Kraken xStock BBO archive is available. Minute candles or
+ * underlying equity prices cannot reconstruct these live token-book marks. */
+export function supportsHistoricalReference(market: string): boolean {
+  const p = pairOf(market);
+  return !!p && assetOf(p.base)?.cex !== 'kraken'
+    && !(p.quoteKind === 'asset' && assetOf(p.quote)?.cex === 'kraken');
 }
 
 /**
@@ -358,7 +366,7 @@ async function assetUsdtSeries(assetKey: string, fromMs: number, toMs: number): 
 export async function pairMidSeries(market: string, fromMs: number, toMs: number): Promise<StepSeries | null> {
   const pair = pairOf(market);
   const asset = pair ? assetOf(pair.base) : undefined;
-  if (!pair || !asset) return null;
+  if (!pair || !asset || !supportsHistoricalReference(market)) return null;
   const pad = STALE_SLOW_MS; // lead-in so carry-forward has a value at fromMs
 
   const base = await assetUsdtSeries(pair.base, fromMs, toMs);
@@ -367,6 +375,7 @@ export async function pairMidSeries(market: string, fromMs: number, toMs: number
   const wrapSym = wrapBasisFor(pair);
   const wrap = wrapSym ? await binanceKlineSeries(wrapSym, '1m', fromMs - pad, toMs) : null;
 
+  const quoteWrap = pair.quoteWrapBasisSymbol ? await binanceKlineSeries(pair.quoteWrapBasisSymbol, '1m', fromMs - pad, toMs) : null;
   let quote: StepSeries | null = null;
   let quoteNeeded = false;
   if (pair.quoteKind === 'asset') {
@@ -406,6 +415,7 @@ export async function pairMidSeries(market: string, fromMs: number, toMs: number
       let v = b;
       if (wrapSym) { const w = wrap?.at(t); if (w == null) return null; v *= w; }
       if (quoteNeeded) { const q = quote?.at(t); if (q == null || q <= 0) return null; v /= q; }
+      if (pair.quoteWrapBasisSymbol) { const w = quoteWrap?.at(t); if (w == null || w <= 0) return null; v /= w; }
       return v;
     },
   };

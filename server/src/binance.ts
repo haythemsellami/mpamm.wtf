@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import { config } from './config.js';
-import type { WalkResult } from './bybit.js';
+import { walkLevels, type WalkResult } from './bybit.js';
 
 /**
  * Binance spot feed — the CEX reference for non-MON assets (BTC/ETH). Multi-symbol
@@ -68,14 +68,7 @@ export class BinanceFeed {
     const levels: Level[] = side === 'buy'
       ? [...b.asks.entries()].sort((x, y) => x[0] - y[0])
       : [...b.bids.entries()].sort((x, y) => y[0] - x[0]);
-    let remaining = baseSize, quote = 0, filled = 0;
-    for (const [price, size] of levels) {
-      if (remaining <= 0) break;
-      const take = Math.min(remaining, size);
-      quote += take * price; filled += take; remaining -= take;
-    }
-    const filledFull = remaining <= 1e-9 && filled > 0;
-    return { price: filled > 0 ? quote / filled : this.mid(symbol), filledBase: filled, filledFull };
+    return walkLevels(levels, baseSize, this.mid(symbol));
   }
 
   // ── REST cold-start ─────────────────────────────────────────────────────────

@@ -3,44 +3,33 @@ import type { Fill, Pair, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
 import { ASSETS, PAIRS, TOKENS } from '@shared';
 import { fromUnits, shortHex, toUnits } from '../util.js';
 import type { AdapterContext, LogBundle, VenueAdapter } from './adapter.js';
-import { createQuoteOutageReporter } from './quote-health.js';
+import { createQuoteOutageReporter, revertReason } from './quote-health.js';
 
 /**
  * ThogAMM is one inventory-funded ERC-7815 pool behind the TAKERBOT proxy.
- * The proxy's executable exact-input view is the quote source of truth: it
- * includes live spread, inventory skew, staleness and exact-token capacity,
- * so the adapter never ports or approximates the maker's private curve.
+ * makerQuoteExactInput is the contract's read-only baseline: spread, inventory,
+ * age and conservative capacity are included, execution-context friction is
+ * not. Actual swaps also depend on effective gas price, basefee, FastLane
+ * warmth and same-block treatment. Do not describe the view as a guaranteed
+ * executable output or add a guessed fee to approximate that mechanism.
+ * https://github.com/thogard785/thog-amm-integration-guide
  *
- * ONE PROXY, TWO BUSINESSES — AND ONLY ONE OF THEM IS THIS VENUE.
- * The same contract also runs TAKERBOT's own taker side, which emits
- * `TakerTradeExecuted` (topic0 0xb322b204…): tokenIn/amountIn are what the BOT
- * pays into someone else's book, tokenOut/amountOut what it gets back. Those
- * are the bot TAKING liquidity elsewhere, not this pAMM quoting a fill, so the
- * volume behind them belongs to the venue that filled it. Counting them here
- * books another venue's flow as ThogAMM's.
- *
- * The size of the temptation, over the venue's lifetime to 2026-08-21:
- * 6,702 TakerTradeExecuted against 6 MakerSwapExecuted. So the fill filter
- * below is deliberately MAKER-ONLY, and ThogAMM's honest number is that it
- * makes almost no markets: near-$0 days are the finding, not a bug to fix.
- * PR #82 mistook exactly this for ABI drift and had to be reverted — if you
- * are here because the venue looks too quiet, that is the answer.
+ * ONE PROXY, TWO BUSINESSES, AND ONLY ONE OF THEM IS THIS VENUE.
+ * Only MakerSwapExecuted measures this pool's settled volume. The same proxy
+ * runs TAKERBOT's own taker side, which emits TakerTradeExecuted (topic0
+ * 0xb322b204…) when its operator trades at OTHER venues: tokenIn/amountIn is
+ * what the bot pays into someone else's book. That volume belongs to the
+ * venue that filled it, and counting it here books another venue's flow as
+ * ThogAMM's. Over the venue's lifetime to 2026-08-21 it was 6,702
+ * TakerTradeExecuted against 6 MakerSwapExecuted; PR #82 mistook that gap for
+ * ABI drift and had to be reverted. Low maker volume is a finding, not a
+ * decode bug. It is also no reason to ignore later ABI/registry changes or
+ * current maker activity: check those against the chain.
  */
-
 export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as const;
 
-/** The keeper's push event since the upgrade to 0x709ba375… (block
- *  115,729,249 · 2026-10-22 22:21:05 UTC). From then on, the price path
- *  (selector 0x59558d29) and the risk-params path (0x4cb2db39) emit THIS event
- *  instead of MakerPricesPushed / MakerRiskParamsPushed. Both upgrades since
- *  then (incl. 0x96ab5405…, 2026-10-27) kept it. Its indexed word is the kind
- *  of push: 1 prices, 2 risk params, plus 4 and 8 on newer paths. That
- *  implementation is unverified, so only the hash is known.
- *  Like MakerPricesPushed before it, it also fires inside TAKERBOT's own taker
- *  trades that push prices (~500 a day). The series has always counted those
- *  txs, so keying on this topic keeps the series the same as before the
- *  upgrade. */
-const PARAMS_PUSHED_TOPIC = '0x5d4a925bedf1997523e2a7480533bd37c5b48ab9315c13dfbb289dcae70ec9cb' as const;
+/** Blocks a "maker: balance" leg sits out before it is probed again (~10 s). */
+export const DRAINED_REPROBE_BLOCKS = 25n;
 
 const THOGAMM_VENUE: VenueMeta = {
   id: 'thogamm',
@@ -49,6 +38,7 @@ const THOGAMM_VENUE: VenueMeta = {
   kind: 'amm',
   role: 'venue',
   sinceUtc: '2026-07-26',
+  quoteNote: 'ThogAMM shows the contract’s read-only quote. Actual swaps may receive less after gas-price and FastLane execution charges; same-block treatment also affects those charges.',
 };
 
 const thogammAbi = parseAbi([
@@ -61,6 +51,11 @@ const thogammAbi = parseAbi([
   'event MakerPricesPushed(uint16 seq, uint32 indexed postedBlock, uint16 sideEnableBits)',
   'event MakerRiskParamsPushed(uint8 indexed fields)',
   'event Upgraded(address indexed implementation)',
+  'event MakerPageUpdated(uint8 indexed lane, bytes payload, uint256 control)',
+  'struct TokenMetadata { address token; uint8 decimals; uint8 category; uint32 price; uint32 priceTail; uint32 tokenBidSpread; uint32 tokenAskSpread; uint32 volumeRate; uint32 categorySpread; uint32 inventory; uint32 sides; uint32 postedBlock; uint32 sequence; uint32 pairStart; uint32 inventoryCap; }',
+  'struct CategoryMetadata { uint8 anchorTokenIndex; uint32 price; uint32 priceTail; uint32 inventory; uint32 spread; uint32 postedBlock; uint32 inventoryCap; }',
+  'event MakerTokenAdded(uint8 indexed tokenIndex, address indexed token, TokenMetadata metadata, CategoryMetadata categoryMetadata, uint256 balance)',
+  'event MakerTokenRetired(uint8 indexed retiredIndex, address indexed token, uint8 movedFrom, uint32 generation)',
 ]);
 const erc20Abi = parseAbi(['function decimals() view returns (uint8)']);
 const event = (name: string) => thogammAbi.find((x: any) => x.type === 'event' && x.name === name)!;
@@ -137,8 +132,10 @@ export function indexThogammMarkets(markets: readonly ThogammMarket[]): Map<stri
 
 /**
  * Decode one real inventory transition. Malformed/irrelevant logs are skipped
- * locally; a crypto-quoted fill with no live USD leg throws so the core holds
- * the cursor rather than persisting a zero-notional fill.
+ * locally; a fill with no USD leg at all throws so the core holds the cursor
+ * rather than persisting a zero-notional fill. `usdForToken` values settled
+ * fills, so a closed Kraken market (an xStock/xStock fill's only legs) still
+ * has its last good price; it throws only if Kraken never answered.
  */
 export function decodeThogammSwap(
   log: any,
@@ -221,10 +218,19 @@ export function createThogammAdapter(): VenueAdapter {
   const byMarket = new Map<string, ThogammMarket>();
   let byDirection = new Map<string, ThogammMarket>();
   let discovered = false;
+  let activeMarkets = new Set<string>();
   // `makerQuoteExactInput` REVERTS rather than returning zero when the maker is
   // off: the keeper posts `sideEnableBits = 0` and every leg reverts
   // "maker: paused" (observed 2026-08-04 07:16:39 UTC, block 92,998,939).
   const reportOutage = createQuoteOutageReporter(THOGAMM_VENUE.name);
+  // Legs the maker answered "maker: balance" (no inventory of the output
+  // token: every buy of an xStock while the pool holds none) sit out until the
+  // block stored here, then are probed again. 75 markets x sizes x 2 sides is
+  // ~600 eth_calls a block, and these would revert on every one. Only the
+  // contract's own answer drops a leg, and a re-probe every
+  // DRAINED_REPROBE_BLOCKS (~10 s) brings it back once inventory arrives.
+  const drainedUntil = new Map<string, bigint>();
+  const legKey = (market: string, sizeUsd: number, side: Side) => `${market}:${sizeUsd}:${side}`;
 
   const refresh = async (ctx: AdapterContext) => {
     const blockNumber = await ctx.client.getBlockNumber();
@@ -273,6 +279,7 @@ export function createThogammAdapter(): VenueAdapter {
     // Discovery refreshes every ten minutes. Merge so a transient proxy/read
     // issue or later registry change can never shrink the historical decode set.
     for (const market of found) byMarket.set(market.market, market);
+    activeMarkets = new Set(found.map((m) => m.market));
     byDirection = indexThogammMarkets([...byMarket.values()]);
     discovered = true;
     ctx.note('venue.discovery', `ThogAMM: ${found.length} registered market(s) across ${addresses.length} on-chain token(s) at block ${blockNumber}`);
@@ -280,8 +287,17 @@ export function createThogammAdapter(): VenueAdapter {
 
   return {
     venues: () => [THOGAMM_VENUE],
-    quoteMarkets: () => [...new Set([...byMarket.values()].map((m) => m.market))],
+    quoteMarkets: () => [...activeMarkets],
     backfillFromUtc: '2026-07-26',
+    // Each `from` is the market's first possible fill, so the revision adds
+    // its whole history. xStocks: MakerTokenAdded for SPYx at block
+    // 116,945,831 (2026-10-27). XAUt/BTC: the first XAUt0<->WBTC
+    // MakerSwapExecuted is block 101,922,564 (2026-09-04, tx 0x8912123b…);
+    // 15 swaps since, none before.
+    historyRevisions: [
+      { id: 'xstocks-usd-references', source: 'markets', from: '2026-10-26', markets: PAIRS.filter((p) => ASSETS[p.base]?.cex === 'kraken').map((p) => p.symbol) },
+      { id: 'xaut-wbtc-quote-basis', source: 'markets', from: '2026-09-04', markets: ['XAUt/BTC'] },
+    ],
 
     discover: refresh,
 
@@ -291,6 +307,7 @@ export function createThogammAdapter(): VenueAdapter {
       const legs: QuoteLeg[] = [];
 
       for (const market of byMarket.values()) {
+        if (!activeMarkets.has(market.market)) continue;
         if (markets && !markets.has(market.market)) continue;
         const mid = ctx.pricer.pairMid(market.market);
         const baseUsd = ctx.pricer.usdPerToken(market.baseKey);
@@ -300,6 +317,7 @@ export function createThogammAdapter(): VenueAdapter {
           for (const side of ['sell', 'buy'] as const) {
             const input = side === 'sell' ? market.base : market.quote;
             const inputUsd = side === 'sell' ? baseUsd : quoteUsd;
+            if ((drainedUntil.get(legKey(market.market, sizeUsd, side)) ?? 0n) > blockNumber) continue;
             const amountIn = toUnits(sizeUsd / inputUsd, input.decimals);
             if (amountIn <= 0n) continue;
             const tokenIn = input.address;
@@ -321,8 +339,13 @@ export function createThogammAdapter(): VenueAdapter {
       const partials = new Map<string, PartialQuote>();
       for (let i = 0; i < results.length; i++) {
         const result = results[i];
-        if (result.status !== 'success') continue;
         const leg = legs[i];
+        const drainKey = legKey(leg.market.market, leg.sizeUsd, leg.side);
+        if (result.status !== 'success') {
+          if (/^maker: balance\b/.test(revertReason(result.error) ?? '')) drainedUntil.set(drainKey, blockNumber + DRAINED_REPROBE_BLOCKS);
+          continue;
+        }
+        drainedUntil.delete(drainKey);
         const [amountOut] = result.result as readonly [bigint, bigint];
         if (amountOut <= 0n) continue;
         const input = fromUnits(leg.amountIn, leg.side === 'sell' ? leg.market.base.decimals : leg.market.quote.decimals);
@@ -352,8 +375,8 @@ export function createThogammAdapter(): VenueAdapter {
           spreadBps: oneSided ? 0 : ((askPx - bidPx) / partial.mid) * 1e4,
           filledFull: true,
           oneSided,
-          // ThogAMM has no additive LP fee. Its executable output already
-          // includes the maker spread, age widening and inventory penalty.
+          // No additive LP fee. The view includes spread/age/inventory,
+          // but excludes transaction-context execution friction (see header).
           feeBps: 0,
           ts,
         });
@@ -367,10 +390,11 @@ export function createThogammAdapter(): VenueAdapter {
         // TAKERBOT taking liquidity on other venues, not fills this pAMM made
         // (see the header). Adding them here is the PR #82 mistake.
         { key: 'swaps', address: THOGAMM_ADDRESS, events: [event('MakerSwapExecuted')], kind: 'fills' as const },
-        // A proxy upgrade can change the immutable token registry. Holding the
-        // cursor on this source lets decode refresh before accepting same-range
+        // An upgrade or registry mutation can change supported pairs. Holding
+        // the cursor on these sources lets decode refresh before accepting same-range
         // fills instead of silently dropping a newly registered token.
         { key: 'upgrades', address: THOGAMM_ADDRESS, events: [event('Upgraded')], kind: 'state' as const },
+        { key: 'registry', address: THOGAMM_ADDRESS, events: [event('MakerTokenAdded'), event('MakerTokenRetired')], kind: 'state' as const },
       ];
     },
 
@@ -379,16 +403,23 @@ export function createThogammAdapter(): VenueAdapter {
     // TAKERBOT's keeper self-funds price/risk pushes to the proxy. Every push
     // emits exactly one event, so destination-keyed log mode follows keeper
     // rotation and counts transactions without block-sampling estimates. Which
-    // event depends on the implementation: the named pair until the 2026-10-22
-    // upgrade, PARAMS_PUSHED_TOPIC after it. Keep both — a rebuild re-reads
-    // the earlier blocks — and the tracker counts each tx once across sources.
+    // event depends on the implementation: the named pair until the upgrade to
+    // 0x709ba375… (block 115,729,249, 2026-10-22 22:21 UTC), MakerPageUpdated
+    // (topic0 0x5d4a925b…, PR #158's source) after it. Its indexed lane is the
+    // push kind: 1 prices (selector 0x59558d29), 2 risk params (0x4cb2db39),
+    // 4 and 8 on newer paths. Keep both — a rebuild re-reads the earlier
+    // blocks — and the tracker counts each tx once across sources.
+    // Both events also fire inside TAKERBOT's own taker trades that push
+    // prices (~500 a day, 13–16% of the series' MON). The series has counted
+    // those from the start, so it stays comparable across the upgrade; whether
+    // they belong in quote-update burn is an open modelling question.
     gasSources: () => [
       {
         mode: 'logs' as const,
         address: THOGAMM_ADDRESS,
         events: [event('MakerPricesPushed'), event('MakerRiskParamsPushed')],
       },
-      { mode: 'logs' as const, address: THOGAMM_ADDRESS, topic0: PARAMS_PUSHED_TOPIC },
+      { mode: 'logs' as const, address: THOGAMM_ADDRESS, events: [event('MakerPageUpdated')] },
     ],
     // From the 2026-10-22 upgrade on, the series matched nothing: the keeper's
     // ~220k daily pushes went uncounted and the gas chart dropped ThogAMM
@@ -413,8 +444,8 @@ export function createThogammAdapter(): VenueAdapter {
           const label = /^0x[0-9a-fA-F]{40}$/.test(impl) ? shortHex(impl) : 'an unreadable implementation';
           ctx.note('venue.upgraded', `ThogAMM: proxy upgraded to ${label} — re-verify quote/fill/gas ABIs against the new implementation`);
         }
-        await refresh(ctx);
       }
+      if (upgrades.length || logs.registry?.length) await refresh(ctx);
       // Sources are a constant, so logSources() is always right and cannot carry
       // the fail-closed guard the discovered-address venues get for free.
       // Discovery supplies only the decode table: with it empty every swap

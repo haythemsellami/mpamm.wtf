@@ -175,3 +175,10 @@ export function shortHex(h: string, head = 4, tail = 4): string {
   if (!h || h.includes('…') || h.length <= 2 + head + tail + 1) return h;
   return h.slice(0, 2 + head) + '…' + h.slice(-tail);
 }
+
+/** The taker fee the Execution prose quotes, in bps: the pair's live
+ *  reference row fee, else that CEX's configured fee (no row is live during a
+ *  Kraken closure or a cold cross leg), else a dash. */
+export function takerFeeLabel(rowFeeBps: number | undefined, configuredBps: number | undefined): string {
+  return (rowFeeBps ?? configuredBps)?.toFixed(1) ?? '—';
+}

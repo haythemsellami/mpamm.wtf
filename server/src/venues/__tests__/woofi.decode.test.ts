@@ -257,8 +257,8 @@ describe('WOOFi registered-market table', () => {
       expect(m.base.address).not.toBe(TOKENS.MON.address);
       expect(m.quote.address).not.toBe(TOKENS.MON.address);
     }
-    // XAUt0↔WBTC is unlisted in @shared PAIRS (quote-leg wrap basis)
-    expect(woofiMarketFor(TOKENS.XAUT0.address, TOKENS.WBTC.address)).toBeUndefined();
+    // Stable/stable pairs remain unregistered (no base-asset benchmark).
+    expect(woofiMarketFor(TOKENS.USDC.address, TOKENS.AUSD.address)).toBeUndefined();
   });
 });
 

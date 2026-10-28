@@ -213,3 +213,14 @@ test('Execution replays quotes collected on other pages and loads shared five-mi
   } finally { await freshContext.close(); }
   await page.screenshot({ path: test.info().outputPath('shared-execution-history.png'), fullPage: true });
 });
+
+test('xStock references show token/USD conversion and ThogAMM quote context', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.getByLabel('Asset pair').selectOption('SPYx/USDC');
+  await expect(page.getByText('Kraken Pro xStocks ($1B+)', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(/ThogAMM shows the contract’s read-only quote/)).toBeVisible();
+  await expect(page.getByText(/live USDC\/USD mid/)).toBeVisible();
+  await expect(page.getByText(/actual xStock token book on Kraken/)).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath('xstocks-mobile.png'), fullPage: true });
+});

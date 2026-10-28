@@ -312,7 +312,7 @@ export interface VenueAdapter {
 
 /**
  * The CEX reference registry — the benchmarks for markouts + the Execution
- * comparison, routed PER BASE ASSET (Bybit for MON, Binance for BTC/ETH). These
+ * comparison, routed per base asset (Bybit, Binance, or Kraken xStocks). These
  * are NOT fill-producing venues; one registry owns every CEX feed.
  */
 export interface ReferenceRegistry {
@@ -320,20 +320,30 @@ export interface ReferenceRegistry {
   stop(): void;
   /** the CEX benchmark venue metas (role: 'reference'). */
   metas(): VenueMeta[];
-  /** the reference venue id benchmarking a base asset ('bybit' | 'binance'). */
+  /** the reference venue id benchmarking a base asset ('bybit' | 'binance' | 'kraken'). */
   refVenueIdForBase(base: string): string;
   /** USD(≈USDT) price of a base asset (MON/BTC/ETH) — for notional sizing and
    *  the header, NOT for bps anchoring (that needs the pair's quote terms). */
   assetUsd(base: string): number;
+  /** USD for VALUING a settled fill: assetUsd, except that a market in a
+   *  scheduled closure or outage (Kraken xStocks, 24/5) keeps its last good
+   *  price. An xStock/xStock fill has no other USD leg, and decode throwing
+   *  for want of one would hold the shared tail for every venue. Never for
+   *  sizing, bps anchors or markouts. */
+  settledUsd(base: string): number;
+  /** The base's CEX itself reports its market as not trading (Kraken's 24/5
+   *  xStock closures, a halt, maintenance). Its pairs have no reference while
+   *  it lasts, and that is expected, not a starving feed. */
+  marketClosed(base: string): boolean;
   /** the CEX reference mid for a PAIR, expressed in the pair's own terms:
-   *  baseUSDT mid × wrap basis (WBTCBTC for wrapped BTC) ÷ the stable's USDT
-   *  cross (USDCUSDT for USDC pairs). This is the bps anchor + markout mark —
+   *  base book mid converted for USD/USDT, base/quote wrapper bases, and
+   *  the quote asset or stable cross. This is the bps anchor + markout mark —
    *  like-for-like with what actually trades on-chain (docs/architecture.md: pair-terms reference). */
   midForPair(market: string): number;
   /** 24h change % for a base asset. */
   changePctFor(base: string): number;
   /** taker-walk benchmark rows for every tracked pair, each routed to and tagged
-   *  with the pair's CEX (venueId = 'bybit' | 'binance'), prices converted into
+   *  with the pair's CEX (venueId = 'bybit' | 'binance' | 'kraken'), prices converted into
    *  the pair's quote terms (wrap basis + stable cross). */
   quote(sizesUsd: readonly number[], markets?: ReadonlySet<string>): QuoteRow[];
 }

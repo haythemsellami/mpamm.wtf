@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { captureReferenceFrame, realtimeCoverage } from '../datasource/live.js';
+import { captureReferenceFrame, expectedReferenceVenues, realtimeCoverage } from '../datasource/live.js';
 
 describe('realtime quote coverage', () => {
   it('counts missing block numbers and a newer observed head', () => {
@@ -45,5 +45,22 @@ describe('frame reference capture', () => {
     expect(frame.monUsd).toBe(2);
     expect(frame.pricer.pairMid('MON/USDC')).toBe(3);
     expect(frame.assetPrices.get('MON')).toBe(2);
+    expect(frame.closedAssets.size).toBe(0);   // a registry without marketClosed
+  });
+
+  it('records the assets whose CEX reports the market closed', () => {
+    const frame = captureReferenceFrame({ assetUsd: () => 0, midForPair: () => 0, quote: () => [], marketClosed: (k) => k === 'SPYx' }, [100]);
+    expect([...frame.closedAssets]).toEqual(['SPYx']);
+  });
+});
+
+describe('expected reference venues', () => {
+  const XSTOCKS = ['SPYx', 'QQQx', 'EWYx', 'NVDAx', 'TSLAx'];
+  it('expects every CEX while its markets are open', () => {
+    expect(expectedReferenceVenues(new Set()).sort()).toEqual(['binance', 'bybit', 'kraken']);
+  });
+  it('does not expect Kraken while all of its xStock markets are closed, and still does if one is open', () => {
+    expect(expectedReferenceVenues(new Set(XSTOCKS)).sort()).toEqual(['binance', 'bybit']);
+    expect(expectedReferenceVenues(new Set(XSTOCKS.slice(1)))).toContain('kraken');
   });
 });

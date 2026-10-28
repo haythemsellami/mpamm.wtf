@@ -22,6 +22,20 @@ export interface WalkResult {
 
 type Level = [price: number, size: number];
 
+/** Take `baseSize` base units from price-ordered levels, best first: the
+ *  VWAP of what filled, how much did, and whether all of it. `fallback` is
+ *  the price when nothing fills (each feed's own choice). The one taker walk
+ *  every CEX feed uses. */
+export function walkLevels(levels: Iterable<readonly [price: number, size: number]>, baseSize: number, fallback: number): WalkResult {
+  let remaining = baseSize, quote = 0, filled = 0;
+  for (const [price, size] of levels) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, size);
+    quote += take * price; filled += take; remaining -= take;
+  }
+  return { price: filled > 0 ? quote / filled : fallback, filledBase: filled, filledFull: remaining <= 1e-9 && filled > 0 };
+}
+
 export class BybitFeed {
   private bids = new Map<number, number>();
   private asks = new Map<number, number>();
@@ -96,19 +110,7 @@ export class BybitFeed {
     const levels: Level[] = side === 'buy'
       ? [...this.asks.entries()].sort((a, b) => a[0] - b[0])
       : [...this.bids.entries()].sort((a, b) => b[0] - a[0]);
-    let remaining = baseSize;
-    let quote = 0;
-    let filled = 0;
-    for (const [price, size] of levels) {
-      if (remaining <= 0) break;
-      const take = Math.min(remaining, size);
-      quote += take * price;
-      filled += take;
-      remaining -= take;
-    }
-    const filledFull = remaining <= 1e-9 && filled > 0;
-    const price = filled > 0 ? quote / filled : this.mid();
-    return { price, filledBase: filled, filledFull };
+    return walkLevels(levels, baseSize, this.mid());
   }
 
   // ── REST cold-start ───────────────────────────────────────────────────────

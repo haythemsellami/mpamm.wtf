@@ -13,6 +13,10 @@ export class UsdPricer {
     /** the CEX reference mid for a PAIR in the pair's own terms (wrap basis +
      *  stable cross applied) — the bps anchor adapters quote against. */
     private readonly pairMidFn?: (market: string) => number,
+    /** USD for valuing a SETTLED fill (usdForToken only): the live price, or a
+     *  closed market's last good one (ReferenceRegistry.settledUsd). Sizing
+     *  never uses it. Unset = assetUsd. */
+    private readonly settledUsd?: (assetKey: string) => number,
   ) {}
 
   /** pair-terms reference mid (0 when unavailable). Use for bps anchoring;
@@ -35,7 +39,13 @@ export class UsdPricer {
     return px > 0 ? usd / px : 0;
   }
 
+  /** USD notional of a settled fill leg (see `settledUsd`). */
   usdForToken(symbol: string, amount: number): number {
-    return amount * this.usdPerToken(symbol);
+    if (!this.settledUsd) return amount * this.usdPerToken(symbol);
+    const t = TOKENS[symbol];
+    if (!t) return 0;
+    if (t.stable) return amount;
+    const asset = assetForToken(t.address);
+    return asset ? amount * this.settledUsd(asset.key) : 0;
   }
 }

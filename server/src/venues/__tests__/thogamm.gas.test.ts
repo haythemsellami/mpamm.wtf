@@ -1,12 +1,12 @@
 // ThogAMM's quote-update burn is its keeper's pushes to the proxy. The
 // 2026-10-22 upgrade (impl 0x709ba375…) replaced the two named push events with
-// one unverified event, and a series keyed only on the old pair matched nothing
+// MakerPageUpdated, and a series keyed only on the old pair matched nothing
 // from then on: the gas chart dropped ThogAMM after 10-22. These pin both
 // generations of the push event, two real post-upgrade pushes, and the
 // one-time rebuild.
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { toEventSelector } from 'viem';
+import { decodeEventLog, toEventSelector } from 'viem';
 import { createThogammAdapter, THOGAMM_ADDRESS } from '../thogamm.js';
 
 /** Real pushes, one per keeper path (fixtures/thogamm-params-pushed.json). */
@@ -49,6 +49,10 @@ describe('thogamm quote-update gas', () => {
       expect(p.status).toBe('success');
       const hits = p.logs.filter((l: any) => l.address === PROXY && topics.has(l.topics[0]));
       expect(hits).toHaveLength(1);
+      const abi = sources.flatMap((s) => s.mode === 'logs' ? s.events ?? [] : []);
+      const decoded = decodeEventLog({ abi, data: hits[0].data, topics: hits[0].topics, strict: true }) as any;
+      expect(decoded.eventName).toBe('MakerPageUpdated');
+      expect(decoded.args.lane).toBe(Number(BigInt(hits[0].topics[1])));
     }
     // the indexed word is the push kind: 1 prices, 2 risk params
     expect(FX.pushes.map((p: any) => BigInt(p.logs[0].topics[1]))).toEqual([1n, 2n]);
