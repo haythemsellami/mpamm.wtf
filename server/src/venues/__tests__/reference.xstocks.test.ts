@@ -1,17 +1,40 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mids = vi.hoisted(() => new Map<string, number>());
 const walk = (symbol: string, side: string, size: number) => ({ price: mids.get(symbol)! * (side === 'buy' ? 1.001 : 0.999), filledBase: size, filledFull: true });
-vi.mock('../../kraken.js', () => ({ KrakenFeed: class { mid(s: string) { return mids.get(s) ?? 0; } walk = walk; } }));
-vi.mock('../../binance.js', () => ({ BinanceFeed: class { mid(s: string) { return mids.get(s) ?? 0; } walk = walk; } }));
-vi.mock('../../bybit.js', () => ({ BybitFeed: class { mid() { return mids.get('MONUSDT') ?? 0; } crossMid(s: string) { return mids.get(s) ?? 0; } } }));
+vi.mock('../../kraken.js', () => ({ KrakenFeed: class { mid(s: string) { return mids.get(s) ?? 0; } walk = walk; changePct() { return 3; } } }));
+vi.mock('../../binance.js', () => ({ BinanceFeed: class { mid(s: string) { return mids.get(s) ?? 0; } walk = walk; changePct() { return 2; } } }));
+vi.mock('../../bybit.js', () => ({ BybitFeed: class {
+  mid() { return mids.get('MONUSDT') ?? 0; }
+  crossMid(s: string) { return mids.get(s) ?? 0; }
+  walk(side: string, size: number) { return walk('MONUSDT', side, size); }
+  changePct() { return 1; }
+} }));
 import { createReferenceRegistry } from '../reference.js';
 import { supportsHistoricalReference, pairMidSeries } from '../../history/cex.js';
 import { config } from '../../config.js';
 
 beforeEach(() => {
   mids.clear();
-  for (const [s, p] of Object.entries({ 'SPYx/USD': 800, 'QQQx/USD': 700, 'USDC/USD': 1.002, 'USDT/USD': 0.998, 'AUSD/USD': 1.003, BTCUSDT: 100_000, MONUSDT: 0.03, WBTCBTC: 0.999, XAUTUSDT: 4000 })) mids.set(s, p);
+  for (const [s, p] of Object.entries({ 'SPYx/USD': 800, 'QQQx/USD': 700, 'USDC/USD': 1.002, 'USDT/USD': 0.998, 'AUSD/USD': 1.003, BTCUSDT: 100_000, MONUSDT: 0.03, WBTCBTC: 0.999, XAUTUSDT: 4000, USDCUSDT: 1.0002 })) mids.set(s, p);
 });
+describe('per-CEX routing', () => {
+  it("routes each base to its own CEX's book, walk, change, fee and venue id", () => {
+    const r = createReferenceRegistry();
+    expect([r.assetUsd('MON'), r.assetUsd('BTC'), r.assetUsd('SPYx')]).toEqual([0.03, 100_000, 800]);
+    expect([r.changePctFor('MON'), r.changePctFor('BTC'), r.changePctFor('SPYx')]).toEqual([1, 2, 3]);
+    const rows = r.quote([100], new Set(['MON/USDC', 'BTC/USDC', 'SPYx/USDC']));
+    expect(rows.map((row) => [row.market, row.venueId, row.feeBps])).toEqual([
+      ['MON/USDC', 'bybit', config.takerBps],
+      ['BTC/USDC', 'binance', config.binanceTakerBps],
+      ['SPYx/USDC', 'kraken', config.krakenXstockTakerBps],
+    ]);
+    // each walked its own book: ask = book mid × 1.001 in pair terms, plus that CEX's fee
+    expect(rows[0].askPx).toBeCloseTo(0.03 * 1.001 / 1.0002 * (1 + config.takerBps / 1e4), 12);
+    expect(rows[1].askPx).toBeCloseTo(100_000 * 1.001 * 0.999 / 1.0002 * (1 + config.binanceTakerBps / 1e4), 6);
+    expect(rows[2].askPx).toBeCloseTo(800 * 1.001 / 1.002 * (1 + config.krakenXstockTakerBps / 1e4), 9);
+  });
+});
+
 describe('xStock pair terms', () => {
   it('converts actual token/USD books separately into USDC, USDT0 and AUSD', () => {
     const r = createReferenceRegistry();

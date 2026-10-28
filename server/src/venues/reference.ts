@@ -1,7 +1,7 @@
-import type { QuoteRow, VenueMeta, Pair } from '@shared';
+import type { CexId, QuoteRow, VenueMeta, Pair } from '@shared';
 import { PAIRS, TOKENS, ASSETS, assetOf, pairOf, cexForBase, wrapBasisFor } from '@shared';
 import { config } from '../config.js';
-import { BybitFeed } from '../bybit.js';
+import { BybitFeed, type WalkResult } from '../bybit.js';
 import { BinanceFeed } from '../binance.js';
 import { KrakenFeed } from '../kraken.js';
 import type { ReferenceRegistry } from './adapter.js';
@@ -40,10 +40,24 @@ export function createReferenceRegistry(): ReferenceRegistry {
   const kraken = new KrakenFeed([...new Set([...symbols('kraken'), 'USDT/USD',
     ...stableQuoted.filter((p) => cexForBase(p.base) === 'kraken').map((p) => TOKENS[p.quote]?.usdCross).filter((s): s is string => !!s)])]);
 
+  /** One row per CEX: a base asset's book, walk, 24h change and taker fee are
+   *  a lookup by its `cex`. Adding a CEX adds a row here instead of a branch
+   *  at each call site, where a missed one silently fell through to Bybit's
+   *  MON book. Bybit's feed is the MON book alone, so it ignores the symbol. */
+  const feeds: Record<CexId, {
+    mid(symbol: string): number;
+    walk(symbol: string, side: 'buy' | 'sell', baseSize: number): WalkResult;
+    changePct(symbol: string): number;
+    feeBps(): number;
+  }> = {
+    bybit: { mid: () => bybit.mid(), walk: (_s, side, size) => bybit.walk(side, size), changePct: () => bybit.changePct(), feeBps: () => config.takerBps },
+    binance: { mid: (s) => binance.mid(s), walk: (s, side, size) => binance.walk(s, side, size), changePct: (s) => binance.changePct(s), feeBps: () => config.binanceTakerBps },
+    kraken: { mid: (s) => kraken.mid(s), walk: (s, side, size) => kraken.walk(s, side, size), changePct: (s) => kraken.changePct(s), feeBps: () => config.krakenXstockTakerBps },
+  };
+
   const rawMid = (base: string): number => {
     const a = assetOf(base);
-    if (!a) return 0;
-    return a.cex === 'kraken' ? kraken.mid(a.cexSymbol) : a.cex === 'binance' ? binance.mid(a.cexSymbol) : bybit.mid();
+    return a ? feeds[a.cex].mid(a.cexSymbol) : 0;
   };
   const wrapFactor = (pair: Pair): number => {
     const sym = wrapBasisFor(pair);
@@ -104,8 +118,7 @@ export function createReferenceRegistry(): ReferenceRegistry {
     },
     changePctFor(base) {
       const a = assetOf(base);
-      if (!a) return 0;
-      return a.cex === 'kraken' ? kraken.changePct(a.cexSymbol) : a.cex === 'binance' ? binance.changePct(a.cexSymbol) : bybit.changePct();
+      return a ? feeds[a.cex].changePct(a.cexSymbol) : 0;
     },
     quote(sizesUsd, markets) {
       const rows: QuoteRow[] = [];
@@ -117,13 +130,12 @@ export function createReferenceRegistry(): ReferenceRegistry {
         const mid = rawMid(pair.base), factor = pairFactor(pair);
         if (mid <= 0 || factor <= 0) continue;
         const pxMid = mid * factor;
-        const feeBps = a.cex === 'kraken' ? config.krakenXstockTakerBps : a.cex === 'binance' ? config.binanceTakerBps : config.takerBps;
+        const feed = feeds[a.cex];
+        const feeBps = feed.feeBps();
         const fee = feeBps / 1e4;
         for (const size of sizesUsd) {
           const base = size / mid;
-          const walk = (side: 'buy' | 'sell') => a.cex === 'kraken' ? kraken.walk(a.cexSymbol, side, base)
-            : a.cex === 'binance' ? binance.walk(a.cexSymbol, side, base) : bybit.walk(side, base);
-          const buy = walk('buy'), sell = walk('sell');
+          const buy = feed.walk(a.cexSymbol, 'buy', base), sell = feed.walk(a.cexSymbol, 'sell', base);
           const askPx = buy.price * factor * (1 + fee), bidPx = sell.price * factor * (1 - fee);
           rows.push({
             venueId: a.cex, market: pair.symbol, sizeUsd: size,
