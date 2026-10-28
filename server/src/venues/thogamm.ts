@@ -3,7 +3,7 @@ import type { Fill, Pair, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
 import { ASSETS, PAIRS, TOKENS } from '@shared';
 import { fromUnits, shortHex, toUnits } from '../util.js';
 import type { AdapterContext, LogBundle, VenueAdapter } from './adapter.js';
-import { createQuoteOutageReporter } from './quote-health.js';
+import { createQuoteOutageReporter, revertReason } from './quote-health.js';
 
 /**
  * ThogAMM is one inventory-funded ERC-7815 pool behind the TAKERBOT proxy.
@@ -20,6 +20,9 @@ import { createQuoteOutageReporter } from './quote-health.js';
  * reason to ignore subsequent ABI/registry changes or current maker activity.
  */
 export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as const;
+
+/** Blocks a "maker: balance" leg sits out before it is probed again (~10 s). */
+export const DRAINED_REPROBE_BLOCKS = 25n;
 
 const THOGAMM_VENUE: VenueMeta = {
   id: 'thogamm',
@@ -213,6 +216,14 @@ export function createThogammAdapter(): VenueAdapter {
   // off: the keeper posts `sideEnableBits = 0` and every leg reverts
   // "maker: paused" (observed 2026-08-04 07:16:39 UTC, block 92,998,939).
   const reportOutage = createQuoteOutageReporter(THOGAMM_VENUE.name);
+  // Legs the maker answered "maker: balance" (no inventory of the output
+  // token: every buy of an xStock while the pool holds none) sit out until the
+  // block stored here, then are probed again. 75 markets x sizes x 2 sides is
+  // ~600 eth_calls a block, and these would revert on every one. Only the
+  // contract's own answer drops a leg, and a re-probe every
+  // DRAINED_REPROBE_BLOCKS (~10 s) brings it back once inventory arrives.
+  const drainedUntil = new Map<string, bigint>();
+  const legKey = (market: string, sizeUsd: number, side: Side) => `${market}:${sizeUsd}:${side}`;
 
   const refresh = async (ctx: AdapterContext) => {
     const blockNumber = await ctx.client.getBlockNumber();
@@ -299,6 +310,7 @@ export function createThogammAdapter(): VenueAdapter {
           for (const side of ['sell', 'buy'] as const) {
             const input = side === 'sell' ? market.base : market.quote;
             const inputUsd = side === 'sell' ? baseUsd : quoteUsd;
+            if ((drainedUntil.get(legKey(market.market, sizeUsd, side)) ?? 0n) > blockNumber) continue;
             const amountIn = toUnits(sizeUsd / inputUsd, input.decimals);
             if (amountIn <= 0n) continue;
             const tokenIn = input.address;
@@ -320,8 +332,13 @@ export function createThogammAdapter(): VenueAdapter {
       const partials = new Map<string, PartialQuote>();
       for (let i = 0; i < results.length; i++) {
         const result = results[i];
-        if (result.status !== 'success') continue;
         const leg = legs[i];
+        const drainKey = legKey(leg.market.market, leg.sizeUsd, leg.side);
+        if (result.status !== 'success') {
+          if (/^maker: balance\b/.test(revertReason(result.error) ?? '')) drainedUntil.set(drainKey, blockNumber + DRAINED_REPROBE_BLOCKS);
+          continue;
+        }
+        drainedUntil.delete(drainKey);
         const [amountOut] = result.result as readonly [bigint, bigint];
         if (amountOut <= 0n) continue;
         const input = fromUnits(leg.amountIn, leg.side === 'sell' ? leg.market.base.decimals : leg.market.quote.decimals);

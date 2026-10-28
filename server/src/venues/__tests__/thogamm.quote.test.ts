@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { TOKENS, ASSETS, pairOf } from '@shared';
-import { createThogammAdapter } from '../thogamm.js';
+import { createThogammAdapter, DRAINED_REPROBE_BLOCKS } from '../thogamm.js';
 
 /**
  * The real viem error a reverted `makerQuoteExactInput` leg carries, recorded
@@ -198,5 +198,64 @@ describe('ThogAMM live xStock quote units', () => {
     expect(row.askPx).toBe(0); expect(row.oneSided).toBe(true);
     expect(row.feeBps).toBe(0);
     expect(adapter.venues()[0].quoteNote).toContain('read-only quote');
+  });
+});
+
+// A leg into a token the pool holds none of reverts "maker: balance" on every
+// block. It sits out DRAINED_REPROBE_BLOCKS, then is probed again; every
+// other leg is still probed each block.
+describe('ThogAMM drained legs', () => {
+  const BALANCE_ERROR = Object.assign(
+    new Error('The contract function "makerQuoteExactInput" reverted with the following reason:\nmaker: balance'),
+    { name: 'ContractFunctionExecutionError', cause: Object.assign(new Error('...'), { name: 'ContractFunctionRevertedError', reason: 'maker: balance' }) },
+  );
+  const XAUT0 = TOKENS.XAUT0.address.toLowerCase();
+
+  it('sits out "maker: balance" legs until the re-probe block, then quotes them again once refilled', async () => {
+    const state = { drained: true };
+    const sent: Array<{ block: bigint; legs: number; intoXaut: number }> = [];
+    const ctx = stubCtx([], { live: true });
+    ctx.client.multicall = async ({ contracts, blockNumber }: any) => {
+      if (contracts[0]?.functionName === 'decimals') {
+        return contracts.map((c: any) => ({ status: 'success', result: Object.values(TOKENS).find((t) => t.address.toLowerCase() === String(c.address).toLowerCase())!.decimals }));
+      }
+      const intoXaut = contracts.filter((c: any) => String(c.args[1]).toLowerCase() === XAUT0).length;
+      sent.push({ block: blockNumber, legs: contracts.length, intoXaut });
+      return contracts.map((c: any) => String(c.args[1]).toLowerCase() === XAUT0 && state.drained
+        ? failed(BALANCE_ERROR)
+        : { status: 'success', result: [1n, blockNumber] });
+    };
+    const adapter = createThogammAdapter();
+    await adapter.discover(ctx);
+    const B = 93_063_374n;
+    await adapter.quote!(ctx, [100, 1000], B);
+    const all = sent[0].legs, drained = sent[0].intoXaut;
+    expect(drained).toBeGreaterThan(0);
+    await adapter.quote!(ctx, [100, 1000], B + 1n);
+    await adapter.quote!(ctx, [100, 1000], B + DRAINED_REPROBE_BLOCKS - 1n);
+    expect(sent.slice(1).map((s) => [s.legs, s.intoXaut])).toEqual([[all - drained, 0], [all - drained, 0]]);
+    state.drained = false;
+    const rows = await adapter.quote!(ctx, [100, 1000], B + DRAINED_REPROBE_BLOCKS);
+    expect(sent[3].legs).toBe(all);
+    expect(rows.some((r) => r.market.startsWith('XAUt/') && r.askPx > 0)).toBe(true);
+    await adapter.quote!(ctx, [100, 1000], B + DRAINED_REPROBE_BLOCKS + 1n);
+    expect(sent[4].legs).toBe(all);
+  });
+
+  it('keeps probing legs that fail for any other reason', async () => {
+    const sent: number[] = [];
+    const ctx = stubCtx([], { live: true });
+    ctx.client.multicall = async ({ contracts, blockNumber }: any) => {
+      if (contracts[0]?.functionName === 'decimals') {
+        return contracts.map((c: any) => ({ status: 'success', result: Object.values(TOKENS).find((t) => t.address.toLowerCase() === String(c.address).toLowerCase())!.decimals }));
+      }
+      sent.push(contracts.length);
+      return contracts.map((c: any) => String(c.args[1]).toLowerCase() === XAUT0 ? failed(PAUSED_ERROR) : { status: 'success', result: [1n, blockNumber] });
+    };
+    const adapter = createThogammAdapter();
+    await adapter.discover(ctx);
+    await adapter.quote!(ctx, [100], 93_063_374n);
+    await adapter.quote!(ctx, [100], 93_063_375n);
+    expect(sent[1]).toBe(sent[0]);
   });
 });

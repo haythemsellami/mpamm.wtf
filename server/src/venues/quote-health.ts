@@ -21,7 +21,7 @@ import type { AdapterContext } from './adapter.js';
 /** The Error(string) payload of a reverted eth_call, from anywhere in viem's
  *  nested error chain (multicall wraps it a few `cause` levels deep). Falls
  *  back to parsing the rendered message, which always carries the reason. */
-function revertReason(err: unknown): string | null {
+export function revertReason(err: unknown): string | null {
   for (let e = err as any, depth = 0; e && depth < 6; e = e.cause, depth++) {
     if (typeof e.reason === 'string' && e.reason.trim()) return e.reason.trim();
   }
