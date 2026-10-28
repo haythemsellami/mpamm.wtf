@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import { crc32 } from 'node:zlib';
 import { config } from './config.js';
-import type { WalkResult } from './bybit.js';
+import { walkLevels, type WalkResult } from './bybit.js';
 
 // Kraken v2 book quantities/prices are JSON numbers. Preserve their decimal
 // lexemes: converting through Number drops trailing zeroes required by CRC32.
@@ -105,13 +105,8 @@ export class KrakenFeed {
   walk(symbol: string, side: 'buy' | 'sell', baseSize: number): WalkResult {
     const b = this.book(symbol);
     if (!b || !(baseSize > 0)) return { ...EMPTY };
-    let remaining = baseSize, quote = 0, filled = 0;
-    for (const l of levels(side === 'buy' ? b.asks : b.bids, side === 'buy')) {
-      const take = Math.min(remaining, Number(l.qty));
-      quote += take * Number(l.price); filled += take; remaining -= take;
-      if (remaining <= 0) break;
-    }
-    return { price: filled > 0 ? quote / filled : 0, filledBase: filled, filledFull: remaining <= 1e-9 && filled > 0 };
+    const book = levels(side === 'buy' ? b.asks : b.bids, side === 'buy').map((l) => [Number(l.price), Number(l.qty)] as const);
+    return walkLevels(book, baseSize, 0);
   }
   private connect(): void {
     if (this.stopped) return;
