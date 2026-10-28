@@ -91,7 +91,9 @@ export function PairPicker({ markets, value, onChange, venuesFor }: {
     return () => document.removeEventListener('pointerdown', outside);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
-  useEffect(() => { if (open) scrollTo(highlighted, 'nearest'); }, [highlighted]); // eslint-disable-line react-hooks/exhaustive-deps
+  // `flat` too: clearing a filter can move the highlighted row far down the
+  // list without changing which row is highlighted.
+  useEffect(() => { if (open) scrollTo(highlighted, 'nearest'); }, [highlighted, flat]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onInputKey = (e: KeyboardEvent<HTMLInputElement>) => {
     const i = highlighted ? flat.indexOf(highlighted) : -1;
@@ -111,8 +113,8 @@ export function PairPicker({ markets, value, onChange, venuesFor }: {
   const [base, quote] = value.split('/');
   return (
     <div ref={root} style={{ position: 'relative' }}
-      // Tab (or any focus move) out of the picker closes it; a click inside
-      // moves focus nowhere (options keep it in the input), so it stays open.
+      // Tab (or any focus move) out of the picker closes it; a press inside
+      // the popup keeps focus in the input (below), so it stays open.
       onBlur={(e) => { if (open && e.relatedTarget && !root.current?.contains(e.relatedTarget)) hide(false); }}>
       <button ref={trigger} type="button" aria-haspopup="listbox" aria-expanded={open} aria-label={`Asset pair: ${value}`}
         onClick={() => (open ? hide(true) : show())}
@@ -126,7 +128,10 @@ export function PairPicker({ markets, value, onChange, venuesFor }: {
         <span aria-hidden="true" style={{ color: open ? C.accent : C.faint2, fontSize: 9 }}>{open ? '▴' : '▾'}</span>
       </button>
       {open && (
-        <div style={{
+        // a press anywhere but the input (an option, a group heading, the
+        // footer) would blur it, taking the arrow keys and Esc with it and
+        // handing digits back to the global tab shortcuts; the click still fires.
+        <div onMouseDown={(e) => { if (e.target !== input.current) e.preventDefault(); }} style={{
           position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 30, width: 252,
           background: C.panel, border: `1px solid ${C.line}`, boxShadow: '0 10px 28px rgba(0,0,0,0.18)',
         }}>
@@ -178,8 +183,6 @@ function PairOption({ id, market, selected, highlighted, venues, onHover, onPick
   const names = venues.map((v) => v.name).join(', ');
   return (
     <div id={id} role="option" aria-selected={selected} aria-describedby={venues.length ? `${id}-v` : undefined}
-      // mousedown would blur the input (and lose the keyboard); the click still fires.
-      onMouseDown={(e) => e.preventDefault()}
       // mousemove, not mouseenter: arrow keys scroll the list under a resting
       // pointer, and mouseenter would steal the highlight back on every step.
       onMouseMove={highlighted ? undefined : onHover} onClick={onPick}

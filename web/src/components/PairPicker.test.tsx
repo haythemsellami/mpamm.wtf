@@ -70,6 +70,36 @@ describe('PairPicker', () => {
     expect(document.getElementById(mon.getAttribute('aria-describedby')!)?.hidden).toBe(true);
   });
 
+  it('scrolls the highlight back into view when clearing the filter moves it', async () => {
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this.textContent ?? ''); };
+    try {
+      await act(async () => root.render(<PairPicker markets={MARKETS} value="TSLAx/NVDAx" onChange={() => {}} />));
+      await act(async () => container.querySelector<HTMLButtonElement>('button[aria-haspopup]')!.click());
+      await type('nvda');
+      scrolled.length = 0;
+      await type('');
+      expect(scrolled).toEqual(['TSLAx/NVDAx']);
+    } finally {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+    }
+  });
+
+  it('keeps focus in the filter on a press anywhere in the popup but the input', async () => {
+    await render();
+    const press = (el: Element) => {
+      const e = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+      el.dispatchEvent(e);
+      return e.defaultPrevented;
+    };
+    const heading = container.querySelector('[role="group"] > div:first-child')!;
+    expect(heading.textContent).toContain('MON');
+    expect(press(heading)).toBe(true);
+    expect(press(container.querySelector('[role="option"]')!)).toBe(true);
+    expect(press(container.querySelector('[role="listbox"]')!.nextElementSibling!)).toBe(true); // footer
+    expect(press(input())).toBe(false); // caret placement and text selection still work
+  });
+
   it('closes on Escape without changing the pair', async () => {
     const onChange = await render();
     await key('Escape');
