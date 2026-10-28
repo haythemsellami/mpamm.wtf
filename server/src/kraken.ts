@@ -11,6 +11,13 @@ interface Book { bids: Map<number, Level>; asks: Map<number, Level>; snapshot: b
 const freshBook = (): Book => ({ bids: new Map(), asks: new Map(), snapshot: false });
 const EMPTY: WalkResult = { price: 0, filledBase: 0, filledFull: false };
 const DEPTH = 25;
+// Reconnect backoff. It starts over only after a connection that stayed up
+// STABLE_MS: one that fails right after its first message (a deterministic
+// rejection, checksum or crossed book) backs off to the cap instead of
+// reconnecting every half second, which Kraken's connection limits punish.
+const RECONNECT_MIN_MS = 500;
+const RECONNECT_MAX_MS = 60_000;
+const STABLE_MS = 60_000;
 
 function checksumDigits(value: string): string {
   const [mantissa, exponent] = value.toLowerCase().split('e');
@@ -43,7 +50,7 @@ export class KrakenFeed {
   private watchdog?: ReturnType<typeof setInterval>;
   private reconnect?: ReturnType<typeof setTimeout>;
   private stopped = true;
-  private backoff = 500;
+  private backoff = RECONNECT_MIN_MS;
   private lastMsgTs = 0;
 
   constructor(private readonly symbols: string[]) {}
@@ -99,13 +106,15 @@ export class KrakenFeed {
     this.reset(); this.lastMsgTs = Date.now();
     const ws = new WebSocket(config.krakenWs);
     this.ws = ws;
+    let openedAt = 0;
     ws.on('open', () => {
+      openedAt = Date.now();
       ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'instrument', include_tokenized_assets: true } }));
       ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'book', symbol: this.symbols, depth: DEPTH } }));
       ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'ticker', symbol: this.symbols } }));
     });
     ws.on('message', (buf) => {
-      try { this.onMessage(buf.toString()); this.backoff = 500; }
+      try { this.onMessage(buf.toString()); }
       catch (e) {
         console.warn(`[kraken] ${e instanceof Error ? e.message : 'invalid feed message'}; reconnecting for fresh books`);
         this.reset(); ws.terminate();
@@ -115,8 +124,9 @@ export class KrakenFeed {
     ws.on('close', () => {
       this.reset();
       if (this.stopped) return;
+      if (openedAt && Date.now() - openedAt >= STABLE_MS) this.backoff = RECONNECT_MIN_MS;
       this.reconnect = setTimeout(() => this.connect(), this.backoff);
-      this.backoff = Math.min(this.backoff * 2, 15_000);
+      this.backoff = Math.min(this.backoff * 2, RECONNECT_MAX_MS);
     });
   }
   private onMessage(raw: string): void {
