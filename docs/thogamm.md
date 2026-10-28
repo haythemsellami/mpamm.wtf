@@ -95,8 +95,13 @@ block 117220388, log 61: `22627416` raw USDC bought
 `1037087468976999087933` raw WMON. That is 22.627416 USDC /
 1037.087468976999087933 MON = **0.02181823296189286 USDC/MON**, with
 $22.627416 quote-side notional under the dashboard's stablecoin convention.
-No xStock fills were found in the separately recorded 7,218-swap sample.
-The xStock fill-unit test is explicitly constructed, not labeled as a real fill.
+The first real xStock fill followed: tx
+[`0xc999c5…703efc`](https://monadscan.com/tx/0xc999c572f634eb3e5f35d21785a52fe441fe540092c6b8b0ac3ac911df703efc),
+block 117225577, log 58, `1000000000000` raw WMON in and `28143588` raw SPYx
+out, both matching the transaction's ERC-20 transfers. That is 35,532 MON per
+SPYx, about $775 at that hour's MON price against Kraken's ~$770, so the
+18-decimal units hold. It is recorded as a decode fixture; a separate
+constructed case covers precision.
 
 Sources: [Kraken v2 book](https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/book),
 [instrument status](https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/instrument),

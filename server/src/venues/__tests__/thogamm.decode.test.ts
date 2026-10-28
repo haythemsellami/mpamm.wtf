@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { decodeEventLog } from 'viem';
 import { TOKENS } from '@shared';
 import {
   THOGAMM_ADDRESS,
@@ -270,6 +272,37 @@ describe('ThogAMM mutable registry and xStocks', () => {
     expect(indexThogammMarkets(markets).size).toBe(150);
     expect(markets.filter((m) => stockKeys.includes(m.baseKey))).toHaveLength(50);
     for (const m of markets) if (stockKeys.includes(m.baseKey)) expect(m.base.decimals).toBe(18);
+  });
+  /**
+   * The first real xStock fill, recorded (fixtures/thogamm-xstock-fill.json):
+   * https://monadscan.com/tx/0xc999c572f634eb3e5f35d21785a52fe441fe540092c6b8b0ac3ac911df703efc
+   * block 117,225,577 · log 58 · 2026-10-28 04:01:21 UTC. 1e-6 WMON in,
+   * 28,143,588 raw SPYx (18 decimals) out: 35,532 MON per SPYx, about $775 at
+   * that hour's MON, against Kraken's ~$770. A dust trade, but real units.
+   */
+  it('decodes the first real xStock fill from its recorded log, with the ABI the adapter subscribes with', () => {
+    const fx = JSON.parse(readFileSync(new URL('./fixtures/thogamm-xstock-fill.json', import.meta.url), 'utf8'));
+    const swaps = createThogammAdapter().logSources().find((s) => s.key === 'swaps')!;
+    const decoded = decodeEventLog({ abi: swaps.events as any, data: fx.log.data, topics: fx.log.topics, strict: true }) as any;
+    expect(decoded.eventName).toBe('MakerSwapExecuted');
+    expect(decoded.args.amountIn).toBe(1_000_000_000_000n);
+    expect(decoded.args.amountOut).toBe(28_143_588n);
+    // the event's amounts are what actually moved: the tx's ERC-20 Transfers in/out of the proxy
+    const moved = (token: string) => BigInt(fx.transfers.find((t: any) => t.token === token.toLowerCase()).value);
+    expect(moved(TOKENS.WMON.address)).toBe(decoded.args.amountIn);
+    expect(moved(TOKENS.SPYX.address)).toBe(decoded.args.amountOut);
+
+    const log = { ...fx.log, ...decoded, transactionHash: fx.transactionHash, blockNumber: BigInt(fx.blockNumber) };
+    const fill = decodeThogammSwap(log, indexThogammMarkets(thogammMarketsForTokens(current)), fx.timestamp * 1000, usdForToken)!;
+    expect(fill).toMatchObject({
+      id: `thogamm-${fx.transactionHash}-58`, market: 'SPYx/MON', side: 'buy',
+      blockNumber: 117_225_577, ts: Date.parse('2026-10-28T04:01:21Z'),
+    });
+    expect(fill.baseAmount).toBeCloseTo(28_143_588 / 1e18, 25);
+    expect(fill.execPx).toBeCloseTo(1e-6 / (28_143_588 / 1e18), 6);   // MON per SPYx
+    expect(fill.execPx * 0.0218).toBeGreaterThan(700);                  // ≈ $775: 18-decimal units hold
+    expect(fill.execPx * 0.0218).toBeLessThan(850);
+    expect(fill.usd).toBeCloseTo(1e-6 * 0.021, 15);                     // its MON leg, at the stub price
   });
   it('decodes rebased xStock event units without applying an issuer multiplier again', () => {
     // Constructed precision case, not a recorded on-chain fill. The real-log
