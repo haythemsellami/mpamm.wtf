@@ -47,6 +47,10 @@ export interface VenueMeta {
   /** true when a reference venue is walked as a taker (order book + fee), not at mid.
    *  Drives the "vs CEX" comparison basis; the Execution prose explains the method. */
   taker?: boolean;
+  /** Reference venues: the configured taker fee (bps) their benchmark rows
+   *  add. The Execution prose quotes it even while no row is live (a Kraken
+   *  closure, a cold cross leg). */
+  takerBps?: number;
   /** first UTC day ('YYYY-MM-DD') this venue EXISTED (deployment day, or the day
    *  its tracked history starts). Per-day views (e.g. Volume hover tooltips) omit
    *  the venue before this date — a venue that didn't exist yet must not render

@@ -3,6 +3,7 @@ import { SIZES_USD, TOKENS, cexForBase, pairOf, wrapBasisFor, type DepthSnapshot
 import { useDashboard } from '../store';
 import { connectLiveDepth } from '../lib/api';
 import { useViewport } from '../lib/viewport';
+import { takerFeeLabel } from '../lib/format';
 import { C, hexA, pill, venueColor } from '../theme';
 import { Panel, PanelHead, Field } from '../components/ui';
 import { QuoteCanvas } from '../components/QuoteCanvas';
@@ -91,8 +92,9 @@ export function ExecutionTab() {
   const active = chips.filter((v) => d.venueToggles[v.id]);
   const refName = ref?.name ?? 'the CEX reference';
   const refLabel = ref ? ref.name : 'The reference';
-  // taker fee shown = the selected pair's CEX row fee (Bybit ~10bps, Binance VIP9 ~2.25bps).
-  const taker = (d.quotes?.rows.find((r) => r.venueId === ref?.id && r.market === pair)?.feeBps)?.toFixed(1) ?? '—';
+  // taker fee shown = the selected pair's CEX row fee (Bybit ~10bps, Binance VIP9 ~2.25bps),
+  // else that CEX's configured fee: no row is live during a Kraken closure.
+  const taker = takerFeeLabel(d.quotes?.rows.find((r) => r.venueId === ref?.id && r.market === pair)?.feeBps, ref?.takerBps);
 
   const row = (v: VenueMeta, s: number): QuoteRow | undefined =>
     d.quotes?.rows.find((r) => r.venueId === v.id && r.market === pair && r.sizeUsd === s);

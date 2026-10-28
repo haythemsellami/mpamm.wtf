@@ -23,6 +23,10 @@ describe('per-CEX routing', () => {
     const r = createReferenceRegistry();
     expect([r.assetUsd('MON'), r.assetUsd('BTC'), r.assetUsd('SPYx')]).toEqual([0.03, 100_000, 800]);
     expect([r.changePctFor('MON'), r.changePctFor('BTC'), r.changePctFor('SPYx')]).toEqual([1, 2, 3]);
+    // each meta carries its configured fee for the Execution prose's fallback
+    expect(r.metas().map((v) => [v.id, v.takerBps])).toEqual([
+      ['bybit', config.takerBps], ['binance', config.binanceTakerBps], ['kraken', config.krakenXstockTakerBps],
+    ]);
     const rows = r.quote([100], new Set(['MON/USDC', 'BTC/USDC', 'SPYx/USDC']));
     expect(rows.map((row) => [row.market, row.venueId, row.feeBps])).toEqual([
       ['MON/USDC', 'bybit', config.takerBps],

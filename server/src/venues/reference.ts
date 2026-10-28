@@ -99,7 +99,7 @@ export function createReferenceRegistry(): ReferenceRegistry {
   return {
     async start() { await Promise.all([bybit.start(), binance.start(), kraken.start()]); },
     stop() { bybit.stop(); binance.stop(); kraken.stop(); },
-    metas: () => [BYBIT_VENUE, BINANCE_VENUE, KRAKEN_VENUE],
+    metas: () => [BYBIT_VENUE, BINANCE_VENUE, KRAKEN_VENUE].map((v) => ({ ...v, takerBps: feeds[v.id as CexId].feeBps() })),
     refVenueIdForBase: (base) => cexForBase(base),
     assetUsd: (base) => rawMid(base), // Kraken is USD; crypto sizing keeps USDT≈$1
     marketClosed(base) {

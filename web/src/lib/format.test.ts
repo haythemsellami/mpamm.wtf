@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtAmt, fmtAmtFull, fmtPx, fmtUsd, fmtVolUsd } from './format';
+import { fmtAmt, fmtAmtFull, fmtPx, fmtUsd, fmtVolUsd, takerFeeLabel } from './format';
 
 /**
  * With the token's decimals, an amount is rendered EXACTLY as it traded —
@@ -210,5 +210,17 @@ describe('fmtUsd — same billions rung, for a leaderboard row that outgrows $1B
     expect(fmtUsd(999_999)).toBe('$1.00M');
     expect(fmtUsd(999.99)).toBe('$999.99');
     expect(fmtUsd(999.999)).toBe('$1.0k');
+  });
+});
+
+describe('takerFeeLabel — the fee the Execution prose quotes', () => {
+  it("prefers the live reference row's fee", () => {
+    expect(takerFeeLabel(2.25, 4.5)).toBe('2.3');
+  });
+  it("falls back to the CEX's configured fee when no row is live (a Kraken closure)", () => {
+    expect(takerFeeLabel(undefined, 2.5)).toBe('2.5');
+  });
+  it('shows a dash only when neither is known', () => {
+    expect(takerFeeLabel(undefined, undefined)).toBe('—');
   });
 });
