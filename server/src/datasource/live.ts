@@ -3114,6 +3114,7 @@ export class LiveDataSource extends BaseSource {
     }
     if (from > end) {
       if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
+      await this.rereadAfterReplay(vid, today);
       await this.storeWriter.setMeta(`backfill_done_${vid}`, '1');
       return;
     }
@@ -3273,14 +3274,35 @@ export class LiveDataSource extends BaseSource {
     const changed = this.mergeBackfill(vid, acc, flushed);
     await this.writeSnapshot({ days: changed, meta: { [`backfill_cursor_${vid}`]: String(end + 1n) }, fills: [] });
     if (historyRunRolled(today)) throw new HistoryDayRolledError(today);
+    await this.rereadAfterReplay(vid, today);
     // done even when ranges were skipped — re-running every boot can't fix an RPC
     // archive hole. To re-attempt after the provider repairs it: delete the
     // 'backfill_done_<venue>' + 'backfill_cursor_<venue>' meta rows (the SET-per-day
     // merge makes a full re-run idempotent).
     await this.storeWriter.setMeta(`backfill_done_${vid}`, '1');
     this.note('backfill.done', `${name}: backfill complete — ${acc.size} day(s) seeded` +
-      (skipped > 0n ? ` (${skipped} block(s) unreadable on the RPC archive and skipped — those windows may undercount)` : ''), vid);
+      (skipped > 0n ? ` (${skipped} block(s) unreadable on the RPC archive and skipped — those windows may undercount)` : '') +
+      `; re-reading ${today} from midnight`, vid);
     this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) }); // nudge connected clients
+  }
+
+  /**
+   * The replay stops at the last block before `today`, and the tail decodes a
+   * new venue only from the deploy that added it. A replay that finishes on
+   * that deploy's day leaves the hours between midnight and the deploy to
+   * nobody (Crystal Vault, 2026-10-27: 434 of 1,606 fills counted). One that
+   * crosses midnight is fine: the rolled run extends `end` past the day.
+   *
+   * So every finished replay re-reads today, as a reset does. The replay
+   * cannot tell whether the tail has decoded the venue since midnight (an
+   * earlier deploy, or a reset's own re-read); when it has, the re-read SETs
+   * the same totals, for one day of hot-pool logs. Queued BEFORE the done
+   * marker: a crash in between re-runs the replay's last day, which queues it
+   * again, where the other order would lose it for good.
+   */
+  private async rereadAfterReplay(vid: string, today: string): Promise<void> {
+    await this.ownMarketsFrom(vid, today);
+    await this.queueReread(vid, today);
   }
 
   /** Merge accumulated backfill totals into this.days, SET per (day, venue):
