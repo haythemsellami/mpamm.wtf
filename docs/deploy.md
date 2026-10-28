@@ -241,8 +241,10 @@ Crystal Vault's 2026-10-27 held 434 of 1,606 fills. Every finished replay
 now re-reads its day too (the `backfill.done` note says so). That re-read
 only adds the fills the tail missed (`(missing fills only)` on its note):
 nothing changed the decode, and a second decode of a cross-quoted fill
-prices it at a later mid. Crystal's own day is repaired by its `deploy-day`
-revision.
+prices it at a later mid. Its marker is `reread_add_<venue>`, apart from
+`reread_day_<venue>`, so a restart past midnight never turns it into a
+carried reset. It re-reads the closed day from the archive instead, still
+only adding. Crystal's own day is repaired by its `deploy-day` revision.
 
 ## Operational notes
 

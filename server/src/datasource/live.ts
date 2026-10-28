@@ -1095,9 +1095,12 @@ export function carriedRereadTarget(vid: string, pendingDay: string | undefined,
  *  snapshot that commits the re-read's day bucket. */
 export const rereadKey = (vid: string) => `reread_day_${vid}`;
 
-/** The UTC day whose pending re-read only ADDS fills (planReread's `keep`):
- *  one a finished replay queued. A replacing re-read clears it, and wins. */
-export const rereadKeepKey = (vid: string) => `reread_keep_${vid}`;
+/** The UTC day of a pending ADDITIVE re-read (planReread's `keep`), the one a
+ *  finished replay queues. A key of its own, apart from rereadKey, because it
+ *  must never become a carried reset: that deletes the day's fills and
+ *  re-prices it. When its day closes first it re-reads that day from the
+ *  archive instead, still only adding. */
+export const rereadAddKey = (vid: string) => `reread_add_${vid}`;
 
 /**
  * Why a reset names a venue this boot cannot resolve to a running adapter.
@@ -1454,6 +1457,8 @@ export class LiveDataSource extends BaseSource {
   private snapshotMeta: Record<string, string> = {};
   /** venue id → UTC day of a pending today re-read (rereadToday). */
   private rereads = new Map<string, string>();
+  /** venue id → UTC day of a pending ADDITIVE re-read (rereadAddKey). */
+  private addRereads = new Map<string, string>();
   private rereadRunning = false;
   /** Fills cut into a snapshot whose write has not settled: between the cut
    *  and the COMMIT they are in neither the store nor `dirty`. */
@@ -1606,6 +1611,8 @@ export class LiveDataSource extends BaseSource {
     for (const vid of ADAPTERS.flatMap((a) => a.venues().map((v) => v.id))) {
       const day = this.store.getMeta(rereadKey(vid));
       if (day && day === utcDay()) this.rereads.set(vid, day);
+      const add = this.store.getMeta(rereadAddKey(vid));
+      if (add) this.addRereads.set(vid, add);   // a closed day too (rereadAddKey)
     }
     this.kickMaintenance();
 
@@ -1864,7 +1871,7 @@ export class LiveDataSource extends BaseSource {
     // no-op when everything is seeded, and the in-flight guard makes an extra
     // kick free while a multi-hour backfill is still running.
     if (this.archiveVerified && (this.seedsPending() || this.resetPending())) void this.backgroundHistory();
-    if (this.rereads.size) void this.runRereads();
+    if (this.rereads.size || this.addRereads.size) void this.runRereads();
   }
 
   private realtimeHealth(): RealtimeHealth | undefined {
@@ -2877,19 +2884,18 @@ export class LiveDataSource extends BaseSource {
 
   /** Persist the pending marker FIRST: a re-read must survive a restart that
    *  lands before it finishes, or today's prefix is lost exactly as before.
-   *  `keep` asks for an additive re-read (planReread). A replacing one already
-   *  pending for the day re-reads everything, so it stays as it is; one queued
-   *  later clears the mode before its marker. */
-  private async queueReread(vid: string, day: string, keep = false): Promise<void> {
-    if (keep && this.store.getMeta(rereadKey(vid)) === day && this.store.getMeta(rereadKeepKey(vid)) !== day) return;
-    await this.storeWriter.setMeta(rereadKeepKey(vid), keep ? day : '');
-    delete this.snapshotMeta[rereadKey(vid)];   // an earlier re-read's clear must not land after this
-    await this.storeWriter.setMeta(rereadKey(vid), day);
+   *  `add` queues an additive re-read (rereadAddKey). A replacing one already
+   *  pending for the day re-reads all of it, so that covers it. */
+  private async queueReread(vid: string, day: string, add = false): Promise<void> {
+    if (add && this.store.getMeta(rereadKey(vid)) === day) return;
+    const key = add ? rereadAddKey(vid) : rereadKey(vid);
+    delete this.snapshotMeta[key];   // an earlier re-read's clear must not land after this
+    await this.storeWriter.setMeta(key, day);
     // ...and again once acknowledged: an in-flight snapshot that carried the
     // clear and FAILED restores it into snapshotMeta while the write is
     // pending. Worker replies are ordered, so that restore has run by now.
-    delete this.snapshotMeta[rereadKey(vid)];
-    this.rereads.set(vid, day);
+    delete this.snapshotMeta[key];
+    (add ? this.addRereads : this.rereads).set(vid, day);
     void this.runRereads();
   }
 
@@ -2908,6 +2914,19 @@ export class LiveDataSource extends BaseSource {
           this.rereads.delete(vid);
         } catch (e) {
           // held, never skipped: retried on the rediscovery tick
+          this.noteOnce('backfill.reread.held', `${name}: re-read of ${day} paused (${(e as Error).message}); retried automatically`, vid);
+        }
+      }
+      // Additive ones after: one for the same day then finds nothing to add.
+      // A closed day is theirs to finish too (rereadAddKey).
+      for (const [vid, day] of [...this.addRereads]) {
+        const a = ADAPTERS.find((x) => x.venues().some((v) => v.id === vid));
+        if (!a) { this.addRereads.delete(vid); continue; }
+        const name = a.venues()[0]?.name ?? vid;
+        try {
+          await this.rereadToday(a, vid, name, day, true);
+          if (this.addRereads.get(vid) === day) this.addRereads.delete(vid);
+        } catch (e) {
           this.noteOnce('backfill.reread.held', `${name}: re-read of ${day} paused (${(e as Error).message}); retried automatically`, vid);
         }
       }
@@ -2934,27 +2953,41 @@ export class LiveDataSource extends BaseSource {
    * inside the tail (inTail), so no cycle ingests between the last read and
    * the SET. HOT pool on purpose: these blocks are under a day old, and they
    * are the blocks the tail itself just read there.
+   *
+   * `add` is the additive re-read (rereadAddKey, planReread's `keep`). Its day
+   * may have closed before it ran. That whole day is then read from the
+   * ARCHIVE pool, bounded at its last block, so the tail has nothing left to
+   * add to it; the apply still runs in the gate, beside the snapshots.
    */
-  private async rereadToday(a: VenueAdapter, vid: string, name: string, day: string): Promise<void> {
-    const keep = this.store.getMeta(rereadKeepKey(vid)) === day;
+  private async rereadToday(a: VenueAdapter, vid: string, name: string, day: string, add = false): Promise<void> {
+    const marker = add ? rereadAddKey(vid) : rereadKey(vid);
     const dayStartMs = Date.parse(`${day}T00:00:00Z`);
     const dayEndMs = dayStartMs + 86_400_000;
-    const bulkEnd = this.lastBlock;
-    const start = await this.firstBlockOfDay(dayStartMs, bulkEnd);
+    const closed = add && day < utcDay();
+    let start: bigint | null;
+    let bulkEnd = this.lastBlock;
+    if (closed) {
+      start = await blockAtOrAfter(dayStartMs / 1000, bulkEnd);
+      const next = await blockAtOrAfter(dayEndMs / 1000, bulkEnd);
+      if (next >= bulkEnd) throw new Error('the tail has not passed the day yet');
+      bulkEnd = next - 1n;
+    } else {
+      start = await this.firstBlockOfDay(dayStartMs, bulkEnd);
+    }
     if (start === null) {
       // the tail has not reached today yet (boot gap-fill): it will decode
       // today with this build, so there is nothing to re-read
-      this.snapshotMeta[rereadKey(vid)] = '';
+      this.snapshotMeta[marker] = '';
       this.note('backfill.reread', `${name}: ${day} not reached by the tail yet — it decodes the day with this build, nothing to re-read`, vid);
       return;
     }
     const decoded: Fill[] = [];
-    await this.rereadRange(a, vid, start, bulkEnd, dayStartMs, dayEndMs, decoded);
+    await this.rereadRange(a, vid, start, bulkEnd, dayStartMs, dayEndMs, decoded, closed);
     // Labels for the bulk OUTSIDE the gate: attribution is a lookup per tx, and
     // a day's worth inside it would hold the live tail for all of them.
     try { await this.attributor.attribute(decoded); } catch { /* labels only */ }
     await this.inTail(async () => {
-      const end = this.lastBlock;
+      const end = closed ? bulkEnd : this.lastBlock;
       if (end > bulkEnd) {
         const rest: Fill[] = [];
         await this.rereadRange(a, vid, bulkEnd + 1n, end, dayStartMs, dayEndMs, rest);
@@ -2972,9 +3005,7 @@ export class LiveDataSource extends BaseSource {
       for (const f of this.store.venueFillsInRange(vid, dayStartMs, dayEndMs, end)) held.set(f.id, f);
       for (const batch of this.inflightFills) for (const f of batch) if (inRange(f)) held.set(f.id, f);
       for (const owner of [this.fills, this.dirty, this.pending]) for (const f of owner) if (inRange(f)) held.set(f.id, f);
-      // a reset queued while this additive pass read: held, it re-runs replacing
-      if (keep && this.store.getMeta(rereadKeepKey(vid)) !== day) throw new Error('a replacing re-read was queued meanwhile');
-      const plan = planReread([...held.values()], decoded, keep);
+      const plan = planReread([...held.values()], decoded, add);
 
       // Drop the replaced fills from memory BEFORE the write is queued: a
       // snapshot taken meanwhile would otherwise write the old row back.
@@ -3012,23 +3043,29 @@ export class LiveDataSource extends BaseSource {
       // place — while the same snapshot clears the marker that would retry it.
       d.byVenue[vid] = { ...plan.total };
       this.dirtyDays.add(day);
-      this.snapshotMeta[rereadKey(vid)] = '';
+      // an additive one queued for a later day meanwhile keeps its marker
+      if (!add || this.addRereads.get(vid) === day) this.snapshotMeta[marker] = '';
       if (written.deleted || written.inserted) {
         this.dropAggregates();
         // connected tapes only take per-fill upserts — a deletion needs a reload
         this.emitMsg({ ch: 'fill', resync: true });
       }
-      this.note('backfill.reread', `${name}: re-read ${day}${keep ? ' (missing fills only)' : ''} blocks ${start}→${end} — ${before.swaps}→${plan.total.swaps} swaps, $${Math.round(before.usd)}→$${Math.round(plan.total.usd)}; fills +${written.inserted} −${written.deleted}`, vid);
+      this.note('backfill.reread', `${name}: re-read ${day}${add ? ' (missing fills only)' : ''} blocks ${start}→${end} — ${before.swaps}→${plan.total.swaps} swaps, $${Math.round(before.usd)}→$${Math.round(plan.total.usd)}; fills +${written.inserted} −${written.deleted}`, vid);
     });
   }
 
   /** Decode [from, to] in tail-sized windows, keeping this day's own fills.
    *  Windowed for the same reason the tail is: a whole day of raw logs held at
    *  once is the OOM the 320MB heap already hit (2026-09-16). */
-  private async rereadRange(a: VenueAdapter, vid: string, from: bigint, to: bigint, dayStartMs: number, dayEndMs: number, out: Fill[]): Promise<void> {
+  private async rereadRange(a: VenueAdapter, vid: string, from: bigint, to: bigint, dayStartMs: number, dayEndMs: number, out: Fill[], deep = false): Promise<void> {
     const window = BigInt(TAIL_WINDOW_BLOCKS) * 10n;
-    const hotLogs = (p: { address: unknown; fromBlock: bigint; toBlock: bigint; events?: unknown }) =>
-      hotRead(() => publicClient.getLogs(p as any) as Promise<unknown[]>);
+    // `deep`: a closed day, possibly past a pruning fullnode's retention
+    const hotLogs = (p: { address: unknown; fromBlock: bigint; toBlock: bigint; events?: unknown }) => deep
+      ? archiveRead(() => archiveClient.getLogs(p as any) as Promise<unknown[]>)
+      : hotRead(() => publicClient.getLogs(p as any) as Promise<unknown[]>);
+    const blockTs = (bn: bigint) => deep
+      ? archiveRead(() => archiveClient.getBlock({ blockNumber: bn }))
+      : hotRead(() => publicClient.getBlock({ blockNumber: bn }));
     for (let lo = from; lo <= to; lo += window) {
       if (this.loopsStopped) throw new Error('source stopped');
       const hi = lo + window - 1n > to ? to : lo + window - 1n;
@@ -3047,7 +3084,7 @@ export class LiveDataSource extends BaseSource {
       const list = [...blocks];
       for (let i = 0; i < list.length; i += 15) {
         await Promise.all(list.slice(i, i + 15).map(async (bn) => {
-          ts.set(bn, Number((await hotRead(() => publicClient.getBlock({ blockNumber: bn }))).timestamp) * 1000);
+          ts.set(bn, Number((await blockTs(bn)).timestamp) * 1000);
         }));
       }
       const tsOf = (bn: bigint) => {
@@ -3325,21 +3362,27 @@ export class LiveDataSource extends BaseSource {
    * reset's own re-read). Nothing changed the decode either, so the re-read
    * only ADDS what the tail missed: every stored fill keeps its valuation,
    * markouts and curve (planReread's `keep`). When the tail saw everything it
-   * changes nothing, for one day of hot-pool logs. Queued BEFORE the done
-   * marker: a crash in between re-runs the replay's last day, which queues it
-   * again, where the other order would lose it for good.
+   * changes nothing, for one day of hot-pool logs. Its marker is its own
+   * (rereadAddKey): if midnight comes first it re-reads the closed day from
+   * the archive, still only adding, and never becomes a reset. Queued BEFORE
+   * the done marker: a crash in between re-runs the replay's last day, which
+   * queues it again, where the other order would lose it for good.
    *
-   * An older day's re-read still pending is a carried reset that waits for
-   * both history stages (resetTargets). Queuing today would overwrite its
-   * marker, and that day's fills would never be repaired: the replay rebuilds
-   * only volume. So completion holds, untouched, until that reset has run
-   * (it rewinds this replay to its day).
+   * An older day's replacing re-read still pending is a carried reset that
+   * waits for both history stages (resetTargets). Queuing today would
+   * overwrite its marker, and that day's fills would never be repaired: the
+   * replay rebuilds only volume. So completion holds, untouched, until that
+   * reset has run (it rewinds this replay to its day). An older additive one
+   * holds it the same way, until its own pass has re-read that day.
    */
   private async rereadAfterReplay(vid: string, today: string): Promise<void> {
     const carried = this.store.getMeta(rereadKey(vid));
     if (carried && carried < today) {
       throw new Error(`the re-read of ${carried} is still pending; it runs as a reset once both history stages are on`);
     }
+    // one marker per venue: an older additive one finishes its day first
+    const added = this.store.getMeta(rereadAddKey(vid));
+    if (added && added < today) throw new Error(`the re-read of ${added} is still pending; it re-reads that day first`);
     await this.ownMarketsFrom(vid, today);
     await this.queueReread(vid, today, true);
   }
