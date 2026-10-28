@@ -207,3 +207,12 @@ describe('Crystal Vault quote (recorded getQuote at block 117,081,122)', () => {
     expect(raised).toHaveLength(3);
   });
 });
+
+describe('Crystal Vault history repair', () => {
+  // The replay finished on the deploy day, 2026-10-27, so that day's pre-deploy
+  // hours were never decoded: production held 434 fills / $55,933.11 against
+  // 1,606 / $187,141.87 on the chain (vault legs of WMON/USDC Trades).
+  it('replays from the deploy day', () => {
+    expect(createCrystalAdapter().historyRevisions).toEqual([{ id: 'deploy-day', from: '2026-10-27' }]);
+  });
+});

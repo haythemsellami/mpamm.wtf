@@ -145,6 +145,12 @@ export function createCrystalAdapter(): VenueAdapter {
     venues: () => [CRYSTAL_VENUE],
     quoteMarkets: () => (book && pair ? [pair.symbol] : []),
     backfillFromUtc: '2026-09-20',
+    // deploy-day  The replay finished on 2026-10-27, the day this adapter
+    //             shipped, before the core re-read a new venue's deploy day,
+    //             so the hours before the deploy were never decoded: 434 of
+    //             1,606 fills ($55.9k of $187.1k). A chain replay re-prices
+    //             nothing here, since every fill's USD is its USDC leg.
+    historyRevisions: [{ id: 'deploy-day', from: '2026-10-27' }],
 
     async discover(ctx: AdapterContext) {
       if (!pair) throw new Error('Crystal Vault: MON/USDC is not a registered pair');

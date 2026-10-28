@@ -234,6 +234,13 @@ deploy day's prefix kept the old decode (Metric v1, 2026-10-12: $572k served of
 the day bucket against the tail's own cursor, keeps unchanged fills (and their
 live markouts) as they are, and replaces or deletes the rest.
 
+**A new venue had the same gap.** Its replay stops at the midnight it ran
+on, and the tail decodes it only from the deploy that added it. A replay
+that finished on the deploy day left that day's earlier hours to nobody:
+Crystal Vault's 2026-10-27 held 434 of 1,606 fills. Every finished replay
+now re-reads its day too (the `backfill.done` note says so). Crystal's own
+day is repaired by its `deploy-day` revision.
+
 ## Operational notes
 
 - **Memory**: the JS heap is capped at `NODE_OPTIONS=--max-old-space-size=320` (set in `.railway/railway.ts`); the leaderboard aggregation is paged and the backfills stream. Railway has no instance sizes: memory is billed by usage up to the plan's per-service limit. If steady-state OOMs recur, raise the heap cap in the file rather than looking for a bigger box.
