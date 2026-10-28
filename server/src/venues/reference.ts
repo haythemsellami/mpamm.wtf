@@ -123,6 +123,11 @@ export function createReferenceRegistry(): ReferenceRegistry {
     quote(sizesUsd, markets) {
       const rows: QuoteRow[] = [];
       const ts = Date.now();
+      // A base's walk depends on its book and the size alone, not on the
+      // pair's quote side, and no feed can move during this synchronous call.
+      // Walk once per base x size and convert per pair: an xStock with ~10
+      // quote pairs was walked (and its book sorted) ~10 times per size.
+      const walks = new Map<string, { buy: WalkResult; sell: WalkResult }>();
       for (const pair of PAIRS) {
         if (markets && !markets.has(pair.symbol)) continue;
         const a = assetOf(pair.base);
@@ -134,8 +139,14 @@ export function createReferenceRegistry(): ReferenceRegistry {
         const feeBps = feed.feeBps();
         const fee = feeBps / 1e4;
         for (const size of sizesUsd) {
-          const base = size / mid;
-          const buy = feed.walk(a.cexSymbol, 'buy', base), sell = feed.walk(a.cexSymbol, 'sell', base);
+          const walkKey = `${a.key}|${size}`;
+          let walked = walks.get(walkKey);
+          if (!walked) {
+            const base = size / mid;
+            walked = { buy: feed.walk(a.cexSymbol, 'buy', base), sell: feed.walk(a.cexSymbol, 'sell', base) };
+            walks.set(walkKey, walked);
+          }
+          const { buy, sell } = walked;
           const askPx = buy.price * factor * (1 + fee), bidPx = sell.price * factor * (1 - fee);
           rows.push({
             venueId: a.cex, market: pair.symbol, sizeUsd: size,

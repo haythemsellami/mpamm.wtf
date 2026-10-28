@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mids = vi.hoisted(() => new Map<string, number>());
-const walk = (symbol: string, side: string, size: number) => ({ price: mids.get(symbol)! * (side === 'buy' ? 1.001 : 0.999), filledBase: size, filledFull: true });
+const walked = vi.hoisted(() => [] as string[]);   // every symbol a mock feed walked
+const walk = (symbol: string, side: string, size: number) => { walked.push(symbol); return { price: mids.get(symbol)! * (side === 'buy' ? 1.001 : 0.999), filledBase: size, filledFull: true }; };
 vi.mock('../../kraken.js', () => ({ KrakenFeed: class { mid(s: string) { return mids.get(s) ?? 0; } walk = walk; changePct() { return 3; } } }));
 vi.mock('../../binance.js', () => ({ BinanceFeed: class { mid(s: string) { return mids.get(s) ?? 0; } walk = walk; changePct() { return 2; } } }));
 vi.mock('../../bybit.js', () => ({ BybitFeed: class {
@@ -32,6 +33,21 @@ describe('per-CEX routing', () => {
     expect(rows[0].askPx).toBeCloseTo(0.03 * 1.001 / 1.0002 * (1 + config.takerBps / 1e4), 12);
     expect(rows[1].askPx).toBeCloseTo(100_000 * 1.001 * 0.999 / 1.0002 * (1 + config.binanceTakerBps / 1e4), 6);
     expect(rows[2].askPx).toBeCloseTo(800 * 1.001 / 1.002 * (1 + config.krakenXstockTakerBps / 1e4), 9);
+  });
+});
+
+describe('one walk per base and size', () => {
+  it('walks each base book once per size, and every pair gets the rows it got on its own', () => {
+    const r = createReferenceRegistry();
+    const spyx = new Set(['SPYx/USDC', 'SPYx/USDT0', 'SPYx/AUSD', 'SPYx/MON', 'SPYx/BTC', 'SPYx/cbBTC', 'SPYx/XAUt']);
+    walked.length = 0;
+    const rows = r.quote([100, 1000], spyx);
+    expect(rows).toHaveLength(spyx.size * 2);
+    expect(walked.filter((s) => s === 'SPYx/USD')).toHaveLength(4);   // 2 sizes x buy/sell, not 7 pairs x 4
+    for (const row of rows) {
+      const [alone] = r.quote([row.sizeUsd], new Set([row.market]));
+      expect({ ...row, ts: 0 }).toEqual({ ...alone, ts: 0 });
+    }
   });
 });
 
