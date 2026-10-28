@@ -14,7 +14,7 @@ import {
 } from '@shared';
 import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from '../chain/failover.js';
 import { FillAttributor } from '../attribution.js';
-import { pairMidSeries } from '../history/cex.js';
+import { pairMidSeries, supportsHistoricalReference } from '../history/cex.js';
 import { curveComplete, curvePoints } from '../markout-curves.js';
 import { GasTracker } from '../gas.js';
 import { DepthWorkerClient } from '../depth/worker-client.js';
@@ -3529,6 +3529,10 @@ export class LiveDataSource extends BaseSource {
     const metaKey = `mkhist_cursor_${vid}_${market}`;
     const first = this.store.earliestRemarkCandidate(vid, market, cutoff);
     if (first == null) return;
+    if (!supportsHistoricalReference(market)) {
+      this.noteOnce('markout.archive.unsupported', `${name} ${market}: live markouts only; no matching Kraken xStock book archive for historical fills`, vid);
+      return;
+    }
     let day = utcDay(first);
     const cur = this.store.getMeta(metaKey);
     // resume from the cursor: candidates BEFORE it were walked already and stayed

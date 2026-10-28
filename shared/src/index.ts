@@ -53,6 +53,8 @@ export interface VenueMeta {
    *  as "$0 / 0.0%", which reads as a live venue doing no business. Unset = shown
    *  for every day. */
   sinceUtc?: string;
+  /** User-facing assumption for interpreting this venue's indicative quotes. */
+  quoteNote?: string;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -93,6 +95,8 @@ export interface TokenInfo {
    *  Unset = treated ≡ USDT (exact for USDT0 — it IS Tether's USDT on Monad;
    *  an approximation for unlisted stables like AUSD). */
   usdtCross?: string;
+  /** Kraken USD cross for USD-quoted xStock references; no assumed stable peg. */
+  usdCross?: string;
   /** the base ASSET this (non-stable) token represents when it is NOT the
    *  asset's canonical wrapper (e.g. cbBTC → 'BTC'; WBTC is already
    *  ASSETS.BTC.token). Lets `assetForToken` price alternative wrappers. */
@@ -110,9 +114,9 @@ export const NATIVE_MON = '0x0000000000000000000000000000000000000000';
 export const WMON_ADDRESS = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a';
 
 export const TOKENS: Record<string, TokenInfo> = {
-  USDC: { symbol: 'USDC', address: '0x754704bc059f8c67012fed69bc8a327a5aafb603', decimals: 6, stable: true, usdtCross: 'USDCUSDT' },
-  USDT0: { symbol: 'USDT0', address: '0xe7cd86e13ac4309349f30b3435a9d337750fc82d', decimals: 6, stable: true }, // Tether's omnichain USDT — ≡ USDT, no cross
-  AUSD: { symbol: 'AUSD', address: '0x00000000efe302beaa2b3e6e1b18d08d69a9012a', decimals: 6, stable: true }, // no CEX listing — $1 peg assumed
+  USDC: { symbol: 'USDC', address: '0x754704bc059f8c67012fed69bc8a327a5aafb603', decimals: 6, stable: true, usdtCross: 'USDCUSDT', usdCross: 'USDC/USD' },
+  USDT0: { symbol: 'USDT0', address: '0xe7cd86e13ac4309349f30b3435a9d337750fc82d', decimals: 6, stable: true, usdCross: 'USDT/USD' }, // Tether's omnichain USDT — ≡ USDT, no cross
+  AUSD: { symbol: 'AUSD', address: '0x00000000efe302beaa2b3e6e1b18d08d69a9012a', decimals: 6, stable: true, usdCross: 'AUSD/USD' }, // no USDT cross; Kraken lists AUSD/USD
   USD1: { symbol: 'USD1', address: '0x111111d2bf19e43c34263401e0cad979ed1cdb61', decimals: 18, stable: true, usdtCross: 'USD1USDT' },
   WMON: { symbol: 'WMON', address: WMON_ADDRESS, decimals: 18, stable: false },
   MON: { symbol: 'MON', address: NATIVE_MON, decimals: 18, stable: false },
@@ -133,6 +137,13 @@ export const TOKENS: Record<string, TokenInfo> = {
     // never a $1 stable. Priced DIRECTLY as Binance XAUTUSDT (the same XAUt
     // instrument trades there, so no PAXG-parity proxy is involved).
   },
+  // Unwrapped, rebasing xStocks. Event amounts and Kraken books already use
+  // rebased token units; applying an issuer multiplier again double-counts it.
+  SPYX: { symbol: 'SPYx', address: '0x90a2a4c76b5d8c0bc892a69ea28aa775a8f2dd48', decimals: 18, stable: false },
+  QQQX: { symbol: 'QQQx', address: '0xa753a7395cae905cd615da0b82a53e0560f250af', decimals: 18, stable: false },
+  EWYX: { symbol: 'EWYx', address: '0x299c95eb52bfd5bc98d924bce17197b64864589b', decimals: 18, stable: false },
+  NVDAX: { symbol: 'NVDAx', address: '0xc845b2894dbddd03858fd2d643b4ef725fe0849d', decimals: 18, stable: false },
+  TSLAX: { symbol: 'TSLAx', address: '0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0', decimals: 18, stable: false },
   // Coinbase wrapped BTC (Hanji's BTC representation). NO CEX lists a cbBTC/BTC
   // basis pair, so cbBTC pairs use wrapBasisOverride: '' (parity — Coinbase 1:1
   // mint/redeem keeps it ~sub-bp) with a UI caveat, unlike WBTC's live WBTCBTC.
@@ -152,9 +163,8 @@ export function isMonSymbol(sym: string | undefined): boolean {
   return sym === 'WMON' || sym === 'MON';
 }
 
-/** Which CEX benchmarks an asset. MON (and any MON derivative) → Bybit (Binance
- *  has no MON spot); everything else → Binance at the VIP9 taker tier. */
-export type CexId = 'bybit' | 'binance';
+/** CEX benchmark: MON → Bybit, crypto/gold → Binance, xStocks → Kraken. */
+export type CexId = 'bybit' | 'binance' | 'kraken';
 
 /**
  * A tradeable BASE asset. The dashboard is generic over base/quote: a venue pool
@@ -190,6 +200,11 @@ export const ASSETS: Record<string, AssetSpec> = {
   // the on-chain token redeems for, not a proxy for it (PAXG exists but would
   // introduce an untraded XAUt/PAXG basis; the direct symbol avoids it).
   XAUt: { key: 'XAUt', symbol: 'XAUt', token: 'XAUT0', cex: 'binance', cexSymbol: 'XAUTUSDT' },
+  SPYx: { key: 'SPYx', symbol: 'SPYx', token: 'SPYX', cex: 'kraken', cexSymbol: 'SPYx/USD' },
+  QQQx: { key: 'QQQx', symbol: 'QQQx', token: 'QQQX', cex: 'kraken', cexSymbol: 'QQQx/USD' },
+  EWYx: { key: 'EWYx', symbol: 'EWYx', token: 'EWYX', cex: 'kraken', cexSymbol: 'EWYx/USD' },
+  NVDAx: { key: 'NVDAx', symbol: 'NVDAx', token: 'NVDAX', cex: 'kraken', cexSymbol: 'NVDAx/USD' },
+  TSLAx: { key: 'TSLAx', symbol: 'TSLAx', token: 'TSLAX', cex: 'kraken', cexSymbol: 'TSLAx/USD' },
 };
 
 /** A tracked market: a base asset vs a quote. `symbol` is the display key used
@@ -212,6 +227,8 @@ export interface Pair {
    *  live 'WBTCBTC' basis; Hanji BTC = cbBTC, no CEX basis pair → '' = parity).
    *  undefined = inherit ASSETS[base].wrapBasisSymbol. */
   wrapBasisOverride?: string;
+  /** Traded wrapper basis on an asset QUOTE leg (e.g. WBTCBTC). */
+  quoteWrapBasisSymbol?: string;
 }
 
 /** The pair registry — THE tracked-market universe, the single source of truth.
@@ -246,22 +263,20 @@ export const PAIRS: Pair[] = [
   // uses native BTC for the cbBTC quote leg, so cbBTC parity is implicit rather
   // than a wrap-basis override.
   { symbol: 'WBTC/cbBTC', base: 'BTC', quote: 'BTC', quoteKind: 'asset' },
-  // XAUt pairs — ThogAMM crossed its whole registry against XAUt0 (on-chain
-  // 2026-09: 8 tokens → 28 crosses; the dashboard registers these 6, leaving
-  // out the stable↔stable crosses USDC/AUSD, USDC/USDT0, AUSD/USDT0 — no base
-  // asset to benchmark — and the WBTC cross XAUt0↔WBTC: its quote leg is WBTC,
-  // and the reference model applies wrap bases to the BASE leg only, so listing
-  // it would anchor quotes in native-BTC terms ~the live WBTCBTC basis off the
-  // pair's own terms (the exact error pair-terms references exist to remove;
-  // cbBTC parity is forced because no CEX lists that pair — WBTC's is traded,
-  // so assuming it is not). List it only after quote-leg wrap-basis support.
-  // (The cross is also one-sided live: the pool holds no WBTC to pay out.)
+  // Stable/stable crosses have no base-asset benchmark and remain unlisted.
   { symbol: 'XAUt/USDC', base: 'XAUt', quote: 'USDC' },
   { symbol: 'XAUt/USDT0', base: 'XAUt', quote: 'USDT0' },
   { symbol: 'XAUt/AUSD', base: 'XAUt', quote: 'AUSD' },
   { symbol: 'XAUt/MON', base: 'XAUt', quote: 'MON', quoteKind: 'asset' },
   { symbol: 'XAUt/ETH', base: 'XAUt', quote: 'ETH', quoteKind: 'asset' },
   { symbol: 'XAUt/cbBTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset' },
+  { symbol: 'XAUt/BTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset', quoteWrapBasisSymbol: 'WBTCBTC' },
+  ...['SPYx', 'QQQx', 'EWYx', 'NVDAx', 'TSLAx'].flatMap((base, i, stocks): Pair[] => [
+    ...['USDC', 'USDT0', 'AUSD'].map((quote) => ({ symbol: `${base}/${quote}`, base, quote })),
+    ...['MON', 'ETH', 'XAUt', ...stocks.slice(0, i)].map((quote): Pair => ({ symbol: `${base}/${quote}`, base, quote, quoteKind: 'asset' })),
+    { symbol: `${base}/BTC`, base, quote: 'BTC', quoteKind: 'asset', quoteWrapBasisSymbol: 'WBTCBTC' },
+    { symbol: `${base}/cbBTC`, base, quote: 'BTC', quoteKind: 'asset' },
+  ]),
 ];
 
 /** Market symbols (derived from the pair registry). */
@@ -787,7 +802,7 @@ export type NoteCode =
   | 'backfill.reread' | 'backfill.reread.held'
   // markout onboarding scan + the archived-price remark
   | 'markout.scan.start' | 'markout.scan.done' | 'markout.scan.held'
-  | 'markout.remark.done' | 'markout.deferred' | 'markout.archive.pending' | 'markout.archive.published'
+  | 'markout.remark.done' | 'markout.deferred' | 'markout.archive.pending' | 'markout.archive.published' | 'markout.archive.unsupported'
   | 'markout.paused' | 'markout.range.skipped' | 'markout.market.unregistered'
   // QUOTE_UPDATE_BURN accrual (server/src/gas.ts)
   | 'gas.scan.start' | 'gas.series.reset' | 'gas.scan.paused'
@@ -816,7 +831,7 @@ export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'backfill.reset': 'info', 'backfill.paused': 'warn', 'backfill.range.skipped': 'warn', 'backfill.config.invalid': 'warn',
   'backfill.reread': 'info', 'backfill.reread.held': 'warn',
   'markout.scan.start': 'info', 'markout.scan.done': 'info', 'markout.scan.held': 'info',
-  'markout.remark.done': 'info', 'markout.deferred': 'info', 'markout.archive.pending': 'info', 'markout.archive.published': 'info',
+  'markout.remark.done': 'info', 'markout.deferred': 'info', 'markout.archive.pending': 'info', 'markout.archive.published': 'info', 'markout.archive.unsupported': 'info',
   'markout.paused': 'warn', 'markout.range.skipped': 'warn', 'markout.market.unregistered': 'warn',
   'gas.scan.start': 'info', 'gas.series.reset': 'info', 'gas.scan.paused': 'warn',
   'gas.range.skipped': 'warn', 'gas.destination.conflict': 'warn', 'gas.mode.mixed': 'warn',

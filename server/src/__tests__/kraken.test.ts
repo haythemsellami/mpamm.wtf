@@ -1,0 +1,71 @@
+import { readFileSync } from 'node:fs';
+import { describe, expect, it, vi, afterEach } from 'vitest';
+import { crc32 } from 'node:zlib';
+import { KrakenFeed } from '../kraken.js';
+
+const messages: string[] = JSON.parse(readFileSync(new URL('./fixtures/kraken-books.json', import.meta.url), 'utf8')).messages;
+const symbols = [...new Set(messages.map((m) => JSON.parse(m).data[0].symbol))] as string[];
+const status = (f: KrakenFeed, symbol: string, state = 'online') => (f as any).onMessage(JSON.stringify({ channel: 'instrument', data: { pairs: [{ symbol, status: state }] } }));
+function feed() {
+  const f = new KrakenFeed(symbols);
+  (f as any).onMessage('{"channel":"status","data":[{"system":"online"}]}');
+  for (const s of symbols) status(f, s);
+  return f;
+}
+afterEach(() => vi.useRealTimers());
+
+describe('Kraken token books', () => {
+  it('replays real snapshots and incremental updates with exact-decimal checksums', () => {
+    const f = feed();
+    for (const raw of messages) (f as any).onMessage(raw);
+    for (const symbol of symbols) {
+      expect(f.mid(symbol)).toBeGreaterThan(0);
+      const buy = f.walk(symbol, 'buy', 0.01), sell = f.walk(symbol, 'sell', 0.01);
+      expect(buy.price).toBeGreaterThan(f.mid(symbol));
+      expect(sell.price).toBeLessThan(f.mid(symbol));
+      expect(buy.filledFull && sell.filledFull).toBe(true);
+    }
+  });
+  it('invalidates a corrupted book instead of serving its last good price', () => {
+    const f = feed();
+    const first = messages[0];
+    (f as any).onMessage(first);
+    const sym = JSON.parse(first).data[0].symbol;
+    expect(f.mid(sym)).toBeGreaterThan(0);
+    expect(() => (f as any).onMessage(first.replace(/"checksum":\s*\d+/, '"checksum":0'))).toThrow('checksum mismatch');
+    expect(f.mid(sym)).toBe(0);
+  });
+  it('honors market/engine status, heartbeat liveness, and reset until a new snapshot', () => {
+    vi.useFakeTimers();
+    const f = feed(), first = messages[0], sym = JSON.parse(first).data[0].symbol;
+    (f as any).onMessage(first);
+    status(f, sym, 'cancel_only'); expect(f.mid(sym)).toBe(0);
+    status(f, sym); expect(f.mid(sym)).toBeGreaterThan(0);
+    vi.advanceTimersByTime(29_000); (f as any).onMessage('{"channel":"heartbeat"}');
+    vi.advanceTimersByTime(29_000); expect(f.mid(sym)).toBeGreaterThan(0);
+    vi.advanceTimersByTime(2_000); expect(f.mid(sym)).toBe(0);
+    (f as any).onMessage('{"channel":"heartbeat"}');
+    (f as any).onMessage('{"channel":"status","data":[{"system":"maintenance"}]}');
+    expect(f.mid(sym)).toBe(0);
+    (f as any).reset(); status(f, sym);
+    (f as any).onMessage('{"channel":"status","data":[{"system":"online"}]}');
+    expect(f.mid(sym)).toBe(0);
+  });
+  it('applies repeated levels sequentially, deletes zero quantities, preserves decimal zeros and walks finite depth', () => {
+    const f = feed(), sym = symbols[0];
+    // 10.00*2.000 and 9.00*3.000 preserve all trailing zeroes in CRC input.
+    const snapshot = `{"channel":"book","type":"snapshot","data":[{"symbol":"${sym}","asks":[{"price":10.00,"qty":2.000}],"bids":[{"price":9.00,"qty":3.000}],"checksum":${crc32('100020009003000')}}]}`;
+    (f as any).onMessage(snapshot);
+    expect(f.walk(sym, 'buy', 3)).toEqual({ price: 10, filledBase: 2, filledFull: false });
+    const update = `{"channel":"book","type":"update","data":[{"symbol":"${sym}","asks":[{"price":10.00,"qty":0},{"price":11.00,"qty":4.000},{"price":11.00,"qty":1.000}],"checksum":${crc32('110010009003000')}}]}`;
+    (f as any).onMessage(update);
+    expect(f.mid(sym)).toBe(10);
+    expect(f.walk(sym, 'buy', 2)).toEqual({ price: 11, filledBase: 1, filledFull: false });
+  });
+  it('rejects updates before a snapshot and subscription errors', () => {
+    const f = feed();
+    const upd = messages.find((raw) => JSON.parse(raw).type === 'update')!;
+    expect(() => (f as any).onMessage(upd)).toThrow('before snapshot');
+    expect(() => (f as any).onMessage('{"success":false,"error":"invalid symbol"}')).toThrow('invalid symbol');
+  });
+});

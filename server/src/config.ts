@@ -129,6 +129,10 @@ export const config = {
   takerBps: num('TAKER_BPS', 4.5),
   /** Binance taker fee (bps) for the BTC/ETH benchmark — default VIP9 (2.25 bps). */
   binanceTakerBps: num('BINANCE_TAKER_BPS', 2.25),
+  krakenWs: env.KRAKEN_WS_URL ?? 'wss://ws.kraken.com/v2',
+  // Kraken Pro xStocks highest published volume tier ($1B+), 2026-10-27.
+  // https://www.kraken.com/features/fee-schedule#xstocks
+  krakenXstockTakerBps: num('KRAKEN_XSTOCK_TAKER_BPS', 2.5),
   /** Simulator cadence. Live quote evaluation is driven by observed blocks. */
   quoteIntervalMs: num('QUOTE_INTERVAL_MS', 500),
   /** HTTP new-head watchdog/fallback cadence. This is deliberately well below

@@ -1,0 +1,19 @@
+{
+  "source": "Monad eth_call to proxy makerQuoteExactInput, 2026-10-28 UTC",
+  "blockNumber": "117224137",
+  "rows": [
+    {
+      "tokenIn": "0x90a2a4c76b5d8c0bc892a69ea28aa775a8f2dd48",
+      "tokenOut": "0x754704bc059f8c67012fed69bc8a327a5aafb603",
+      "amountIn": "1000000000000000000",
+      "amountOut": "770369227",
+      "lastPostedBlock": "117224137"
+    }
+  ],
+  "unavailable": {
+    "tokenIn": "0x754704bc059f8c67012fed69bc8a327a5aafb603",
+    "tokenOut": "0x90a2a4c76b5d8c0bc892a69ea28aa775a8f2dd48",
+    "amountIn": "100000000",
+    "revertReason": "maker: balance"
+  }
+}

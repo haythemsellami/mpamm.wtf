@@ -7,40 +7,19 @@ import { createQuoteOutageReporter } from './quote-health.js';
 
 /**
  * ThogAMM is one inventory-funded ERC-7815 pool behind the TAKERBOT proxy.
- * The proxy's executable exact-input view is the quote source of truth: it
- * includes live spread, inventory skew, staleness and exact-token capacity,
- * so the adapter never ports or approximates the maker's private curve.
+ * makerQuoteExactInput is the contract's read-only baseline: spread, inventory,
+ * age and conservative capacity are included, execution-context friction is
+ * not. Actual swaps also depend on effective gas price, basefee, FastLane
+ * warmth and same-block treatment. Do not describe the view as a guaranteed
+ * executable output or add a guessed fee to approximate that mechanism.
+ * https://github.com/thogard785/thog-amm-integration-guide
  *
- * ONE PROXY, TWO BUSINESSES — AND ONLY ONE OF THEM IS THIS VENUE.
- * The same contract also runs TAKERBOT's own taker side, which emits
- * `TakerTradeExecuted` (topic0 0xb322b204…): tokenIn/amountIn are what the BOT
- * pays into someone else's book, tokenOut/amountOut what it gets back. Those
- * are the bot TAKING liquidity elsewhere, not this pAMM quoting a fill, so the
- * volume behind them belongs to the venue that filled it. Counting them here
- * books another venue's flow as ThogAMM's.
- *
- * The size of the temptation, over the venue's lifetime to 2026-08-21:
- * 6,702 TakerTradeExecuted against 6 MakerSwapExecuted. So the fill filter
- * below is deliberately MAKER-ONLY, and ThogAMM's honest number is that it
- * makes almost no markets: near-$0 days are the finding, not a bug to fix.
- * PR #82 mistook exactly this for ABI drift and had to be reverted — if you
- * are here because the venue looks too quiet, that is the answer.
+ * Only MakerSwapExecuted measures this pool's settled volume. The same proxy
+ * emits TakerTradeExecuted when its operator trades at OTHER venues; those
+ * events belong to those venues. Early low-volume observations are not a
+ * reason to ignore subsequent ABI/registry changes or current maker activity.
  */
-
 export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as const;
-
-/** The keeper's push event since the upgrade to 0x709ba375… (block
- *  115,729,249 · 2026-10-22 22:21:05 UTC). From then on, the price path
- *  (selector 0x59558d29) and the risk-params path (0x4cb2db39) emit THIS event
- *  instead of MakerPricesPushed / MakerRiskParamsPushed. Both upgrades since
- *  then (incl. 0x96ab5405…, 2026-10-27) kept it. Its indexed word is the kind
- *  of push: 1 prices, 2 risk params, plus 4 and 8 on newer paths. That
- *  implementation is unverified, so only the hash is known.
- *  Like MakerPricesPushed before it, it also fires inside TAKERBOT's own taker
- *  trades that push prices (~500 a day). The series has always counted those
- *  txs, so keying on this topic keeps the series the same as before the
- *  upgrade. */
-const PARAMS_PUSHED_TOPIC = '0x5d4a925bedf1997523e2a7480533bd37c5b48ab9315c13dfbb289dcae70ec9cb' as const;
 
 const THOGAMM_VENUE: VenueMeta = {
   id: 'thogamm',
@@ -49,6 +28,7 @@ const THOGAMM_VENUE: VenueMeta = {
   kind: 'amm',
   role: 'venue',
   sinceUtc: '2026-07-26',
+  quoteNote: 'ThogAMM shows the contract’s read-only quote. Actual swaps may receive less after gas-price and FastLane execution charges; same-block treatment also affects those charges.',
 };
 
 const thogammAbi = parseAbi([
@@ -61,6 +41,11 @@ const thogammAbi = parseAbi([
   'event MakerPricesPushed(uint16 seq, uint32 indexed postedBlock, uint16 sideEnableBits)',
   'event MakerRiskParamsPushed(uint8 indexed fields)',
   'event Upgraded(address indexed implementation)',
+  'event MakerPageUpdated(uint8 indexed lane, bytes payload, uint256 control)',
+  'struct TokenMetadata { address token; uint8 decimals; uint8 category; uint32 price; uint32 priceTail; uint32 tokenBidSpread; uint32 tokenAskSpread; uint32 volumeRate; uint32 categorySpread; uint32 inventory; uint32 sides; uint32 postedBlock; uint32 sequence; uint32 pairStart; uint32 inventoryCap; }',
+  'struct CategoryMetadata { uint8 anchorTokenIndex; uint32 price; uint32 priceTail; uint32 inventory; uint32 spread; uint32 postedBlock; uint32 inventoryCap; }',
+  'event MakerTokenAdded(uint8 indexed tokenIndex, address indexed token, TokenMetadata metadata, CategoryMetadata categoryMetadata, uint256 balance)',
+  'event MakerTokenRetired(uint8 indexed retiredIndex, address indexed token, uint8 movedFrom, uint32 generation)',
 ]);
 const erc20Abi = parseAbi(['function decimals() view returns (uint8)']);
 const event = (name: string) => thogammAbi.find((x: any) => x.type === 'event' && x.name === name)!;
@@ -221,6 +206,7 @@ export function createThogammAdapter(): VenueAdapter {
   const byMarket = new Map<string, ThogammMarket>();
   let byDirection = new Map<string, ThogammMarket>();
   let discovered = false;
+  let activeMarkets = new Set<string>();
   // `makerQuoteExactInput` REVERTS rather than returning zero when the maker is
   // off: the keeper posts `sideEnableBits = 0` and every leg reverts
   // "maker: paused" (observed 2026-08-04 07:16:39 UTC, block 92,998,939).
@@ -273,6 +259,7 @@ export function createThogammAdapter(): VenueAdapter {
     // Discovery refreshes every ten minutes. Merge so a transient proxy/read
     // issue or later registry change can never shrink the historical decode set.
     for (const market of found) byMarket.set(market.market, market);
+    activeMarkets = new Set(found.map((m) => m.market));
     byDirection = indexThogammMarkets([...byMarket.values()]);
     discovered = true;
     ctx.note('venue.discovery', `ThogAMM: ${found.length} registered market(s) across ${addresses.length} on-chain token(s) at block ${blockNumber}`);
@@ -280,8 +267,12 @@ export function createThogammAdapter(): VenueAdapter {
 
   return {
     venues: () => [THOGAMM_VENUE],
-    quoteMarkets: () => [...new Set([...byMarket.values()].map((m) => m.market))],
+    quoteMarkets: () => [...activeMarkets],
     backfillFromUtc: '2026-07-26',
+    historyRevisions: [
+      { id: 'xstocks-usd-references', source: 'markets', from: '2026-10-26', markets: PAIRS.filter((p) => ASSETS[p.base]?.cex === 'kraken').map((p) => p.symbol) },
+      { id: 'xaut-wbtc-quote-basis', source: 'markets', from: '2026-09-15', markets: ['XAUt/BTC'] },
+    ],
 
     discover: refresh,
 
@@ -291,6 +282,7 @@ export function createThogammAdapter(): VenueAdapter {
       const legs: QuoteLeg[] = [];
 
       for (const market of byMarket.values()) {
+        if (!activeMarkets.has(market.market)) continue;
         if (markets && !markets.has(market.market)) continue;
         const mid = ctx.pricer.pairMid(market.market);
         const baseUsd = ctx.pricer.usdPerToken(market.baseKey);
@@ -352,8 +344,8 @@ export function createThogammAdapter(): VenueAdapter {
           spreadBps: oneSided ? 0 : ((askPx - bidPx) / partial.mid) * 1e4,
           filledFull: true,
           oneSided,
-          // ThogAMM has no additive LP fee. Its executable output already
-          // includes the maker spread, age widening and inventory penalty.
+          // No additive LP fee. The view includes spread/age/inventory,
+          // but excludes transaction-context execution friction (see header).
           feeBps: 0,
           ts,
         });
@@ -367,10 +359,11 @@ export function createThogammAdapter(): VenueAdapter {
         // TAKERBOT taking liquidity on other venues, not fills this pAMM made
         // (see the header). Adding them here is the PR #82 mistake.
         { key: 'swaps', address: THOGAMM_ADDRESS, events: [event('MakerSwapExecuted')], kind: 'fills' as const },
-        // A proxy upgrade can change the immutable token registry. Holding the
-        // cursor on this source lets decode refresh before accepting same-range
+        // An upgrade or registry mutation can change supported pairs. Holding
+        // the cursor on these sources lets decode refresh before accepting same-range
         // fills instead of silently dropping a newly registered token.
         { key: 'upgrades', address: THOGAMM_ADDRESS, events: [event('Upgraded')], kind: 'state' as const },
+        { key: 'registry', address: THOGAMM_ADDRESS, events: [event('MakerTokenAdded'), event('MakerTokenRetired')], kind: 'state' as const },
       ];
     },
 
@@ -380,7 +373,7 @@ export function createThogammAdapter(): VenueAdapter {
     // emits exactly one event, so destination-keyed log mode follows keeper
     // rotation and counts transactions without block-sampling estimates. Which
     // event depends on the implementation: the named pair until the 2026-10-22
-    // upgrade, PARAMS_PUSHED_TOPIC after it. Keep both — a rebuild re-reads
+    // upgrade, MakerPageUpdated after it. Keep both — a rebuild re-reads
     // the earlier blocks — and the tracker counts each tx once across sources.
     gasSources: () => [
       {
@@ -388,7 +381,7 @@ export function createThogammAdapter(): VenueAdapter {
         address: THOGAMM_ADDRESS,
         events: [event('MakerPricesPushed'), event('MakerRiskParamsPushed')],
       },
-      { mode: 'logs' as const, address: THOGAMM_ADDRESS, topic0: PARAMS_PUSHED_TOPIC },
+      { mode: 'logs' as const, address: THOGAMM_ADDRESS, events: [event('MakerPageUpdated')] },
     ],
     // From the 2026-10-22 upgrade on, the series matched nothing: the keeper's
     // ~220k daily pushes went uncounted and the gas chart dropped ThogAMM
@@ -413,8 +406,8 @@ export function createThogammAdapter(): VenueAdapter {
           const label = /^0x[0-9a-fA-F]{40}$/.test(impl) ? shortHex(impl) : 'an unreadable implementation';
           ctx.note('venue.upgraded', `ThogAMM: proxy upgraded to ${label} — re-verify quote/fill/gas ABIs against the new implementation`);
         }
-        await refresh(ctx);
       }
+      if (upgrades.length || logs.registry?.length) await refresh(ctx);
       // Sources are a constant, so logSources() is always right and cannot carry
       // the fail-closed guard the discovered-address venues get for free.
       // Discovery supplies only the decode table: with it empty every swap

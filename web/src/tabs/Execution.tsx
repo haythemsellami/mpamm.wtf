@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { SIZES_USD, TOKENS, pairOf, wrapBasisFor, type DepthSnapshot, type VenueMeta, type QuoteRow } from '@shared';
+import { SIZES_USD, TOKENS, cexForBase, pairOf, wrapBasisFor, type DepthSnapshot, type VenueMeta, type QuoteRow } from '@shared';
 import { useDashboard } from '../store';
 import { connectLiveDepth } from '../lib/api';
 import { useViewport } from '../lib/viewport';
@@ -92,7 +92,7 @@ export function ExecutionTab() {
   const refName = ref?.name ?? 'the CEX reference';
   const refLabel = ref ? ref.name : 'The reference';
   // taker fee shown = the selected pair's CEX row fee (Bybit ~10bps, Binance VIP9 ~2.25bps).
-  const taker = (d.quotes?.rows.find((r) => r.venueId === ref?.id && r.market === pair)?.feeBps ?? d.state?.takerBps ?? 4.5).toFixed(1);
+  const taker = (d.quotes?.rows.find((r) => r.venueId === ref?.id && r.market === pair)?.feeBps)?.toFixed(1) ?? '—';
 
   const row = (v: VenueMeta, s: number): QuoteRow | undefined =>
     d.quotes?.rows.find((r) => r.venueId === v.id && r.market === pair && r.sizeUsd === s);
@@ -170,12 +170,16 @@ export function ExecutionTab() {
     const baseSym = p.symbol.split('/')[0];
     if (wrapSym) notes.push(`${pair} trades a wrapped asset — the ${refName} reference is adjusted by the ${wrapSym} mid (wrapped/native basis, a proxy for the bridged asset), so the CEX line is shown in wrapped terms for a like-for-like comparison.`);
     else if (p.wrapBasisOverride === '') notes.push(`${pair} trades ${baseSym}, a wrapped asset with NO CEX basis market — the ${refName} reference assumes parity with native ${p.base} (${baseSym} is 1:1 mint/redeemable, typically sub-bp; there is no live basis feed to price it).`);
+    const usdBase = cexForBase(p.base) === 'kraken';
     if (p.quoteKind === 'asset') {
-      notes.push(`${pair} is crypto-quoted — the reference is a SYNTHETIC cross: the ${p.base} leg's CEX book converted by the live ${p.quote}/USDT mid (two real markets, possibly on different exchanges), so bps compare like-for-like in ${p.quote} terms.`);
+      notes.push(`${pair} uses a synthetic cross: the base book is converted at the quote asset’s live mid. USD/USDT conversion is applied when the two books use different currencies; the reference does not include executing the conversion legs.`);
+      if (p.quoteWrapBasisSymbol) notes.push(`The quote token’s ${p.quoteWrapBasisSymbol} wrapper basis is included in the conversion.`);
+      else if (p.symbol.endsWith('/cbBTC')) notes.push('The cbBTC quote leg assumes parity with BTC; there is no traded cbBTC/BTC basis feed.');
     } else {
-      const crossSym = TOKENS[p.quote]?.usdtCross;
-      if (crossSym) notes.push(`${pair} is quoted in ${p.quote} but the ${refName} book is USDT — the reference is converted by the live ${crossSym} mid (the ${p.quote}/USDT basis is real, ~±10bps), not a $1 peg.`);
+      const crossSym = usdBase ? TOKENS[p.quote]?.usdCross : TOKENS[p.quote]?.usdtCross;
+      if (crossSym) notes.push(`${pair} is converted from the ${refName} book’s ${usdBase ? 'USD' : 'USDT'} price using the live ${crossSym} mid.`);
     }
+    if (usdBase) notes.push('The reference uses the actual xStock token book on Kraken, with its market hours and status. Historical markouts are unavailable without a matching book archive; live markouts are collected while the feed is running.');
     return notes;
   }, [pair, refName]);
 
@@ -185,8 +189,11 @@ export function ExecutionTab() {
         <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: '.06em' }}>REALTIME EXECUTION COMPARISON</div>
         <div style={{ fontSize: 11, color: C.dim3, marginTop: 6, lineHeight: 1.55, maxWidth: 880 }}>
           Last 60s of quotes for the selected pair at the chosen notional. Spreads are quoted vs the <span style={{ color: C.text3 }}>{refName}</span> reference BBO mid.{' '}
-          <span style={{ color: C.text3 }}>{refLabel}</span> walks the live book for the requested size and overlays the configured taker fee ({taker} bps each side) — realized-vs-realized, the only honest comparison for size-sensitive flow.
+          <span style={{ color: C.text3 }}>{refLabel}</span> walks the live book for the requested size and overlays the configured taker fee ({taker} bps each side) for a size-sensitive execution comparison.
         </div>
+        {active.filter((v) => v.quoteNote).map((v) => (
+          <div key={v.id} style={{ fontSize: 11, color: C.dim3, marginTop: 6, lineHeight: 1.55, maxWidth: 880 }}>{v.quoteNote}</div>
+        ))}
         {realtime && (
           <div title={slowestAdapters.length ? `Slowest adapters: ${slowestAdapters.map(([id, ms]) => `${id} ${ms.toFixed(1)}ms`).join(' · ')}` : undefined}
             style={{ display: 'flex', flexWrap: 'wrap', gap: '5px 13px', marginTop: 9, fontSize: 9.5, letterSpacing: '.04em', color: C.dim2 }}>

@@ -2,6 +2,7 @@
 // runs with allowFailure — so the venue's disappearance from the grid carries
 // no signal by itself. These lock down that the adapter names the cause.
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { TOKENS, ASSETS, pairOf } from '@shared';
 import { createThogammAdapter } from '../thogamm.js';
 
@@ -172,5 +173,30 @@ describe('ThogAMM XAUt markets (gold sizing + crypto-quoted terms)', () => {
     const rel = (x: number) => Math.abs(x - 4_350 / 0.0207) / (4_350 / 0.0207);
     expect(rel(rows[0].bidPx)).toBeLessThan(5e-5);
     expect(rel(rows[0].askPx)).toBeLessThan(5e-5);
+  });
+});
+
+
+describe('ThogAMM live xStock quote units', () => {
+  it('turns the recorded 1 SPYx → 770369227 raw USDC quote into 770.369227 USDC/SPYx', async () => {
+    const fx = JSON.parse(readFileSync(new URL('./fixtures/thogamm-xstock-quote.json', import.meta.url), 'utf8'));
+    const ctx = stubCtx([], { live: true });
+    ctx.client.readContract = async ({ functionName }: any) => functionName === 'getPoolIds'
+      ? [`0x${'1'.repeat(64)}`] : [...LIVE_TOKEN_ADDRESSES, TOKENS.SPYX.address];
+    ctx.pricer = { pairMid: () => 770, usdPerToken: (key: string) => key === 'SPYX' ? 770 : 1 };
+    ctx.client.multicall = async ({ contracts, blockNumber }: any) => contracts.map((c: any) => {
+      if (c.functionName === 'decimals') return { status: 'success', result: Object.values(TOKENS).find((t) => t.address.toLowerCase() === c.address.toLowerCase())!.decimals };
+      expect(blockNumber).toBe(BigInt(fx.blockNumber));
+      const q = fx.rows.find((q: any) => q.tokenIn === c.args[0] && q.tokenOut === c.args[1] && q.amountIn === c.args[2].toString());
+      return q ? { status: 'success', result: [BigInt(q.amountOut), BigInt(q.lastPostedBlock)] }
+        : failed(new Error('unrecorded test leg'));
+    });
+    const adapter = createThogammAdapter();
+    await adapter.discover(ctx);
+    const [row] = await adapter.quote!(ctx, [770], BigInt(fx.blockNumber), new Set(['SPYx/USDC']));
+    expect(row.bidPx).toBe(770.369227);
+    expect(row.askPx).toBe(0); expect(row.oneSided).toBe(true);
+    expect(row.feeBps).toBe(0);
+    expect(adapter.venues()[0].quoteNote).toContain('read-only quote');
   });
 });

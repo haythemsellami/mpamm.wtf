@@ -95,13 +95,11 @@ describe('ThogAMM registered-market coverage', () => {
       'XAUt/MON',
       'XAUt/ETH',
       'XAUt/cbBTC',
+      'XAUt/BTC',
     ]);
-    // 24, not 25: the XAUt0↔WBTC cross stays unlisted — its quote leg would
-    // need the live WBTCBTC basis the reference model applies to bases only
-    // (see the PAIRS comment in @shared).
-    expect(MARKETS).toHaveLength(24);
+    expect(MARKETS).toHaveLength(25);
     expect(new Set(MARKETS.flatMap((market) => [market.base.address, market.quote.address]))).toEqual(new Set(LIVE_TOKEN_ADDRESSES));
-    expect(BY_DIRECTION.size).toBe(48);
+    expect(BY_DIRECTION.size).toBe(50);
   });
 
   it('does not advertise pairs for a token absent from the on-chain registry', () => {
@@ -250,7 +248,7 @@ describe('ThogAMM fail-closed before discovery', () => {
     const adapter = createThogammAdapter();
     // the sources are static and genuinely knowable, so the shared tail must
     // keep moving for every other venue while ThogAMM is undiscovered.
-    expect(adapter.logSources()).toHaveLength(2);
+    expect(adapter.logSources()).toHaveLength(3);
     await expect(decode(adapter, stubCtx([]), { upgrades: [], swaps: [] })).resolves.toEqual([]);
   });
 
@@ -259,5 +257,53 @@ describe('ThogAMM fail-closed before discovery', () => {
     const upgrade = { address: THOGAMM_ADDRESS, eventName: 'Upgraded', args: { implementation: '0x127a5b18e3e96fc104f5eaf280dfe502dd3fd40a' }, blockNumber: 91_000_000n, logIndex: 1 };
     const fills = await decode(adapter, stubCtx([]), { upgrades: [upgrade], swaps: [REAL_MON_USDC_FILL] });
     expect(fills).toHaveLength(1);
+  });
+});
+
+describe('ThogAMM mutable registry and xStocks', () => {
+  const stockKeys = ['SPYX', 'QQQX', 'EWYX', 'NVDAX', 'TSLAX'];
+  const current = [...LIVE_TOKEN_ADDRESSES, ...stockKeys.map((k) => TOKENS[k].address)];
+  it('covers all 75 non-stable crosses in the 13-token registry without duplicates', () => {
+    const markets = thogammMarketsForTokens(current);
+    expect(markets).toHaveLength(75);
+    expect(indexThogammMarkets(markets).size).toBe(150);
+    expect(markets.filter((m) => stockKeys.includes(m.baseKey))).toHaveLength(50);
+    for (const m of markets) if (stockKeys.includes(m.baseKey)) expect(m.base.decimals).toBe(18);
+  });
+  it('decodes rebased xStock event units without applying an issuer multiplier again', () => {
+    // Constructed precision case, not a recorded on-chain fill. The real-log
+    // decoding fixture above tests the same unchanged MakerSwapExecuted ABI.
+    const log = { ...REAL_MON_USDC_FILL, args: { ...REAL_MON_USDC_FILL.args,
+      tokenIn: TOKENS.SPYX.address, tokenOut: TOKENS.USDC.address,
+      amountIn: 1_234_567_890_123_456_789n, amountOut: 950_617_275n,
+    } };
+    const fill = decodeThogammSwap(log, indexThogammMarkets(thogammMarketsForTokens(current)), 0, usdForToken)!;
+    expect(fill.market).toBe('SPYx/USDC'); expect(fill.side).toBe('sell');
+    expect(fill.baseAmount).toBeCloseTo(1.234567890123456789, 14);
+    expect(fill.usd).toBe(950.617275);
+    expect(fill.execPx).toBeCloseTo(950.617275 / 1.234567890123456789, 10);
+  });
+  it('refreshes on registry events, stops quoting retired tokens, and retains their historical decode table', async () => {
+    const adapter = createThogammAdapter(), ctx = stubCtx([]);
+    let addresses = LIVE_TOKEN_ADDRESSES;
+    ctx.client.readContract = async ({ functionName }: any) => functionName === 'getPoolIds' ? [`0x${'1'.repeat(64)}`] : addresses;
+    await adapter.discover(ctx);
+    expect(adapter.quoteMarkets?.()).not.toContain('SPYx/USDC');
+    addresses = current;
+    await adapter.decode(ctx, { registry: [{ eventName: 'MakerTokenAdded' }] } as any, () => 0, new Set());
+    expect(adapter.quoteMarkets?.()).toContain('SPYx/USDC');
+    addresses = current.filter((a) => a !== TOKENS.WMON.address);
+    const fills = await adapter.decode(ctx, { registry: [{ eventName: 'MakerTokenRetired' }], swaps: [REAL_MON_USDC_FILL] } as any, () => 0, new Set());
+    expect(adapter.quoteMarkets?.()).not.toContain('MON/USDC');
+    expect(fills).toHaveLength(1);
+    ctx.client.readContract = async () => { throw new Error('registry RPC failed'); };
+    await expect(adapter.decode(ctx, { registry: [{}], swaps: [REAL_MON_USDC_FILL] } as any, () => 0, new Set())).rejects.toThrow('registry RPC failed');
+  });
+  it('replays only newly tracked markets and preserves the existing gas repair', () => {
+    const adapter = createThogammAdapter(), revisions = adapter.historyRevisions!;
+    expect(revisions[0]).toMatchObject({ source: 'markets', from: '2026-10-26' });
+    expect(revisions[0].markets).toHaveLength(50);
+    expect(revisions[1]).toMatchObject({ source: 'markets', markets: ['XAUt/BTC'] });
+    expect(adapter.gasRevisions).toEqual([{ id: 'params-pushed-topic', from: '2026-10-22' }]);
   });
 });
