@@ -14,10 +14,17 @@ import { createQuoteOutageReporter, revertReason } from './quote-health.js';
  * executable output or add a guessed fee to approximate that mechanism.
  * https://github.com/thogard785/thog-amm-integration-guide
  *
+ * ONE PROXY, TWO BUSINESSES, AND ONLY ONE OF THEM IS THIS VENUE.
  * Only MakerSwapExecuted measures this pool's settled volume. The same proxy
- * emits TakerTradeExecuted when its operator trades at OTHER venues; those
- * events belong to those venues. Early low-volume observations are not a
- * reason to ignore subsequent ABI/registry changes or current maker activity.
+ * runs TAKERBOT's own taker side, which emits TakerTradeExecuted (topic0
+ * 0xb322b204…) when its operator trades at OTHER venues: tokenIn/amountIn is
+ * what the bot pays into someone else's book. That volume belongs to the
+ * venue that filled it, and counting it here books another venue's flow as
+ * ThogAMM's. Over the venue's lifetime to 2026-08-21 it was 6,702
+ * TakerTradeExecuted against 6 MakerSwapExecuted; PR #82 mistook that gap for
+ * ABI drift and had to be reverted. Low maker volume is a finding, not a
+ * decode bug. It is also no reason to ignore later ABI/registry changes or
+ * current maker activity: check those against the chain.
  */
 export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as const;
 
@@ -396,9 +403,16 @@ export function createThogammAdapter(): VenueAdapter {
     // TAKERBOT's keeper self-funds price/risk pushes to the proxy. Every push
     // emits exactly one event, so destination-keyed log mode follows keeper
     // rotation and counts transactions without block-sampling estimates. Which
-    // event depends on the implementation: the named pair until the 2026-10-22
-    // upgrade, MakerPageUpdated after it. Keep both — a rebuild re-reads
-    // the earlier blocks — and the tracker counts each tx once across sources.
+    // event depends on the implementation: the named pair until the upgrade to
+    // 0x709ba375… (block 115,729,249, 2026-10-22 22:21 UTC), MakerPageUpdated
+    // (topic0 0x5d4a925b…, PR #158's source) after it. Its indexed lane is the
+    // push kind: 1 prices (selector 0x59558d29), 2 risk params (0x4cb2db39),
+    // 4 and 8 on newer paths. Keep both — a rebuild re-reads the earlier
+    // blocks — and the tracker counts each tx once across sources.
+    // Both events also fire inside TAKERBOT's own taker trades that push
+    // prices (~500 a day, 13–16% of the series' MON). The series has counted
+    // those from the start, so it stays comparable across the upgrade; whether
+    // they belong in quote-update burn is an open modelling question.
     gasSources: () => [
       {
         mode: 'logs' as const,
