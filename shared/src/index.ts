@@ -269,8 +269,10 @@ export const PAIRS: Pair[] = [
   { symbol: 'XAUt/AUSD', base: 'XAUt', quote: 'AUSD' },
   { symbol: 'XAUt/MON', base: 'XAUt', quote: 'MON', quoteKind: 'asset' },
   { symbol: 'XAUt/ETH', base: 'XAUt', quote: 'ETH', quoteKind: 'asset' },
-  { symbol: 'XAUt/cbBTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset' },
+  // WBTC, the canonical BTC token, first: pairFor(base, quote) resolves the
+  // first match, and the cbBTC cross is referenced by its symbol.
   { symbol: 'XAUt/BTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset', quoteWrapBasisSymbol: 'WBTCBTC' },
+  { symbol: 'XAUt/cbBTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset' },
   ...['SPYx', 'QQQx', 'EWYx', 'NVDAx', 'TSLAx'].flatMap((base, i, stocks): Pair[] => [
     ...['USDC', 'USDT0', 'AUSD'].map((quote) => ({ symbol: `${base}/${quote}`, base, quote })),
     ...['MON', 'ETH', 'XAUt', ...stocks.slice(0, i)].map((quote): Pair => ({ symbol: `${base}/${quote}`, base, quote, quoteKind: 'asset' })),

@@ -97,8 +97,8 @@ describe('ThogAMM registered-market coverage', () => {
       'XAUt/AUSD',
       'XAUt/MON',
       'XAUt/ETH',
-      'XAUt/cbBTC',
       'XAUt/BTC',
+      'XAUt/cbBTC',
     ]);
     expect(MARKETS).toHaveLength(25);
     expect(new Set(MARKETS.flatMap((market) => [market.base.address, market.quote.address]))).toEqual(new Set(LIVE_TOKEN_ADDRESSES));
