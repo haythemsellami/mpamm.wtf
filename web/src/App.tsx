@@ -19,6 +19,8 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // a digit typed into a field ("usd1" in the pair filter, a date) is text, not a tab switch
+      if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]')) return;
       const t = TAB_KEYS[e.key];
       if (t) set('tab', t);
     };

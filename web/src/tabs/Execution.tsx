@@ -6,6 +6,7 @@ import { useViewport } from '../lib/viewport';
 import { takerFeeLabel } from '../lib/format';
 import { C, hexA, pill, venueColor } from '../theme';
 import { Panel, PanelHead, Field } from '../components/ui';
+import { PairPicker, groupPairs } from '../components/PairPicker';
 import { QuoteCanvas } from '../components/QuoteCanvas';
 import { SizeAvailabilityHint } from '../components/SizeAvailabilityHint';
 import { DepthCurveChart, type DepthVenue } from '../components/DepthCurve';
@@ -34,7 +35,7 @@ export function ExecutionTab() {
   const d = useDashboard();
   const { mobile } = useViewport();
   // mobile control style — pill rows become compact native selects (pamm.wtf
-  // pattern): 7 asset pills never fit a phone row, a select always does.
+  // pattern): a row of pills never fits a phone, a select always does.
   const selStyle: React.CSSProperties = {
     background: 'transparent', color: C.text, border: '1px solid var(--pill-border)',
     borderRadius: 4, padding: '7px 8px', fontSize: 12, fontFamily: 'inherit',
@@ -219,12 +220,16 @@ export function ExecutionTab() {
         <Field label="ASSET">
           {mobile ? (
             <select aria-label="Asset pair" value={pair} onChange={(e) => d.set('pair', e.target.value)} style={selStyle}>
-              {markets.map((p) => <option key={p} value={p}>{p}</option>)}
+              {groupPairs(markets).map((g) => (
+                <optgroup key={g.base} label={g.base}>
+                  {g.markets.map((p) => <option key={p} value={p}>{p}</option>)}
+                </optgroup>
+              ))}
             </select>
           ) : (
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-              {markets.map((p) => <button key={p} type="button" aria-pressed={pair === p} onClick={() => d.set('pair', p)} style={pill(pair === p)}>{p}</button>)}
-            </div>
+            <PairPicker markets={markets} value={pair} onChange={(p) => d.set('pair', p)}
+              venuesFor={(m) => d.displayVenues.filter((v) => seenVenuePairs.current.has(`${v.id}|${m}`))
+                .map((v) => ({ id: v.id, name: v.name, color: venueColor(v, d.theme) }))} />
           )}
         </Field>
         <Field label="SIZE">
