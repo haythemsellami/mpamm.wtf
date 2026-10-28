@@ -41,10 +41,10 @@ export class KrakenFeed {
   private books = new Map<string, Book>();
   private statuses = new Map<string, string>();
   private changes = new Map<string, number>();
-  // Last validated book mid, and the ticker's last trade. Kept across closures
-  // and reconnects (reset() leaves them): they only value settled fills.
+  // Last validated book mid, and the ticker's price. Kept across closures and
+  // reconnects (reset() leaves them): they only value settled fills.
   private lastMid = new Map<string, number>();
-  private lastTrade = new Map<string, number>();
+  private lastTicker = new Map<string, number>();
   private engineOnline = false;
   private engineStatus?: string;   // as Kraken reported it; undefined until it does
   private ws?: WebSocket;
@@ -93,14 +93,14 @@ export class KrakenFeed {
     return s !== undefined && s !== 'online' && s !== 'delisted';
   }
   /** USD for VALUING a fill that already settled on-chain: the live mid, else
-   *  the last validated mid before a closure or outage, else the ticker's last
-   *  trade (which Kraken sends while a market is closed, so a restart during a
-   *  closure still has one). 0 only when Kraken never answered. Never a
+   *  the last validated mid before a closure or outage, else the ticker's
+   *  price, which Kraken sends while a market is closed, so a restart during
+   *  a closure still has one. 0 only when Kraken never answered. Never a
    *  reference: bps anchors, walks and markouts use mid() alone. */
   settledMid(symbol: string): number {
     const live = this.mid(symbol);
     if (live > 0) return live;
-    return this.lastMid.get(symbol) ?? this.lastTrade.get(symbol) ?? 0;
+    return this.lastMid.get(symbol) ?? this.lastTicker.get(symbol) ?? 0;
   }
   walk(symbol: string, side: 'buy' | 'sell', baseSize: number): WalkResult {
     const b = this.book(symbol);
@@ -165,7 +165,11 @@ export class KrakenFeed {
     if (msg.channel === 'ticker') {
       for (const t of msg.data ?? []) {
         if (Number.isFinite(t.change_pct)) this.changes.set(t.symbol, t.change_pct);
-        if (this.symbols.includes(t.symbol) && Number.isFinite(t.last) && t.last > 0) this.lastTrade.set(t.symbol, t.last);
+        // the ticker's bid/ask mid, else its last trade: an illiquid xStock
+        // (EWYx, 2026-10-28) can have no trade in 24 h, `last: 0`, and a quote
+        const bid = Number(t.bid), ask = Number(t.ask), last = Number(t.last);
+        const px = bid > 0 && ask > bid ? (bid + ask) / 2 : last > 0 ? last : 0;
+        if (this.symbols.includes(t.symbol) && Number.isFinite(px) && px > 0) this.lastTicker.set(t.symbol, px);
       }
       return;
     }

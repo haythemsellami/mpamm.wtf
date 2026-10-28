@@ -77,12 +77,18 @@ describe('Kraken token books', () => {
     (f as any).reset();
     expect(f.settledMid(sym)).toBe(open);
   });
-  it("falls back to the ticker's last trade when no book was ever open", () => {
-    const f = feed(), sym = symbols[0];
-    expect(f.settledMid(sym)).toBe(0);
-    (f as any).onMessage(JSON.stringify({ channel: 'ticker', type: 'snapshot', data: [{ symbol: sym, last: 770.5, change_pct: 0.1 }] }));
-    expect(f.mid(sym)).toBe(0);
-    expect(f.settledMid(sym)).toBe(770.5);
+  it("falls back to the ticker's quote, then its last trade, when no book was ever open", () => {
+    const f = feed(), [a, b, c] = symbols;
+    const ticker = (data: object) => (f as any).onMessage(JSON.stringify({ channel: 'ticker', type: 'snapshot', data: [data] }));
+    expect(f.settledMid(a)).toBe(0);
+    // the live EWYx ticker on 2026-10-28: no trade in 24 h, but a quote
+    ticker({ symbol: a, bid: 161.83, ask: 163.54, last: 0, change_pct: 0 });
+    ticker({ symbol: b, last: 770.5, change_pct: 0.1 });                 // no two-sided quote
+    ticker({ symbol: c, bid: 0, ask: 0, last: 0, change_pct: 0 });       // nothing to value with
+    expect(f.mid(a)).toBe(0);
+    expect(f.settledMid(a)).toBeCloseTo(162.685, 9);
+    expect(f.settledMid(b)).toBe(770.5);
+    expect(f.settledMid(c)).toBe(0);
     expect(f.settledMid('NOT/LISTED')).toBe(0);
   });
   it("leaves the other books up when Kraken rejects one symbol's subscription", () => {
