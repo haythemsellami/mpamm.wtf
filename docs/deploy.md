@@ -244,7 +244,11 @@ nothing changed the decode, and a second decode of a cross-quoted fill
 prices it at a later mid. Its marker is `reread_add_<venue>`, apart from
 `reread_day_<venue>`, so a restart past midnight never turns it into a
 carried reset. It re-reads the closed day from the archive instead, still
-only adding. Crystal's own day is repaired by its `deploy-day` revision.
+only adding. Fills it inserts rewind their markets' markout cursors before
+its marker clears, so a day the sweep already walked gets marked. A repaired
+closed day resyncs open Volume tabs. A `'markets'` revision that inherits one
+pending leaves that day to it. Crystal's own day is repaired by its
+`deploy-day` revision.
 
 ## Operational notes
 

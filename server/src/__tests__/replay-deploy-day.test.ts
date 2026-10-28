@@ -276,7 +276,12 @@ describe('an additive re-read whose day closed first', () => {
     source.store.insertFillsIfAbsent([stored]);
     source.dayFor(stored.ts).byVenue[VID] = { usd: 100, swaps: 1 };
     source.lastBlock = 5_000_500n;
+    source.store.setMeta(live.rereadAddKey(VID), '2026-10-26');
     source.addRereads.set(VID, '2026-10-26');
+    // the markout sweep already walked the day: its cursor is past it
+    source.store.setMeta(`mkhist_cursor_${VID}_MON/USDC`, '2026-10-27');
+    const frames: unknown[] = [];
+    source.emitMsg = (m: unknown) => { frames.push(m); };
 
     let settled = false;
     const run = source.rereadToday(adapter, VID, VID, '2026-10-26', true).finally(() => { settled = true; });
@@ -291,8 +296,51 @@ describe('an additive re-read whose day closed first', () => {
     expect(kept.map((f: Fill) => [f.id, f.usd]).sort()).toEqual([['prefix', 30], ['tail', 100]]);
     expect(kept.find((f: Fill) => f.id === 'tail')!.markoutsBps).toEqual([1, 2, 3, 4, 5]);
     expect(source.dayFor(stored.ts).byVenue[VID]).toEqual({ usd: 130, swaps: 2 });
-    expect(source.snapshotMeta[live.rereadAddKey(VID)]).toBe('');
     expect(notes.find((n) => n.startsWith('backfill.reread'))).toBe(`backfill.reread: ${VID}: re-read 2026-10-26 (missing fills only) blocks 5000000→5000099 — 1→2 swaps, $100→$130; fills +1 −0`);
+    // the inserted fill gets its archive markouts: the sweep walks the day again
+    expect(source.store.getMeta(`mkhist_cursor_${VID}_MON/USDC`)).toBe('2026-10-26');
+    // ...and the debt, the marker and the repaired day commit together
+    expect(source.store.getMeta(live.rereadRemarkKey(VID))).toBe('');
+    expect(source.store.getMeta(live.rereadAddKey(VID))).toBe('');
+    expect(source.store.all().find((d: { utcDay: string }) => d.utcDay === '2026-10-26')?.byVenue[VID]).toEqual({ usd: 130, swaps: 2 });
+    // an open Volume tab reloads the closed day it already shows
+    expect(frames).toContainEqual({ ch: 'volume', resync: true });
+    source.store.close();
+  });
+});
+
+describe("a build's first boot hands an inherited additive re-read's day to its 'markets' revisions", () => {
+  /** Hanji declares one ('xaut-book'); an additive re-read counts every market
+   *  it inserts, so the revision must not add the same fills again */
+  async function boot(addDay: string, now: string) {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse(now));
+    const s = await inertSetup();
+    s.source.store.setMeta(s.live.rereadAddKey('hanji'), addDay);
+    s.source.recordMarketsRevisionStarts(9_000_000n);
+    const hanji = s.ADAPTERS.find((a) => a.venues()[0]?.id === 'hanji')!;
+    const keys = s.live.revisionTargets('hanji', hanji.historyRevisions)
+      .filter((t) => t.from === 'markets')
+      .map((t) => s.live.marketsRevisionKeys(s.live.resetMarker(t)));
+    expect(keys.length).toBeGreaterThan(0);
+    return { ...s, keys };
+  }
+
+  it("today's: the revision stops at today's midnight, as for a replacing re-read", async () => {
+    const { source, keys } = await boot('2026-10-28', '2026-10-28T09:00:00Z');
+    for (const k of keys) {
+      expect(source.store.getMeta(k.owned)).toBe('2026-10-28');
+      expect(source.store.getMeta(k.skip)).toBeUndefined();
+    }
+    source.store.close();
+  });
+
+  it("a closed day's: that day alone is carved out, the days after it stay the revision's", async () => {
+    const { source, keys } = await boot('2026-10-26', '2026-10-28T09:00:00Z');
+    for (const k of keys) {
+      expect(source.store.getMeta(k.skip)).toBe('2026-10-26');
+      expect(source.store.getMeta(k.owned)).toBeUndefined();
+    }
     source.store.close();
   });
 });

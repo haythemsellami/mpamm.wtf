@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import type { Fill } from '@shared';
 import { VolumeStore, rewindCursor } from '../db.js';
 import {
-  carriedRereadTarget, markResetApplied, marketsRevisionWindow, mergeIntoRing, parseMarketsAdded, planMarketsAdd, planReread,
+  carriedRereadTarget, markResetApplied, marketsRevisionWindow, mergeIntoRing, parseMarketsAdded, parseRereadRemark, planMarketsAdd, planReread,
   refuseResetStart, rereadKey, resetAlreadyApplied, resetMarker, revisionTargets,
 } from '../datasource/live.js';
 import { ADAPTERS } from '../venues/registry.js';
@@ -264,6 +264,23 @@ describe('marketsRevisionWindow — the blocks an older build decoded', () => {
     expect(W({ ownedFrom: 1_800n })).toEqual({ ranges: [[1_000n, 1_800n]], pending: false });
     expect(W({ ownedFrom: 0n, replay: { from: 1_500n } })).toEqual({ ranges: [], pending: false });
     expect(W({ ownedFrom: 3_000n })).toEqual({ ranges: [[1_000n, 2_500n]], pending: false });
+  });
+
+  /** an additive re-read an older build left pending for a closed day counts
+   *  that day itself, and only it: the days after are still the revision's */
+  it('carves out a skipped day alone, keeping the days on either side', () => {
+    expect(W({ skip: [[1_200n, 1_400n]] })).toEqual({ ranges: [[1_000n, 1_200n], [1_400n, 2_500n]], pending: false });
+    expect(W({ skip: [[500n, 1_100n], [2_400n, 2_700n]] })).toEqual({ ranges: [[1_100n, 2_400n]], pending: false });
+    expect(W({ skip: [[3_000n, 3_100n]] })).toEqual({ ranges: [[1_000n, 2_500n]], pending: false });
+    expect(W({ replay: { from: 1_500n, end: 2_000n }, skip: [[2_000n, 2_200n]] })).toEqual({ ranges: [[1_000n, 1_500n], [2_200n, 2_500n]], pending: false });
+    expect(W({ replay: { from: 1_500n }, skip: [[1_100n, 1_200n]] })).toEqual({ ranges: [[1_000n, 1_100n], [1_200n, 1_500n]], pending: true });
+  });
+});
+
+describe('parseRereadRemark — the rewind an additive re-read owes', () => {
+  it('reads the persisted debt, and anything else as none', () => {
+    expect(parseRereadRemark('{"day":"2026-10-27","markets":["MON/USDC"]}')).toEqual({ day: '2026-10-27', markets: ['MON/USDC'] });
+    for (const v of [undefined, '', 'x', '{}', '{"day":1,"markets":[]}', '{"day":"2026-10-27"}']) expect(parseRereadRemark(v)).toBeUndefined();
   });
 });
 
