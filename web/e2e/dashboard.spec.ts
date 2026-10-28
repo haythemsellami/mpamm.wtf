@@ -50,7 +50,8 @@ test('two browser tabs share one socket, union selections, and keep every dashbo
   await other.goto('/');
   await expect(other.getByText('BID_ASK_DEPTH', { exact: true })).toBeVisible();
   await expect.poll(async () => (await health(page)).connections).toBe(1);
-  await other.getByRole('button', { name: 'BTC/USDC', exact: true }).click();
+  await other.getByRole('button', { name: /^Asset pair/ }).click();
+  await other.getByRole('option', { name: 'BTC/USDC', exact: true }).click();
   await expect.poll(async () => (await health(page)).topics).toBe(5);
   await other.getByRole('button', { name: /Uniswap/i }).click();
   await expect(other.getByRole('button', { name: /Uniswap/i })).toHaveAttribute('aria-pressed', 'true');
