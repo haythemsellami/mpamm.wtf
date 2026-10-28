@@ -123,7 +123,18 @@ export class KrakenFeed {
     const msg = JSON.parse(raw, (key: string, value: unknown, ctx?: { source?: string }) =>
       (key === 'price' || key === 'qty') && typeof value === 'number' ? ctx?.source ?? String(value) : value);
     this.lastMsgTs = Date.now();
-    if (msg.success === false) throw new Error(`subscription failed: ${String(msg.error)}`);
+    if (msg.success === false) {
+      // Kraken acks each symbol of a subscription separately. One rejected
+      // symbol (delisted, renamed, or not served in this region) leaves only
+      // its own book unavailable: resetting would drop every other book, and
+      // the same rejection on every reconnect would keep them all down.
+      if (typeof msg.symbol === 'string' && this.symbols.includes(msg.symbol)) {
+        this.books.delete(msg.symbol);
+        console.warn(`[kraken] ${msg.symbol} subscription rejected (${String(msg.error)}); its reference stays unavailable`);
+        return;
+      }
+      throw new Error(`subscription failed: ${String(msg.error)}`);
+    }
     if (msg.channel === 'status') { this.engineOnline = msg.data?.[0]?.system === 'online'; return; }
     if (msg.channel === 'instrument') {
       for (const p of msg.data?.pairs ?? []) if (this.symbols.includes(p.symbol) && typeof p.status === 'string') this.statuses.set(p.symbol, p.status);

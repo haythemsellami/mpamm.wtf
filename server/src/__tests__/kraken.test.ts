@@ -85,6 +85,17 @@ describe('Kraken token books', () => {
     expect(f.settledMid(sym)).toBe(770.5);
     expect(f.settledMid('NOT/LISTED')).toBe(0);
   });
+  it("leaves the other books up when Kraken rejects one symbol's subscription", () => {
+    const f = feed();
+    for (const raw of messages) (f as any).onMessage(raw);
+    const [rejected, ...others] = symbols;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() => (f as any).onMessage(JSON.stringify({ method: 'subscribe', success: false, error: `Currency pair not supported ${rejected}`, symbol: rejected }))).not.toThrow();
+    expect(f.mid(rejected)).toBe(0);
+    for (const s of others) expect(f.mid(s)).toBeGreaterThan(0);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
   it('rejects updates before a snapshot and subscription errors', () => {
     const f = feed();
     const upd = messages.find((raw) => JSON.parse(raw).type === 'update')!;
