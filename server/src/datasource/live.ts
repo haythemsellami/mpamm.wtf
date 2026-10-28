@@ -88,12 +88,17 @@ export function realtimeCoverage(
  *  adapter receives one immutable sizing/bps view even if the books move while
  *  its pinned chain calls are in flight. */
 export function captureReferenceFrame(
-  references: Pick<ReferenceRegistry, 'assetUsd' | 'midForPair' | 'quote'>,
+  references: Pick<ReferenceRegistry, 'assetUsd' | 'midForPair' | 'quote'> & Partial<Pick<ReferenceRegistry, 'marketClosed'>>,
   sizesUsd: readonly number[],
   markets?: ReadonlySet<string>,
-): { pricer: UsdPricer; monUsd: number; rows: QuoteRow[]; assetPrices: Map<string, number>; pairMids: Map<string, number> } {
+): {
+  pricer: UsdPricer; monUsd: number; rows: QuoteRow[]; assetPrices: Map<string, number>; pairMids: Map<string, number>;
+  /** base assets whose CEX reports the market closed at capture time */
+  closedAssets: Set<string>;
+} {
   const assetPrices = new Map<string, number>();
   for (const key of Object.keys(ASSETS)) assetPrices.set(key, references.assetUsd(key));
+  const closedAssets = new Set(Object.keys(ASSETS).filter((key) => references.marketClosed?.(key)));
   const pairMids = new Map(PAIRS.map((pair) => [pair.symbol, references.midForPair(pair.symbol)]));
   const rows = references.quote(sizesUsd, markets);
   return {
@@ -105,7 +110,16 @@ export function captureReferenceFrame(
     rows,
     assetPrices,
     pairMids,
+    closedAssets,
   };
+}
+
+/** The reference venues a quote frame should carry a row from: each pair's
+ *  CEX, except pairs whose base market that CEX reports closed (a Kraken
+ *  xStock closure). Their rows are absent by design, and flagging the venue
+ *  MISSING on every frame of every closure would be a false alarm. */
+export function expectedReferenceVenues(closedAssets: ReadonlySet<string>): string[] {
+  return [...new Set(PAIRS.filter((pair) => !closedAssets.has(pair.base)).map((pair) => cexForBase(pair.base)))];
 }
 
 /** Cursor-preserving availability retries use a real outage cadence, not the
@@ -222,8 +236,13 @@ export function checkReferenceStarvation(
   starvedSince: Map<string, number>,
   now: number,
   io: { warn: (m: string) => void; clear: (m: string) => void; announce: (m: string) => void },
+  /** the CEX reports this asset's market closed: no mid is expected, so it
+   *  neither starts nor ends a starvation (a warning raised before it closed
+   *  stays until a mid really returns) */
+  closed: (key: string) => boolean = () => false,
 ): void {
   for (const a of assets) {
+    if (closed(a.key)) continue;
     const warning = `${a.cex} feed has no ${a.cexSymbol} mid — ${a.symbol} pairs are hidden (reference/markouts unavailable)`;
     if (midOf(a.key) <= 0) {
       if (!starvedSince.has(a.key)) starvedSince.set(a.key, now);
@@ -3825,7 +3844,7 @@ export class LiveDataSource extends BaseSource {
     // Every registered pair/size is sampled once per block, even with no
     // viewers. Subscriptions control delivery only, never the retained dataset.
     const referenceFrame = captureReferenceFrame(REFERENCES, config.sizesUsd);
-    const { pricer: framePricer, monUsd, rows: refRows, assetPrices, pairMids } = referenceFrame;
+    const { pricer: framePricer, monUsd, rows: refRows, assetPrices, pairMids, closedAssets } = referenceFrame;
     // Surface a starving reference feed LOUDLY (state.notes): with no base mid
     // there are no reference rows, no venue bps anchors and no markouts for that
     // asset's pairs — they silently vanish from the UI otherwise (this is exactly
@@ -3837,7 +3856,7 @@ export class LiveDataSource extends BaseSource {
         warn: (m) => this.noteOnce('reference.starved', m),
         clear: (m) => this.dropNote('reference.starved', m),
         announce: (m) => this.note('reference.recovered', m),
-      });
+      }, (k) => closedAssets.has(k));
     }
     const pinned = await resolveQuoteBlock(blockNumber, trigger.identity ?? this.headWatcher.identity(blockNumber));
     trigger.identity = pinned;
@@ -3927,7 +3946,7 @@ export class LiveDataSource extends BaseSource {
     const present = new Set(rows.map((row) => row.venueId));
     const expected = new Set([
       ...requestedAdapters.flatMap((a) => a.venues().map((v) => v.id)),
-      ...PAIRS.map((pair) => cexForBase(pair.base)),
+      ...expectedReferenceVenues(closedAssets),
     ]);
     const quoteCompletedAt = Date.now();
     const loopMaxNs = this.eventLoopDelay.max;

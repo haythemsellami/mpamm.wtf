@@ -82,6 +82,10 @@ export function createReferenceRegistry(): ReferenceRegistry {
     metas: () => [BYBIT_VENUE, BINANCE_VENUE, KRAKEN_VENUE],
     refVenueIdForBase: (base) => cexForBase(base),
     assetUsd: (base) => rawMid(base), // Kraken is USD; crypto sizing keeps USDT≈$1
+    marketClosed(base) {
+      const a = assetOf(base);
+      return a?.cex === 'kraken' ? kraken.marketClosed(a.cexSymbol) : false;
+    },
     settledUsd(base) {
       const a = assetOf(base);
       return a?.cex === 'kraken' ? kraken.settledMid(a.cexSymbol) : rawMid(base);

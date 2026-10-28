@@ -23,6 +23,37 @@ const sink = () => {
 };
 const T0 = 1_800_000_000_000;
 
+describe('checkReferenceStarvation for a market its CEX reports closed', () => {
+  const SPYX = { key: 'SPYx', symbol: 'SPYx', cex: 'kraken', cexSymbol: 'SPYx/USD' };
+  const WARN_SPYX = 'kraken feed has no SPYx/USD mid — SPYx pairs are hidden (reference/markouts unavailable)';
+
+  it('says nothing through a closure, or when it reopens', () => {
+    const { notes, io } = sink();
+    const st = new Map<string, number>();
+    checkReferenceStarvation([SPYX], () => 0, st, T0, io, () => true);
+    checkReferenceStarvation([SPYX], () => 0, st, T0 + 1_000, io, () => true);
+    checkReferenceStarvation([SPYX], () => 770, st, T0 + 2_000, io, () => false);
+    expect(notes).toEqual([]);
+    expect(st.size).toBe(0);
+  });
+
+  it('keeps a warning raised before the closure until a mid really returns', () => {
+    const { notes, io } = sink();
+    const st = new Map<string, number>();
+    checkReferenceStarvation([SPYX], () => 0, st, T0, io, () => false);
+    checkReferenceStarvation([SPYX], () => 0, st, T0 + 1_000, io, () => true);
+    expect(notes).toEqual([WARN_SPYX]);
+    checkReferenceStarvation([SPYX], () => 770, st, T0 + 120_000, io, () => false);
+    expect(notes).toEqual(['kraken feed recovered: SPYx/USD mid is back — SPYx pairs visible again (hidden for ~2m)']);
+  });
+
+  it('still warns when the market is open and the mid is dark', () => {
+    const { notes, io } = sink();
+    checkReferenceStarvation([SPYX], () => 0, new Map(), T0, io, () => false);
+    expect(notes).toEqual([WARN_SPYX]);
+  });
+});
+
 describe('checkReferenceStarvation', () => {
   it('warns while a mid is dark, and only once across repeated ticks', () => {
     const { notes, io } = sink();

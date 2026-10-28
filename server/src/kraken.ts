@@ -46,6 +46,7 @@ export class KrakenFeed {
   private lastMid = new Map<string, number>();
   private lastTrade = new Map<string, number>();
   private engineOnline = false;
+  private engineStatus?: string;   // as Kraken reported it; undefined until it does
   private ws?: WebSocket;
   private watchdog?: ReturnType<typeof setInterval>;
   private reconnect?: ReturnType<typeof setTimeout>;
@@ -67,7 +68,7 @@ export class KrakenFeed {
     this.reset(); this.ws?.close();
   }
   private reset(): void {
-    this.books.clear(); this.statuses.clear(); this.changes.clear(); this.engineOnline = false;
+    this.books.clear(); this.statuses.clear(); this.changes.clear(); this.engineOnline = false; this.engineStatus = undefined;
   }
   private book(symbol: string): Book | undefined {
     if (!this.engineOnline || Date.now() - this.lastMsgTs > 30_000 || this.statuses.get(symbol) !== 'online') return;
@@ -80,6 +81,17 @@ export class KrakenFeed {
     return (Math.max(...b.bids.keys()) + Math.min(...b.asks.keys())) / 2;
   }
   changePct(symbol: string): number { return this.book(symbol) ? this.changes.get(symbol) ?? 0 : 0; }
+  /** Kraken itself reports this market as not trading, over a live
+   *  connection: a scheduled xStock closure (24/5), a halt, engine
+   *  maintenance. Nothing on our side is broken, so it is not reference
+   *  starvation. A dead connection, or a status never received, is a failure
+   *  and returns false, as does 'delisted', which needs a human. */
+  marketClosed(symbol: string): boolean {
+    if (Date.now() - this.lastMsgTs > 30_000) return false;
+    if (this.engineStatus !== undefined && this.engineStatus !== 'online') return true;
+    const s = this.statuses.get(symbol);
+    return s !== undefined && s !== 'online' && s !== 'delisted';
+  }
   /** USD for VALUING a fill that already settled on-chain: the live mid, else
    *  the last validated mid before a closure or outage, else the ticker's last
    *  trade (which Kraken sends while a market is closed, so a restart during a
@@ -145,7 +157,12 @@ export class KrakenFeed {
       }
       throw new Error(`subscription failed: ${String(msg.error)}`);
     }
-    if (msg.channel === 'status') { this.engineOnline = msg.data?.[0]?.system === 'online'; return; }
+    if (msg.channel === 'status') {
+      const system = msg.data?.[0]?.system;
+      this.engineStatus = typeof system === 'string' ? system : undefined;
+      this.engineOnline = system === 'online';
+      return;
+    }
     if (msg.channel === 'instrument') {
       for (const p of msg.data?.pairs ?? []) if (this.symbols.includes(p.symbol) && typeof p.status === 'string') this.statuses.set(p.symbol, p.status);
       return;

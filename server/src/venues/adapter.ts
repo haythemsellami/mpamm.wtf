@@ -331,6 +331,10 @@ export interface ReferenceRegistry {
    *  for want of one would hold the shared tail for every venue. Never for
    *  sizing, bps anchors or markouts. */
   settledUsd(base: string): number;
+  /** The base's CEX itself reports its market as not trading (Kraken's 24/5
+   *  xStock closures, a halt, maintenance). Its pairs have no reference while
+   *  it lasts, and that is expected, not a starving feed. */
+  marketClosed(base: string): boolean;
   /** the CEX reference mid for a PAIR, expressed in the pair's own terms:
    *  base book mid converted for USD/USDT, base/quote wrapper bases, and
    *  the quote asset or stable cross. This is the bps anchor + markout mark —

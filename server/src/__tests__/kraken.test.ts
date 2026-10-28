@@ -96,6 +96,21 @@ describe('Kraken token books', () => {
     expect(warn).toHaveBeenCalledOnce();
     warn.mockRestore();
   });
+  // A closure Kraken reports is not a failure; a dead connection is.
+  it('tells a market Kraken reports closed apart from a broken feed', () => {
+    vi.useFakeTimers();
+    const f = feed(), sym = symbols[0];
+    expect(f.marketClosed(sym)).toBe(false);                  // online
+    status(f, sym, 'cancel_only'); expect(f.marketClosed(sym)).toBe(true);
+    status(f, sym, 'delisted'); expect(f.marketClosed(sym)).toBe(false);   // needs a human
+    status(f, sym);
+    (f as any).onMessage('{"channel":"status","data":[{"system":"maintenance"}]}');
+    expect(f.marketClosed(sym)).toBe(true);
+    vi.advanceTimersByTime(31_000);                           // silent connection
+    expect(f.marketClosed(sym)).toBe(false);
+    (f as any).reset(); (f as any).onMessage('{"channel":"heartbeat"}');
+    expect(f.marketClosed(sym)).toBe(false);                  // nothing reported yet
+  });
   it('rejects updates before a snapshot and subscription errors', () => {
     const f = feed();
     const upd = messages.find((raw) => JSON.parse(raw).type === 'update')!;
