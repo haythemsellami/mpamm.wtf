@@ -194,9 +194,6 @@ export function ExecutionTab() {
           Last 60s of quotes for the selected pair at the chosen notional. Spreads are quoted vs the <span style={{ color: C.text3 }}>{refName}</span> reference BBO mid.{' '}
           <span style={{ color: C.text3 }}>{refLabel}</span> walks the live book for the requested size and overlays the configured taker fee ({taker} bps each side) for a size-sensitive execution comparison.
         </div>
-        {active.filter((v) => v.quoteNote).map((v) => (
-          <div key={v.id} style={{ fontSize: 11, color: C.dim3, marginTop: 6, lineHeight: 1.55, maxWidth: 880 }}>{v.quoteNote}</div>
-        ))}
         {realtime && (
           <div title={slowestAdapters.length ? `Slowest adapters: ${slowestAdapters.map(([id, ms]) => `${id} ${ms.toFixed(1)}ms`).join(' · ')}` : undefined}
             style={{ display: 'flex', flexWrap: 'wrap', gap: '5px 13px', marginTop: 9, fontSize: 9.5, letterSpacing: '.04em', color: C.dim2 }}>
