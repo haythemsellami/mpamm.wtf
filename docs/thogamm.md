@@ -73,8 +73,9 @@ xStock BBO archive is configured, so historical xStock marks remain null. The
 remark worker reports `markout.archive.unsupported` for affected historical
 fills; it does not query Bybit using a Kraken symbol or substitute stock candles.
 Persisted live marks remain available. Automatic market-only revisions replay
-xStock fills from October 26 and XAUt/WBTC from September 15, without repricing
-existing markets or requiring a deployment environment-variable change.
+xStock fills from October 26 and XAUt/WBTC from September 4 (its first on-chain
+swap), without repricing existing markets or requiring a deployment
+environment-variable change.
 
 ## Verification evidence
 

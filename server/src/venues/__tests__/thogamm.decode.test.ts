@@ -320,7 +320,8 @@ describe('ThogAMM mutable registry and xStocks', () => {
     const adapter = createThogammAdapter(), revisions = adapter.historyRevisions!;
     expect(revisions[0]).toMatchObject({ source: 'markets', from: '2026-10-26' });
     expect(revisions[0].markets).toHaveLength(50);
-    expect(revisions[1]).toMatchObject({ source: 'markets', markets: ['XAUt/BTC'] });
+    // from the first on-chain XAUt0<->WBTC swap (block 101,922,564, 2026-09-04)
+    expect(revisions[1]).toMatchObject({ source: 'markets', from: '2026-09-04', markets: ['XAUt/BTC'] });
     expect(adapter.gasRevisions).toEqual([{ id: 'params-pushed-topic', from: '2026-10-22' }]);
   });
 });

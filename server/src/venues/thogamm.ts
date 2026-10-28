@@ -271,9 +271,14 @@ export function createThogammAdapter(): VenueAdapter {
     venues: () => [THOGAMM_VENUE],
     quoteMarkets: () => [...activeMarkets],
     backfillFromUtc: '2026-07-26',
+    // Each `from` is the market's first possible fill, so the revision adds
+    // its whole history. xStocks: MakerTokenAdded for SPYx at block
+    // 116,945,831 (2026-10-27). XAUt/BTC: the first XAUt0<->WBTC
+    // MakerSwapExecuted is block 101,922,564 (2026-09-04, tx 0x8912123b…);
+    // 15 swaps since, none before.
     historyRevisions: [
       { id: 'xstocks-usd-references', source: 'markets', from: '2026-10-26', markets: PAIRS.filter((p) => ASSETS[p.base]?.cex === 'kraken').map((p) => p.symbol) },
-      { id: 'xaut-wbtc-quote-basis', source: 'markets', from: '2026-09-15', markets: ['XAUt/BTC'] },
+      { id: 'xaut-wbtc-quote-basis', source: 'markets', from: '2026-09-04', markets: ['XAUt/BTC'] },
     ],
 
     discover: refresh,
