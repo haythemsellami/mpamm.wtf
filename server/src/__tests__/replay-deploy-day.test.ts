@@ -43,6 +43,10 @@ interface Opts {
   /** the adapter's decode */
   decode?: () => Fill[];
   blockAtOrAfter?: (sec: number) => bigint;
+  /** a block's timestamp (seconds); a fixed closed-day noon by default */
+  blockTs?: (bn: bigint) => bigint;
+  /** the HOT pool; absent, any read of it throws */
+  publicClient?: Record<string, unknown>;
 }
 
 async function setup(opts: Opts = {}) {
@@ -61,15 +65,15 @@ async function setup(opts: Opts = {}) {
       if (opts.readDelayMs) await new Promise<void>((resolve) => setTimeout(resolve, opts.readDelayMs));
       return opts.logs?.() ?? [];
     }),
-    getBlock: vi.fn(async () => ({ timestamp: CLOSED_TS })),
+    getBlock: vi.fn(async ({ blockNumber }: { blockNumber: bigint }) => ({ timestamp: opts.blockTs?.(blockNumber) ?? CLOSED_TS })),
     getBlockNumber: async () => START,
   };
   const status = () => ({ active: 'archive', degraded: false, down: false });
   vi.doMock('../chain/rpc.js', () => ({
     hotHeadEndpoint: () => ({ generation: 0 }),
     resolveQuoteBlock: async (number: bigint, identity = {}) => ({ number, hash: `0x${number.toString(16).padStart(64, '0')}`, generation: 0, ...identity }),
-    // no hot pool at all: a closed day must be read from the archive
-    publicClient: {},
+    // no hot pool unless a case gives one: a closed day is read from the archive
+    publicClient: opts.publicClient ?? {},
     quoteClient: {},
     headClient: { getBlockNumber: vi.fn(async () => 100n) },
     archiveClient,
@@ -90,8 +94,12 @@ async function setup(opts: Opts = {}) {
   const { ADAPTERS } = await import('../venues/registry.js');
   const source = new live.LiveDataSource() as any;
   const writes: string[] = [];
+  const failing = new Set<string>();
   const setMeta = source.storeWriter.setMeta.bind(source.storeWriter);
-  source.storeWriter.setMeta = (key: string, value: string) => { writes.push(key); return setMeta(key, value); };
+  source.storeWriter.setMeta = (key: string, value: string) => {
+    writes.push(key);
+    return failing.has(key) ? Promise.reject(new Error(`write of ${key} failed`)) : setMeta(key, value);
+  };
   const notes: string[] = [];
   const note = source.note.bind(source);
   source.note = (code: string, msg: string, venue?: string) => { notes.push(`${code}: ${msg}`); return note(code, msg, venue); };
@@ -104,7 +112,18 @@ async function setup(opts: Opts = {}) {
     decode: async () => opts.decode?.() ?? [],
   } as unknown as VenueAdapter;
   const sources: LogSource[] = [{ key: 'fills', address: ADDRESS, events: [] }];
-  return { live, ADAPTERS, source, adapter, sources, writes, notes, archiveClient };
+  return { live, ADAPTERS, source, adapter, sources, writes, failing, notes, archiveClient };
+}
+
+/** Run a re-read, playing the tail: each gate it queues runs at once. */
+async function throughGates(source: any, run: Promise<void>): Promise<void> {
+  let settled = false;
+  run.then(() => { settled = true; }, () => { settled = true; });   // handled from the start
+  while (!settled) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (const gate of source.tailGates.splice(0)) await gate();
+  }
+  await run;
 }
 
 /** A replay run with the queued re-read kept inert: only its queueing is pinned here. */
@@ -283,13 +302,7 @@ describe('an additive re-read whose day closed first', () => {
     const frames: unknown[] = [];
     source.emitMsg = (m: unknown) => { frames.push(m); };
 
-    let settled = false;
-    const run = source.rereadToday(adapter, VID, VID, '2026-10-26', true).finally(() => { settled = true; });
-    while (!settled) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      for (const gate of source.tailGates.splice(0)) await gate();
-    }
-    await run;
+    await throughGates(source, source.rereadToday(adapter, VID, VID, '2026-10-26', true));
 
     expect(archiveClient.getLogs).toHaveBeenCalledWith(expect.objectContaining({ fromBlock: 5_000_000n, toBlock: 5_000_099n }));
     const kept = source.store.venueFillsInRange(VID, Date.parse('2026-10-26T00:00:00Z'), Date.parse('2026-10-27T00:00:00Z'), 5_000_099n);
@@ -305,6 +318,68 @@ describe('an additive re-read whose day closed first', () => {
     expect(source.store.all().find((d: { utcDay: string }) => d.utcDay === '2026-10-26')?.byVenue[VID]).toEqual({ usd: 130, swaps: 2 });
     // an open Volume tab reloads the closed day it already shows
     expect(frames).toContainEqual({ ch: 'volume', resync: true });
+    // the tail was flushed first: what the bucket counts is on disk with its cursor
+    expect(source.store.getMeta('lastProcessedBlock')).toBe('5000500');
+    source.store.close();
+  });
+
+  // The debt goes to disk BEFORE the fills: if it fails, nothing is inserted
+  // and the re-read is held, so the retry inserts the fills and owes again.
+  it('holds with nothing inserted when the rewind debt cannot be written', async () => {
+    const DAY_START = Date.parse('2026-10-26T00:00:00Z') / 1000;
+    const { live, source, adapter, failing } = await setup({
+      blockAtOrAfter: (sec) => (sec === DAY_START ? 5_000_000n : 5_000_100n),
+      logs: () => [{ blockNumber: 5_000_020n }],
+      decode: () => [fill('prefix', { usd: 30, blockNumber: 5_000_020, ts: Date.parse('2026-10-26T01:00:00Z') })],
+    });
+    source.lastBlock = 5_000_500n;
+    source.store.setMeta(live.rereadAddKey(VID), '2026-10-26');
+    source.addRereads.set(VID, '2026-10-26');
+    failing.add(live.rereadRemarkKey(VID));
+    const range = [Date.parse('2026-10-26T00:00:00Z'), Date.parse('2026-10-27T00:00:00Z'), 5_000_099n] as const;
+
+    await expect(throughGates(source, source.rereadToday(adapter, VID, VID, '2026-10-26', true))).rejects.toThrow(/reread_remark_deploy-day failed/);
+    expect(source.store.venueFillsInRange(VID, ...range)).toEqual([]);
+    expect(source.store.getMeta(live.rereadAddKey(VID))).toBe('2026-10-26');
+
+    failing.clear();
+    await throughGates(source, source.rereadToday(adapter, VID, VID, '2026-10-26', true));
+    expect(source.store.venueFillsInRange(VID, ...range).map((f: Fill) => f.id)).toEqual(['prefix']);
+    expect(source.store.getMeta(live.rereadAddKey(VID))).toBe('');
+    source.store.close();
+  });
+});
+
+describe("an additive re-read of today", () => {
+  /** block 5,000,000 is 2026-10-27's first; one block a second */
+  const T0 = BigInt(Date.parse('2026-10-27T00:00:00Z') / 1000);
+  const blockTs = (bn: bigint) => T0 + (bn - 5_000_000n);
+
+  // The markout sweep only walks closed days, so today owes no rewind, and
+  // its marker clears with the tail's own snapshot: day, fills and cursor.
+  it('owes no rewind and clears its marker with the next tail snapshot', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.parse('2026-10-27T00:08:20Z'));
+    const hot = {
+      getBlock: vi.fn(async ({ blockNumber }: { blockNumber: bigint }) => ({ timestamp: blockTs(blockNumber) })),
+      getLogs: vi.fn(async () => [{ blockNumber: 5_000_020n }]),
+    };
+    const { live, source, adapter } = await setup({
+      blockTs,
+      publicClient: hot,
+      decode: () => [fill('prefix', { usd: 30, blockNumber: 5_000_020, ts: Date.parse('2026-10-27T00:00:20Z') })],
+    });
+    source.lastBlock = 5_000_500n;
+    source.store.setMeta(live.rereadAddKey(VID), '2026-10-27');
+    source.addRereads.set(VID, '2026-10-27');
+
+    await throughGates(source, source.rereadToday(adapter, VID, VID, '2026-10-27', true));
+
+    expect(hot.getLogs).toHaveBeenCalled();
+    expect(source.store.getMeta(live.rereadRemarkKey(VID))).toBeUndefined();
+    expect(source.snapshotMeta[live.rereadAddKey(VID)]).toBe('');
+    expect(source.dirtyDays.has('2026-10-27')).toBe(true);
+    expect(source.dayFor(Date.parse('2026-10-27T00:00:20Z')).byVenue[VID]).toEqual({ usd: 30, swaps: 1 });
     source.store.close();
   });
 });

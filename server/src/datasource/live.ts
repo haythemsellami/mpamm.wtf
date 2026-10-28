@@ -2902,7 +2902,11 @@ export class LiveDataSource extends BaseSource {
   }
 
   /** Rewind `vid`'s `markets` remark cursors that walked past `day` back to
-   *  it, under the remark lock, committing `meta` in the same snapshot. */
+   *  it, under the remark lock, committing `meta` in the same snapshot.
+   *  A snapshot that carries `days` writes buckets the tail counts into, so it
+   *  goes in the tail gate behind a flush (persist): every fill they count is
+   *  on disk with the cursor first. A crash in between would otherwise leave a
+   *  bucket counting fills the restart's gap-fill then counts again. */
   private async rewindRemark(vid: string, markets: Iterable<string>, day: string, meta: Record<string, string>, days: DailyVolume[] = []): Promise<void> {
     while (this.remarkRunning) {
       if (this.loopsStopped) throw new Error('source stopped while a markout sweep held the remark lock');
@@ -2916,7 +2920,9 @@ export class LiveDataSource extends BaseSource {
         const cur = this.store.getMeta(key);
         if (cur && cur > day) write[key] = day;
       }
-      await this.writeSnapshot({ days, meta: write, fills: [] });
+      const commit = () => this.writeSnapshot({ days, meta: write, fills: [] });
+      if (days.length) await this.inTail(async () => { await this.persist(true); await commit(); });
+      else await commit();
     } finally {
       this.remarkRunning = false;
     }
@@ -2926,7 +2932,7 @@ export class LiveDataSource extends BaseSource {
    * Record the rewind an additive re-read's inserted fills are owed. A closed
    * day the markout sweep already walked never comes back to it, and the
    * fills' horizons are long past, so they would never be marked. Merged into
-   * any debt still unpaid (earliest day, every market). Returns the write.
+   * any debt still unpaid (earliest day, every market).
    */
   private oweRereadRemark(vid: string, day: string, inserted: readonly Fill[]): Promise<void> {
     const was = parseRereadRemark(this.store.getMeta(rereadRemarkKey(vid)));
@@ -2937,8 +2943,9 @@ export class LiveDataSource extends BaseSource {
 
   /** Pay an additive re-read's rewind (oweRereadRemark) as a 'markets'
    *  revision does, then clear the debt, the marker and SET the day in ONE
-   *  snapshot: until it commits, the marker re-runs the re-read, which finds
-   *  nothing new to insert and pays what it owed. */
+   *  snapshot, behind a flush of the tail (rewindRemark): until it commits,
+   *  the marker re-runs the re-read, which finds nothing new to insert and
+   *  pays what it owed. */
   private async payRereadRemark(vid: string, day: string, marker: string, d: DailyVolume): Promise<void> {
     const debt = parseRereadRemark(this.store.getMeta(rereadRemarkKey(vid)));
     const meta: Record<string, string> = { [rereadRemarkKey(vid)]: '' };
@@ -3074,13 +3081,21 @@ export class LiveDataSource extends BaseSource {
       // snapshot that has not committed yet (posted before reconcileFills, so
       // its row lands first and is deleted after it), and in-memory ones (the
       // newest object wins). Everything from here to the reconcile post is
-      // synchronous, so no snapshot can be cut in between.
+      // synchronous, so no snapshot can be cut in between, but for an additive
+      // plan's rewind debt (below), which no snapshot can disturb.
       const inRange = (f: Fill) => f.venueId === vid && f.ts >= dayStartMs && f.ts < dayEndMs && BigInt(f.blockNumber) <= end;
       const held = new Map<string, Fill>();
       for (const f of this.store.venueFillsInRange(vid, dayStartMs, dayEndMs, end)) held.set(f.id, f);
       for (const batch of this.inflightFills) for (const f of batch) if (inRange(f)) held.set(f.id, f);
       for (const owner of [this.fills, this.dirty, this.pending]) for (const f of owner) if (inRange(f)) held.set(f.id, f);
       const plan = planReread([...held.values()], decoded, add);
+      // A closed day's additive insert owes its markets a remark-cursor rewind
+      // (payRereadRemark); the sweep never walks today, so today's owes none.
+      // Awaited BEFORE the fills are posted: a failure of either holds the
+      // re-read with nothing half-done. The wait is safe in the gate: the plan
+      // deletes nothing and inserts only fills the tail never held, so a
+      // snapshot cut meanwhile carries none of them.
+      if (add && plan.insert.length && day < utcDay()) await this.oweRereadRemark(vid, day, plan.insert);
 
       // Drop the replaced fills from memory BEFORE the write is queued: a
       // snapshot taken meanwhile would otherwise write the old row back.
@@ -3093,12 +3108,7 @@ export class LiveDataSource extends BaseSource {
         for (const id of gone) { this.countedIds.delete(id); this.dirtyCurves.delete(id); }
       };
       dropGone();
-      // An additive insert owes its markets a remark-cursor rewind
-      // (payRereadRemark). Posted ahead of the fills, in order and without a
-      // gap a snapshot could fall into, so it is on disk before they are.
-      const owed = add && plan.insert.length ? this.oweRereadRemark(vid, day, plan.insert) : undefined;
       const written = await this.storeWriter.reconcileFills(plan.deleteIds, plan.insert);
-      await owed;
       // Again after the ACK: a snapshot in flight before the write that then
       // failed merges its captured fills/curves back into dirty while we await,
       // and the next snapshot would write a deleted fill (or its old curve)
