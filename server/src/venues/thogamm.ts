@@ -122,8 +122,10 @@ export function indexThogammMarkets(markets: readonly ThogammMarket[]): Map<stri
 
 /**
  * Decode one real inventory transition. Malformed/irrelevant logs are skipped
- * locally; a crypto-quoted fill with no live USD leg throws so the core holds
- * the cursor rather than persisting a zero-notional fill.
+ * locally; a fill with no USD leg at all throws so the core holds the cursor
+ * rather than persisting a zero-notional fill. `usdForToken` values settled
+ * fills, so a closed Kraken market (an xStock/xStock fill's only legs) still
+ * has its last good price; it throws only if Kraken never answered.
  */
 export function decodeThogammSwap(
   log: any,

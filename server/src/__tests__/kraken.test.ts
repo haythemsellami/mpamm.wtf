@@ -62,6 +62,29 @@ describe('Kraken token books', () => {
     expect(f.mid(sym)).toBe(10);
     expect(f.walk(sym, 'buy', 2)).toEqual({ price: 11, filledBase: 1, filledFull: false });
   });
+  // A fill that settled on-chain while the market was closed is still valued:
+  // never by a reference (mid/walk stay 0), only by settledMid.
+  it('keeps the last validated mid for settled fills through a closure and a reset', () => {
+    const f = feed(), first = messages[0], sym = JSON.parse(first).data[0].symbol;
+    (f as any).onMessage(first);
+    const open = f.mid(sym);
+    expect(open).toBeGreaterThan(0);
+    expect(f.settledMid(sym)).toBe(open);
+    status(f, sym, 'cancel_only');
+    expect(f.mid(sym)).toBe(0);
+    expect(f.walk(sym, 'buy', 1).price).toBe(0);
+    expect(f.settledMid(sym)).toBe(open);
+    (f as any).reset();
+    expect(f.settledMid(sym)).toBe(open);
+  });
+  it("falls back to the ticker's last trade when no book was ever open", () => {
+    const f = feed(), sym = symbols[0];
+    expect(f.settledMid(sym)).toBe(0);
+    (f as any).onMessage(JSON.stringify({ channel: 'ticker', type: 'snapshot', data: [{ symbol: sym, last: 770.5, change_pct: 0.1 }] }));
+    expect(f.mid(sym)).toBe(0);
+    expect(f.settledMid(sym)).toBe(770.5);
+    expect(f.settledMid('NOT/LISTED')).toBe(0);
+  });
   it('rejects updates before a snapshot and subscription errors', () => {
     const f = feed();
     const upd = messages.find((raw) => JSON.parse(raw).type === 'update')!;

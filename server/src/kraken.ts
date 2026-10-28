@@ -28,11 +28,16 @@ function levels(side: Map<number, Level>, ascending: boolean): Level[] {
 /** USD books for the actual xStocks, plus USD stablecoin crosses. Instrument
  * status gates executable markets (including 24/5 closures). Heartbeats keep
  * an unchanged book alive; disconnects/checksum errors require fresh snapshots.
- * No REST ticker/last-trade substitution for a missing order book. */
+ * References (mid/walk) never substitute a ticker or last trade for a missing
+ * order book; only settledMid, which values fills that already happened, does. */
 export class KrakenFeed {
   private books = new Map<string, Book>();
   private statuses = new Map<string, string>();
   private changes = new Map<string, number>();
+  // Last validated book mid, and the ticker's last trade. Kept across closures
+  // and reconnects (reset() leaves them): they only value settled fills.
+  private lastMid = new Map<string, number>();
+  private lastTrade = new Map<string, number>();
   private engineOnline = false;
   private ws?: WebSocket;
   private watchdog?: ReturnType<typeof setInterval>;
@@ -68,6 +73,16 @@ export class KrakenFeed {
     return (Math.max(...b.bids.keys()) + Math.min(...b.asks.keys())) / 2;
   }
   changePct(symbol: string): number { return this.book(symbol) ? this.changes.get(symbol) ?? 0 : 0; }
+  /** USD for VALUING a fill that already settled on-chain: the live mid, else
+   *  the last validated mid before a closure or outage, else the ticker's last
+   *  trade (which Kraken sends while a market is closed, so a restart during a
+   *  closure still has one). 0 only when Kraken never answered. Never a
+   *  reference: bps anchors, walks and markouts use mid() alone. */
+  settledMid(symbol: string): number {
+    const live = this.mid(symbol);
+    if (live > 0) return live;
+    return this.lastMid.get(symbol) ?? this.lastTrade.get(symbol) ?? 0;
+  }
   walk(symbol: string, side: 'buy' | 'sell', baseSize: number): WalkResult {
     const b = this.book(symbol);
     if (!b || !(baseSize > 0)) return { ...EMPTY };
@@ -115,7 +130,10 @@ export class KrakenFeed {
       return;
     }
     if (msg.channel === 'ticker') {
-      for (const t of msg.data ?? []) if (Number.isFinite(t.change_pct)) this.changes.set(t.symbol, t.change_pct);
+      for (const t of msg.data ?? []) {
+        if (Number.isFinite(t.change_pct)) this.changes.set(t.symbol, t.change_pct);
+        if (this.symbols.includes(t.symbol) && Number.isFinite(t.last) && t.last > 0) this.lastTrade.set(t.symbol, t.last);
+      }
       return;
     }
     if (msg.channel !== 'book') return;
@@ -141,6 +159,8 @@ export class KrakenFeed {
       }
       if (b.asks.size && b.bids.size && Math.max(...b.bids.keys()) >= Math.min(...b.asks.keys())) throw new Error(`crossed book for ${d.symbol}`);
       b.snapshot = true; this.books.set(d.symbol, b);
+      const mid = this.mid(d.symbol);
+      if (mid > 0) this.lastMid.set(d.symbol, mid);
     }
   }
 }

@@ -1358,7 +1358,7 @@ async function holdWhileDegraded(): Promise<boolean> {
 export class LiveDataSource extends BaseSource {
   readonly mode: DataSourceMode = 'live';
 
-  private pricer = new UsdPricer((key) => REFERENCES.assetUsd(key), (market) => REFERENCES.midForPair(market));
+  private pricer = new UsdPricer((key) => REFERENCES.assetUsd(key), (market) => REFERENCES.midForPair(market), (key) => REFERENCES.settledUsd(key));
   private store = new VolumeStore(config.dbPath);
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
   // ARCHIVE pool: the gas tracker resolves `gas_from` through blockAtOrAfter and

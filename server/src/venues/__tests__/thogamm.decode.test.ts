@@ -9,6 +9,7 @@ import {
   thogammMarketsForTokens,
 } from '../thogamm.js';
 import type { VenueAdapter } from '../adapter.js';
+import { UsdPricer } from '../../pricer.js';
 
 /**
  * The only MakerSwapExecuted log in ThogAMM's on-chain history when this
@@ -282,6 +283,22 @@ describe('ThogAMM mutable registry and xStocks', () => {
     expect(fill.baseAmount).toBeCloseTo(1.234567890123456789, 14);
     expect(fill.usd).toBe(950.617275);
     expect(fill.execPx).toBeCloseTo(950.617275 / 1.234567890123456789, 10);
+  });
+  // Both legs of an xStock/xStock fill price from Kraken alone. A closed
+  // market must value it at its last good price, not throw: a decode throw
+  // holds the shared tail for every venue until Kraken reopens.
+  it('values an xStock/xStock fill while Kraken is closed, and holds only if Kraken never answered', () => {
+    const markets = indexThogammMarkets(thogammMarketsForTokens(current));
+    const log = { ...REAL_MON_USDC_FILL, args: { ...REAL_MON_USDC_FILL.args,
+      tokenIn: TOKENS.QQQX.address, tokenOut: TOKENS.SPYX.address,
+      amountIn: 2_000_000_000_000_000_000n, amountOut: 1_000_000_000_000_000_000n,
+    } };
+    const closed = new UsdPricer(() => 0, undefined, (key) => (key === 'SPYx' ? 770 : key === 'QQQx' ? 720 : 0));
+    const fill = decodeThogammSwap(log, markets, 0, (k, a) => closed.usdForToken(k, a))!;
+    expect(fill.market).toBe('QQQx/SPYx');
+    expect(fill.usd).toBe(770);
+    const silent = new UsdPricer(() => 0, undefined, () => 0);
+    expect(() => decodeThogammSwap(log, markets, 0, (k, a) => silent.usdForToken(k, a))).toThrow('no USD price for either fill leg');
   });
   it('refreshes on registry events, stops quoting retired tokens, and retains their historical decode table', async () => {
     const adapter = createThogammAdapter(), ctx = stubCtx([]);

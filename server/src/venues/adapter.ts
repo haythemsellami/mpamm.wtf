@@ -325,6 +325,12 @@ export interface ReferenceRegistry {
   /** USD(≈USDT) price of a base asset (MON/BTC/ETH) — for notional sizing and
    *  the header, NOT for bps anchoring (that needs the pair's quote terms). */
   assetUsd(base: string): number;
+  /** USD for VALUING a settled fill: assetUsd, except that a market in a
+   *  scheduled closure or outage (Kraken xStocks, 24/5) keeps its last good
+   *  price. An xStock/xStock fill has no other USD leg, and decode throwing
+   *  for want of one would hold the shared tail for every venue. Never for
+   *  sizing, bps anchors or markouts. */
+  settledUsd(base: string): number;
   /** the CEX reference mid for a PAIR, expressed in the pair's own terms:
    *  base book mid converted for USD/USDT, base/quote wrapper bases, and
    *  the quote asset or stable cross. This is the bps anchor + markout mark —
