@@ -10,7 +10,13 @@ import type { ReferenceRegistry } from './adapter.js';
 // every chip/legend. Kraken xStocks have their own schedule, not crypto fees.
 const BYBIT_VENUE: VenueMeta = { id: 'bybit', name: 'Bybit (Supreme VIP)', color: { light: '#8A8375', dark: '#B9BCC6' }, kind: 'cex', role: 'reference', taker: true };
 const BINANCE_VENUE: VenueMeta = { id: 'binance', name: 'Binance (VIP9)', color: { light: '#B58A1B', dark: '#F0B90B' }, kind: 'cex', role: 'reference', taker: true };
-const KRAKEN_VENUE: VenueMeta = { id: 'kraken', name: 'Kraken Pro xStocks ($1B+)', color: { light: '#B34400', dark: '#FFD0AC' }, kind: 'cex', role: 'reference', taker: true };
+// color: bronze / peach, one orange family across themes. Validated against
+// every venue + reference colour and the theme green/red, ΔE2000 in normal and
+// Machado protan/deutan/tritan: nearest 9.5 light (Uniswap v4 and WOOFi,
+// deutan) and 9.1 dark (Binance, tritan). Contrast 10.7 / 9.6 on the light
+// surfaces, 13.9 / 14.1 on the dark. The first pick, #B34400, was ΔE 0.8 from
+// Uniswap v4 under protanopia.
+const KRAKEN_VENUE: VenueMeta = { id: 'kraken', name: 'Kraken Pro xStocks ($1B+)', color: { light: '#503714', dark: '#FFD0AC' }, kind: 'cex', role: 'reference', taker: true };
 
 /** Pair-terms references: base book × base wrapper / quote asset / quote
  * wrapper. Crypto books are in USDT; Kraken xStocks are in USD. Crossing the
