@@ -789,12 +789,27 @@ function sameFill(a: Fill, b: Fill): boolean {
  * tail captured live, which no archive can restore for today); a changed one
  * is deleted and re-inserted; a stored one the decode no longer produces is
  * deleted. Pure so the convergence rules are unit-testable (history-revisions.test.ts).
+ *
+ * `keep` is the re-read a finished replay queues (rereadAfterReplay). Nothing
+ * there changed the decode: the tail's fills are this build's, and a second
+ * decode can still differ from them. A cross-quoted fill is priced at the mid
+ * when it is decoded, so Hanji's MON and ETH books re-price hours later.
+ * Every stored fill stays as stored; only the fills the tail never saw are
+ * inserted, and the bucket is their sum with the stored ones.
  */
-export function planReread(stored: readonly Fill[], decoded: readonly Fill[]): {
+export function planReread(stored: readonly Fill[], decoded: readonly Fill[], keep = false): {
   deleteIds: string[]; insert: Fill[]; total: { usd: number; swaps: number };
 } {
   const byId = new Map<string, Fill>();
   for (const f of decoded) byId.set(f.id, f);   // a re-tailed duplicate collapses
+  if (keep) {
+    const held = new Map<string, Fill>();
+    for (const s of stored) held.set(s.id, s);
+    const insert = [...byId.values()].filter((f) => !held.has(f.id));
+    let usd = 0;
+    for (const f of [...held.values(), ...insert]) usd += f.usd;
+    return { deleteIds: [], insert, total: { usd, swaps: held.size + insert.length } };
+  }
   const kept = new Set<string>();
   const deleteIds: string[] = [];
   for (const s of stored) {
@@ -1079,6 +1094,10 @@ export function carriedRereadTarget(vid: string, pendingDay: string | undefined,
 /** The pending today re-read for a venue: its UTC day, cleared in the same
  *  snapshot that commits the re-read's day bucket. */
 export const rereadKey = (vid: string) => `reread_day_${vid}`;
+
+/** The UTC day whose pending re-read only ADDS fills (planReread's `keep`):
+ *  one a finished replay queued. A replacing re-read clears it, and wins. */
+export const rereadKeepKey = (vid: string) => `reread_keep_${vid}`;
 
 /**
  * Why a reset names a venue this boot cannot resolve to a running adapter.
@@ -2857,8 +2876,13 @@ export class LiveDataSource extends BaseSource {
   }
 
   /** Persist the pending marker FIRST: a re-read must survive a restart that
-   *  lands before it finishes, or today's prefix is lost exactly as before. */
-  private async queueReread(vid: string, day: string): Promise<void> {
+   *  lands before it finishes, or today's prefix is lost exactly as before.
+   *  `keep` asks for an additive re-read (planReread). A replacing one already
+   *  pending for the day re-reads everything, so it stays as it is; one queued
+   *  later clears the mode before its marker. */
+  private async queueReread(vid: string, day: string, keep = false): Promise<void> {
+    if (keep && this.store.getMeta(rereadKey(vid)) === day && this.store.getMeta(rereadKeepKey(vid)) !== day) return;
+    await this.storeWriter.setMeta(rereadKeepKey(vid), keep ? day : '');
     delete this.snapshotMeta[rereadKey(vid)];   // an earlier re-read's clear must not land after this
     await this.storeWriter.setMeta(rereadKey(vid), day);
     // ...and again once acknowledged: an in-flight snapshot that carried the
@@ -2912,6 +2936,7 @@ export class LiveDataSource extends BaseSource {
    * are the blocks the tail itself just read there.
    */
   private async rereadToday(a: VenueAdapter, vid: string, name: string, day: string): Promise<void> {
+    const keep = this.store.getMeta(rereadKeepKey(vid)) === day;
     const dayStartMs = Date.parse(`${day}T00:00:00Z`);
     const dayEndMs = dayStartMs + 86_400_000;
     const bulkEnd = this.lastBlock;
@@ -2947,7 +2972,9 @@ export class LiveDataSource extends BaseSource {
       for (const f of this.store.venueFillsInRange(vid, dayStartMs, dayEndMs, end)) held.set(f.id, f);
       for (const batch of this.inflightFills) for (const f of batch) if (inRange(f)) held.set(f.id, f);
       for (const owner of [this.fills, this.dirty, this.pending]) for (const f of owner) if (inRange(f)) held.set(f.id, f);
-      const plan = planReread([...held.values()], decoded);
+      // a reset queued while this additive pass read: held, it re-runs replacing
+      if (keep && this.store.getMeta(rereadKeepKey(vid)) !== day) throw new Error('a replacing re-read was queued meanwhile');
+      const plan = planReread([...held.values()], decoded, keep);
 
       // Drop the replaced fills from memory BEFORE the write is queued: a
       // snapshot taken meanwhile would otherwise write the old row back.
@@ -2991,7 +3018,7 @@ export class LiveDataSource extends BaseSource {
         // connected tapes only take per-fill upserts — a deletion needs a reload
         this.emitMsg({ ch: 'fill', resync: true });
       }
-      this.note('backfill.reread', `${name}: re-read ${day} blocks ${start}→${end} — ${before.swaps}→${plan.total.swaps} swaps, $${Math.round(before.usd)}→$${Math.round(plan.total.usd)}; fills +${written.inserted} −${written.deleted}`, vid);
+      this.note('backfill.reread', `${name}: re-read ${day}${keep ? ' (missing fills only)' : ''} blocks ${start}→${end} — ${before.swaps}→${plan.total.swaps} swaps, $${Math.round(before.usd)}→$${Math.round(plan.total.usd)}; fills +${written.inserted} −${written.deleted}`, vid);
     });
   }
 
@@ -3282,7 +3309,7 @@ export class LiveDataSource extends BaseSource {
     await this.storeWriter.setMeta(`backfill_done_${vid}`, '1');
     this.note('backfill.done', `${name}: backfill complete — ${acc.size} day(s) seeded` +
       (skipped > 0n ? ` (${skipped} block(s) unreadable on the RPC archive and skipped — those windows may undercount)` : '') +
-      `; re-reading ${today} from midnight`, vid);
+      `; re-reading ${today} from midnight for fills the tail missed`, vid);
     this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) }); // nudge connected clients
   }
 
@@ -3293,16 +3320,28 @@ export class LiveDataSource extends BaseSource {
    * nobody (Crystal Vault, 2026-10-27: 434 of 1,606 fills counted). One that
    * crosses midnight is fine: the rolled run extends `end` past the day.
    *
-   * So every finished replay re-reads today, as a reset does. The replay
-   * cannot tell whether the tail has decoded the venue since midnight (an
-   * earlier deploy, or a reset's own re-read); when it has, the re-read SETs
-   * the same totals, for one day of hot-pool logs. Queued BEFORE the done
+   * So every finished replay re-reads today. The replay cannot tell whether
+   * the tail has decoded the venue since midnight (an earlier deploy, or a
+   * reset's own re-read). Nothing changed the decode either, so the re-read
+   * only ADDS what the tail missed: every stored fill keeps its valuation,
+   * markouts and curve (planReread's `keep`). When the tail saw everything it
+   * changes nothing, for one day of hot-pool logs. Queued BEFORE the done
    * marker: a crash in between re-runs the replay's last day, which queues it
    * again, where the other order would lose it for good.
+   *
+   * An older day's re-read still pending is a carried reset that waits for
+   * both history stages (resetTargets). Queuing today would overwrite its
+   * marker, and that day's fills would never be repaired: the replay rebuilds
+   * only volume. So completion holds, untouched, until that reset has run
+   * (it rewinds this replay to its day).
    */
   private async rereadAfterReplay(vid: string, today: string): Promise<void> {
+    const carried = this.store.getMeta(rereadKey(vid));
+    if (carried && carried < today) {
+      throw new Error(`the re-read of ${carried} is still pending; it runs as a reset once both history stages are on`);
+    }
     await this.ownMarketsFrom(vid, today);
-    await this.queueReread(vid, today);
+    await this.queueReread(vid, today, true);
   }
 
   /** Merge accumulated backfill totals into this.days, SET per (day, venue):

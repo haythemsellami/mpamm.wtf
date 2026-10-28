@@ -238,8 +238,11 @@ live markouts) as they are, and replaces or deletes the rest.
 on, and the tail decodes it only from the deploy that added it. A replay
 that finished on the deploy day left that day's earlier hours to nobody:
 Crystal Vault's 2026-10-27 held 434 of 1,606 fills. Every finished replay
-now re-reads its day too (the `backfill.done` note says so). Crystal's own
-day is repaired by its `deploy-day` revision.
+now re-reads its day too (the `backfill.done` note says so). That re-read
+only adds the fills the tail missed (`(missing fills only)` on its note):
+nothing changed the decode, and a second decode of a cross-quoted fill
+prices it at a later mid. Crystal's own day is repaired by its `deploy-day`
+revision.
 
 ## Operational notes
 

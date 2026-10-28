@@ -2,9 +2,10 @@
 // day, and the tail decodes a new venue only from the deploy that added it.
 // Crystal Vault's replay finished on its deploy day (2026-10-27), so the hours
 // before the deploy were never decoded: 434 of 1,606 fills counted. These pin
-// the fix on the REAL backfillAdapter: a finished replay queues today's re-read
-// before its done marker, and hands today to a pending 'markets' revision.
-// The re-read itself is inert here (runRereads stubbed). No network.
+// the fix on the REAL backfillAdapter: a finished replay queues an additive
+// re-read of today before its done marker, hands today to a pending 'markets'
+// revision, and holds while an older day's re-read is still pending. The
+// re-read itself is inert here (runRereads stubbed). No network.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -108,7 +109,7 @@ describe('a finished volume replay re-reads its day', () => {
     // the other order loses the re-read to a crash between the two writes
     expect(writes.indexOf(live.rereadKey(VID))).toBeGreaterThanOrEqual(0);
     expect(writes.indexOf(live.rereadKey(VID))).toBeLessThan(writes.indexOf(`backfill_done_${VID}`));
-    expect(notes.find((n) => n.startsWith('backfill.done'))).toBe(`backfill.done: ${VID}: backfill complete — 0 day(s) seeded; re-reading 2026-10-27 from midnight`);
+    expect(notes.find((n) => n.startsWith('backfill.done'))).toBe(`backfill.done: ${VID}: backfill complete — 0 day(s) seeded; re-reading 2026-10-27 from midnight for fills the tail missed`);
     source.store.close();
   });
 
@@ -161,6 +162,68 @@ describe('a finished volume replay re-reads its day', () => {
 
     for (const t of markets) expect(source.store.getMeta(live.marketsRevisionKeys(live.resetMarker(t)).owned)).toBe('2026-10-27');
     expect(source.store.getMeta(live.rereadKey('hanji'))).toBe('2026-10-27');
+    source.store.close();
+  });
+
+  // Nothing changed the decode, so the re-read only adds what the tail missed:
+  // a second decode re-prices cross-quoted fills (planReread's keep).
+  it('queues the re-read as additive', async () => {
+    const now = Date.parse('2026-10-27T23:14:40Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { live, source, adapter, sources } = await setup();
+
+    const run = source.backfillAdapter(adapter, VID, VID, '2026-10-01', sources, now, START);
+    await vi.runAllTimersAsync();
+    await run;
+
+    expect(source.store.getMeta(live.rereadKeepKey(VID))).toBe('2026-10-27');
+    // a reset queued afterwards re-reads everything again: the replacing one wins
+    await source.queueReread(VID, '2026-10-27');
+    expect(source.store.getMeta(live.rereadKeepKey(VID))).toBe('');
+    expect(source.store.getMeta(live.rereadKey(VID))).toBe('2026-10-27');
+    source.store.close();
+  });
+
+  it("leaves a reset's replacing re-read of the same day replacing", async () => {
+    const now = Date.parse('2026-10-27T23:14:40Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { live, source, adapter, sources } = await setup();
+    await source.queueReread(VID, '2026-10-27');   // the reset's, queued first
+
+    const run = source.backfillAdapter(adapter, VID, VID, '2026-10-01', sources, now, START);
+    await vi.runAllTimersAsync();
+    await run;
+
+    expect(source.store.getMeta(live.rereadKey(VID))).toBe('2026-10-27');
+    expect(source.store.getMeta(live.rereadKeepKey(VID))).toBe('');
+    expect(source.store.getMeta(`backfill_done_${VID}`)).toBe('1');
+    source.store.close();
+  });
+
+  // A carried re-read waits for both history stages (resetTargets). Queuing
+  // today would overwrite its marker, and its day's fills would stay stale.
+  it("holds completion, untouched, while an older day's re-read is pending", async () => {
+    const now = Date.parse('2026-10-27T23:14:40Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { live, ADAPTERS, source, adapter, sources, writes } = await setup();
+    source.store.setMeta(live.rereadKey('hanji'), '2026-10-26');
+    const hanji = ADAPTERS.find((a) => a.venues()[0]?.id === 'hanji')!;
+    const markets = live.revisionTargets('hanji', hanji.historyRevisions).filter((t) => t.from === 'markets');
+
+    const run = source.backfillAdapter(adapter, 'hanji', 'Hanji', '2026-10-01', sources, now, START);
+    const rejected = expect(run).rejects.toThrow('the re-read of 2026-10-26 is still pending; it runs as a reset once both history stages are on');
+    await vi.runAllTimersAsync();
+    await rejected;
+
+    expect(source.store.getMeta(live.rereadKey('hanji'))).toBe('2026-10-26');
+    expect(source.store.getMeta(live.rereadKeepKey('hanji'))).toBeUndefined();
+    expect(source.store.getMeta('backfill_done_hanji')).not.toBe('1');
+    for (const t of markets) expect(source.store.getMeta(live.marketsRevisionKeys(live.resetMarker(t)).owned)).toBeUndefined();
+    expect(writes).not.toContain(live.rereadKey('hanji'));
+    expect(source.rereads.size).toBe(0);
     source.store.close();
   });
 });

@@ -99,6 +99,30 @@ describe('planReread — converge today onto the current decode', () => {
   });
 });
 
+describe('planReread keep — the re-read a finished replay queues only adds', () => {
+  /** Hanji prices a MON- or ETH-quoted fill at the mid when it decodes; the
+   *  same trade decoded hours later is the same fill at another price */
+  it('keeps a stored fill a second decode prices differently, markouts and all', () => {
+    const live = fill('a', { usd: 100, markoutsBps: [1, 2, 3, 4, 5] });
+    const plan = planReread([live], [fill('a', { usd: 103 })], true);
+    expect(plan.deleteIds).toEqual([]);
+    expect(plan.insert).toEqual([]);
+    expect(plan.total).toEqual({ usd: 100, swaps: 1 });
+  });
+
+  it('inserts only the fills the tail never saw, and SETs the bucket to both', () => {
+    const plan = planReread([fill('tail', { usd: 10 })], [fill('tail', { usd: 11 }), fill('prefix', { usd: 30 }), fill('prefix', { usd: 30 })], true);
+    expect(plan.insert.map((f) => f.id)).toEqual(['prefix']);
+    expect(plan.total).toEqual({ usd: 40, swaps: 2 });
+  });
+
+  it('never deletes a stored fill, even one the decode did not produce', () => {
+    const plan = planReread([fill('a', { usd: 5 }), fill('b', { usd: 7 })], [], true);
+    expect(plan.deleteIds).toEqual([]);
+    expect(plan.total).toEqual({ usd: 12, swaps: 2 });
+  });
+});
+
 describe('mergeIntoRing — recovered fills join the served tape', () => {
   const at = (id: string, ts: number) => fill(id, { ts, blockNumber: ts });
 
