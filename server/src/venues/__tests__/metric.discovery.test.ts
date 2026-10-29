@@ -322,12 +322,16 @@ describe('Metric v1 quotes', () => {
 
 /** the real quoter revert recorded during the 2026-10-12 stop-loss window, in
  *  the nesting viem's multicall hands back (ContractFunctionRevertedError.raw) */
-const STOP_LOSS_RAW = JSON.parse(readFileSync(new URL('./fixtures/metric.json', import.meta.url), 'utf8')).v1StopLossRevert.raw as string;
+const METRIC_FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/metric.json', import.meta.url), 'utf8'));
+const STOP_LOSS_RAW = METRIC_FIXTURE.v1StopLossRevert.raw as string;
+const POOL_PAUSED_RAW = METRIC_FIXTURE.v1PoolPausedRevert.raw as string;
 const stopLossError = () => ({ name: 'ContractFunctionExecutionError', cause: { name: 'ContractFunctionRevertedError', raw: STOP_LOSS_RAW } });
 
 describe('Metric v1 one-sided quotes (a pool refusing one direction)', () => {
   it('decodes the real quoter revert through WrappedError to OracleStopLossTriggered', () => {
     expect(metricV1RevertName(stopLossError())).toBe('OracleStopLossTriggered');
+    // the pause-aware quoter's own error, unwrapped (pool #6, paused 2026-10-13)
+    expect(metricV1RevertName({ cause: { raw: POOL_PAUSED_RAW } })).toBe('PoolPaused');
     expect(metricV1RevertName({ cause: { raw: '0xdeadbeef' } })).toBe('error 0xdeadbeef');
     expect(metricV1RevertName(new Error('fetch failed'))).toBeNull();
   });
