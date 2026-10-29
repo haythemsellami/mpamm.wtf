@@ -17,9 +17,10 @@ import { METRIC_VENUE, admitMetricPool, metricFill, metricPoolLiveness, type Met
  *   SwapQuoter.quoteLiveExactInSingle(…)   → realized amounts (eth_call)
  *   Pool.Swap(…, amountDeltas, …)          → the landed fill (PACKED deltas)
  *
- * Addresses + ABIs: @metric.xyz/metric-omm-sdk-v1@0.6.3 (src/addresses.ts — one
- * CREATE2/CREATE3 deployment shared by every chain), each one checked on Monad
- * for code and creation block on 2026-10-12.
+ * Addresses + ABIs: @metric.xyz/metric-omm-sdk-v1@0.6.7 (src/addresses.ts — one
+ * CREATE2/CREATE3 deployment shared by every chain; docs.metric.xyz →
+ * reference/supported-chains-and-deployments lists the same set), each one
+ * checked on Monad for code and creation block on 2026-10-12.
  *
  * What changed from v0 (metric-v0.ts) and why it matters here:
  *  - The factory ENUMERATES its pools, so a pool announced once is re-found at
@@ -36,7 +37,12 @@ import { METRIC_VENUE, admitMetricPool, metricFill, metricPoolLiveness, type Met
 export const V1_FACTORY = '0x2a53833cc95548cf52c7b159110e22d3a9018f32' as const;
 /** v1 factory creation — no v1 pool (or its logs) can predate it. */
 export const V1_FACTORY_BLOCK = 105_093_536n;
-export const V1_QUOTER = '0x803dd787ef9734c34696877ca6f20194fbcbfbf8' as const;
+/** The PAUSE-AWARE quoter (SDK 0.6.4+, 2026-10-13), same ABI as the first one
+ *  (0x803dd787…, which Metric's docs now call deprecated). The difference is
+ *  what a paused pool returns: PoolPaused(pool, level) instead of whatever its
+ *  oracle read hits first. On 2026-10-29, live BNB pools quoted identically
+ *  through both at one block. */
+export const V1_QUOTER = '0x3b9ea79f482094323d06064e637a7f4528560fcb' as const;
 export const V1_DATA_PROVIDER = '0x83d66c5934b1525ee82e6e772c76c7acc778bbb7' as const;
 /** MetricOmmSimpleRouter — Metric's own periphery (single/multi-hop swaps). */
 export const V1_SIMPLE_ROUTER = '0x02201e6f13c41506c7bb635d7543f98826229ab7' as const;
@@ -88,6 +94,8 @@ const metricV1ErrorAbi = parseAbi([
   'error OracleStopLossTriggered(int16 binIdx, bool isToken0Metric, uint256 currentMetric, uint256 threshold)',
   'error PriceVelocityExceeded(uint256 actualDeltaSqE36, uint256 allowedDeltaSqE36)',
   'error PoolPaused()',
+  // the quoter's own pre-check: raised before it touches the pool or its oracle
+  'error PoolPaused(address pool, uint8 pauseLevel)',
   'error NotAllowedToSwap()',
   'error InsufficientLiquidity(uint256 requested, uint256 available)',
   'error PriceProviderFailed(bytes reason)',
