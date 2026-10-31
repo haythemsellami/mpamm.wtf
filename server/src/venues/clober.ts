@@ -169,8 +169,8 @@ export async function discoverClober(client: PublicClient, getLogs: AdapterConte
  *  (constants/chain-configs/subgraph.js, FALLBACK_SUBGRAPH_URL for chain 143)
  *  and app.clober.io both try it when the Goldsky primary fails. Goldsky has
  *  answered 404 "Subgraph not found" for every Clober subgraph since at least
- *  2026-10-27. Without an authoritative discovery, decode() holds every range
- *  that contains a Take, and that cursor is the live tail every venue shares. */
+ *  2026-10-27. Discovery only decides what the Execution tab quotes at boot:
+ *  decode() asks the chain which books are the vault's (readCloberBooks). */
 export const CLOBER_SUBGRAPH_FALLBACK_URL = 'https://api.subgraph.ormilabs.com/api/public/27ad58eb-e12c-4b7b-8df8-0560d8e26b37/subgraphs/v2-subgraph-monad/latest/gn';
 
 /** The endpoints to try, in order: the configured one (SUBGRAPH_URL), then
@@ -240,47 +240,45 @@ export async function discoverCloberViaSubgraph(
   return { books, markets: assembleCloberMarkets(books), vault };
 }
 
-/** Resolve specific vault book ids when a live Vault.Open did not arrive with its
- *  BookManager.Open — distinguishes out-of-scope vault books from base/stable books
- *  without silently dropping a fill. */
-export async function discoverCloberBooksById(
-  url: string,
-  ids: string[],
-): Promise<{ books: Map<string, CloberBook>; ignored: Set<string>; missing: Set<string> }> {
-  const unique = [...new Set(ids)];
-  if (!unique.length) return { books: new Map(), ignored: new Set(), missing: new Set() };
-  for (const id of unique) if (!/^\d+$/.test(id)) throw new Error(`invalid Clober book id ${id}`);
+/** What the chain says about a book a Take hit: not the vault's, or the
+ *  vault's with its base/stable book (null when outside that scope). */
+export type CloberBookVerdict = { vault: false; atBlock: bigint } | { vault: true; book: CloberBook | null };
 
-  const books = new Map<string, CloberBook>();
-  const ignored = new Set<string>();
-  const missing = new Set(unique);
-  for (let i = 0; i < unique.length; i += 500) {
-    const batch = unique.slice(i, i + 500);
-    const idset = batch.map((id) => `"${id}"`).join(',');
-    const query = `{ books(first: ${batch.length}, where: { id_in: [${idset}] }) { id unitSize base { id } quote { id } pool { id } } }`;
-    const res = await fetch(url, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ query }), signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) throw new Error(`subgraph ${res.status}`);
-    const j: any = await res.json();
-    if (Array.isArray(j?.errors) && j.errors.length) throw new Error(`subgraph GraphQL error: ${j.errors[0]?.message ?? 'unknown'}`);
-    const rows = j?.data?.books as CloberSubgraphBookRow[] | undefined;
-    if (!Array.isArray(rows)) throw new Error('subgraph response missing books');
-
-    for (const r of rows) {
-      const { id, book, isVault } = parseSubgraphBook(r);
-      missing.delete(id);
-      if (!isVault) {
-        missing.add(id);
-      } else if (book) {
-        books.set(id, book);
-      } else {
-        ignored.add(id);
-      }
-    }
-  }
-  return { books, ignored, missing };
+/**
+ * Classify books from the chain, so whether a Take is vault flow never waits
+ * on the subgraph. The fills tail is ONE cursor for every venue: while decode()
+ * required a subgraph discovery, a Take on any Clober book froze them all —
+ * on 2026-10-31 two Takes on a CHOG/MON book nobody tracks (block 117,814,474)
+ * held it for as long as Goldsky (404) and Ormi (429) stayed down.
+ *
+ * LiquidityVault.bookPair(id) is non-zero exactly for the books the vault
+ * opened: open() writes it and nothing clears it. Both reads are pinned to
+ * the head, which must have reached `minBlock` (the newest Take asked about).
+ * A non-vault verdict therefore covers every Take at or before `atBlock`: the
+ * vault can still adopt an already-open book later, and a later Take is asked
+ * again. A vault book's key (BookManager.getBookKey) never changes.
+ */
+export async function readCloberBooks(client: PublicClient, ids: readonly string[], minBlock: bigint): Promise<Map<string, CloberBookVerdict>> {
+  const head = await client.getBlockNumber();
+  if (head < minBlock) throw new Error(`head ${head} is behind Take block ${minBlock}`);
+  const res = await client.multicall({
+    allowFailure: false,
+    blockNumber: head,
+    contracts: ids.flatMap((id) => [
+      { address: ADDR.liquidityVault as `0x${string}`, abi: liquidityVaultAbi, functionName: 'bookPair' as const, args: [BigInt(id)] as const },
+      { address: ADDR.bookManager as `0x${string}`, abi: bookManagerAbi, functionName: 'getBookKey' as const, args: [BigInt(id)] as const },
+    ]),
+  }) as readonly unknown[];
+  const out = new Map<string, CloberBookVerdict>();
+  ids.forEach((id, i) => {
+    const pair = res[2 * i] as bigint;
+    const key = res[2 * i + 1] as { base: string; unitSize: bigint; quote: string };
+    if (pair === 0n) { out.set(id, { vault: false, atBlock: head }); return; }
+    // the vault opens both books before it pairs them, so a zero key is a bad read
+    if (key.unitSize === 0n) throw new Error(`vault book ${id} has no BookManager key`);
+    out.set(id, { vault: true, book: cloberBookFromOpen({ id, base: key.base, quote: key.quote, unitSize: key.unitSize }, new Set([id])) });
+  });
+  return out;
 }
 
 function parseSubgraphBook(r: CloberSubgraphBookRow): { id: string; book: CloberBook | null; isVault: boolean } {
@@ -574,17 +572,23 @@ export function buildRouterMap(logs: Array<{ args: any; transactionHash: string 
 const ev = (abi: readonly unknown[], name: string) => abi.find((x: any) => x.type === 'event' && x.name === name);
 
 /**
- * Clober oracle-vault adapter — a MIXED-source venue: subgraph for discovery +
- * closed-day backfill, the chain for live quotes + fills. Vault (propAMM) books
- * only; non-vault Clober flow is ignored (this venue IS the vault).
+ * Clober oracle-vault adapter — a MIXED-source venue: the subgraph discovers
+ * which books to quote at boot; the chain serves quotes, fills, and which
+ * books a Take counts on. Vault (propAMM) books only; non-vault Clober flow is
+ * ignored (this venue IS the vault).
  */
 export function createCloberVaultAdapter(): VenueAdapter {
   let books = new Map<string, CloberBook>();   // vault-only book cache
   let vault = new Set<string>();
   let ignoredVaultBooks = new Set<string>();   // vault books known to be outside base/stable scope
+  /** books the chain says are not the vault's, through the block of that read */
+  const notVaultThrough = new Map<string, bigint>();
   let markets: CloberMarket[] = [];
-  let authoritativeDiscovery = false;
   const reportOutage = createQuoteOutageLatch(CLOBER_VAULT_VENUE.name);
+
+  /** Is a Take on `id` at `block` decided without a chain read? */
+  const classified = (id: string, block: bigint): boolean =>
+    books.has(id) || ignoredVaultBooks.has(id) || (!vault.has(id) && (notVaultThrough.get(id) ?? -1n) >= block);
 
   const mergeVaultBooks = (vaultOpens: any[], bmOpens: any[]): void => {
     for (const l of vaultOpens) {
@@ -612,7 +616,7 @@ export function createCloberVaultAdapter(): VenueAdapter {
     // venue. This REPLACED the old subgraph volume seed, which (a) started at
     // the dashboard's launch date (2026-05-13) and silently hid the venue's
     // $230M pre-May history, and (b) carried no swap counts. The subgraph is
-    // still used for what it is authoritative for: vault-book DISCOVERY.
+    // still used to discover the vault books to quote; fills never wait on it.
     backfillFromUtc: '2025-10-28',
     // History revisions (HistoryRevision — applied once per database on deploy):
     //   replay-0921-midnight  2026-09-18..19 from fills. The 2026-09-21 replay
@@ -625,15 +629,15 @@ export function createCloberVaultAdapter(): VenueAdapter {
     historyRevisions: [{ id: 'replay-0921-midnight', source: 'fills', from: '2026-09-18', until: '2026-09-20' }],
     async discover(ctx: AdapterContext) {
       let disc: { books: Map<string, CloberBook>; markets: CloberMarket[]; vault: Set<string> };
-      let authoritative = false;
       try {
         const urls = cloberSubgraphUrls(ctx.config.subgraphUrl);
         const res = await withCloberSubgraph(urls, discoverCloberViaSubgraph);
         disc = res.value;
-        authoritative = true;
         const via = res.url === urls[0] ? '' : ` via fallback ${cloberEndpointLabel(res.url) ?? 'endpoint'}`;
         ctx.note('venue.discovery', `Clober: subgraph discovery (${disc.vault.size} vault book(s))${via}`);
       } catch (e) {
+        // fills are unaffected (decode asks the chain); only boot quoting
+        // waits for a book to be seen in an Open or a Take
         ctx.note('venue.discovery.degraded', `Clober: subgraph discovery failed (${(e as Error).message}); trying recent Open logs`);
         try { disc = await discoverClober(ctx.client, ctx.getLogs, 2000); } catch { disc = { books: new Map(), markets: [], vault: new Set() }; }
       }
@@ -642,10 +646,6 @@ export function createCloberVaultAdapter(): VenueAdapter {
       for (const id of disc.vault) vault.add(id);
       for (const [id, b] of disc.books) if (b.isVault) { books.set(id, b); ignoredVaultBooks.delete(id); }
       markets = assembleCloberMarkets(books);
-      if (authoritative) authoritativeDiscovery = true;
-      else if (!authoritativeDiscovery) {
-        ctx.note('venue.discovery.degraded', 'Clober: authoritative discovery unavailable; holding Take ranges until rediscovery succeeds');
-      }
     },
     async quote(ctx, sizesUsd, blockNumber, requestedMarkets) {
       const selected = requestedMarkets ? markets.filter((m) => requestedMarkets.has(m.market)) : markets;
@@ -672,8 +672,8 @@ export function createCloberVaultAdapter(): VenueAdapter {
     logSources() {
       return [
         { key: 'take', address: ADDR.bookManager as `0x${string}`, events: [ev(bookManagerAbi, 'Take')], kind: 'fills' as const },
-        // Opens are decoding STATE — a missed vault-book Open makes that book's later
-        // Takes undecodable, so an Opens fetch failure HOLDS the cursor (review #2).
+        // Opens are decoding STATE — they name a new vault book (and its key) before
+        // its first Take, so an Opens fetch failure HOLDS the cursor (review #2).
         { key: 'bmOpen', address: ADDR.bookManager as `0x${string}`, events: [ev(bookManagerAbi, 'Open')], kind: 'state' as const },
         { key: 'vaultOpen', address: ADDR.liquidityVault as `0x${string}`, events: [ev(liquidityVaultAbi, 'Open')], kind: 'state' as const },
         // router tags are attribution only — when unavailable, Takes decode as UNKNOWN.
@@ -685,38 +685,43 @@ export function createCloberVaultAdapter(): VenueAdapter {
     // book manager is a direct trade (the gateway path is evidenced above).
     entryPoints: () => [{ address: ADDR.controller }, { address: ADDR.bookManager }],
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf, failed: Set<string>) {
-      if (!authoritativeDiscovery && (logs.take?.length ?? 0) > 0) {
-        throw new Error('authoritative vault-book discovery unavailable');
-      }
       mergeVaultBooks(logs.vaultOpen ?? [], logs.bmOpen ?? []);
-      const missingVaultBookIds = [...new Set((logs.take ?? [])
-        .map((l) => (l.args?.bookId === undefined ? undefined : String(l.args.bookId)))
-        .filter((id): id is string => !!id && vault.has(id) && !books.has(id) && !ignoredVaultBooks.has(id)))];
-      if (missingVaultBookIds.length) {
-        const { value: resolved } = await withCloberSubgraph(
-          cloberSubgraphUrls(ctx.config.subgraphUrl),
-          async (url) => {
-            const r = await discoverCloberBooksById(url, missingVaultBookIds);
-            // An endpoint that answers without a requested book (an indexer
-            // behind the chain) is a failed read, not an answer. The next one
-            // may have the book, and the check below holds the tail anyway.
-            if (r.missing.size) throw new Error(`missing metadata for vault book ${[...r.missing][0]}`);
-            return r;
-          },
-        );
+      const takes = logs.take ?? [];
+      const bookOf = (l: any): string | undefined => (l.args?.bookId === undefined ? undefined : String(l.args.bookId));
+      // A Take is dropped only on the chain's word that its book is not the
+      // vault's; every other book is read before anything decodes. A failed
+      // read throws, and the range is retried (fail-closed).
+      const unknown = new Set<string>();
+      let newest = 0n;
+      for (const l of takes) {
+        const id = bookOf(l);
+        if (id === undefined || classified(id, BigInt(l.blockNumber))) continue;
+        unknown.add(id);
+        if (BigInt(l.blockNumber) > newest) newest = BigInt(l.blockNumber);
+      }
+      if (unknown.size) {
+        const verdicts = await readCloberBooks(ctx.client, [...unknown], newest);
         let changed = false;
-        for (const [id, b] of resolved.books) { books.set(id, b); ignoredVaultBooks.delete(id); changed = true; }
-        for (const id of resolved.ignored) ignoredVaultBooks.add(id);
+        for (const [id, v] of verdicts) {
+          if (!v.vault) {
+            // a Vault.Open already named it: that read is behind the log, not an answer
+            if (vault.has(id)) throw new Error(`vault book ${id} has no LiquidityVault.bookPair at block ${v.atBlock}`);
+            notVaultThrough.set(id, v.atBlock);
+            continue;
+          }
+          vault.add(id);
+          notVaultThrough.delete(id);
+          if (v.book) { books.set(id, v.book); ignoredVaultBooks.delete(id); changed = true; }
+          else ignoredVaultBooks.add(id);
+        }
         if (changed) markets = assembleCloberMarkets(books);
-        const unresolved = missingVaultBookIds.filter((id) => !books.has(id) && !ignoredVaultBooks.has(id));
-        if (unresolved.length || resolved.missing.size) throw new Error(`missing metadata for vault book ${unresolved[0] ?? [...resolved.missing][0]}`);
       }
       const routerMap = buildRouterMap(logs.router ?? []);
       const out: Fill[] = [];
-      for (const l of logs.take ?? []) {
-        const bookId = l.args?.bookId === undefined ? undefined : String(l.args.bookId);
-        if (bookId && vault.has(bookId) && !books.has(bookId) && !ignoredVaultBooks.has(bookId)) {
-          throw new Error(`missing metadata for vault book ${bookId}`);
+      for (const l of takes) {
+        const bookId = bookOf(l);
+        if (bookId !== undefined && !classified(bookId, BigInt(l.blockNumber))) {
+          throw new Error(`unclassified Clober book ${bookId}`);
         }
         const f = decodeCloberTake(l, books, tsOf(l.blockNumber), routerMap.get(String(l.transactionHash).toLowerCase()));
         if (f) out.push(f);
