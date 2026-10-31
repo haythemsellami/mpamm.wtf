@@ -1,9 +1,9 @@
 // Clober's vault-book discovery reads its Monad subgraph. On 2026-10-27 the
-// Goldsky primary answered 404 "Subgraph not found" for every Clober subgraph,
-// so discovery was never authoritative. decode() then holds any range that
-// holds a Take, and that range is the live tail every venue shares. These pin
-// the fallback Clober's own SDK uses: the configured endpoint first, then
-// Ormi Labs, each serving one whole discovery. No network: fetch is stubbed.
+// Goldsky primary answered 404 "Subgraph not found" for every Clober subgraph.
+// Discovery decides what is quoted at boot (fills ask the chain instead —
+// clober.classify.test.ts). These pin the fallback Clober's own SDK uses: the
+// configured endpoint first, then Ormi Labs, each serving one whole
+// discovery. No network: fetch is stubbed.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CLOBER_SUBGRAPH_FALLBACK_URL, cloberSubgraphUrls, createCloberVaultAdapter, discoverCloberViaSubgraph, withCloberSubgraph,
@@ -108,52 +108,16 @@ describe('clober subgraph endpoints', () => {
 });
 
 describe('clober adapter discovery through the fallback', () => {
-  it('is authoritative via the fallback, so a vault Take decodes instead of holding the tail', async () => {
+  it('learns the vault books from the fallback, so a vault Take decodes without a chain read', async () => {
     stubFetch({ [GOLDSKY]: NOT_FOUND, [CLOBER_SUBGRAPH_FALLBACK_URL]: BOOKS });
     const notes: string[] = [];
-    const ctx = ctxWith(notes);
+    const ctx = ctxWith(notes); // client: {} — any chain read would throw
     const a = createCloberVaultAdapter();
     await a.discover(ctx);
     expect(notes).toContain('venue.discovery: Clober: subgraph discovery (2 vault book(s)) via fallback api.subgraph.ormilabs.com');
+    expect(a.quoteMarkets?.()).toEqual(['MON/USDC']);
     const fills = await a.decode(ctx, { take: [TAKE_LOG], bmOpen: [], vaultOpen: [], router: [] } as any, () => 1_783_600_000_000, new Set());
     expect(fills).toHaveLength(1);
     expect(fills[0]).toMatchObject({ venueId: 'clober-vault', market: 'MON/USDC' });
-  });
-
-  // A vault book known from LiquidityVault.Open but with no metadata yet sends
-  // decode() to the by-id lookup. A primary that answers 200 WITHOUT the book
-  // (an indexer behind the chain) must not end that lookup.
-  const VAULT_OPEN = { args: { bookIdA: BigInt(VAULT_BOOKS[0].id), bookIdB: BigInt(VAULT_BOOKS[1].id) } };
-  const EMPTY = () => json(200, { data: { books: [] } });
-
-  it('retries the by-id lookup on the fallback when the primary answers without the book', async () => {
-    const asked = stubFetch({ [GOLDSKY]: EMPTY, [CLOBER_SUBGRAPH_FALLBACK_URL]: BOOKS });
-    const ctx = ctxWith([]);
-    const a = createCloberVaultAdapter();
-    await a.discover(ctx); // authoritative: the primary answered (no vault books yet)
-    const fills = await a.decode(ctx, { take: [TAKE_LOG], bmOpen: [], vaultOpen: [VAULT_OPEN], router: [] } as any, () => 1_783_600_000_000, new Set());
-    expect(fills).toHaveLength(1);
-    expect(fills[0]).toMatchObject({ venueId: 'clober-vault', market: 'MON/USDC' });
-    expect(asked).toEqual([GOLDSKY, GOLDSKY, CLOBER_SUBGRAPH_FALLBACK_URL]); // discovery, by-id, by-id retry
-  });
-
-  it('holds the range when no endpoint has the book', async () => {
-    stubFetch({ [GOLDSKY]: EMPTY, [CLOBER_SUBGRAPH_FALLBACK_URL]: EMPTY });
-    const ctx = ctxWith([]);
-    const a = createCloberVaultAdapter();
-    await a.discover(ctx);
-    await expect(a.decode(ctx, { take: [TAKE_LOG], bmOpen: [], vaultOpen: [VAULT_OPEN], router: [] } as any, () => 0, new Set()))
-      .rejects.toThrow(`subgraph unavailable (api.goldsky.com: missing metadata for vault book ${VAULT_BOOKS[0].id}; api.subgraph.ormilabs.com: missing metadata for vault book ${VAULT_BOOKS[0].id})`);
-  });
-
-  it('when every endpoint fails, says why and still holds a range with a Take', async () => {
-    stubFetch({ [GOLDSKY]: NOT_FOUND, [CLOBER_SUBGRAPH_FALLBACK_URL]: TOO_MANY });
-    const notes: string[] = [];
-    const ctx = ctxWith(notes);
-    const a = createCloberVaultAdapter();
-    await a.discover(ctx);
-    expect(notes[0]).toBe('venue.discovery.degraded: Clober: subgraph discovery failed (subgraph unavailable (api.goldsky.com: subgraph 404; api.subgraph.ormilabs.com: subgraph 429)); trying recent Open logs');
-    await expect(a.decode(ctx, { take: [TAKE_LOG], bmOpen: [], vaultOpen: [], router: [] } as any, () => 0, new Set()))
-      .rejects.toThrow('authoritative vault-book discovery unavailable');
   });
 });
