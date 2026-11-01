@@ -145,15 +145,22 @@ describe('Clober with its subgraph down at boot', () => {
     expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, READ_AT + 10n]);
   });
 
-  it('counts a book from the Vault.Open that adopts it, after a not-the-vault\'s verdict', async () => {
-    // the vault can adopt a book that is already open (LiquidityVault.open)
-    const { decode, chain } = await bootWith({ head: HEAD, books: { [MON_USDC]: { pair: 0n, key: MON_USDC_KEY } } });
+  // LiquidityVault.open() can adopt a book that is already open, and both of
+  // the vault's pairs were adopted (Vault.Open at blocks 37,278,311 and
+  // 37,886,929 with no BookManager.Open in either tx). Adoption makes later
+  // Takes vault flow, never the ones the chain already said were not.
+  it('counts an adopted book from the Vault.Open on, and never a Take the chain said predates it', async () => {
+    const { decode, chain, reads } = await bootWith({ head: HEAD, books: { [MON_USDC]: { pair: 0n, key: MON_USDC_KEY } } });
     expect(await decode({ take: [VAULT_TAKE] })).toEqual([]);
+    chain.head = HEAD + 20n;
     chain.books[MON_USDC] = { pair: BigInt(MON_USDC_MIRROR), key: MON_USDC_KEY };
-    const vaultOpen = { args: { bookIdA: BigInt(MON_USDC), bookIdB: BigInt(MON_USDC_MIRROR) } };
-    const fills = await decode({ take: [VAULT_TAKE], vaultOpen: [vaultOpen] });
-    expect(fills).toHaveLength(1);
-    expect(fills[0].market).toBe('MON/USDC');
+    const vaultOpen = { args: { bookIdA: BigInt(MON_USDC), bookIdB: BigInt(MON_USDC_MIRROR) }, blockNumber: HEAD };
+    const later = { ...VAULT_TAKE, blockNumber: HEAD + 1n, logIndex: 1 };
+    const fills = await decode({ take: [later], vaultOpen: [vaultOpen] });
+    expect(fills.map((f) => [f.market, f.id])).toEqual([['MON/USDC', `clb-${VAULT_TAKE.transactionHash}-1`]]);
+    // a replay after the adoption still leaves the earlier Take out
+    expect(await decode({ take: [VAULT_TAKE, later] })).toHaveLength(1);
+    expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, READ_AT + 20n]);
   });
 
   it('ignores a vault book outside base/stable scope, without holding or re-reading it', async () => {

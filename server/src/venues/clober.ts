@@ -262,8 +262,8 @@ export type CloberBookVerdict = { vault: false; atBlock: bigint } | { vault: tru
  * opened: open() writes it and nothing clears it. Both reads are pinned
  * FINALITY_MARGIN blocks behind the head, which must have reached `minBlock`
  * (the newest Take asked about). A non-vault verdict therefore covers every
- * Take at or before `atBlock`: the vault can still adopt an already-open book
- * later, and a later Take is asked again. A vault book's key
+ * Take at or before `atBlock`, for good: the vault can still adopt an
+ * already-open book later, and a later Take is asked again. A vault book's key
  * (BookManager.getBookKey) never changes.
  */
 export async function readCloberBooks(client: PublicClient, ids: readonly string[], minBlock: bigint): Promise<Map<string, CloberBookVerdict>> {
@@ -589,14 +589,18 @@ export function createCloberVaultAdapter(): VenueAdapter {
   let books = new Map<string, CloberBook>();   // vault-only book cache
   let vault = new Set<string>();
   let ignoredVaultBooks = new Set<string>();   // vault books known to be outside base/stable scope
-  /** books the chain says are not the vault's, through the block of that read */
+  /** books the chain says are not the vault's, through the block of that read.
+   *  Kept when the vault later adopts the book (open() can take an already-open
+   *  one, and both its pairs so far were): a Take at or before it predates the
+   *  adoption, so it is never vault flow, however often it is replayed. */
   const notVaultThrough = new Map<string, bigint>();
   let markets: CloberMarket[] = [];
   const reportOutage = createQuoteOutageLatch(CLOBER_VAULT_VENUE.name);
 
+  const notVaultAt = (id: string, block: bigint): boolean => (notVaultThrough.get(id) ?? -1n) >= block;
   /** Is a Take on `id` at `block` decided without a chain read? */
   const classified = (id: string, block: bigint): boolean =>
-    books.has(id) || ignoredVaultBooks.has(id) || (!vault.has(id) && (notVaultThrough.get(id) ?? -1n) >= block);
+    notVaultAt(id, block) || books.has(id) || ignoredVaultBooks.has(id);
 
   const mergeVaultBooks = (vaultOpens: any[], bmOpens: any[]): void => {
     for (const l of vaultOpens) {
@@ -719,7 +723,6 @@ export function createCloberVaultAdapter(): VenueAdapter {
         for (const [id, v] of verdicts) {
           if (!v.vault) { notVaultThrough.set(id, v.atBlock); continue; }
           vault.add(id);
-          notVaultThrough.delete(id);
           if (v.book) { books.set(id, v.book); ignoredVaultBooks.delete(id); changed = true; }
           else ignoredVaultBooks.add(id);
         }
@@ -732,6 +735,7 @@ export function createCloberVaultAdapter(): VenueAdapter {
         if (bookId !== undefined && !classified(bookId, BigInt(l.blockNumber))) {
           throw new Error(`unclassified Clober book ${bookId}`);
         }
+        if (bookId !== undefined && notVaultAt(bookId, BigInt(l.blockNumber))) continue;
         const f = decodeCloberTake(l, books, tsOf(l.blockNumber), routerMap.get(String(l.transactionHash).toLowerCase()));
         if (f) out.push(f);
       }
