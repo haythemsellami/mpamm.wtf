@@ -202,6 +202,21 @@ describe('Clober with its subgraph down at boot', () => {
     expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, OPEN - 11n]);
   });
 
+  // The lifetime volume replay fetches fill sources only (seedSources ->
+  // backfillAdapter), so its ranges come with no `vaultOpen` at all. Taking
+  // that for "no Open here" would drop the Takes after an unseen adoption and
+  // advance the replay's cursor past them.
+  it('reads the Opens itself when a range came without them, so a replay keeps post-adoption Takes', async () => {
+    const OPEN = 117_500_000n;
+    const { decode, reads, scans } = await bootWith({
+      head: HEAD, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: OPEN } }, logs: { vaultOpen: [lateOpen(OPEN, 5)], bmOpen: [] },
+    });
+    const take = [lateTake(OPEN - 10n, 1), lateTake(OPEN, 7), lateTake(OPEN + 10n, 4)];
+    expect(logIndexes(await decode({ take, vaultOpen: undefined }))).toEqual([7, 4]);
+    expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, OPEN - 11n]);
+    expect(scans).toEqual([READ_AT, READ_AT, OPEN + 10n]); // the fallback's two scans, then the Takes' span
+  });
+
   it('counts an unlisted vault book once the chain says it was paired before its Takes, reading that once', async () => {
     const { decode, reads, chain } = await bootWith({ head: HEAD, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: 100_000_000n } } });
     expect(await decode({ take: [lateTake(117_000_000n, 1), lateTake(117_000_100n, 2)] })).toHaveLength(2);

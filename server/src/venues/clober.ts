@@ -807,13 +807,24 @@ export function createCloberVaultAdapter(): VenueAdapter {
         raise(latest, id, b);
       }
       if (oldest.size) {
+        const paired = await readCloberPairedAt(ctx.client, [...oldest].map(([id, b]) => ({ id, block: b - 1n })));
+        // The Opens over an unpaired book's Takes: this range's own when the
+        // core fetched them (the tail, re-reads, revisions), else read here.
+        // The volume replay fetches fill sources only (seedSources), and an
+        // Open it did not fetch is not an Open that did not happen.
+        let opens: readonly any[] | undefined = logs.vaultOpen;
+        const unpaired = [...oldest].filter(([id]) => !paired.get(id));
+        if (!opens && unpaired.length) {
+          let lo = unpaired[0][1], hi = lo;
+          for (const [id, b] of unpaired) { if (b < lo) lo = b; if (latest.get(id)! > hi) hi = latest.get(id)!; }
+          opens = await ctx.getLogs({ address: ADDR.liquidityVault as `0x${string}`, fromBlock: lo, toBlock: hi, events: [ev(liquidityVaultAbi, 'Open')] });
+        }
         const firstOpen = new Map<string, CloberLogPos>();
-        for (const l of logs.vaultOpen ?? []) {
+        for (const l of opens ?? []) {
           for (const id of [l.args?.bookIdA, l.args?.bookIdB].filter((x) => x !== undefined).map(String)) {
             if (!firstOpen.has(id) || isBefore(posOf(l), firstOpen.get(id)!)) firstOpen.set(id, posOf(l));
           }
         }
-        const paired = await readCloberPairedAt(ctx.client, [...oldest].map(([id, b]) => ({ id, block: b - 1n })));
         for (const [id, b] of oldest) {
           const open = firstOpen.get(id);
           if (!paired.get(id) && open && open.block < b) throw new Error(`book ${id} has a Vault.Open at block ${open.block} but no LiquidityVault.bookPair at block ${b - 1n}`);
