@@ -249,7 +249,32 @@ export async function discoverCloberViaSubgraph(
 
 /** What the chain says about a book a Take hit: not the vault's, or the
  *  vault's with its base/stable book (null when outside that scope). */
-export type CloberBookVerdict = { vault: false; atBlock: bigint } | { vault: true; book: CloberBook | null };
+export type CloberBookVerdict = { vault: false; atBlock: bigint } | { vault: true; atBlock: bigint; book: CloberBook | null };
+
+/** A log's place in the chain. */
+export type CloberLogPos = { block: bigint; logIndex: number };
+const isBefore = (a: CloberLogPos, b: CloberLogPos): boolean => a.block < b.block || (a.block === b.block && a.logIndex < b.logIndex);
+
+/**
+ * The FIRST LiquidityVault.Open of each book the vault has paired: a
+ * Vault.Open scan of blocks 37,272,487 (the proxy's creation) to 38,486,629
+ * found these two and no other.
+ * open() is permissionless and ADOPTS a book that is already open (`_open`:
+ * `if (!bookManager.isOpened(id)) bookManager.open(...)`,
+ * clober-dex/clober-liquidity-vault src/LiquidityVault.sol), and both pairs
+ * here were adopted: neither tx emits a BookManager.Open. A Take on one of
+ * these books before its Open was never the vault's. bookPair() and the
+ * subgraph's `pool` flag both say a book IS paired, not since when, and prod
+ * booked 14 such MON/USDC Takes ($1.64, 2025-11-06..24) that way. This table
+ * answers "since when" without a chain read, so a deep replay needs none. Any
+ * book missing from it is asked of the chain (readCloberPairedAt).
+ */
+export const CLOBER_VAULT_ADOPTIONS: ReadonlyArray<CloberLogPos & { pair: string; books: readonly [string, string] }> = [
+  // tx 0x9d7465903e76cada5878f61df0706f8d9f32d58a3c792905f5d68d165da95835, 2025-11-22 15:02 UTC
+  { pair: 'WETH/USDC', block: 37_278_311n, logIndex: 2, books: ['680091963353999958661303284433884846705699901928885914311', '6215929461771924482215683498685754109371513948112281158916'] },
+  // tx 0xb8cb6e2356321e67e49939c2cf71206e4c27b5e1b6a34dfd96bf4091658f9e3a, 2025-11-25 10:52 UTC
+  { pair: 'MON/USDC', block: 37_886_929n, logIndex: 8, books: ['5954885684956363054050231031211743946744177791604395877538', '3875727077379471850923186002296331935053867847116966170720'] },
+];
 
 /**
  * Classify books from the chain, so whether a Take is vault flow never waits
@@ -284,8 +309,32 @@ export async function readCloberBooks(client: PublicClient, ids: readonly string
     if (pair === 0n) { out.set(id, { vault: false, atBlock: at }); return; }
     // the vault opens both books before it pairs them, so a zero key is a bad read
     if (key.unitSize === 0n) throw new Error(`vault book ${id} has no BookManager key`);
-    out.set(id, { vault: true, book: cloberBookFromOpen({ id, base: key.base, quote: key.quote, unitSize: key.unitSize }, new Set([id])) });
+    out.set(id, { vault: true, atBlock: at, book: cloberBookFromOpen({ id, base: key.base, quote: key.quote, unitSize: key.unitSize }, new Set([id])) });
   });
+  return out;
+}
+
+/**
+ * Was each book already the vault's at the end of its `block`? bookPair goes
+ * from 0 to non-zero once and is never cleared, so one read bounds a book's
+ * adoption: paired at B means every Take after B is vault flow, unpaired at
+ * B means none at or before B is. Callers ask about blocks behind the fills
+ * tail, whose state is final. A block deeper than the client keeps state for
+ * throws, and the range holds: only a book missing from CLOBER_VAULT_ADOPTIONS
+ * can need one.
+ */
+export async function readCloberPairedAt(client: PublicClient, reqs: ReadonlyArray<{ id: string; block: bigint }>): Promise<Map<string, boolean>> {
+  const byBlock = new Map<bigint, string[]>();
+  for (const r of reqs) byBlock.set(r.block, [...(byBlock.get(r.block) ?? []), r.id]);
+  const out = new Map<string, boolean>();
+  for (const [block, ids] of byBlock) {
+    const res = await client.multicall({
+      allowFailure: false,
+      blockNumber: block,
+      contracts: ids.map((id) => ({ address: ADDR.liquidityVault as `0x${string}`, abi: liquidityVaultAbi, functionName: 'bookPair' as const, args: [BigInt(id)] as const })),
+    }) as readonly bigint[];
+    ids.forEach((id, i) => out.set(id, res[i] !== 0n));
+  }
   return out;
 }
 
@@ -594,13 +643,26 @@ export function createCloberVaultAdapter(): VenueAdapter {
    *  one, and both its pairs so far were): a Take at or before it predates the
    *  adoption, so it is never vault flow, however often it is replayed. */
   const notVaultThrough = new Map<string, bigint>();
+  /** each book's first Vault.Open: CLOBER_VAULT_ADOPTIONS, or one the chain proved first */
+  const adoptedAt = new Map<string, CloberLogPos>();
+  /** vault books whose first Open is not known: a block the chain says each was already paired at */
+  const pairedBy = new Map<string, bigint>();
+  for (const a of CLOBER_VAULT_ADOPTIONS) for (const id of a.books) { adoptedAt.set(id, a); vault.add(id); }
   let markets: CloberMarket[] = [];
   const reportOutage = createQuoteOutageLatch(CLOBER_VAULT_VENUE.name);
 
-  const notVaultAt = (id: string, block: bigint): boolean => (notVaultThrough.get(id) ?? -1n) >= block;
-  /** Is a Take on `id` at `block` decided without a chain read? */
-  const classified = (id: string, block: bigint): boolean =>
-    notVaultAt(id, block) || books.has(id) || ignoredVaultBooks.has(id);
+  /** Is a Take at `pos` on `id` vault flow? undefined: the chain must say. A
+   *  book being the vault's is not enough, since it may have been adopted
+   *  after the Take. */
+  const vaultFlowAt = (id: string, pos: CloberLogPos): boolean | undefined => {
+    const open = adoptedAt.get(id);
+    if (open) return !isBefore(pos, open);
+    if ((notVaultThrough.get(id) ?? -1n) >= pos.block) return false;
+    const by = pairedBy.get(id);
+    return by !== undefined && pos.block > by ? true : undefined;
+  };
+  const lower = (m: Map<string, bigint>, id: string, b: bigint) => { const c = m.get(id); if (c === undefined || b < c) m.set(id, b); };
+  const raise = (m: Map<string, bigint>, id: string, b: bigint) => { const c = m.get(id); if (c === undefined || b > c) m.set(id, b); };
 
   const mergeVaultBooks = (vaultOpens: any[], bmOpens: any[]): void => {
     for (const l of vaultOpens) {
@@ -700,19 +762,24 @@ export function createCloberVaultAdapter(): VenueAdapter {
       mergeVaultBooks(logs.vaultOpen ?? [], logs.bmOpen ?? []);
       const takes = logs.take ?? [];
       const bookOf = (l: any): string | undefined => (l.args?.bookId === undefined ? undefined : String(l.args.bookId));
-      // A Take is dropped only on the chain's word that its book is not the
-      // vault's; every other book is read before anything decodes. A failed
-      // read throws, and the range is retried (fail-closed).
-      const unknown = new Set<string>();
+      const posOf = (l: any): CloberLogPos => ({ block: BigInt(l.blockNumber), logIndex: Number(l.logIndex) });
+      // A Take counts only if the vault had its book by then, on the word of
+      // CLOBER_VAULT_ADOPTIONS or the chain; any Take neither settles yet is
+      // read about before anything decodes. A failed read throws, and the
+      // range is retried (fail-closed).
+      //
+      // First, whether the vault pairs a book at all, and its key: one read at
+      // the head for each book the adapter has not seen.
+      const unseen = new Set<string>();
       let newest = 0n;
       for (const l of takes) {
         const id = bookOf(l);
-        if (id === undefined || classified(id, BigInt(l.blockNumber))) continue;
-        unknown.add(id);
+        if (id === undefined || books.has(id) || ignoredVaultBooks.has(id) || vaultFlowAt(id, posOf(l)) === false) continue;
+        unseen.add(id);
         if (BigInt(l.blockNumber) > newest) newest = BigInt(l.blockNumber);
       }
-      if (unknown.size) {
-        const verdicts = await readCloberBooks(ctx.client, [...unknown], newest);
+      if (unseen.size) {
+        const verdicts = await readCloberBooks(ctx.client, [...unseen], newest);
         // Check every verdict before caching any. A throw part-way would leave
         // a book cached with `markets` never rebuilt, and the retry skips it.
         for (const [id, v] of verdicts) {
@@ -723,19 +790,61 @@ export function createCloberVaultAdapter(): VenueAdapter {
         for (const [id, v] of verdicts) {
           if (!v.vault) { notVaultThrough.set(id, v.atBlock); continue; }
           vault.add(id);
+          if (!adoptedAt.has(id)) lower(pairedBy, id, v.atBlock);
           if (v.book) { books.set(id, v.book); ignoredVaultBooks.delete(id); changed = true; }
           else ignoredVaultBooks.add(id);
         }
         if (changed) markets = assembleCloberMarkets(books);
       }
+      // Then, for a vault book whose first Open is not known, whether it was
+      // already paired just before this range's oldest Take on it. If not,
+      // its first Open is the earliest one in this range, or a later one.
+      const oldest = new Map<string, bigint>(), latest = new Map<string, bigint>();
+      for (const l of takes) {
+        const id = bookOf(l), b = BigInt(l.blockNumber);
+        if (id === undefined || !books.has(id) || vaultFlowAt(id, posOf(l)) !== undefined) continue;
+        lower(oldest, id, b);
+        raise(latest, id, b);
+      }
+      if (oldest.size) {
+        const paired = await readCloberPairedAt(ctx.client, [...oldest].map(([id, b]) => ({ id, block: b - 1n })));
+        // The Opens over an unpaired book's Takes: this range's own when the
+        // core fetched them (the tail, re-reads, revisions), else read here.
+        // The volume replay fetches fill sources only (seedSources), and an
+        // Open it did not fetch is not an Open that did not happen.
+        let opens: readonly any[] | undefined = logs.vaultOpen;
+        const unpaired = [...oldest].filter(([id]) => !paired.get(id));
+        if (!opens && unpaired.length) {
+          let lo = unpaired[0][1], hi = lo;
+          for (const [id, b] of unpaired) { if (b < lo) lo = b; if (latest.get(id)! > hi) hi = latest.get(id)!; }
+          opens = await ctx.getLogs({ address: ADDR.liquidityVault as `0x${string}`, fromBlock: lo, toBlock: hi, events: [ev(liquidityVaultAbi, 'Open')] });
+        }
+        const firstOpen = new Map<string, CloberLogPos>();
+        for (const l of opens ?? []) {
+          for (const id of [l.args?.bookIdA, l.args?.bookIdB].filter((x) => x !== undefined).map(String)) {
+            if (!firstOpen.has(id) || isBefore(posOf(l), firstOpen.get(id)!)) firstOpen.set(id, posOf(l));
+          }
+        }
+        for (const [id, b] of oldest) {
+          const open = firstOpen.get(id);
+          if (!paired.get(id) && open && open.block < b) throw new Error(`book ${id} has a Vault.Open at block ${open.block} but no LiquidityVault.bookPair at block ${b - 1n}`);
+        }
+        for (const [id, b] of oldest) {
+          const open = firstOpen.get(id);
+          if (paired.get(id)) lower(pairedBy, id, b - 1n);
+          else if (open) { adoptedAt.set(id, open); pairedBy.delete(id); }
+          else raise(notVaultThrough, id, latest.get(id)!);
+        }
+      }
       const routerMap = buildRouterMap(logs.router ?? []);
       const out: Fill[] = [];
       for (const l of takes) {
         const bookId = bookOf(l);
-        if (bookId !== undefined && !classified(bookId, BigInt(l.blockNumber))) {
-          throw new Error(`unclassified Clober book ${bookId}`);
+        if (bookId !== undefined && !ignoredVaultBooks.has(bookId)) {
+          const flow = vaultFlowAt(bookId, posOf(l));
+          if (flow === undefined || (flow && !books.has(bookId))) throw new Error(`unclassified Clober book ${bookId}`);
+          if (!flow) continue;
         }
-        if (bookId !== undefined && notVaultAt(bookId, BigInt(l.blockNumber))) continue;
         const f = decodeCloberTake(l, books, tsOf(l.blockNumber), routerMap.get(String(l.transactionHash).toLowerCase()));
         if (f) out.push(f);
       }

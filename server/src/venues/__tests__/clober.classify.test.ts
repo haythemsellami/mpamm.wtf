@@ -7,7 +7,7 @@
 // Monad; fetch and the RPC client are stubbed, so there is no network.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ADDR } from '@shared';
-import { createCloberVaultAdapter, decodeCloberTake, type CloberBook } from '../clober.js';
+import { CLOBER_VAULT_ADOPTIONS, createCloberVaultAdapter, decodeCloberTake, type CloberBook } from '../clober.js';
 
 const GOLDSKY = 'https://api.goldsky.com/api/public/project_clsljw95chutg01w45cio46j0/subgraphs/v2-subgraph-monad/latest/gn';
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -41,12 +41,23 @@ const VAULT_TAKE = {
   logIndex: 6,
 };
 
+/** A MON/USDC-keyed book the vault adopts during a test. It is not in
+ *  CLOBER_VAULT_ADOPTIONS, so only the chain can say when it was adopted. */
+const LATE = '4242424242424242424242424242424242424242424242424242424242';
+const LATE_MIRROR = '2424242424242424242424242424242424242424242424242424242424';
+const lateTake = (blockNumber: bigint, logIndex = 0) => ({ ...VAULT_TAKE, args: { ...VAULT_TAKE.args, bookId: BigInt(LATE) }, blockNumber, logIndex });
+const lateOpen = (blockNumber: bigint, logIndex = 0) => ({ args: { bookIdA: BigInt(LATE), bookIdB: BigInt(LATE_MIRROR) }, blockNumber, logIndex });
+/** the logIndex each fill's id ends with */
+const logIndexes = (fills: Array<{ id: string }>) => fills.map((f) => Number(f.id.split('-').pop()));
+
 const HEAD = 118_218_881n;
 /** reads stay five blocks behind the head: the fills tail's finality margin */
 const READ_AT = HEAD - 5n;
 const TS = 1_783_600_000_000;
 
-type ChainBook = { pair: bigint; key: Key };
+/** `pair` is what bookPair returns from block `pairedFrom` on (0 before it;
+ *  always, when omitted) */
+type ChainBook = { pair: bigint; key: Key; pairedFrom?: bigint };
 type OpenLogs = { vaultOpen: any[]; bmOpen: any[] };
 /** Both subgraph endpoints down, exactly as on 2026-10-31. */
 function subgraphDown() {
@@ -57,7 +68,7 @@ function subgraphDown() {
 
 /** An RPC client answering bookPair/getBookKey from `chain.books`; records
  *  each multicall's block and the books it asked about. */
-function chainWith(chain: { head: bigint; books: Record<string, ChainBook>; fail?: Error; logs?: OpenLogs }) {
+function chainWith(chain: { head: bigint; books: Record<string, ChainBook>; fail?: Error; logs?: OpenLogs; stateFrom?: bigint }) {
   const reads: Array<{ blockNumber: bigint; ids: string[] }> = [];
   const client = {
     getBlockNumber: async () => chain.head,
@@ -65,9 +76,14 @@ function chainWith(chain: { head: bigint; books: Record<string, ChainBook>; fail
       expect(allowFailure).toBe(false); // one failed leg must fail the read, never read as "not the vault's"
       reads.push({ blockNumber, ids: [...new Set<string>(contracts.map((c: any) => String(c.args[0])))] });
       if (chain.fail) throw chain.fail;
+      // a fullnode keeps recent state only
+      if (chain.stateFrom !== undefined && blockNumber < chain.stateFrom) throw new Error(`missing trie node (block ${blockNumber})`);
       return contracts.map((c: any) => {
         const b = chain.books[String(c.args[0])] ?? { pair: 0n, key: NO_KEY };
-        if (c.functionName === 'bookPair') { expect(c.address).toBe(ADDR.liquidityVault); return b.pair; }
+        if (c.functionName === 'bookPair') {
+          expect(c.address).toBe(ADDR.liquidityVault);
+          return b.pairedFrom === undefined || blockNumber >= b.pairedFrom ? b.pair : 0n;
+        }
         expect(c.functionName).toBe('getBookKey');
         expect(c.address).toBe(ADDR.bookManager);
         return b.key;
@@ -150,17 +166,81 @@ describe('Clober with its subgraph down at boot', () => {
   // 37,886,929 with no BookManager.Open in either tx). Adoption makes later
   // Takes vault flow, never the ones the chain already said were not.
   it('counts an adopted book from the Vault.Open on, and never a Take the chain said predates it', async () => {
-    const { decode, chain, reads } = await bootWith({ head: HEAD, books: { [MON_USDC]: { pair: 0n, key: MON_USDC_KEY } } });
-    expect(await decode({ take: [VAULT_TAKE] })).toEqual([]);
+    const { decode, chain, reads } = await bootWith({ head: HEAD, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: HEAD } } });
+    const early = lateTake(117_000_000n);
+    expect(await decode({ take: [early] })).toEqual([]);
     chain.head = HEAD + 20n;
-    chain.books[MON_USDC] = { pair: BigInt(MON_USDC_MIRROR), key: MON_USDC_KEY };
-    const vaultOpen = { args: { bookIdA: BigInt(MON_USDC), bookIdB: BigInt(MON_USDC_MIRROR) }, blockNumber: HEAD };
-    const later = { ...VAULT_TAKE, blockNumber: HEAD + 1n, logIndex: 1 };
-    const fills = await decode({ take: [later], vaultOpen: [vaultOpen] });
+    const later = lateTake(HEAD + 1n, 1);
+    const fills = await decode({ take: [later], vaultOpen: [lateOpen(HEAD, 3)] });
     expect(fills.map((f) => [f.market, f.id])).toEqual([['MON/USDC', `clb-${VAULT_TAKE.transactionHash}-1`]]);
     // a replay after the adoption still leaves the earlier Take out
-    expect(await decode({ take: [VAULT_TAKE, later] })).toHaveLength(1);
-    expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, READ_AT + 20n]);
+    expect(await decode({ take: [early, later] })).toHaveLength(1);
+    // the head twice (not the vault's, then its key), then just before the later Take
+    expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, READ_AT + 20n, HEAD]);
+  });
+
+  // The subgraph's `pool` flag and bookPair both say a book IS the vault's,
+  // never since when: both of the vault's pairs were open books it adopted
+  // later, and prod counted 14 MON/USDC Takes from before (2025-11-06..24).
+  it('counts a listed book\'s Takes from its first Vault.Open on, reading only its key', async () => {
+    const { decode, reads } = await bootWith({ head: HEAD, books: { [MON_USDC]: { pair: BigInt(MON_USDC_MIRROR), key: MON_USDC_KEY, pairedFrom: 37_886_929n } } });
+    const at = (blockNumber: bigint, logIndex: number) => ({ ...VAULT_TAKE, blockNumber, logIndex });
+    // its Vault.Open is log 8 of block 37,886,929 (CLOBER_VAULT_ADOPTIONS)
+    const fills = await decode({ take: [at(37_000_000n, 1), at(37_886_929n, 7), at(37_886_929n, 9), at(37_886_930n, 0)] });
+    expect(logIndexes(fills)).toEqual([9, 0]);
+    expect(reads).toEqual([{ blockNumber: READ_AT, ids: [MON_USDC] }]);
+    expect(CLOBER_VAULT_ADOPTIONS.find((a) => a.books.includes(MON_USDC))).toMatchObject({ pair: 'MON/USDC', block: 37_886_929n, logIndex: 8 });
+  });
+
+  it('finds an unlisted book\'s adoption in the range: Takes before its first Vault.Open drop', async () => {
+    const OPEN = 117_500_000n;
+    const { decode, reads } = await bootWith({ head: HEAD, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: OPEN } } });
+    const take = [lateTake(OPEN - 10n, 1), lateTake(OPEN, 2), lateTake(OPEN, 7), lateTake(OPEN + 10n, 4)];
+    expect(logIndexes(await decode({ take, vaultOpen: [lateOpen(OPEN, 5)] }))).toEqual([7, 4]);
+    // the Open is known from here on: a replay without it reads nothing more
+    expect(logIndexes(await decode({ take }))).toEqual([7, 4]);
+    expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, OPEN - 11n]);
+  });
+
+  // The lifetime volume replay fetches fill sources only (seedSources ->
+  // backfillAdapter), so its ranges come with no `vaultOpen` at all. Taking
+  // that for "no Open here" would drop the Takes after an unseen adoption and
+  // advance the replay's cursor past them.
+  it('reads the Opens itself when a range came without them, so a replay keeps post-adoption Takes', async () => {
+    const OPEN = 117_500_000n;
+    const { decode, reads, scans } = await bootWith({
+      head: HEAD, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: OPEN } }, logs: { vaultOpen: [lateOpen(OPEN, 5)], bmOpen: [] },
+    });
+    const take = [lateTake(OPEN - 10n, 1), lateTake(OPEN, 7), lateTake(OPEN + 10n, 4)];
+    expect(logIndexes(await decode({ take, vaultOpen: undefined }))).toEqual([7, 4]);
+    expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, OPEN - 11n]);
+    expect(scans).toEqual([READ_AT, READ_AT, OPEN + 10n]); // the fallback's two scans, then the Takes' span
+  });
+
+  it('counts an unlisted vault book once the chain says it was paired before its Takes, reading that once', async () => {
+    const { decode, reads, chain } = await bootWith({ head: HEAD, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: 100_000_000n } } });
+    expect(await decode({ take: [lateTake(117_000_000n, 1), lateTake(117_000_100n, 2)] })).toHaveLength(2);
+    chain.head = HEAD + 50n;
+    expect(await decode({ take: [lateTake(HEAD + 40n, 3)] })).toHaveLength(1);
+    expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, 116_999_999n]);
+  });
+
+  it('drops an unlisted vault book\'s Takes from before its adoption, with no Vault.Open in the range', async () => {
+    const { decode, reads } = await bootWith({ head: HEAD, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: 118_000_000n } } });
+    expect(await decode({ take: [lateTake(117_000_000n, 1), lateTake(117_000_100n, 2)] })).toEqual([]);
+    expect(await decode({ take: [lateTake(117_000_050n, 3)] })).toEqual([]);
+    expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, 116_999_999n]);
+  });
+
+  it('holds the range when a Vault.Open precedes a block the chain says its book was not paired at', async () => {
+    const { decode } = await bootWith({ head: HEAD, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: 118_000_000n } } });
+    await expect(decode({ take: [lateTake(117_000_000n, 1)], vaultOpen: [lateOpen(116_999_000n)] }))
+      .rejects.toThrow(`book ${LATE} has a Vault.Open at block 116999000 but no LiquidityVault.bookPair at block 116999999`);
+  });
+
+  it('holds the range when an unlisted book\'s Take is deeper than the node keeps state', async () => {
+    const { decode } = await bootWith({ head: HEAD, stateFrom: HEAD - 1_000_000n, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: 100_000_000n } } });
+    await expect(decode({ take: [lateTake(90_000_000n, 1)] })).rejects.toThrow('missing trie node (block 89999999)');
   });
 
   it('ignores a vault book outside base/stable scope, without holding or re-reading it', async () => {
@@ -215,9 +295,9 @@ describe('Clober with its subgraph down at boot', () => {
 
   /** The vault opening MON/USDC and its mirror at `block` (Vault.Open +
    *  BookManager.Open), as the recent-Open fallback finds them. */
-  const opensAt = (block: bigint): OpenLogs => ({
-    vaultOpen: [{ args: { bookIdA: BigInt(MON_USDC), bookIdB: BigInt(MON_USDC_MIRROR) }, blockNumber: block }],
-    bmOpen: [{ args: { id: BigInt(MON_USDC), ...MON_USDC_KEY }, blockNumber: block }],
+  const opensAt = (block: bigint, id = MON_USDC, mirror = MON_USDC_MIRROR): OpenLogs => ({
+    vaultOpen: [{ args: { bookIdA: BigInt(id), bookIdB: BigInt(mirror) }, blockNumber: block }],
+    bmOpen: [{ args: { id: BigInt(id), ...MON_USDC_KEY }, blockNumber: block }],
   });
 
   it('learns a vault book from a finalized Open in the recent-Open fallback', async () => {
@@ -232,10 +312,19 @@ describe('Clober with its subgraph down at boot', () => {
   // Open there can still mutate away: if it is retracted, the book is not the
   // vault's, and its Takes must not count.
   it('never caches an Open from the tip in the fallback, so a retracted one counts nothing', async () => {
-    const { adapter, decode, reads } = await bootWith({ head: HEAD, books: { [MON_USDC]: { pair: 0n, key: MON_USDC_KEY } }, logs: opensAt(HEAD - 2n) });
+    const { adapter, decode, reads } = await bootWith({ head: HEAD, books: { [LATE]: { pair: 0n, key: MON_USDC_KEY } }, logs: opensAt(HEAD - 2n, LATE, LATE_MIRROR) });
     expect(adapter.quoteMarkets?.()).toEqual([]);
-    expect(await decode({ take: [{ ...VAULT_TAKE, blockNumber: READ_AT }] })).toEqual([]);
-    expect(reads).toEqual([{ blockNumber: READ_AT, ids: [MON_USDC] }]);
+    expect(await decode({ take: [lateTake(READ_AT)] })).toEqual([]);
+    expect(reads).toEqual([{ blockNumber: READ_AT, ids: [LATE] }]);
+  });
+
+  it('counts a discovered vault book from its adoption, not over its whole life', async () => {
+    const OPEN = READ_AT - 100n;
+    const { adapter, decode, reads } = await bootWith({ head: HEAD, books: { [LATE]: { pair: BigInt(LATE_MIRROR), key: MON_USDC_KEY, pairedFrom: OPEN } }, logs: opensAt(OPEN, LATE, LATE_MIRROR) });
+    expect(adapter.quoteMarkets?.()).toEqual(['MON/USDC']);
+    expect(await decode({ take: [lateTake(OPEN - 100n, 1)] })).toEqual([]);
+    expect(await decode({ take: [lateTake(OPEN + 1n, 2)] })).toHaveLength(1);
+    expect(reads.map((r) => r.blockNumber)).toEqual([OPEN - 101n, OPEN]);
   });
 
   it('a range without a Take reads nothing', async () => {
