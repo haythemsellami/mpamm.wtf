@@ -256,8 +256,9 @@ export type CloberLogPos = { block: bigint; logIndex: number };
 const isBefore = (a: CloberLogPos, b: CloberLogPos): boolean => a.block < b.block || (a.block === b.block && a.logIndex < b.logIndex);
 
 /**
- * The FIRST LiquidityVault.Open of each book the vault has paired, from a
- * Vault.Open scan starting at the proxy's creation (block 37,272,487).
+ * The FIRST LiquidityVault.Open of each book the vault has paired: a
+ * Vault.Open scan of blocks 37,272,487 (the proxy's creation) to 38,486,629
+ * found these two and no other.
  * open() is permissionless and ADOPTS a book that is already open (`_open`:
  * `if (!bookManager.isOpened(id)) bookManager.open(...)`,
  * clober-dex/clober-liquidity-vault src/LiquidityVault.sol), and both pairs
