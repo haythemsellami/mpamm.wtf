@@ -42,6 +42,8 @@ const VAULT_TAKE = {
 };
 
 const HEAD = 118_218_881n;
+/** reads stay five blocks behind the head: the fills tail's finality margin */
+const READ_AT = HEAD - 5n;
 const TS = 1_783_600_000_000;
 
 type ChainBook = { pair: bigint; key: Key };
@@ -103,7 +105,7 @@ describe('Clober with its subgraph down at boot', () => {
   it('drops the Takes that froze the tail on 2026-10-31: the chain says their CHOG/MON book is not the vault\'s', async () => {
     const { decode, reads } = await bootWith({ head: HEAD, books: { [CHOG_MON]: { pair: 0n, key: CHOG_MON_KEY } } });
     expect(await decode({ take: CHOG_TAKES })).toEqual([]);
-    expect(reads).toEqual([{ blockNumber: HEAD, ids: [CHOG_MON] }]); // one read, pinned at the head
+    expect(reads).toEqual([{ blockNumber: READ_AT, ids: [CHOG_MON] }]); // one read, pinned behind the head
   });
 
   it('decodes a vault Take from the chain\'s book key, the same fill the subgraph book gives', async () => {
@@ -128,11 +130,11 @@ describe('Clober with its subgraph down at boot', () => {
   it('a not-the-vault\'s verdict covers Takes up to its block; a later Take is asked again', async () => {
     const { decode, reads, chain } = await bootWith({ head: HEAD, books: { [CHOG_MON]: { pair: 0n, key: CHOG_MON_KEY } } });
     await decode({ take: CHOG_TAKES });
-    await decode({ take: [{ ...CHOG_TAKES[0], blockNumber: HEAD }] });
+    await decode({ take: [{ ...CHOG_TAKES[0], blockNumber: READ_AT }] });
     expect(reads).toHaveLength(1);
     chain.head = HEAD + 10n;
-    expect(await decode({ take: [{ ...CHOG_TAKES[0], blockNumber: HEAD + 1n }] })).toEqual([]);
-    expect(reads.map((r) => r.blockNumber)).toEqual([HEAD, HEAD + 10n]);
+    expect(await decode({ take: [{ ...CHOG_TAKES[0], blockNumber: READ_AT + 1n }] })).toEqual([]);
+    expect(reads.map((r) => r.blockNumber)).toEqual([READ_AT, READ_AT + 10n]);
   });
 
   it('counts a book from the Vault.Open that adopts it, after a not-the-vault\'s verdict', async () => {
@@ -158,17 +160,37 @@ describe('Clober with its subgraph down at boot', () => {
     await expect(decode({ take: CHOG_TAKES })).rejects.toThrow('HTTP request failed');
   });
 
-  it('holds the range when the head has not reached the Take', async () => {
-    const { decode, reads } = await bootWith({ head: 117_814_473n, books: { [CHOG_MON]: { pair: 0n, key: CHOG_MON_KEY } } });
-    await expect(decode({ take: CHOG_TAKES })).rejects.toThrow('head 117814473 is behind Take block 117814474');
+  // A vault verdict is cached for good, so it never comes from a tip block
+  // that can still mutate away (a provisional Vault.Open would stick).
+  it('holds the range until the block five behind the head has reached the Take', async () => {
+    const { decode, reads, chain } = await bootWith({ head: 117_814_478n, books: { [CHOG_MON]: { pair: 0n, key: CHOG_MON_KEY } } });
+    await expect(decode({ take: CHOG_TAKES })).rejects.toThrow('block 117814473 (head - 5) is behind Take block 117814474');
     expect(reads).toEqual([]);
+    chain.head = 117_814_479n;
+    expect(await decode({ take: CHOG_TAKES })).toEqual([]);
+    expect(reads).toEqual([{ blockNumber: 117_814_474n, ids: [CHOG_MON] }]);
   });
 
   it('holds the range when a Vault.Open names a book the chain read says is not the vault\'s', async () => {
     const { decode } = await bootWith({ head: HEAD, books: { [MON_USDC]: { pair: 0n, key: MON_USDC_KEY } } });
     const vaultOpen = { args: { bookIdA: BigInt(MON_USDC), bookIdB: BigInt(MON_USDC_MIRROR) } };
     await expect(decode({ take: [VAULT_TAKE], vaultOpen: [vaultOpen] }))
-      .rejects.toThrow(`vault book ${MON_USDC} has no LiquidityVault.bookPair at block ${HEAD}`);
+      .rejects.toThrow(`vault book ${MON_USDC} has no LiquidityVault.bookPair at block ${READ_AT}`);
+  });
+
+  it('caches nothing from a read it holds on, so the retry still makes the vault book quotable', async () => {
+    // MON/USDC answers first and is in scope; the CHOG/MON answer contradicts its Vault.Open
+    const { decode, adapter, reads, chain } = await bootWith({ head: HEAD, books: {
+      [MON_USDC]: { pair: BigInt(MON_USDC_MIRROR), key: MON_USDC_KEY },
+      [CHOG_MON]: { pair: 0n, key: CHOG_MON_KEY },
+    } });
+    const range = { take: [VAULT_TAKE, CHOG_TAKES[0]], vaultOpen: [{ args: { bookIdA: BigInt(CHOG_MON) } }] };
+    await expect(decode(range)).rejects.toThrow(`vault book ${CHOG_MON} has no LiquidityVault.bookPair`);
+    chain.books[CHOG_MON] = { pair: 1n, key: CHOG_MON_KEY }; // the vault's after all, outside base/stable scope
+    const fills = await decode(range);
+    expect(fills.map((f) => f.market)).toEqual(['MON/USDC']);
+    expect(adapter.quoteMarkets?.()).toEqual(['MON/USDC']);
+    expect(reads.map((r) => r.ids)).toEqual([[MON_USDC, CHOG_MON], [MON_USDC, CHOG_MON]]);
   });
 
   it('holds the range when a vault book has no key on the BookManager', async () => {

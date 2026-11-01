@@ -244,6 +244,12 @@ export async function discoverCloberViaSubgraph(
  *  vault's with its base/stable book (null when outside that scope). */
 export type CloberBookVerdict = { vault: false; atBlock: bigint } | { vault: true; book: CloberBook | null };
 
+/** The fills tail's own finality margin (tailFills; the gas tracker's too):
+ *  Monad state at the tip can still mutate away. A vault verdict is cached for
+ *  good, so one read off a provisional Vault.Open would count that book's
+ *  Takes as vault flow forever. */
+const VERDICT_MARGIN = 5n;
+
 /**
  * Classify books from the chain, so whether a Take is vault flow never waits
  * on the subgraph. The fills tail is ONE cursor for every venue: while decode()
@@ -252,18 +258,19 @@ export type CloberBookVerdict = { vault: false; atBlock: bigint } | { vault: tru
  * held it for as long as Goldsky (404) and Ormi (429) stayed down.
  *
  * LiquidityVault.bookPair(id) is non-zero exactly for the books the vault
- * opened: open() writes it and nothing clears it. Both reads are pinned to
- * the head, which must have reached `minBlock` (the newest Take asked about).
- * A non-vault verdict therefore covers every Take at or before `atBlock`: the
- * vault can still adopt an already-open book later, and a later Take is asked
- * again. A vault book's key (BookManager.getBookKey) never changes.
+ * opened: open() writes it and nothing clears it. Both reads are pinned
+ * VERDICT_MARGIN blocks behind the head, which must have reached `minBlock`
+ * (the newest Take asked about). A non-vault verdict therefore covers every
+ * Take at or before `atBlock`: the vault can still adopt an already-open book
+ * later, and a later Take is asked again. A vault book's key
+ * (BookManager.getBookKey) never changes.
  */
 export async function readCloberBooks(client: PublicClient, ids: readonly string[], minBlock: bigint): Promise<Map<string, CloberBookVerdict>> {
-  const head = await client.getBlockNumber();
-  if (head < minBlock) throw new Error(`head ${head} is behind Take block ${minBlock}`);
+  const at = (await client.getBlockNumber()) - VERDICT_MARGIN;
+  if (at < minBlock) throw new Error(`block ${at} (head - ${VERDICT_MARGIN}) is behind Take block ${minBlock}`);
   const res = await client.multicall({
     allowFailure: false,
-    blockNumber: head,
+    blockNumber: at,
     contracts: ids.flatMap((id) => [
       { address: ADDR.liquidityVault as `0x${string}`, abi: liquidityVaultAbi, functionName: 'bookPair' as const, args: [BigInt(id)] as const },
       { address: ADDR.bookManager as `0x${string}`, abi: bookManagerAbi, functionName: 'getBookKey' as const, args: [BigInt(id)] as const },
@@ -273,7 +280,7 @@ export async function readCloberBooks(client: PublicClient, ids: readonly string
   ids.forEach((id, i) => {
     const pair = res[2 * i] as bigint;
     const key = res[2 * i + 1] as { base: string; unitSize: bigint; quote: string };
-    if (pair === 0n) { out.set(id, { vault: false, atBlock: head }); return; }
+    if (pair === 0n) { out.set(id, { vault: false, atBlock: at }); return; }
     // the vault opens both books before it pairs them, so a zero key is a bad read
     if (key.unitSize === 0n) throw new Error(`vault book ${id} has no BookManager key`);
     out.set(id, { vault: true, book: cloberBookFromOpen({ id, base: key.base, quote: key.quote, unitSize: key.unitSize }, new Set([id])) });
@@ -701,14 +708,15 @@ export function createCloberVaultAdapter(): VenueAdapter {
       }
       if (unknown.size) {
         const verdicts = await readCloberBooks(ctx.client, [...unknown], newest);
+        // Check every verdict before caching any. A throw part-way would leave
+        // a book cached with `markets` never rebuilt, and the retry skips it.
+        for (const [id, v] of verdicts) {
+          // a Vault.Open already named it: that read is behind the log, not an answer
+          if (!v.vault && vault.has(id)) throw new Error(`vault book ${id} has no LiquidityVault.bookPair at block ${v.atBlock}`);
+        }
         let changed = false;
         for (const [id, v] of verdicts) {
-          if (!v.vault) {
-            // a Vault.Open already named it: that read is behind the log, not an answer
-            if (vault.has(id)) throw new Error(`vault book ${id} has no LiquidityVault.bookPair at block ${v.atBlock}`);
-            notVaultThrough.set(id, v.atBlock);
-            continue;
-          }
+          if (!v.vault) { notVaultThrough.set(id, v.atBlock); continue; }
           vault.add(id);
           notVaultThrough.delete(id);
           if (v.book) { books.set(id, v.book); ignoredVaultBooks.delete(id); changed = true; }
