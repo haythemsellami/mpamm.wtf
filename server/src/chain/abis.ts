@@ -10,6 +10,8 @@ export const bookManagerAbi = parseAbi([
   'event Take(uint192 indexed bookId, address indexed user, int24 tick, uint64 unit)',
   'event Open(uint192 indexed id, address indexed base, address indexed quote, uint64 unitSize, uint24 makerPolicy, uint24 takerPolicy, address hooks)',
   'event Make(uint192 indexed bookId, address indexed user, int24 tick, uint256 orderIndex, uint64 unit, address provider)',
+  // a book's immutable key; all zero for an id that was never opened
+  'function getBookKey(uint192 id) view returns ((address base, uint64 unitSize, address quote, uint24 makerPolicy, address hooks, uint24 takerPolicy))',
 ]);
 
 // Clober V2 — BookViewer (quoting)
@@ -26,6 +28,9 @@ export const routerGatewayAbi = parseAbi([
 // Clober V2 — LiquidityVault (propAMM-cut tagging)
 export const liquidityVaultAbi = parseAbi([
   'event Open(bytes32 indexed key, uint192 indexed bookIdA, uint192 indexed bookIdB, bytes32 salt, address strategy)',
+  // a vault book's mirror, 0 for any other book: written only by open(), never
+  // cleared (clober-dex/clober-liquidity-vault src/LiquidityVault.sol)
+  'function bookPair(uint192 bookId) view returns (uint192)',
 ]);
 
 // Clober V2 — SimpleOracleStrategy (clober-dex/clober-liquidity-vault
