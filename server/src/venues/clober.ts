@@ -130,10 +130,17 @@ export function cloberBookFromOpen(a: any, vault: Set<string>): CloberBook | nul
   };
 }
 
+/** The fills tail's own finality margin (tailFills; the gas tracker's too):
+ *  Monad logs and state at the tip can still mutate away. A book learned as
+ *  the vault's is cached for good, so a provisional Vault.Open, seen in a log
+ *  or a read, would count that book's Takes as vault flow forever. */
+const FINALITY_MARGIN = 5n;
+
 /** Build a book cache + vault set from recent Open logs, then assemble the
- *  base/stable markets we can quote. `lookback` blocks back from head. */
+ *  base/stable markets we can quote. `lookback` blocks back from
+ *  FINALITY_MARGIN behind the head: the adapter caches these books for fills. */
 export async function discoverClober(client: PublicClient, getLogs: AdapterContext['getLogs'], lookback = 4000): Promise<{ books: Map<string, CloberBook>; markets: CloberMarket[]; vault: Set<string> }> {
-  const head = await client.getBlockNumber();
+  const head = (await client.getBlockNumber()) - FINALITY_MARGIN;
   const from = head > BigInt(lookback) ? head - BigInt(lookback) : 0n;
   const books = new Map<string, CloberBook>();
   const vault = new Set<string>();
@@ -244,12 +251,6 @@ export async function discoverCloberViaSubgraph(
  *  vault's with its base/stable book (null when outside that scope). */
 export type CloberBookVerdict = { vault: false; atBlock: bigint } | { vault: true; book: CloberBook | null };
 
-/** The fills tail's own finality margin (tailFills; the gas tracker's too):
- *  Monad state at the tip can still mutate away. A vault verdict is cached for
- *  good, so one read off a provisional Vault.Open would count that book's
- *  Takes as vault flow forever. */
-const VERDICT_MARGIN = 5n;
-
 /**
  * Classify books from the chain, so whether a Take is vault flow never waits
  * on the subgraph. The fills tail is ONE cursor for every venue: while decode()
@@ -259,15 +260,15 @@ const VERDICT_MARGIN = 5n;
  *
  * LiquidityVault.bookPair(id) is non-zero exactly for the books the vault
  * opened: open() writes it and nothing clears it. Both reads are pinned
- * VERDICT_MARGIN blocks behind the head, which must have reached `minBlock`
+ * FINALITY_MARGIN blocks behind the head, which must have reached `minBlock`
  * (the newest Take asked about). A non-vault verdict therefore covers every
  * Take at or before `atBlock`: the vault can still adopt an already-open book
  * later, and a later Take is asked again. A vault book's key
  * (BookManager.getBookKey) never changes.
  */
 export async function readCloberBooks(client: PublicClient, ids: readonly string[], minBlock: bigint): Promise<Map<string, CloberBookVerdict>> {
-  const at = (await client.getBlockNumber()) - VERDICT_MARGIN;
-  if (at < minBlock) throw new Error(`block ${at} (head - ${VERDICT_MARGIN}) is behind Take block ${minBlock}`);
+  const at = (await client.getBlockNumber()) - FINALITY_MARGIN;
+  if (at < minBlock) throw new Error(`block ${at} (head - ${FINALITY_MARGIN}) is behind Take block ${minBlock}`);
   const res = await client.multicall({
     allowFailure: false,
     blockNumber: at,

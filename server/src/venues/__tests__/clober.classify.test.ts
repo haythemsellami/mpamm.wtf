@@ -47,6 +47,7 @@ const READ_AT = HEAD - 5n;
 const TS = 1_783_600_000_000;
 
 type ChainBook = { pair: bigint; key: Key };
+type OpenLogs = { vaultOpen: any[]; bmOpen: any[] };
 /** Both subgraph endpoints down, exactly as on 2026-10-31. */
 function subgraphDown() {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => (url === GOLDSKY
@@ -56,7 +57,7 @@ function subgraphDown() {
 
 /** An RPC client answering bookPair/getBookKey from `chain.books`; records
  *  each multicall's block and the books it asked about. */
-function chainWith(chain: { head: bigint; books: Record<string, ChainBook>; fail?: Error }) {
+function chainWith(chain: { head: bigint; books: Record<string, ChainBook>; fail?: Error; logs?: OpenLogs }) {
   const reads: Array<{ blockNumber: bigint; ids: string[] }> = [];
   const client = {
     getBlockNumber: async () => chain.head,
@@ -80,17 +81,24 @@ async function bootWith(chain: Parameters<typeof chainWith>[0]) {
   subgraphDown();
   const { client, reads } = chainWith(chain);
   const notes: string[] = [];
+  const scans: bigint[] = [];
   const ctx = {
     config: { subgraphUrl: GOLDSKY },
     note: (code: string, msg: string) => notes.push(`${code}: ${msg}`),
     client,
-    getLogs: async () => { throw new Error('no getLogs in this test'); },
+    // the recent-Open fallback's scans, answered from `chain.logs` within the asked range
+    getLogs: async ({ address, fromBlock, toBlock }: any) => {
+      if (!chain.logs) throw new Error('no getLogs in this test');
+      scans.push(toBlock);
+      const src = address === ADDR.liquidityVault ? chain.logs.vaultOpen : chain.logs.bmOpen;
+      return src.filter((l) => l.blockNumber >= fromBlock && l.blockNumber <= toBlock);
+    },
   } as any;
   const adapter = createCloberVaultAdapter();
   await adapter.discover(ctx);
   const decode = (bundle: { take?: any[]; vaultOpen?: any[]; bmOpen?: any[] }) =>
     adapter.decode(ctx, { take: [], bmOpen: [], vaultOpen: [], router: [], ...bundle }, () => TS, new Set());
-  return { adapter, decode, reads, notes, chain };
+  return { adapter, decode, reads, notes, chain, scans };
 }
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -196,6 +204,31 @@ describe('Clober with its subgraph down at boot', () => {
   it('holds the range when a vault book has no key on the BookManager', async () => {
     const { decode } = await bootWith({ head: HEAD, books: { [MON_USDC]: { pair: BigInt(MON_USDC_MIRROR), key: NO_KEY } } });
     await expect(decode({ take: [VAULT_TAKE] })).rejects.toThrow(`vault book ${MON_USDC} has no BookManager key`);
+  });
+
+  /** The vault opening MON/USDC and its mirror at `block` (Vault.Open +
+   *  BookManager.Open), as the recent-Open fallback finds them. */
+  const opensAt = (block: bigint): OpenLogs => ({
+    vaultOpen: [{ args: { bookIdA: BigInt(MON_USDC), bookIdB: BigInt(MON_USDC_MIRROR) }, blockNumber: block }],
+    bmOpen: [{ args: { id: BigInt(MON_USDC), ...MON_USDC_KEY }, blockNumber: block }],
+  });
+
+  it('learns a vault book from a finalized Open in the recent-Open fallback', async () => {
+    const { adapter, decode, reads, scans } = await bootWith({ head: HEAD, books: {}, logs: opensAt(READ_AT) });
+    expect(scans).toEqual([READ_AT, READ_AT]);
+    expect(adapter.quoteMarkets?.()).toEqual(['MON/USDC']);
+    expect(await decode({ take: [{ ...VAULT_TAKE, blockNumber: READ_AT }] })).toHaveLength(1);
+    expect(reads).toEqual([]);
+  });
+
+  // The fallback's books are cached for fills, so it never scans the tip. An
+  // Open there can still mutate away: if it is retracted, the book is not the
+  // vault's, and its Takes must not count.
+  it('never caches an Open from the tip in the fallback, so a retracted one counts nothing', async () => {
+    const { adapter, decode, reads } = await bootWith({ head: HEAD, books: { [MON_USDC]: { pair: 0n, key: MON_USDC_KEY } }, logs: opensAt(HEAD - 2n) });
+    expect(adapter.quoteMarkets?.()).toEqual([]);
+    expect(await decode({ take: [{ ...VAULT_TAKE, blockNumber: READ_AT }] })).toEqual([]);
+    expect(reads).toEqual([{ blockNumber: READ_AT, ids: [MON_USDC] }]);
   });
 
   it('a range without a Take reads nothing', async () => {
