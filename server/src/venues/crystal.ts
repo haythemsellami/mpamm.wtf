@@ -51,12 +51,14 @@ import { createQuoteOutageLatch, quoteOutageReason, type MulticallOutcome, type 
  *           taker fee applied), so no client-side book model. The vault has
  *           no quote view of its own. worstPrice bounds the walk to
  *           ±PER_SIDE_BAND_BPS of the pair mid (see there).
- *   gas:    the keeper is the vault's immutable owner() 0xaf9ed4D3…; it sends
- *           only `execute` (0x61d59c2d) txs, only to the vault (1,500-block
- *           sample: 359 txs, ~0.24/block, none reverted, 250k–550k limits).
- *           The vault emits nothing itself, and the OrdersUpdated that Crystal
- *           logs for it is shared with every maker on every market, so it is
- *           'blocks' mode keyed on the vault.
+ *   gas:    the keeper is the vault's immutable owner() 0xaf9ed4D3…; it
+ *           reprices with `execute` (0x61d59c2d), until 2026-11-07 sent only
+ *           straight to the vault (1,500-block sample: 359 txs, ~0.24/block,
+ *           none reverted, 250k–550k limits). The vault emits nothing itself,
+ *           and the OrdersUpdated that Crystal logs for it is shared with
+ *           every maker on every market, so it is 'blocks' mode keyed on the
+ *           vault. Since 2026-11-07 the same pushes arrive through FastLane —
+ *           see CRYSTAL_KEEPER.
  *
  * The vault can only trade ITS market, whose WMON/USDC tokens are immutable,
  * and `changeMarket()` can only move it to a new market for the same pair. So
@@ -78,6 +80,29 @@ const CRYSTAL_VENUE: VenueMeta = { id: 'crystal', name: 'Crystal Vault', color: 
 
 const CRYSTAL = '0x508254c838b2e936b0631440c5c6e3ab3a4a98bd' as const;
 const CRYSTAL_VAULT = '0x020f863a6212a9ed5caa73a087e62acd371b7334' as const;
+
+/** FASTLANE ROUTE: on 2026-11-07 the keeper EOA delegated itself to
+ *  0xa8357c99… (EIP-7702, type-4 tx 0x102a445e…98a7, block 120,108,824,
+ *  06:30:42 UTC). Its last direct `execute` was 05:33:01; from 07:52:22 every
+ *  push is FastLane's `flashExecutionBid` (sel 0x0c7abd22, the route Hanji's
+ *  quoters take) with searcherToAddress = the keeper's OWN account: handler →
+ *  keeper.fastLaneCall (0xb3839cec) → keeper 0x74420f4c → vault.execute.
+ *  tx.to is the shared handler, so a vault-keyed source matches nothing: the
+ *  series stored 4,040 txs for 11-07 and no row from 11-08, against 51,770
+ *  keeper txs (its nonce) and ~3.9k MON on 11-08 on chain — a 950,000 limit
+ *  per relayed push, 200,000 direct.
+ *  The calldata names the vault only inside searcherCallData, off the word
+ *  grid, so the route is matched on word 5 = the keeper — which makes the
+ *  keeper the routed destination. Its code first exists at the delegation
+ *  block, so listing it rebuilds from 2026-11-07 and keeps the days before
+ *  (gas.ts reconcileSourceChange). Sampled 11-07 08:00 → 11-09 04:00: 98 of
+ *  98 keeper txs took this route and no other sender named the keeper; the
+ *  first minutes' bids reverted log-less, still paying the limit. Sent
+ *  straight to the keeper are only its 7702 setup (3 txs on 11-07) and MON
+ *  top-ups (15 in its life, all earlier) — noise beside ~50k pushes a day.
+ *  Examples: tx 0xa9f21b2d…7526, reverted 0xbac8e3e6…c905. */
+const CRYSTAL_KEEPER = '0xaf9ed4d3153d821046885b4aea0f778addbb3de5' as const;
+const FASTLANE_AUCTION_HANDLER = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58' as const;
 
 const BASE_TOK = 'WMON';
 const QUOTE_TOK = 'USDC';
@@ -241,8 +266,20 @@ export function createCrystalAdapter(): VenueAdapter {
     // swapExact* entry points all live on the core contract)
     entryPoints: () => [{ address: CRYSTAL }],
 
+    // One keeper, two routes: `execute` sent straight to the vault, and the
+    // same push relayed by FastLane to the keeper's own account (see
+    // CRYSTAL_KEEPER). The relay binds to the keeper ALONE — on the vault's
+    // source its token would date the change by the vault's creation, which
+    // precedes sinceUtc, and re-scan the lifetime.
     gasSources() {
-      return [{ mode: 'blocks' as const, address: CRYSTAL_VAULT }];
+      return [
+        { mode: 'blocks' as const, address: CRYSTAL_VAULT },
+        {
+          mode: 'blocks' as const,
+          address: CRYSTAL_KEEPER,
+          relays: [{ address: FASTLANE_AUCTION_HANDLER, selector: '0x0c7abd22' as const, targetWord: 5 }],
+        },
+      ];
     },
 
     async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {

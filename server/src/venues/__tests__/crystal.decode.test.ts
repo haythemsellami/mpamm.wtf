@@ -64,7 +64,8 @@ describe('Crystal Vault discovery', () => {
     expect(src.address).toBe(CRYSTAL);
     expect((src.events as any[]).map((e) => toEventSelector(e)).sort()).toEqual([FX.logs.buy[0].topics[0], FX.logs.buy[1].topics[0]].sort());
     expect(a.quoteMarkets!()).toEqual(['MON/USDC']);
-    expect(a.gasSources!()).toEqual([{ mode: 'blocks', address: VAULT }]);
+    // the direct route; the keeper's FastLane route is pinned in crystal.gas.test.ts
+    expect(a.gasSources!()[0]).toEqual({ mode: 'blocks', address: VAULT });
     expect(a.entryPoints!()).toEqual([{ address: CRYSTAL }]);
   });
 });
