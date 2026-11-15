@@ -9,6 +9,7 @@ import { createThogammAdapter } from './thogamm.js';
 import { createCapricornAdapter } from './capricorn.js';
 import { createCrystalAdapter } from './crystal.js';
 import { createWoofiAdapter } from './woofi.js';
+import { createBtrAdapter } from './btr.js';
 import { createUniswapAdapter } from './uniswap.js';
 import { createReferenceRegistry } from './reference.js';
 
@@ -31,6 +32,7 @@ const ALL_ADAPTERS: VenueAdapter[] = [
   createCapricornAdapter(),
   createCrystalAdapter(),
   createWoofiAdapter(),
+  createBtrAdapter(),
   createUniswapAdapter(), // baseline (quote-only) — the standard-DEX band
 ];
 
