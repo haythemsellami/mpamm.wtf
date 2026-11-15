@@ -322,11 +322,9 @@ export function createBtrAdapter(): VenueAdapter {
       return [{ key: 'pool', address: BTR_POOL, events: [event('Swapped'), event('Upgraded')], kind: 'fills' as const }];
     },
 
-    // Takers enter through the pool directly (swap_qe) or through BTR's router.
-    entryPoints: () => [
-      { address: BTR_POOL },
-      { address: '0x6131b5fae19ea4f9d964eac0408e4408b66337b5', router: 'BTR' },
-    ],
+    // Takers call the pool directly (swap_qe); BTR has no router of its own, so
+    // an aggregator's router is attributed by the core, not claimed here.
+    entryPoints: () => [{ address: BTR_POOL }],
 
     // gasSources omitted on purpose: BTR's keepers push marks with log-less
     // calls to a separate oracle contract whose destination and cadence are
