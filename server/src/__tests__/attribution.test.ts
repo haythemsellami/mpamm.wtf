@@ -171,6 +171,20 @@ describe('FillAttributor', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('asks the given clients in order, and only falls to the next for a tx the first cannot find', async () => {
+    // a gap-fill read from the archive pool: the hot node may have pruned the tx
+    const archiveCalls: string[] = [], hotCalls: string[] = [];
+    const archive = clientFor({ '0x9': POOL, '0xa': 'FAIL' }, archiveCalls);
+    const hot = clientFor({ '0x9': RELAY, '0xa': RELAY }, hotCalls);
+    const a = new FillAttributor(hot as any, [fakeAdapter()]);
+    const found = fill('0x9'), pruned = fill('0xa');
+    await a.attribute([found, pruned], [archive as any, hot as any]);
+    expect(found.category).toBe('DIRECT');   // the archive's answer, not the hot client's
+    expect(pruned.router).toBe('Relay');     // the archive failed twice, the hot client answered
+    expect(archiveCalls).toEqual(['0x9', '0xa', '0xa']);
+    expect(hotCalls).toEqual(['0xa']);
+  });
+
   it('an adapter without entryPoints still gets registry brands', async () => {
     const bare = { ...fakeAdapter(), entryPoints: undefined } as VenueAdapter;
     const a = new FillAttributor(clientFor({ '0x8': RELAY }) as any, [bare]);

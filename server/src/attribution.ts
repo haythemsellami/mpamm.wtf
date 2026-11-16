@@ -166,8 +166,13 @@ export class FillAttributor {
   ) {}
 
   /** Enrich UNKNOWN fills in place. Never throws; unresolved fills are left
-   *  exactly as the adapter emitted them. */
-  async attribute(fills: Fill[]): Promise<void> {
+   *  exactly as the adapter emitted them.
+   *
+   *  `clients` is tried in order per tx and defaults to the hot client. A
+   *  caller that read the fills from the archive pool passes that pool first:
+   *  a pruning fullnode answers "not found" for a tx older than its retention,
+   *  which would leave every fill of a gap-fill UNKNOWN. */
+  async attribute(fills: Fill[], clients: readonly Pick<PublicClient, 'getTransaction'>[] = [this.client]): Promise<void> {
     const targets = fills.filter((f) => f.category === 'UNKNOWN');
     if (!targets.length) return;
 
@@ -186,12 +191,14 @@ export class FillAttributor {
     const hashes = [...new Set(targets.map((f) => f.txHash))].filter((h) => !this.cache.has(h));
     for (let i = 0; i < hashes.length; i += LOOKUP_POOL) {
       await Promise.all(hashes.slice(i, i + LOOKUP_POOL).map(async (h) => {
-        for (let r = 0; r < 2; r++) {
-          try {
-            const t = await this.client.getTransaction({ hash: h as `0x${string}` });
-            this.cache.set(h, { to: String(t.to ?? '').toLowerCase(), from: String(t.from).toLowerCase() });
-            return;
-          } catch { await new Promise((res) => setTimeout(res, 120 * (r + 1))); }
+        for (const client of clients) {
+          for (let r = 0; r < 2; r++) {
+            try {
+              const t = await client.getTransaction({ hash: h as `0x${string}` });
+              this.cache.set(h, { to: String(t.to ?? '').toLowerCase(), from: String(t.from).toLowerCase() });
+              return;
+            } catch { await new Promise((res) => setTimeout(res, 120 * (r + 1))); }
+          }
         }
         this.cache.set(h, null); // looked up and failed — don't retry this pass
       }));

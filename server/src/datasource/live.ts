@@ -46,6 +46,16 @@ const REALTIME_WINDOW_MS = 60_000;
 
 /** Max blocks one tail cycle fetches/decodes/commits (see tailFills). */
 const TAIL_WINDOW_BLOCKS = 1_000;
+/** A tail window whose END trails the hot head by more than this is a DEEP
+ *  read (tailWindowIsDeep). The hot pool is chosen for distance to the tip and
+ *  promises nothing about retention, so only the last few minutes are its job:
+ *  one window ≈ 5 min, which a deploy's restart gap stays inside and a healthy
+ *  archive's head is always past. */
+const TAIL_DEEP_LAG_BLOCKS = TAIL_WINDOW_BLOCKS;
+/** Block-timestamp reads sent to the archive pool at once for one tail window.
+ *  Bounded because the gas tracker and the deep replays share that node; the
+ *  hot path stays unbounded (at the tip it is one or two blocks per cycle). */
+const TAIL_ARCHIVE_BLOCK_READS = 32;
 /** The in-memory recent-fill ring (`/api/markets` tape, ingest dedup window). */
 const FILL_RING_SIZE = 400;
 
@@ -443,6 +453,47 @@ export function checkArchivePending(
 export function shouldGapFill(lpb: string | undefined, head: bigint, maxBlocks: number): boolean {
   if (!lpb) return false; // first boot — nothing to resume, not a loss
   return head - BigInt(lpb) <= BigInt(maxBlocks);
+}
+
+/** Which pool a tail window belongs to: `hot` reads the tip, `archive` a gap. */
+export type TailPool = 'hot' | 'archive';
+
+/**
+ * Whether a tail window [.., to] is a DEEP read, given the hot head.
+ *
+ * The tail read every window from the hot pool, whatever its age. A gap older
+ * than the hot node holds is answered with a JSON-RPC error, which by design
+ * never trips failover (chain/failover.ts), so the shared cursor holds for
+ * good. On 2026-11-12 the hot pool was unreachable for 31 h; after it reported
+ * recovered, every source's read of the range it had missed still failed on
+ * each cycle with no failover, and the tail stayed at the outage's first block
+ * while the archive pool — healthy throughout — was never asked. ~21.6k fills
+ * (≈$1.9M) were missing a day later with the header reading "RPC OK". (The
+ * note raised then carried no reason, which is why rpcFailureReason exists.)
+ *
+ * So a window that is not at the tip goes to the pool chosen for retention.
+ * Pure so the boundary is unit-testable (tail-archive.test.ts).
+ */
+export function tailWindowIsDeep(to: bigint, hotHead: bigint): boolean {
+  return hotHead - to > BigInt(TAIL_DEEP_LAG_BLOCKS);
+}
+
+/**
+ * Why an RPC read failed, in the node's own words, for a held-cursor note.
+ *
+ * viem's `message` carries the request body and URL: the URL is a secret
+ * (scrubNote strips it) and the body names the block range, which moves with
+ * the head while a window is uncapped. `noteOnce` dedupes VERBATIM, so a
+ * reason that changes per cycle is a new note twice a second. `details` is the
+ * node's answer alone, and long digit runs / hex words are folded so the
+ * reason names a class of failure rather than one request.
+ */
+export function rpcFailureReason(e: unknown): string {
+  const err = (e ?? {}) as { details?: unknown; shortMessage?: unknown; message?: unknown; status?: unknown };
+  const text = [err.details, err.shortMessage, err.message].find((x): x is string => typeof x === 'string' && x.trim() !== '') ?? String(e);
+  const line = text.trim().split('\n')[0].replace(/0x[0-9a-fA-F]{4,}/g, '0x…').replace(/\d{5,}/g, '#').trim();
+  const status = typeof err.status === 'number' ? `HTTP ${err.status}: ` : '';
+  return (status + line).slice(0, 160);
 }
 
 /** Gap-fill catch-up lifecycle for the live tail (family B of #6).
@@ -1406,6 +1457,9 @@ const archiveRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read
 /** The same guarantee on the HOT pool, for the today re-read: a result served
  *  across a failover is refused (and retried) rather than mixed. */
 const hotRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, hotUnavailable, rpcGeneration);
+/** getLogsChunked's fetch for a deep window: each chunk is an archive read. */
+const archiveLogs = (p: { address: unknown; fromBlock: bigint; toBlock: bigint; events?: unknown }): Promise<unknown[]> =>
+  archiveRead(() => archiveClient.getLogs(p as any) as Promise<unknown[]>);
 
 async function holdWhileDegraded(): Promise<boolean> {
   const wasUnavailable = archiveUnavailable();
@@ -1471,6 +1525,24 @@ export class LiveDataSource extends BaseSource {
         },
       };
       this.ctxCache.set(a, ctx);
+    }
+    return ctx;
+  }
+  /** Decode context for a tail window read from the ARCHIVE pool. decode() may
+   *  read chain state AT the blocks it is decoding (Clober asks whether a book
+   *  was vault-paired one block before a Take), and a hot node that could not
+   *  serve the window's logs cannot serve its state either. Everything but the
+   *  two chain handles is the adapter's ordinary context. */
+  private archiveCtxCache = new WeakMap<VenueAdapter, AdapterContext>();
+  private archiveCtxFor(a: VenueAdapter): AdapterContext {
+    let ctx = this.archiveCtxCache.get(a);
+    if (!ctx) {
+      ctx = {
+        ...this.ctxFor(a),
+        client: archiveClient,
+        getLogs: (params, chunk, fetchLogs = archiveLogs) => getLogsChunked(params, chunk, fetchLogs),
+      };
+      this.archiveCtxCache.set(a, ctx);
     }
     return ctx;
   }
@@ -4199,12 +4271,6 @@ export class LiveDataSource extends BaseSource {
     // exactly TAIL_WINDOW_BLOCKS blocks, not one more.
     const to = head - from < BigInt(TAIL_WINDOW_BLOCKS) ? head : from + BigInt(TAIL_WINDOW_BLOCKS) - 1n;
 
-    // Fetch every adapter's declared log sources into a per-adapter bundle. Track
-    // whether any REQUIRED (fill-producing) source failed: if so we must NOT
-    // advance the cursor, or a transient RPC error would look like "no logs" and
-    // silently lose those fills forever (review #1). Only attribution sources
-    // are tolerated on failure; state/discovery sources are cursor-critical.
-    let requiredFailed = false;
     // Gather every adapter's sources BEFORE any fetch starts. logSources() is
     // the fail-closed gate: it throws while discovery hasn't succeeded, and the
     // cursor must hold. Called inside the fetch map below, one adapter's throw
@@ -4213,71 +4279,35 @@ export class LiveDataSource extends BaseSource {
     // held range re-fetched on every retry. That allocation spiral OOM-killed
     // prod within hours of a persistently undiscovered adapter (2026-09-16).
     const declared = ADAPTERS.map((a) => ({ a, sources: a.logSources() }));
-    const perAdapter = await Promise.all(declared.map(async ({ a, sources }) => {
-      const bundle: LogBundle = {};
-      const all: any[] = [];
-      const failed = new Set<string>(); // source keys whose fetch failed (surfaced to decode)
-      await Promise.all(sources.map(async (s) => {
-        // outside its declared span a source cannot have logs: no fetch at all
-        const span = sourceSpan(s, from, to);
-        if (!span) { bundle[s.key] = []; return; }
-        try {
-          const logs = (await getLogsChunked({ address: s.address, fromBlock: span.from, toBlock: span.to, events: s.events as any })) as any[];
-          bundle[s.key] = logs;
-          all.push(...logs);
-        } catch {
-          bundle[s.key] = [];
-          failed.add(s.key);
-          // 'fills' + 'state' sources hold the cursor; only 'attribution' is tolerated.
-          if (s.kind !== 'attribution') {
-            requiredFailed = true;
-            this.noteOnce('venue.source.failed', `${a.venues()[0]?.name ?? 'venue'} log source '${s.key}' failed — holding cursor, retrying`, this.vidOf(a));
-          }
-        }
-      }));
-      return { a, bundle, all, failed };
-    }));
 
-    // ATOMIC (review #1): if any required (fills/state) source failed, skip the
-    // ENTIRE cycle — do NOT resolve timestamps, decode, mutate adapter state,
-    // ingest, emit, or advance the cursor. The identical range is re-tailed next
-    // cycle once every required source is back, so a fill is never partially
-    // decoded, and dedupe (countedIds) is not relied on across a held range.
-    if (requiredFailed) return;
-
-    // resolve block timestamps once for every block that carries a log (audit B2).
-    const blocks = new Set<bigint>();
-    for (const { all } of perAdapter) for (const l of all) blocks.add(l.blockNumber);
-    let blockTs: Map<string, number>;
-    try {
-      blockTs = await this.blockTimes(blocks);
-    } catch (e) {
-      this.noteOnce('tail.timestamps.failed', `block timestamp lookup failed — holding cursor, retrying: ${(e as Error).message}`);
-      return;
+    // ONE pool per window (tailWindowIsDeep): a gap is read where history
+    // lives, the tip where the head is freshest. The archive attempt is an
+    // addition, never a replacement: whatever it cannot do — lagging, failed
+    // over, throttled, or a decode read it will not answer — falls through to
+    // the hot read below, which is the whole of the previous behaviour. So the
+    // worst this can do is what the tail always did.
+    let fresh: Fill[] | null = null;
+    let pool: TailPool = 'hot';
+    if (tailWindowIsDeep(to, head) && await this.archiveServesTail(to)) {
+      fresh = await this.decodeTailWindow(declared, from, to, 'archive');
+      this.tailArchiveOutcome(fresh !== null);
+      if (fresh) pool = 'archive';
     }
-    const tsOf = (bn: bigint) => {
-      const ts = blockTs.get(String(bn));
-      if (ts == null) throw new Error(`missing block timestamp for ${bn}`);
-      return ts;
-    };
-
-    const fresh: Fill[] = [];
-    let decodeFailed = false;
-    for (const { a, bundle, failed } of perAdapter) {
-      try { fresh.push(...this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, failed), 'fill')); }
-      catch (e) {
-        decodeFailed = true;
-        this.noteOnce('venue.decode.failed', `${a.venues()[0]?.name ?? 'venue'} decode error — holding cursor, retrying: ${(e as Error).message}`, this.vidOf(a));
-      }
+    fresh ??= await this.decodeTailWindow(declared, from, to, 'hot');
+    // ATOMIC (review #1): a window that could not be read and decoded in full
+    // changes NOTHING — no ingest, no emit, no cursor. The identical range is
+    // re-tailed next cycle, so a fill is never partially decoded, and dedupe
+    // (countedIds) is not relied on across a held range.
+    if (!fresh) return;
+    if (pool === 'archive') {
+      this.noteOnce('tail.archive', `tail is more than ${TAIL_DEEP_LAG_BLOCKS} blocks behind the head — reading the gap from the archive pool`);
     }
-    // Decode is cursor-critical too: if an adapter cannot decode this range, do
-    // not count any fills from it and do not advance. The exact range is retried.
-    if (decodeFailed) return;
 
     fresh.sort((a, b) => a.blockNumber - b.blockNumber);
     // best-effort label enrichment (UNKNOWN → DIRECT / Router - X). Never
     // cursor-critical: a lookup failure leaves the adapter's honest UNKNOWN.
-    try { await this.attributor.attribute(fresh); } catch { /* labels only */ }
+    // A gap's transactions are asked of the pool that served its logs first.
+    try { await this.attributor.attribute(fresh, pool === 'archive' ? [archiveClient, publicClient] : undefined); } catch { /* labels only */ }
     for (const f of fresh) this.ingest(f);
     // Publish the cursor only after every decoded fill has landed in memory.
     // backgroundHistory waits on this value before applying authoritative
@@ -4292,13 +4322,127 @@ export class LiveDataSource extends BaseSource {
     });
   }
 
-  /** Block timestamps (ms) for the blocks that carry logs (audit B2). */
-  private async blockTimes(blocks: Set<bigint>): Promise<Map<string, number>> {
-    const m = new Map<string, number>();
-    await Promise.all([...blocks].map(async (bn) => {
-      const b = await publicClient.getBlock({ blockNumber: bn });
-      m.set(String(bn), Number(b.timestamp) * 1000);
+  /**
+   * Read and decode ONE tail window from ONE pool: every source's logs, the
+   * timestamps of the blocks that carry them, then each adapter's decode.
+   * Returns the window's fills, or null when any cursor-critical step failed
+   * (noted, with the pool and the node's reason). Nothing is ingested here.
+   *
+   * Cursor-critical means: a 'fills' or 'state' log source (only 'attribution'
+   * is tolerated on failure — a transient RPC error must never read as "no
+   * logs here" and lose those fills for good, review #1), the timestamps, and
+   * decode itself.
+   */
+  private async decodeTailWindow(
+    declared: ReadonlyArray<{ a: VenueAdapter; sources: LogSource[] }>, from: bigint, to: bigint, pool: TailPool,
+  ): Promise<Fill[] | null> {
+    const deep = pool === 'archive';
+    // what a failure on this pool does next, for the note
+    const on = deep ? ' on the archive pool' : '';
+    const next = deep ? 'trying the hot pool' : 'holding cursor, retrying';
+    let requiredFailed = false;
+    const perAdapter = await Promise.all(declared.map(async ({ a, sources }) => {
+      const bundle: LogBundle = {};
+      const all: any[] = [];
+      const failed = new Set<string>(); // source keys whose fetch failed (surfaced to decode)
+      await Promise.all(sources.map(async (s) => {
+        // outside its declared span a source cannot have logs: no fetch at all
+        const span = sourceSpan(s, from, to);
+        if (!span) { bundle[s.key] = []; return; }
+        const range = { address: s.address, fromBlock: span.from, toBlock: span.to, events: s.events as any };
+        try {
+          const logs = (await (deep ? getLogsChunked(range, undefined, archiveLogs) : getLogsChunked(range))) as any[];
+          bundle[s.key] = logs;
+          all.push(...logs);
+        } catch (e) {
+          bundle[s.key] = [];
+          failed.add(s.key);
+          if (s.kind !== 'attribution') {
+            requiredFailed = true;
+            this.noteOnce('venue.source.failed', `${a.venues()[0]?.name ?? 'venue'} log source '${s.key}' failed${on} — ${next}: ${rpcFailureReason(e)}`, this.vidOf(a));
+          }
+        }
+      }));
+      return { a, bundle, all, failed };
     }));
+    // before timestamps and decode: a partial bundle must not mutate adapter state
+    if (requiredFailed) return null;
+
+    // resolve block timestamps once for every block that carries a log (audit B2).
+    const blocks = new Set<bigint>();
+    for (const { all } of perAdapter) for (const l of all) blocks.add(l.blockNumber);
+    let blockTs: Map<string, number>;
+    try {
+      blockTs = await this.blockTimes(blocks, pool);
+    } catch (e) {
+      this.noteOnce('tail.timestamps.failed', `block timestamp lookup failed${on} — ${next}: ${rpcFailureReason(e)}`);
+      return null;
+    }
+    const tsOf = (bn: bigint) => {
+      const ts = blockTs.get(String(bn));
+      if (ts == null) throw new Error(`missing block timestamp for ${bn}`);
+      return ts;
+    };
+
+    const fresh: Fill[] = [];
+    let decodeFailed = false;
+    for (const { a, bundle, failed } of perAdapter) {
+      try { fresh.push(...this.ownVenues(a, await a.decode(deep ? this.archiveCtxFor(a) : this.ctxFor(a), bundle, tsOf, failed), 'fill')); }
+      catch (e) {
+        decodeFailed = true;
+        this.noteOnce('venue.decode.failed', `${a.venues()[0]?.name ?? 'venue'} decode error${on} — ${next}: ${(e as Error).message}`, this.vidOf(a));
+      }
+    }
+    // Decode is cursor-critical too: if an adapter cannot decode this range, do
+    // not count any fills from it and do not advance. The exact range is retried.
+    return decodeFailed ? null : fresh;
+  }
+
+  /** Whether the archive pool can serve a deep window ending at `to` right
+   *  now: a dedicated pool (shared pools ARE the hot read), on its primary,
+   *  out of the back-off a failed attempt set, and with a head at or past the
+   *  window. The head check is the one that matters for correctness — a node
+   *  asked for a range beyond its head can answer "no logs", and an empty
+   *  answer consumes the cursor. Any "no" just leaves the window to the hot
+   *  pool, as before. */
+  private async archiveServesTail(to: bigint): Promise<boolean> {
+    if (!hasDedicatedArchive || archiveUnavailable() || Date.now() < this.tailArchiveRetryAt) return false;
+    try {
+      return (await archiveRead(() => archiveClient.getBlockNumber())) >= to;
+    } catch {
+      this.tailArchiveOutcome(false);
+      return false;
+    }
+  }
+
+  /** Space out archive attempts after one fails. The tail retries a held
+   *  window every cycle (500 ms); pointed at a throttled archive that is the
+   *  tight loop archiveRetryDelayMs exists to prevent, on the node the gas
+   *  tracker and every deep replay depend on. */
+  private tailArchiveFailures = 0;
+  private tailArchiveRetryAt = 0;
+  private tailArchiveOutcome(ok: boolean): void {
+    if (ok) { this.tailArchiveFailures = 0; this.tailArchiveRetryAt = 0; return; }
+    this.tailArchiveRetryAt = Date.now() + archiveRetryDelayMs(++this.tailArchiveFailures);
+  }
+
+  /** Block timestamps (ms) for the blocks that carry logs (audit B2). */
+  private async blockTimes(blocks: Set<bigint>, pool: TailPool = 'hot'): Promise<Map<string, number>> {
+    const m = new Map<string, number>();
+    if (pool === 'hot') {
+      await Promise.all([...blocks].map(async (bn) => {
+        const b = await publicClient.getBlock({ blockNumber: bn });
+        m.set(String(bn), Number(b.timestamp) * 1000);
+      }));
+      return m;
+    }
+    const list = [...blocks];
+    for (let i = 0; i < list.length; i += TAIL_ARCHIVE_BLOCK_READS) {
+      await Promise.all(list.slice(i, i + TAIL_ARCHIVE_BLOCK_READS).map(async (bn) => {
+        const b = await archiveRead(() => archiveClient.getBlock({ blockNumber: bn }));
+        m.set(String(bn), Number(b.timestamp) * 1000);
+      }));
+    }
     return m;
   }
 

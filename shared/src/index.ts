@@ -801,7 +801,7 @@ export type NoteCode =
   | 'venue.quote.unavailable' | 'venue.quote.recovered' | 'venue.gas.suspect'
   | 'venue.source.failed' | 'venue.decode.failed' | 'venue.foreign'
   // the live fill tail and its resume point
-  | 'tail.resume' | 'tail.caughtup' | 'tail.gap.skipped' | 'tail.failed' | 'tail.timestamps.failed'
+  | 'tail.resume' | 'tail.caughtup' | 'tail.gap.skipped' | 'tail.failed' | 'tail.timestamps.failed' | 'tail.archive'
   // deep volume history: adapter seed + the on-chain replay
   | 'backfill.start' | 'backfill.done' | 'backfill.deferred' | 'backfill.held'
   | 'backfill.reset' | 'backfill.paused' | 'backfill.range.skipped' | 'backfill.config.invalid'
@@ -832,7 +832,7 @@ export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'venue.market.unlisted': 'warn', 'venue.upgraded': 'warn', 'venue.quarantined': 'warn',
   'venue.quote.unavailable': 'warn', 'venue.quote.recovered': 'info', 'venue.gas.suspect': 'warn',
   'venue.source.failed': 'warn', 'venue.decode.failed': 'warn', 'venue.foreign': 'warn',
-  'tail.resume': 'info', 'tail.caughtup': 'info', 'tail.gap.skipped': 'warn', 'tail.failed': 'warn', 'tail.timestamps.failed': 'warn',
+  'tail.resume': 'info', 'tail.caughtup': 'info', 'tail.gap.skipped': 'warn', 'tail.failed': 'warn', 'tail.timestamps.failed': 'warn', 'tail.archive': 'info',
   'backfill.start': 'info', 'backfill.done': 'info', 'backfill.deferred': 'info', 'backfill.held': 'info',
   'backfill.reset': 'info', 'backfill.paused': 'warn', 'backfill.range.skipped': 'warn', 'backfill.config.invalid': 'warn',
   'backfill.reread': 'info', 'backfill.reread.held': 'warn',
