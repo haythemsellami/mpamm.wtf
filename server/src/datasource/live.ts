@@ -25,6 +25,7 @@ import {
 } from '../chain/rpc.js';
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
+import { FillTimePrices } from '../fill-time-prices.js';
 import { VolumeStore, retentionCutoffMs, type DayFillCount, type ResetDeletes, type SnapshotResult } from '../db.js';
 
 /** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
@@ -65,6 +66,9 @@ const FILL_RING_SIZE = 400;
  *  reading as live. ONLY past it: at the tip the frame does not carry the
  *  field at all (the WS frame budget, AGENTS.md). */
 export const TAIL_LAG_SHOWN_MS = 120_000;
+/** Stored fills read once at boot to learn each asset's last on-chain USD
+ *  print (fill-time-prices.ts): about half a day of tape. */
+const PRICE_SEED_FILLS = 5_000;
 /** Behind by that much AND no cursor progress for this long is a HELD tail,
  *  as opposed to a gap-fill in progress, which commits a window every few
  *  seconds. Held is the state that needs a human. */
@@ -1263,7 +1267,12 @@ export const rereadAddKey = (vid: string) => `reread_add_${vid}`;
  *  `{ day, markets }`, paid before its marker clears (payRereadRemark). */
 export const rereadRemarkKey = (vid: string) => `reread_remark_${vid}`;
 
-/** A persisted rereadRemarkKey value, or undefined when there is none. */
+/** The remark-cursor rewind the TAIL's closed-day fills are owed, same shape
+ *  (`{ day, markets }`): committed with the fills (persist), paid by the next
+ *  remark of the venue (payTailRemark). */
+export const tailRemarkKey = (vid: string) => `tail_remark_${vid}`;
+
+/** A persisted rereadRemarkKey / tailRemarkKey value, or undefined when there is none. */
 export function parseRereadRemark(v: string | undefined): { day: string; markets: string[] } | undefined {
   if (!v) return undefined;
   try {
@@ -1554,6 +1563,29 @@ export class LiveDataSource extends BaseSource {
   readonly mode: DataSourceMode = 'live';
 
   private pricer = new UsdPricer((key) => REFERENCES.assetUsd(key), (market) => REFERENCES.midForPair(market), (key) => REFERENCES.settledUsd(key));
+  /** The latest on-chain USD print per asset (fill-time-prices.ts): what an
+   *  old tail window is priced from, where `pricer` would be days late. */
+  private fillPrices = new FillTimePrices();
+  /**
+   * The pricer for a tail window that is NOT at the tip: an asset's USD as of
+   * the window's own blocks. `usdForToken` is what decode uses to value a
+   * crypto-quoted fill, and with the live pricer a gap decoded four days late
+   * came out 10–12% low on every MON- and ETH-quoted market. Falls back to
+   * the live price per asset when no nearer print is held, so the worst case
+   * is the previous behaviour. Pair mids stay live: decode does not use them.
+   * Undefined for a window with no logs, which has nothing to price.
+   */
+  private pricerAsOf(blockTs: ReadonlyMap<string, number>): UsdPricer | undefined {
+    if (!blockTs.size) return undefined;
+    let lo = Infinity, hi = -Infinity;
+    for (const t of blockTs.values()) { if (t < lo) lo = t; if (t > hi) hi = t; }
+    const at = (lo + hi) / 2, now = Date.now();
+    return new UsdPricer(
+      (key) => this.fillPrices.usdAt(key, at, now) ?? REFERENCES.assetUsd(key),
+      (market) => REFERENCES.midForPair(market),
+      (key) => this.fillPrices.usdAt(key, at, now) ?? REFERENCES.settledUsd(key),
+    );
+  }
   private store = new VolumeStore(config.dbPath);
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
   // ARCHIVE pool: the gas tracker resolves `gas_from` through blockAtOrAfter and
@@ -1646,6 +1678,13 @@ export class LiveDataSource extends BaseSource {
    *  buckets and cursor it carries (a finished today re-read clears its
    *  pending marker this way, in the same transaction as the bucket it SET). */
   private snapshotMeta: Record<string, string> = {};
+  /** The remark rewind owed to closed-day fills the tail ingested, per venue
+   *  (oweTailRemark): EVERYTHING unpaid, not a per-snapshot delta. Snapshots
+   *  overlap (each is cut before the previous ACK), so a snapshot that wrote
+   *  only its own fills' debt could commit after, and erase, an earlier one's.
+   *  `tailRemarkDirty` = the venues whose debt the next snapshot must write. */
+  private tailRemarkOwed = new Map<string, { day: string; markets: Set<string> }>();
+  private tailRemarkDirty = new Set<string>();
   /** venue id → UTC day of a pending today re-read (rereadToday). */
   private rereads = new Map<string, string>();
   /** venue id → UTC day of a pending ADDITIVE re-read (rereadAddKey). */
@@ -2219,6 +2258,10 @@ export class LiveDataSource extends BaseSource {
     // seed the dedup guard with the persisted window so a gap-fill re-decode of
     // already-counted fills won't re-count them.
     for (const f of this.fills) this.countedIds.add(f.id);
+    // The newest stored fills end at the cursor: they are the prints the first
+    // window of a gap is priced from. Read deeper than the ring for it: MON
+    // prints every few seconds, but an ETH/USDC fill can be thousands back.
+    this.fillPrices.observe(this.store.recentFills(PRICE_SEED_FILLS));
     // Resume markout aging across a restart (M1): a fill persisted with only its
     // early horizons must go back on the pending queue if a later horizon is
     // still in the future, or ageMarkouts would leave those cells null forever.
@@ -2372,15 +2415,24 @@ export class LiveDataSource extends BaseSource {
     const dirtyDays = this.dirtyDays;
     const dirtyCurves = this.dirtyCurves;
     const extraMeta = this.snapshotMeta;
+    const owedVenues = this.tailRemarkDirty;
     this.dirty = new Set();
     this.dirtyDays = new Set();
     this.dirtyCurves = new Map();
     this.snapshotMeta = {};
+    this.tailRemarkDirty = new Set();
+    // committed WITH the closed-day fills that owe it, so a crash between the
+    // two cannot leave fills the remark sweep will never come back for
+    const remarkDebt: Record<string, string> = {};
+    for (const vid of owedVenues) {
+      const o = this.tailRemarkOwed.get(vid);
+      if (o) remarkDebt[tailRemarkKey(vid)] = JSON.stringify({ day: o.day, markets: [...o.markets].sort() });
+    }
     const snapshot: SnapshotWrite = {
       days: this.days
         .filter((d) => dirtyDays.has(d.utcDay))
         .map((d) => ({ ...d, byVenue: Object.fromEntries(Object.entries(d.byVenue).map(([id, v]) => [id, { ...v }])) })),
-      meta: { ...extraMeta, lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
+      meta: { ...extraMeta, ...remarkDebt, lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
       fills: [...dirtyFills].map((f) => ({ ...f, markoutsBps: [...f.markoutsBps] })),
       curves: [...dirtyCurves].map(([id, curveBps]) => ({ id, curveBps })),
     };
@@ -2397,13 +2449,14 @@ export class LiveDataSource extends BaseSource {
           // drained before stop() closes the writer — this snapshot already
           // committed the cursor past it. Converges: a failure throws here,
           // and a curve requeues at most CURVE_MAX_RETRIES times.
-          if (reportFailure && (this.dirty.size || this.dirtyDays.size || this.dirtyCurves.size || Object.keys(this.snapshotMeta).length)) return this.persist(true);
+          if (reportFailure && (this.dirty.size || this.dirtyDays.size || this.dirtyCurves.size || this.tailRemarkDirty.size || Object.keys(this.snapshotMeta).length)) return this.persist(true);
         },
         (e) => {
           for (const f of dirtyFills) this.dirty.add(f);
           for (const day of dirtyDays) this.dirtyDays.add(day);
           for (const [id, curve] of dirtyCurves) if (!this.dirtyCurves.has(id)) this.dirtyCurves.set(id, curve);
           for (const [k, v] of Object.entries(extraMeta)) if (!(k in this.snapshotMeta)) this.snapshotMeta[k] = v;
+          for (const vid of owedVenues) this.tailRemarkDirty.add(vid);
           // retained + retried next tick, but say so — a broken disk otherwise
           // looks healthy while the cursor silently stops advancing.
           this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); ${reportFailure ? 'shutdown flush not acknowledged' : 'retrying'}`);
@@ -3925,6 +3978,8 @@ export class LiveDataSource extends BaseSource {
   /** Mark this venue's still-unmarked persisted fills against archived CEX
    *  prices, per market, walking closed days forward (resumable cursor). */
   private async remarkVenue(vid: string, name: string): Promise<void> {
+    // the tail may have landed fills on days this walk's cursors are past
+    await this.payTailRemark(vid);
     // NOW-relative (not boot-relative): the retry timer runs for the process
     // lifetime, and each sweep may mark newly-closed days. The live aging path
     // owns the most recent window either way.
@@ -4409,12 +4464,15 @@ export class LiveDataSource extends BaseSource {
     // worst this can do is what the tail always did.
     let fresh: Fill[] | null = null;
     let pool: TailPool = 'hot';
-    if (tailWindowIsDeep(to, head) && await this.archiveServesTail(to)) {
-      fresh = await this.decodeTailWindow(declared, from, to, 'archive');
+    // Old is a property of the WINDOW, not of the pool that ends up serving
+    // it: a gap read from the hot pool is priced as of its blocks all the same.
+    const old = tailWindowIsDeep(to, head);
+    if (old && await this.archiveServesTail(to)) {
+      fresh = await this.decodeTailWindow(declared, from, to, 'archive', old);
       this.tailArchiveOutcome(fresh !== null);
       if (fresh) pool = 'archive';
     }
-    fresh ??= await this.decodeTailWindow(declared, from, to, 'hot');
+    fresh ??= await this.decodeTailWindow(declared, from, to, 'hot', old);
     // ATOMIC (review #1): a window that could not be read and decoded in full
     // changes NOTHING — no ingest, no emit, no cursor. The identical range is
     // re-tailed next cycle, so a fill is never partially decoded, and dedupe
@@ -4430,6 +4488,9 @@ export class LiveDataSource extends BaseSource {
     // A gap's transactions are asked of the pool that served its logs first.
     try { await this.attributor.attribute(fresh, pool === 'archive' ? [archiveClient, publicClient] : undefined); } catch { /* labels only */ }
     for (const f of fresh) this.ingest(f);
+    // every window, tip included: when a hold begins, the last prints before
+    // it are what the first window after it is priced from
+    this.fillPrices.observe(fresh);
     // Publish the cursor only after every decoded fill has landed in memory.
     // backgroundHistory waits on this value before applying authoritative
     // closed-day SETs; exposing it earlier leaves a race where a late tail
@@ -4455,7 +4516,7 @@ export class LiveDataSource extends BaseSource {
    * decode itself.
    */
   private async decodeTailWindow(
-    declared: ReadonlyArray<{ a: VenueAdapter; sources: LogSource[] }>, from: bigint, to: bigint, pool: TailPool,
+    declared: ReadonlyArray<{ a: VenueAdapter; sources: LogSource[] }>, from: bigint, to: bigint, pool: TailPool, old = false,
   ): Promise<Fill[] | null> {
     const deep = pool === 'archive';
     // what a failure on this pool does next, for the note
@@ -4505,10 +4566,13 @@ export class LiveDataSource extends BaseSource {
       return ts;
     };
 
+    // an old window is priced as of its own blocks (pricerAsOf); the tip, live
+    const pricer = old ? this.pricerAsOf(blockTs) : undefined;
     const fresh: Fill[] = [];
     let decodeFailed = false;
     for (const { a, bundle, failed } of perAdapter) {
-      try { fresh.push(...this.ownVenues(a, await a.decode(deep ? this.archiveCtxFor(a) : this.ctxFor(a), bundle, tsOf, failed), 'fill')); }
+      const base = deep ? this.archiveCtxFor(a) : this.ctxFor(a);
+      try { fresh.push(...this.ownVenues(a, await a.decode(pricer ? { ...base, pricer } : base, bundle, tsOf, failed), 'fill')); }
       catch (e) {
         decodeFailed = true;
         this.noteOnce('venue.decode.failed', `${a.venues()[0]?.name ?? 'venue'} decode error${on} — ${next}: ${(e as Error).message}`, this.vidOf(a));
@@ -4593,7 +4657,63 @@ export class LiveDataSource extends BaseSource {
     vd.usd += f.usd;
     vd.swaps += 1;
     this.dirtyDays.add(d.utcDay);
+    if (d.utcDay < utcDay()) this.oweTailRemark(f, d.utcDay);
     this.emitMsg({ ch: 'fill', data: f });
+  }
+
+  /**
+   * A fill the tail lands on a CLOSED day is owed a remark-cursor rewind.
+   *
+   * Its markout horizons passed before it was decoded, so only the remark
+   * sweep can mark it, and the sweep writes its cursor for every day it walks
+   * whether or not the day held any fills yet. A tail held across days
+   * (2026-11-12: three of them) comes back to days the sweep may already be
+   * past, and their fills would then stay unmarked for good. It is the debt a
+   * 'markets' revision and an additive re-read already carry
+   * (rewindRemarkCursors), from the one writer that did not.
+   *
+   * Recorded here, committed by persist() in the snapshot that carries the
+   * fill, paid by payTailRemark before the venue's next walk. Today's fills
+   * owe nothing: the sweep never walks today.
+   */
+  private oweTailRemark(f: Fill, day: string): void {
+    if (f.pxApprox) return; // never marked, live or historical
+    let o = this.tailRemarkOwed.get(f.venueId);
+    if (!o) {
+      // start from what a previous process left unpaid on disk
+      const was = parseRereadRemark(this.store.getMeta(tailRemarkKey(f.venueId)));
+      this.tailRemarkOwed.set(f.venueId, o = { day: was?.day ?? day, markets: new Set(was?.markets ?? []) });
+    }
+    if (day < o.day) o.day = day;
+    o.markets.add(f.market);
+    this.tailRemarkDirty.add(f.venueId);
+  }
+
+  /**
+   * Pay what the tail owes `vid`'s remark cursors, then clear the debt, in one
+   * snapshot. Called under the remark lock by the walk it clears the way for.
+   *
+   * In the tail gate, behind a flush: the debt on disk is then complete (every
+   * closed-day fill ingested so far is committed with its share of it) and
+   * nothing can add to it until the clear has landed. A fill ingested after
+   * that owes afresh, to the next walk.
+   */
+  private async payTailRemark(vid: string): Promise<void> {
+    const key = tailRemarkKey(vid);
+    if (!this.tailRemarkOwed.has(vid) && !this.store.getMeta(key)) return; // the usual case: no gate, no flush
+    await this.inTail(async () => {
+      await this.persist(true);
+      const debt = parseRereadRemark(this.store.getMeta(key));
+      const write: Record<string, string> = { [key]: '' };
+      for (const market of debt?.markets ?? []) {
+        const cursor = `mkhist_cursor_${vid}_${market}`;
+        const cur = this.store.getMeta(cursor);
+        if (cur && debt && cur > debt.day) write[cursor] = debt.day;
+      }
+      await this.writeSnapshot({ days: [], meta: write, fills: [] });
+      this.tailRemarkOwed.delete(vid);
+      this.tailRemarkDirty.delete(vid);
+    });
   }
 
   /** Find/create the daily bucket for a fill's execution timestamp (audit B2). */

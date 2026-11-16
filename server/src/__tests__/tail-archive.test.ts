@@ -99,6 +99,7 @@ async function setup(a: ReturnType<typeof adapter>, opts: { dedicated?: boolean 
       start: vi.fn(async () => {}),
       stop: vi.fn(),
       assetUsd: vi.fn(() => 1), // warm — passes the markout-anchor gate
+      settledUsd: vi.fn(() => 1), // the LIVE price of every asset in these tests: $1
       changePctFor: vi.fn(() => 0),
       midForPair: vi.fn(() => 1),
       quote: vi.fn(() => []),
@@ -349,6 +350,75 @@ describe('tailFills archive fallback (never worse than the hot read)', () => {
       expect(hot.getTransaction).toHaveBeenCalledOnce();
       expect(source.fills[0].category).toBe('DIRECT');
       expect(source.lastBlock).toBe(1000n);
+    } finally { source.store.close(); }
+  });
+});
+
+// A crypto-quoted fill is valued through ctx.pricer.usdForToken. With the live
+// pricer a gap decoded days late is priced at today's price: the 2026-11-12
+// gap came out 10–12% low on every MON- and ETH-quoted market. An old window
+// is priced as of its own blocks instead (pricerAsOf / fill-time-prices.ts).
+describe('tailFills prices an old window as of its blocks', () => {
+  /** the harness decode emits MON/USDC fills at execPx 100: each window that
+   *  carries a log leaves a print of MON = $100, against a live price of $1.
+   *  What decode would get for 2 WMON is recorded per call. */
+  function pricing() {
+    const a = adapter();
+    const emit = a.decode.getMockImplementation()!;
+    const quoted: number[] = [];
+    a.decode.mockImplementation(async (ctx: any, bundle: any, tsOf: any) => {
+      quoted.push(ctx.pricer.usdForToken('WMON', 2));
+      return emit(ctx, bundle, tsOf);
+    });
+    return { a, quoted };
+  }
+
+  it('uses the last on-chain print for a gap window, the live price only until one exists', async () => {
+    const { a, quoted } = pricing();
+    const { source, archive } = await gap(a);
+    archive.getLogs.mockResolvedValueOnce([log(10n)]).mockResolvedValueOnce([log(1500n)]);
+    try {
+      await source.tailFills(); // window 1: nothing learned yet
+      await source.tailFills(); // window 2: priced from window 1's MON/USDC fill
+      expect(quoted).toEqual([2, 200]);
+      expect(a.decode.mock.calls[1][0].client).toBe(archive); // still the archive context, pricer aside
+    } finally { source.store.close(); }
+  });
+
+  it('prices a gap window the same when the hot pool ends up serving it', async () => {
+    const { a, quoted } = pricing();
+    const { source, hot } = await gap(a, { dedicated: false });
+    hot.getLogs.mockResolvedValueOnce([log(10n)]).mockResolvedValueOnce([log(1500n)]);
+    try {
+      await source.tailFills();
+      await source.tailFills();
+      expect(quoted).toEqual([2, 200]);
+    } finally { source.store.close(); }
+  });
+
+  it('leaves the tip on the live pricer, print or no print', async () => {
+    const { a, quoted } = pricing();
+    const { source, hot, setHead } = await setup(a);
+    source.lastBlock = 4990n;
+    setHead(5000n);
+    source.fillPrices.observe([{ market: 'MON/USDC', execPx: 100, ts: Date.now() - 1_000 }]);
+    hot.getLogs.mockResolvedValueOnce([log(4995n)]);
+    try {
+      await source.tailFills();
+      expect(quoted).toEqual([2]);
+      expect(a.decode.mock.calls[0][0].pricer).toBe(source.pricer);
+    } finally { source.store.close(); }
+  });
+
+  it('seeds the prints from the stored tape, so the FIRST window of a gap is priced too', async () => {
+    const { a, quoted } = pricing();
+    const { source, archive } = await gap(a);
+    // what initHistory does with the ring it loads: the newest fills end at the cursor
+    source.fillPrices.observe([{ market: 'MON/USDC', execPx: 100, ts: Number(BLOCK_SEC) * 1000 - 60_000 }]);
+    archive.getLogs.mockResolvedValueOnce([log(10n)]);
+    try {
+      await source.tailFills();
+      expect(quoted).toEqual([200]);
     } finally { source.store.close(); }
   });
 });
