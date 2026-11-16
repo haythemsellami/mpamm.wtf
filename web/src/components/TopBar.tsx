@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { C, SANS, LOGO_PURPLE } from '../theme';
 import { useDashboard, type Tab } from '../store';
 import { useViewport } from '../lib/viewport';
-import { clockSec, fmtInt } from '../lib/format';
+import { clockSec, fmtInt, fmtLag } from '../lib/format';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'exec', label: 'EXECUTION' },
@@ -14,7 +14,7 @@ const TABS: { id: Tab; label: string }[] = [
 
 export function TopBar() {
   const d = useDashboard();
-  const { mobile, tablet } = useViewport();
+  const { mobile, tablet, wide } = useViewport();
   const [clock, setClock] = useState(clockSec());
   useEffect(() => {
     const t = setInterval(() => setClock(clockSec()), 1000);
@@ -39,6 +39,26 @@ export function TopBar() {
         ? `Primary RPC unhealthy — serving from ${rpc.active}${rpc.degradedSinceTs ? ` since ${new Date(rpc.degradedSinceTs).toISOString().slice(11, 16)} UTC` : ''}`
         : 'RPC healthy — serving from the primary endpoint'
     : '';
+
+  // Fill-tail lag. The field is present ONLY while the tail is behind the
+  // head (MarketState.tail), so its presence is the signal. Quotes and fills
+  // are separate loops: the socket and the RPC can both be healthy while fills
+  // stopped days ago (2026-11-12), and then "live" alone is a false statement
+  // about everything below the quote matrix. CVD-safe like the RPC chip: the
+  // WORDS say held vs behind, never colour alone.
+  const tail = d.state?.tail;
+  const lag = tail ? fmtLag(tail.lagMs) : '';
+  // The bar is full without the chip, so the chip is paid for: below WIDE_W it
+  // takes the room of the MON ticker and the clock, and below TABLET_W of the
+  // socket word too (its own dot then stands for "connected").
+  const compact = mobile || tablet;
+  const roomy = !tail || wide;
+  const tailLabel = !tail ? '' : tail.held ? `FILLS HELD ${lag}` : compact ? `FILLS −${lag}` : `FILLS ${lag} BEHIND`;
+  const tailColor = tail?.held ? C.red : C.amber;
+  const tailTitle = !tail ? ''
+    : tail.held
+      ? `Fill ingest is stuck at block ${fmtInt(tail.block)}, about ${lag} behind the chain — fills, volume and markouts stop there. Quotes are live.`
+      : `Fill ingest is catching up: about ${lag} behind the chain (block ${fmtInt(tail.block)}). Recent fills and volume are still arriving. Quotes are live.`;
 
   return (
     <div style={{
@@ -75,11 +95,23 @@ export function TopBar() {
             borderRadius: 4, padding: mobile ? '3px 6px' : '3px 8px', cursor: 'pointer', letterSpacing: '.06em', userSelect: 'none',
             whiteSpace: 'nowrap',
           }}>◐{mobile ? '' : ` ${d.theme === 'dark' ? 'BRIGHT' : 'DARK'}`}</button>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 5, color: liveColor }}>
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: liveColor, animation: 'blink 1.6s infinite' }} />
-          {d.conn === 'live' ? 'live' : d.conn === 'reconnecting' ? 'reconnecting' : 'connecting'}
-        </span>
-        {rpc && (!mobile || rpc.degraded || rpc.down) && (
+        {!(compact && tail && d.conn === 'live') && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 5, color: liveColor, whiteSpace: 'nowrap' }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: liveColor, animation: 'blink 1.6s infinite' }} />
+            {/* with the tail behind, only the quotes are live — say so */}
+            {d.conn === 'live' ? (tail ? 'quotes live' : 'live') : d.conn === 'reconnecting' ? 'reconnecting' : 'connecting'}
+          </span>
+        )}
+        {tail && (
+          <span role="status" data-tail={tail.held ? 'held' : 'behind'} title={tailTitle} aria-label={tailTitle}
+            style={{ display: 'flex', alignItems: 'center', gap: 5, color: tailColor, whiteSpace: 'nowrap' }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: tailColor }} />
+            {tailLabel}
+          </span>
+        )}
+        {/* a healthy RPC is the least news on the bar: mobile never shows it, and
+            below TABLET_W it gives way to the tail chip the same way */}
+        {rpc && (!(mobile || (tablet && tail)) || rpc.degraded || rpc.down) && (
           <span role="status" title={rpcTitle} aria-label={rpcTitle}
             style={{ display: 'flex', alignItems: 'center', gap: 5, color: rpcColor, whiteSpace: 'nowrap' }}>
             {/* static dot — the blinking one above is socket liveness, this is chain-source health */}
@@ -87,10 +119,10 @@ export function TopBar() {
             RPC {rpcLabel}
           </span>
         )}
-        {!mobile && !tablet && <span>MON <span style={{ color: C.text }}>${monPx}</span></span>}
+        {!compact && roomy && <span>MON <span style={{ color: C.text }}>${monPx}</span></span>}
         {/* on mobile the label words go — the block number and clock read as themselves */}
         <span title={d.tab === 'exec' ? 'Block of the displayed quotes' : 'Latest observed block'} style={{ whiteSpace: 'nowrap' }}>{!mobile && 'BLOCK '}<span data-quote-block={d.tab === 'exec' ? displayed?.block : undefined} style={{ color: stale ? C.amber : C.text }}>{block}</span>{stale && <span style={{ color: C.amber }}> · STALE</span>}</span>
-        {(mobile || !tablet) && <span style={{ whiteSpace: 'nowrap' }}>{!mobile && 'UTC '}<span style={{ color: C.text }}>{clock}</span></span>}
+        {(mobile ? !tail : !tablet && roomy) && <span style={{ whiteSpace: 'nowrap' }}>{!mobile && 'UTC '}<span style={{ color: C.text }}>{clock}</span></span>}
       </div>
     </div>
   );

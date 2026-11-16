@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type {
   DataSourceMode, DepthSnapshot, MarketState, QuoteSnapshot, Fill, DailyVolume, StreamMessage,
-  LeaderboardResponse, GasResponse, QuoteStatsResponse, MarkoutCurvesResponse,
+  LeaderboardResponse, GasResponse, QuoteStatsResponse, MarkoutCurvesResponse, TailStatus,
 } from '@shared';
 import { QUOTE_CHART_WINDOW_MS } from '@shared';
 import { ExecutionHistory } from '../execution-history.js';
@@ -20,6 +20,10 @@ export interface DataSource {
   getState(): MarketState;
   /** False until persisted history is available to dashboard snapshots. */
   isReady?(): boolean;
+  /** The fill tail's distance behind the chain head, lagging or not (`GET
+   *  /api/health`). Absent in sim, which has no tail, and undefined before the
+   *  live source has its resume point. */
+  tailStatus?(): TailStatus | undefined;
   getQuotes(): QuoteSnapshot;
   /** Wait for a complete collected matrix; never opens additional RPC work. */
   fullQuoteSnapshot?(fresh?: boolean): Promise<QuoteSnapshot>;

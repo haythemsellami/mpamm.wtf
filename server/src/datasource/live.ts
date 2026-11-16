@@ -10,7 +10,7 @@ import {
   MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase, CURVE_OFFSETS_S, curveMarkMs,
   type DataSourceMode, type MarkoutCurvesResponse, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode, type QuoteFrameTelemetry,
-  type QuoteHeadSource, type RealtimeHealth,
+  type QuoteHeadSource, type RealtimeHealth, type TailStatus,
 } from '@shared';
 import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from '../chain/failover.js';
 import { FillAttributor } from '../attribution.js';
@@ -58,6 +58,17 @@ const TAIL_DEEP_LAG_BLOCKS = TAIL_WINDOW_BLOCKS;
 const TAIL_ARCHIVE_BLOCK_READS = 32;
 /** The in-memory recent-fill ring (`/api/markets` tape, ingest dedup window). */
 const FILL_RING_SIZE = 400;
+/** Chain time the fill tail may trail the head and still count as live. Its
+ *  normal distance is the finality margin plus a cycle (a few seconds), and a
+ *  deploy's restart gap is back under this within seconds. Past it the tail's
+ *  status rides the state frame (`MarketState.tail`) so the header stops
+ *  reading as live. ONLY past it: at the tip the frame does not carry the
+ *  field at all (the WS frame budget, AGENTS.md). */
+export const TAIL_LAG_SHOWN_MS = 120_000;
+/** Behind by that much AND no cursor progress for this long is a HELD tail,
+ *  as opposed to a gap-fill in progress, which commits a window every few
+ *  seconds. Held is the state that needs a human. */
+export const TAIL_HELD_MS = 120_000;
 
 interface QuoteTrigger {
   identity?: HeadIdentity;
@@ -525,6 +536,65 @@ export function checkGapFill(
   // already moved past it by the time we get here (lastBlock >= target), so
   // "current at block target" would report a block the tail has left behind.
   io.announce(`gap-fill caught up: decoded through block ${target}`);
+}
+
+/**
+ * Where the fill tail is relative to the chain head.
+ *
+ * On 2026-11-12 the tail held for more than three days after an RPC outage
+ * while quotes at the tip were healthy. The header read "live · RPC OK",
+ * /api/health answered ok, and three days of volume were $0 before anyone
+ * looked: neither surface carried the one number that was wrong.
+ *
+ * `lagMs` is blocks × block time, not the cursor block's timestamp: that would
+ * be a read on the pool that may be the one failing. `quietSince` is the later
+ * of the cursor's last move and the moment the tail fell behind, so a tail
+ * that sat at the tip through an outage is not called held the instant the
+ * head jumps ahead of it; it gets TAIL_HELD_MS to commit a window first.
+ *
+ * Pure so the thresholds are unit-testable (tail-lag.test.ts).
+ */
+export function tailStatusOf(p: { lastBlock: bigint; head: bigint; blockTimeMs: number; quietSince: number; now: number }): TailStatus {
+  const lagBlocks = p.head > p.lastBlock ? Number(p.head - p.lastBlock) : 0;
+  const lagMs = lagBlocks * p.blockTimeMs;
+  return { block: Number(p.lastBlock), lagBlocks, lagMs, held: lagMs > TAIL_LAG_SHOWN_MS && p.now - p.quietSince > TAIL_HELD_MS };
+}
+
+/** Whether a status belongs on the state frame (TAIL_LAG_SHOWN_MS). */
+export const tailIsLagging = (t: TailStatus): boolean => t.lagMs > TAIL_LAG_SHOWN_MS;
+
+/**
+ * Held-tail note lifecycle, called once per tail cycle.
+ *
+ * While the tail is held the SAME line is raised every cycle: noteOnce drops
+ * the verbatim repeat, and re-raises it once the buffer has rolled it out, so
+ * a hold of days keeps surfacing in the log instead of scrolling away behind
+ * noisier subsystems. The line therefore names only what is fixed during a
+ * hold (the block), never the lag, which moves with the head.
+ *
+ * When the cursor moves the line is retracted and the resume announced once,
+ * with how long the hold lasted. Pure with injected sinks, like checkGapFill.
+ */
+export function checkTailHeld(
+  t: TailStatus,
+  quietSince: number,
+  now: number,
+  state: { msg?: string; since?: number },
+  io: { warn: (m: string) => void; clear: (m: string) => void; announce: (m: string) => void },
+): void {
+  if (t.held) {
+    if (state.msg === undefined) {
+      state.msg = `fill tail held at block ${t.block}: behind the head with no window committed for ${approximateDuration(TAIL_HELD_MS)} — fills, volume and markouts stop at that block until it moves`;
+      state.since = quietSince;
+    }
+    io.warn(state.msg);
+    return;
+  }
+  if (state.msg === undefined) return;
+  io.clear(state.msg);
+  io.announce(`fill tail moving again after a hold of ${approximateDuration(now - (state.since ?? now))}`);
+  state.msg = undefined;
+  state.since = undefined;
 }
 
 /**
@@ -2015,8 +2085,54 @@ export class LiveDataSource extends BaseSource {
     };
   }
 
+  /** When the tail cursor last moved and when the tail last fell behind (wall
+   *  clock), sampled once per tail cycle (observeTail). Boot counts as a move:
+   *  a hold is measured from this process's start at the earliest. */
+  private tailSeen = { block: 0n, at: Date.now() };
+  private tailBehindSince: number | undefined;
+  private tailHeldNote: { msg?: string; since?: number } = {};
+
+  /** The later of the cursor's last move and the tail falling behind. */
+  private tailQuietSince(): number {
+    return Math.max(this.tailSeen.at, this.tailBehindSince ?? 0);
+  }
+
+  /** The fill tail's distance behind the head (tailStatusOf). Undefined until
+   *  boot has set the resume point: a zero cursor is "not started", and
+   *  reporting it would read as a tail the whole chain behind. */
+  tailStatus(): TailStatus | undefined {
+    if (this.lastBlock === 0n) return undefined;
+    const quoted = BigInt(this.block);
+    return tailStatusOf({
+      lastBlock: this.lastBlock,
+      head: this.observedHead > quoted ? this.observedHead : quoted,
+      blockTimeMs: monad.blockTime ?? 300,
+      quietSince: this.tailQuietSince(),
+      now: Date.now(),
+    });
+  }
+
+  /** Once per tail cycle, whether or not the cycle read anything: record a
+   *  cursor move, track the tail falling behind, and keep the held-tail note
+   *  in step (checkTailHeld). */
+  private observeTail(): void {
+    const now = Date.now();
+    if (this.lastBlock !== this.tailSeen.block) this.tailSeen = { block: this.lastBlock, at: now };
+    const before = this.tailStatus();
+    if (!before) return;
+    if (!tailIsLagging(before)) this.tailBehindSince = undefined;
+    else this.tailBehindSince ??= now;
+    // read again: `held` is measured from the stamps just set
+    checkTailHeld(this.tailStatus()!, this.tailQuietSince(), now, this.tailHeldNote, {
+      warn: (m) => this.noteOnce('tail.held', m),
+      clear: (m) => this.dropNote('tail.held', m),
+      announce: (m) => this.note('tail.resume', m),
+    });
+  }
+
   getState(): MarketState {
     const realtime = this.realtimeHealth();
+    const tail = this.tailStatus();
     return {
       chainId: 143, block: this.block, monUsd: REFERENCES.assetUsd('MON'), monChangePct: REFERENCES.changePctFor('MON'),
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
@@ -2028,6 +2144,10 @@ export class LiveDataSource extends BaseSource {
       // subsystem that does not exist.
       ...(hasDedicatedArchive ? { rpcArchive: archiveRpcStatus() } : {}),
       ...(realtime ? { realtime } : {}),
+      // Only while it is behind. This object is the state frame, sent on every
+      // head: at the tip the field would be bytes on every tick for a number
+      // nobody needs, and its absence is what the header reads as "live".
+      ...(tail && tailIsLagging(tail) ? { tail } : {}),
     };
   }
   getQuotes(): QuoteSnapshot {
@@ -3953,6 +4073,7 @@ export class LiveDataSource extends BaseSource {
     const timer = setTimeout(async () => {
       const t0 = Date.now();
       try { await this.tailFills(); } catch (e) { this.noteOnce('tail.failed', `tail failed — holding cursor, retrying: ${(e as Error).message}`); }
+      this.observeTail();
       // between cycles: nothing can ingest while a gate runs (inTail)
       for (const gate of this.tailGates.splice(0)) await gate();
       this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) });

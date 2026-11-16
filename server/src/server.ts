@@ -72,6 +72,13 @@ export function tickFrame(state: StreamState): StreamState {
   return rest;
 }
 
+/** Timestamp of the newest fill in a list that is not necessarily ordered. */
+export function newestFillTs(fills: readonly { ts: number }[]): number | undefined {
+  let newest: number | undefined;
+  for (const f of fills) if (newest === undefined || f.ts > newest) newest = f.ts;
+  return newest;
+}
+
 /** What to do with one stream client on a broadcast. Pure so the backpressure
  *  policy is unit-tested — a wrong 'cut' here would disconnect real users, and
  *  a missing one leaks the heap (see the OOM note on the broadcast loop). */
@@ -139,9 +146,20 @@ export function startServer(source: DataSource): Server {
     });
   }
 
+  // `ok` is liveness and nothing else: this is the deploy healthcheck
+  // (.railway/railway.ts), and failing it on a held tail would block the very
+  // deploy that fixes one. A lagging tail is reported, not failed: `tail` is
+  // always present on the live source, with `lastFillTs` (the newest fill
+  // held, undefined before any) beside the block lag because "no fill since
+  // Tuesday" is the symptom a monitor can alert on without knowing the head.
   app.get('/api/health', (_req, res) => {
     const state = source.getState();
-    res.json({ ok: true, source: source.mode, block: state.block, realtime: state.realtime, stream: { protocol: 'v2', ...gateway.metrics } });
+    const tail = source.tailStatus?.();
+    res.json({
+      ok: true, source: source.mode, block: state.block,
+      ...(tail ? { tail: { ...tail, lastFillTs: newestFillTs(source.getFills()) } } : {}),
+      realtime: state.realtime, stream: { protocol: 'v2', ...gateway.metrics },
+    });
   });
 
   app.get('/api/bootstrap', (req, res) => {

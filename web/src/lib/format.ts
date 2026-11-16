@@ -169,6 +169,22 @@ export function fmtInt(n: number): string {
   return Math.round(n).toLocaleString();
 }
 
+/**
+ * A lag as the header prints it: 4m / 2.5h / 31h / 3.6d.
+ *
+ * Coarse on purpose. The value is an estimate (blocks × block time), and a
+ * chip that re-renders a new figure every second reads as a counter rather
+ * than a status. Each rung hands over where the next unit's own rounding
+ * would start to hide a real difference: 90 minutes, then two days.
+ */
+export function fmtLag(ms: number): string {
+  const minutes = Math.max(0, ms) / 60_000;
+  if (minutes < 90) return `${Math.max(1, Math.round(minutes))}m`;
+  const hours = minutes / 60;
+  if (hours < 48) return `${hours < 10 ? hours.toFixed(1) : Math.round(hours)}h`;
+  return `${(hours / 24).toFixed(1)}d`;
+}
+
 /** Abbreviate a hash/address for display (idempotent — pre-shortened or short
  *  values pass through unchanged). Live decoders store full tx hashes. */
 export function shortHex(h: string, head = 4, tail = 4): string {

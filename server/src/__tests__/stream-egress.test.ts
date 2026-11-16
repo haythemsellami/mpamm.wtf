@@ -52,7 +52,7 @@ const STATE: MarketState = {
 };
 
 /** The transport only ever touches these; the rest of DataSource is inert here. */
-function stubSource(): DataSource & EventEmitter {
+function stubSource(extra: Record<string, unknown> = {}): DataSource & EventEmitter {
   const source = new EventEmitter() as EventEmitter & Record<string, unknown>;
   Object.assign(source, {
     mode: 'sim',
@@ -62,16 +62,16 @@ function stubSource(): DataSource & EventEmitter {
     getFills: () => [], getVolume: () => [], queryFills: () => [],
     leaderboard: async () => ({}), quoteHistory: () => [], gasSeries: () => ({}),
     getDepth: () => undefined, watchDepth: () => () => {},
-  });
+  }, extra);
   return source as unknown as DataSource & EventEmitter;
 }
 
 const running: Array<() => void> = [];
 afterEach(() => { for (const stop of running.splice(0)) stop(); });
 
-async function boot() {
+async function boot(extra: Record<string, unknown> = {}) {
   const { startServer } = await import('../server.js');
-  const source = stubSource();
+  const source = stubSource(extra);
   const server = startServer(source);
   await once(server, 'listening');
   running.push(() => server.close());
@@ -141,6 +141,59 @@ describe('WS state frames', () => {
 
     expect(before).toBeGreaterThan(18_000);       // what prod used to ship ~6x/s
     expect(tick.bytes).toBeLessThan(before / 10);
+  });
+
+  // The fill tail's lag is the one health field that is conditional: the
+  // source puts it on the state only while the tail is behind, so a healthy
+  // tick carries no `tail` key at all and the header reads its presence.
+  it('carries the tail lag when the source reports one, and no key otherwise', async () => {
+    const tail = { block: 121_585_293, lagBlocks: 1_021_587, lagMs: 306_476_100, held: true };
+    const { source, port } = await boot();
+    const { frames } = await collect(port, 3, () => {
+      source.emit('message', { ch: 'state', data: { ...STATE, block: 12_346, tail } });
+      source.emit('message', { ch: 'state', data: { ...STATE, block: 12_347 } });
+    });
+    const [, behind, atTip] = frames.filter((f) => f.msg.ch === 'state').map((f) => f.msg.data as MarketState);
+
+    expect(behind.tail).toEqual(tail);
+    expect('tail' in atTip).toBe(false);
+  });
+});
+
+// The header said "live · RPC OK" and this endpoint said ok for three days
+// while the fill tail was held (2026-11-12): neither carried the cursor.
+describe('GET /api/health', () => {
+  const health = (port: number) => fetch(`http://127.0.0.1:${port}/api/health`);
+
+  it('reports the fill tail and the newest fill beside it', async () => {
+    const tail = { block: 121_585_293, lagBlocks: 1_021_587, lagMs: 306_476_100, held: true };
+    // the tape is not ordered by time: the newest is found, not assumed last
+    const fills = [{ ts: 1_794_481_000_000 }, { ts: 1_794_481_517_000 }, { ts: 1_794_480_000_000 }];
+    const { port } = await boot({ tailStatus: () => tail, getFills: () => fills });
+    const body = await (await health(port)).json() as Record<string, unknown>;
+
+    expect(body.tail).toEqual({ ...tail, lastFillTs: 1_794_481_517_000 });
+  });
+
+  it('omits the newest fill, never a zero, when no fill is held', async () => {
+    const tail = { block: 100, lagBlocks: 5, lagMs: 1_500, held: false };
+    const { port } = await boot({ tailStatus: () => tail });
+    const body = await (await health(port)).json() as Record<string, unknown>;
+
+    expect(body.tail).toEqual(tail);
+  });
+
+  it('stays ok on a held tail: it is the deploy healthcheck, and failing it would block the fix', async () => {
+    const { port } = await boot({ tailStatus: () => ({ block: 1, lagBlocks: 9_999_999, lagMs: 2_999_999_700, held: true }) });
+    const res = await health(port);
+
+    expect(res.status).toBe(200);
+    expect((await res.json() as { ok: boolean }).ok).toBe(true);
+  });
+
+  it('has no tail field for a source without one (sim)', async () => {
+    const { port } = await boot();
+    expect('tail' in (await (await health(port)).json() as object)).toBe(false);
   });
 });
 

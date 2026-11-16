@@ -133,7 +133,9 @@ daily_gas(utc_day, venue_id, mon, txs)         -- QUOTE_UPDATE_BURN; additive, a
 REST + WS contract (the frontend renders purely off these):
 
 ```
-GET /api/health                    liveness + realtime head/quote health — deploy health checks hit this
+GET /api/health                    liveness + realtime head/quote health — deploy health checks hit this.
+                                   `tail` = the fill tail's lag behind the head (block, lagBlocks, lagMs, held,
+                                   lastFillTs). `ok` stays true on a held tail: alert on `tail.held`, not on `ok`
 GET /api/venues                    the venue registry (VenueMeta[])
 GET /api/bootstrap?volume=1        lean page bootstrap (no quotes/fills/notes; optional volume)
 GET /api/markets                   legacy full snapshot (incl. venues + notes)

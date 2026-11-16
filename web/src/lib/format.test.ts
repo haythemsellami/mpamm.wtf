@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtAmt, fmtAmtFull, fmtPx, fmtUsd, fmtVolUsd, takerFeeLabel } from './format';
+import { fmtAmt, fmtAmtFull, fmtLag, fmtPx, fmtUsd, fmtVolUsd, takerFeeLabel } from './format';
 
 /**
  * With the token's decimals, an amount is rendered EXACTLY as it traded —
@@ -222,5 +222,20 @@ describe('takerFeeLabel — the fee the Execution prose quotes', () => {
   });
   it('shows a dash only when neither is known', () => {
     expect(takerFeeLabel(undefined, undefined)).toBe('—');
+  });
+});
+
+describe('fmtLag — the header chip for a fill tail that is behind', () => {
+  it('prints minutes up to 90, never 0m', () => {
+    expect(fmtLag(121_000)).toBe('2m');     // just past the server's threshold
+    expect(fmtLag(10_000)).toBe('1m');
+    expect(fmtLag(89 * 60_000)).toBe('89m');
+  });
+  it('prints hours with one decimal under 10, whole above', () => {
+    expect(fmtLag(90 * 60_000)).toBe('1.5h');
+    expect(fmtLag(31 * 3_600_000)).toBe('31h'); // the 2026-11-12 outage itself
+  });
+  it('prints days from two days on', () => {
+    expect(fmtLag(306_476_100)).toBe('3.5d');   // 1,021,587 blocks × 300 ms
   });
 });
