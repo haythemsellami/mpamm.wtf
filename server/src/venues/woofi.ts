@@ -1,8 +1,9 @@
 import { parseAbi } from 'viem';
-import type { Fill, Pair, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
-import { ASSETS, NATIVE_MON, PAIRS, TOKENS } from '@shared';
+import type { Fill, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
+import { NATIVE_MON, PAIRS, TOKENS } from '@shared';
 import { fromUnits, shortHex, toUnits } from '../util.js';
 import type { AdapterContext, LogBundle, VenueAdapter } from './adapter.js';
+import { pairKey, tokenKeysForPair } from './pair-tokens.js';
 import { createQuoteOutageReporter } from './quote-health.js';
 
 /**
@@ -136,20 +137,6 @@ export interface WoofiMarket {
   quoteKey: string;
   base: TokenInfo;
   quote: TokenInfo;
-}
-
-const pairKey = (a: string, b: string) => [a.toLowerCase(), b.toLowerCase()].sort().join(':');
-
-function tokenKeysForPair(pair: Pair): readonly [string, string] | undefined {
-  // cbBTC is an alternative BTC wrapper, so its market symbol—not Pair.base—
-  // selects the on-chain token. The same rule handles the WBTC/cbBTC cross.
-  const baseKey = pair.symbol.startsWith('cbBTC/') ? 'CBBTC' : ASSETS[pair.base]?.token;
-  const quoteKey = pair.symbol.endsWith('/cbBTC')
-    ? 'CBBTC'
-    : pair.quoteKind === 'asset'
-      ? ASSETS[pair.quote]?.token
-      : pair.quote;
-  return baseKey && quoteKey ? [baseKey, quoteKey] : undefined;
 }
 
 /** Every registered pair whose two ERC-20s could meet in the pool, keyed on

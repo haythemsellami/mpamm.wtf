@@ -1,8 +1,9 @@
 import { parseAbi } from 'viem';
-import type { Fill, Pair, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
+import type { Fill, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
 import { ASSETS, PAIRS, TOKENS } from '@shared';
 import { fromUnits, shortHex, toUnits } from '../util.js';
 import type { AdapterContext, LogBundle, VenueAdapter } from './adapter.js';
+import { tokenKeysForPair } from './pair-tokens.js';
 import { createQuoteOutageReporter, revertReason } from './quote-health.js';
 
 /**
@@ -74,18 +75,6 @@ export function selectThogammPoolId(poolIds: readonly `0x${string}`[]): `0x${str
     throw new Error(`ThogAMM expected exactly one pool id, got ${poolIds.length}: ${poolIds.join(', ') || 'none'}`);
   }
   return poolIds[0];
-}
-
-function tokenKeysForPair(pair: Pair): readonly [string, string] | undefined {
-  // cbBTC is an alternative BTC wrapper, so its market symbol—not Pair.base—
-  // selects the on-chain token. The same rule handles the WBTC/cbBTC cross.
-  const baseKey = pair.symbol.startsWith('cbBTC/') ? 'CBBTC' : ASSETS[pair.base]?.token;
-  const quoteKey = pair.symbol.endsWith('/cbBTC')
-    ? 'CBBTC'
-    : pair.quoteKind === 'asset'
-      ? ASSETS[pair.quote]?.token
-      : pair.quote;
-  return baseKey && quoteKey ? [baseKey, quoteKey] : undefined;
 }
 
 /** Resolve every registered pair whose exact two ERC-20s are in the live pool. */

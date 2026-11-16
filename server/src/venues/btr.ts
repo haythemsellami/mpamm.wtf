@@ -1,8 +1,9 @@
 import { parseAbi } from 'viem';
-import type { Fill, Pair, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
-import { ASSETS, NATIVE_MON, PAIRS, TOKENS } from '@shared';
+import type { Fill, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
+import { NATIVE_MON, PAIRS, TOKENS } from '@shared';
 import { fromUnits, shortHex, toUnits } from '../util.js';
 import type { AdapterContext, LogBundle, VenueAdapter } from './adapter.js';
+import { pairKey, tokenKeysForPair } from './pair-tokens.js';
 import { createQuoteOutageReporter } from './quote-health.js';
 
 /**
@@ -25,8 +26,21 @@ import { createQuoteOutageReporter } from './quote-health.js';
  * `getSwapQuote` does not depend on msg.sender, so quoting works from any
  * address. Executing `swap_qe` is a different matter: while a leg carries the
  * SWAP_GATED risk flag, the pool only accepts senders on its swap gate
- * (`inSwapGate`). This dashboard never sends a swap, so the gate affects
- * nothing here; fills of gated swaps are still ordinary `Swapped` logs.
+ * (`inSwapGate`). A quoted price is therefore executable THROUGH a gated
+ * sender, not by any direct caller: on 2026-11-16 the gate held KyberSwap's
+ * MetaAggregationRouterV2 and its executor, none of BTR's own executors, and
+ * pool v2 had not swapped yet. Fills of gated swaps are ordinary `Swapped`
+ * logs.
+ *
+ * TWO POOLS, one venue. Pool v2 (created 2026-11-13) replaced an earlier
+ * proxy from the same deployer that emitted the same `Swapped`: 1,731 of them
+ * between 2026-10-02 and 2026-11-10, the only ones on the chain before pool
+ * v2 (topic-only scan from 2026-09-30). The layout is the same too — sampled
+ * across that whole span, both halves of `amounts` equal the ERC-20 transfers
+ * in the same tx, to the wei. That history is the venue's, so both addresses
+ * sit in the ONE log source: no extra getLogs, and no promise to make about
+ * the retired pool staying inert. Only pool v2 is quoted (the retired pool's
+ * quotes revert).
  *
  * A quote the pool cannot honour (size past a coverage threshold, a halted or
  * disabled leg, a stale mark) REVERTS rather than returning a partial amount,
@@ -36,28 +50,61 @@ import { createQuoteOutageReporter } from './quote-health.js';
  * action and is not a trade of the pool's assets: it is deliberately not read.
  */
 
-// sinceUtc = backfillFromUtc = the pool v2 deployment day. Nothing swapped
-// before it.
+// sinceUtc = backfillFromUtc = the day the retired pool was deployed (block
+// 109,610,388 · 2026-10-01 12:40 UTC). Its first Swapped landed the next day
+// (block 109,894,457), and a topic-only scan from 2026-09-30 finds no other
+// emitter of this event.
 // color: navy / lavender-white — the one hue family no live venue uses (blues
-// are sky/teal, violets are Thog/Hanji). Light navy vs the nearest venue
-// ΔE ≥ 13 under normal, protan, deutan and tritan simulation; the pale dark
-// variant is >15 from every dark venue color. Proposed for reviewer validation
-// per docs/adapters.md.
+// are sky/teal, violets are Thog/Hanji). ΔE00 against every venue and
+// reference color under normal vision and Machado protan/deutan/tritan
+// simulation: nearest in light is Hanji at 6.7 (protan; 24.4 normal), then
+// ThogAMM at 11.9; nearest in dark is 11.0 (Bybit, and Lunarbase under
+// protan). Both clear the palette's own closest pairs under the same
+// simulations (3.2 light, 0.5 dark). Contrast 10.0:1 light, 15.9:1 dark.
 const BTR_VENUE: VenueMeta = {
   id: 'btr',
   name: 'BTR',
   color: { light: '#1E3A8A', dark: '#E0E7FF' },
   kind: 'amm',
   role: 'venue',
-  sinceUtc: '2026-11-13',
+  sinceUtc: '2026-10-01',
 };
 
-/** Pool v2 proxy (ERC-1967) on Monad mainnet. */
+/** Pool v2 proxy (ERC-1967) on Monad mainnet — the only pool quoted. */
 export const BTR_POOL = '0xbbbbbbbd7060b1ced79c381ead40d73fcb9ae0c6' as const;
 
-/** The implementation the ABIs below were checked against. Any other one is
- *  announced so the quote/fill ABIs get re-checked. */
-const VERIFIED_IMPLEMENTATION = '0xf1dd174b3540f298809d51e06ffc9f7f05b161f5';
+/** The proxy pool v2 replaced: Swapped from block 109,894,457 to 120,916,325.
+ *  Decode-only — its fills are the venue's history. */
+export const BTR_RETIRED_POOL = '0xbbbbbbb04f5b762a4cdd1d89e341e2537e3267e4' as const;
+
+const BTR_POOLS: ReadonlySet<string> = new Set([BTR_POOL, BTR_RETIRED_POOL]);
+
+/**
+ * Every implementation the two proxies have run, oldest first — APPEND-ONLY.
+ * Two things hang off each entry:
+ *  - the ABIs below were checked against it, so an `Upgraded` to any other
+ *    one is announced for them to be re-checked;
+ *  - it is a quote-update destination (see gasSources). Dropping one rescans
+ *    the venue's whole gas series, so a replaced implementation stays listed.
+ * Pool v2's only `Upgraded` is in its creation block; the retired proxy read
+ * the same implementation from creation to its last swap.
+ */
+const IMPLEMENTATIONS: readonly `0x${string}`[] = [
+  '0x154be75fff18c9dfdd15d7f902b64a7b93b2a638', // retired pool
+  '0xf1dd174b3540f298809d51e06ffc9f7f05b161f5', // pool v2
+];
+
+/**
+ * BTR's own executors: contracts from the pools' deployer (0x0a37aec2…) that
+ * fronted the retired pool — each is both tx.to and the event's `sender`,
+ * driven by one EOA. None is on pool v2's swap gate (2026-11-16), where the
+ * flow is expected through aggregators the core's registry already names.
+ */
+const BTR_EXECUTORS = [
+  '0xbbbbbbb0d5cfe5bc7939ae0fce2cf21b95e806a7',
+  '0xbbbbbbb0f219f537a64d41a907192ba41b5225be',
+  '0xbbbbbbb1e1dabc155c79f4688cdb462a462f4040',
+] as const;
 
 /** Pool risk-flag bit: the leg may be swapped at all. */
 const SWAP_ENABLED_BIT = 16;
@@ -72,10 +119,6 @@ const poolAbi = parseAbi([
 ]);
 const event = (name: string) => poolAbi.find((x: any) => x.type === 'event' && x.name === name)!;
 
-/** Registry keys of the pool's assets that this dashboard tracks. The pool lists
- *  more (mUSD, GHO, USDe, …) but only registered pairs are ever emitted. */
-const POOL_TOKEN_KEYS = ['USDC', 'USDT0', 'AUSD', 'WMON', 'WBTC', 'CBBTC', 'WETH', 'XAUT0'] as const;
-
 export interface BtrMarket {
   market: string;
   baseKey: string;
@@ -84,26 +127,14 @@ export interface BtrMarket {
   quote: TokenInfo;
 }
 
-const pairKey = (a: string, b: string) => [a.toLowerCase(), b.toLowerCase()].sort().join(':');
-
-function tokenKeysForPair(pair: Pair): readonly [string, string] | undefined {
-  // cbBTC is an alternative BTC wrapper, so its market symbol—not Pair.base—
-  // selects the on-chain token. The same rule handles the WBTC/cbBTC cross.
-  const baseKey = pair.symbol.startsWith('cbBTC/') ? 'CBBTC' : ASSETS[pair.base]?.token;
-  const quoteKey = pair.symbol.endsWith('/cbBTC')
-    ? 'CBBTC'
-    : pair.quoteKind === 'asset'
-      ? ASSETS[pair.quote]?.token
-      : pair.quote;
-  return baseKey && quoteKey ? [baseKey, quoteKey] : undefined;
-}
-
-/** Every registered pair whose two ERC-20s are both pool assets, keyed on the
+/** Every registered pair whose two ERC-20s could meet in a pool, keyed on the
  *  unordered token pair (first PAIRS match wins, i.e. the canonical one). The
- *  swap event names both tokens, so this — not discovery — is the whole decode
- *  table: a fill never depends on a discovery read having succeeded. */
+ *  swap event names both tokens, so this — not discovery, and not a hand-kept
+ *  list of what the pool lists — is the whole decode table: a fill depends on
+ *  neither a discovery read nor an edit here the day BTR lists another
+ *  registered token. The pool lists more than the registry tracks (mUSD, GHO,
+ *  USDe, …); a pair that is not registered maps to nothing and is dropped. */
 export function btrMarkets(): Map<string, BtrMarket> {
-  const listed = new Set(POOL_TOKEN_KEYS.map((k) => TOKENS[k].address.toLowerCase()));
   const out = new Map<string, BtrMarket>();
   for (const pair of PAIRS) {
     const keys = tokenKeysForPair(pair);
@@ -112,7 +143,6 @@ export function btrMarkets(): Map<string, BtrMarket> {
     const base = TOKENS[baseKey], quote = TOKENS[quoteKey];
     if (!base || !quote || base.address === NATIVE_MON || quote.address === NATIVE_MON) continue;
     if (base.address.toLowerCase() === quote.address.toLowerCase()) continue;
-    if (!listed.has(base.address.toLowerCase()) || !listed.has(quote.address.toLowerCase())) continue;
     const key = pairKey(base.address, quote.address);
     if (!out.has(key)) out.set(key, { market: pair.symbol, baseKey, quoteKey, base, quote });
   }
@@ -145,7 +175,8 @@ export function decodeBtrSwap(
   const args = log?.args;
   const txHash = String(log?.transactionHash ?? '');
   const logIndex = Number(log?.logIndex);
-  if (String(log?.address ?? '').toLowerCase() !== BTR_POOL
+  const pool = String(log?.address ?? '').toLowerCase();
+  if (!BTR_POOLS.has(pool)
     || String(log?.eventName ?? '') !== 'Swapped'
     || !args || !/^0x[0-9a-fA-F]{64}$/.test(txHash)
     || !Number.isSafeInteger(logIndex) || logIndex < 0) return null;
@@ -190,7 +221,7 @@ export function decodeBtrSwap(
     execPx: quoteAmount / baseAmount, // realized quote-per-base, fee-inclusive
     txHash,
     to: shortHex(String(args.recipient ?? '0x')),
-    pool: `btr ${BTR_POOL.slice(0, 10)}`,
+    pool: `btr ${pool.slice(0, 10)}`,
     blockNumber: Number(blockNumber),
     ts,
     markoutsBps: [null, null, null, null, null],
@@ -214,7 +245,9 @@ export function createBtrAdapter(): VenueAdapter {
 
   const refresh = async (ctx: AdapterContext) => {
     const blockNumber = await ctx.client.getBlockNumber();
-    const tokens = POOL_TOKEN_KEYS.map((k) => TOKENS[k]);
+    // The registry cannot enumerate the pool's assets, so probe every
+    // registered ERC-20: a new listing is picked up with no edit here.
+    const tokens = Object.values(TOKENS).filter((t) => t.address !== NATIVE_MON);
     const res = await ctx.client.multicall({
       contracts: tokens.flatMap((t) => [
         { address: BTR_POOL, abi: poolAbi, functionName: 'getAsset' as const, args: [t.address as `0x${string}`] as const },
@@ -228,10 +261,14 @@ export function createBtrAdapter(): VenueAdapter {
       const t = tokens[i];
       const asset = res[i * 2], flags = res[i * 2 + 1];
       if (asset.status !== 'success' || flags.status !== 'success') throw new Error(`BTR getAsset/getRiskFlags(${t.symbol}) read failed`);
-      // decimals are where adapter bugs live: the pool's own must match the registry's.
       const decimals = Number((asset.result as { decimals: number }).decimals);
+      const riskFlags = Number(flags.result);
+      // An asset the pool does not list reads back as a zeroed struct, not a
+      // revert. Skip it: one delisting must not fail discovery for the venue.
+      if (decimals === 0 && riskFlags === 0) continue;
+      // decimals are where adapter bugs live: a listed asset's must match the registry's.
       if (decimals !== t.decimals) throw new Error(`BTR ${t.symbol} decimals mismatch (pool ${decimals}, registry ${t.decimals})`);
-      if ((Number(flags.result) & SWAP_ENABLED_BIT) !== 0) enabled.add(t.address.toLowerCase());
+      if ((riskFlags & SWAP_ENABLED_BIT) !== 0) enabled.add(t.address.toLowerCase());
     }
     let found = 0;
     for (const m of MARKETS_BY_TOKENS.values()) {
@@ -246,8 +283,8 @@ export function createBtrAdapter(): VenueAdapter {
   return {
     venues: () => [BTR_VENUE],
     quoteMarkets: () => [...quotable.keys()],
-    // the pool v2 deployment day — see BTR_VENUE.
-    backfillFromUtc: '2026-11-13',
+    // the retired pool's deployment day — see BTR_VENUE.
+    backfillFromUtc: '2026-10-01',
 
     discover: refresh,
 
@@ -280,7 +317,7 @@ export function createBtrAdapter(): VenueAdapter {
         const r = results[i];
         if (r.status !== 'success') continue;
         const leg = legs[i];
-        const q = r.result as { amountOut: bigint; amountIn: bigint; protoFee: bigint; lpFee: bigint };
+        const q = r.result as { amountOut: bigint; protoFee: bigint; lpFee: bigint };
         if (q.amountOut <= 0n) continue;
         const m = leg.market;
         const inH = fromUnits(leg.amountIn, leg.side === 'sell' ? m.base.decimals : m.quote.decimals);
@@ -292,8 +329,6 @@ export function createBtrAdapter(): VenueAdapter {
           row = { venueId: BTR_VENUE.id, market: m.market, sizeUsd: leg.sizeUsd, bidPx: 0, askPx: 0, bidBps: 0, askBps: 0, spreadBps: 0, filledFull: true, feeBps: 0, ts, fees: [] };
           rows.set(key, row);
         }
-        // the quote reports the input it will actually take; less than asked = a partial fill
-        if (q.amountIn < leg.amountIn) row.filledFull = false;
         // fee as the pool charges it: (protocol + LP fee) over the gross output, both in tokenOut units
         const gross = q.amountOut + q.protoFee + q.lpFee;
         if (gross > 0n) row.fees.push(Number((q.protoFee + q.lpFee) * 10_000_000n / gross) / 1000);
@@ -316,32 +351,44 @@ export function createBtrAdapter(): VenueAdapter {
     },
 
     logSources() {
-      // One source, one getLogs: the proxy's Upgraded rides along with the
-      // fills so an implementation change is seen in the range it happens.
-      // Static, so there is no discovery to wait on.
-      return [{ key: 'pool', address: BTR_POOL, events: [event('Swapped'), event('Upgraded')], kind: 'fills' as const }];
+      // One source, one getLogs, both pools: a proxy's Upgraded rides along
+      // with the fills so an implementation change is seen in the range it
+      // happens. Static, so there is no discovery to wait on.
+      return [{ key: 'pool', address: [BTR_POOL, BTR_RETIRED_POOL], events: [event('Swapped'), event('Upgraded')], kind: 'fills' as const }];
     },
 
-    // Takers call the pool directly (swap_qe); BTR has no router of its own, so
-    // an aggregator's router is attributed by the core, not claimed here.
-    entryPoints: () => [{ address: BTR_POOL }],
+    // Takers call a pool directly (swap_qe), or enter through one of BTR's
+    // own executors. An aggregator's router is attributed by the core, not
+    // claimed here.
+    entryPoints: () => [
+      { address: BTR_POOL },
+      { address: BTR_RETIRED_POOL },
+      ...BTR_EXECUTORS.map((address) => ({ address, router: 'BTR' })),
+    ],
 
-    // gasSources omitted on purpose: BTR's keepers push marks with log-less
-    // calls to a separate oracle contract whose destination and cadence are
-    // not a public interface, so the quote-update burn is not tracked here.
+    // QUOTE_UPDATE_BURN: BTR's keeper pays for every mark push. A pool keeps
+    // its marks in its IMPLEMENTATION's own storage — getSwapQuote STATICCALLs
+    // the implementation address, and the pushes (selector 0x013b6436, no
+    // logs) are sent to that address, never to the proxy. So blocks mode on
+    // every implementation — sampled, shown with ≈. At one push per ~10-14
+    // blocks (20-28k a day, measured 2026-11-14..15; the retired pool ran one
+    // per ~11) the default 1000-block stride lands on a push ~25 times a day:
+    // a day's figure carries ~±20% sampling noise.
+    gasSources: () => [{ mode: 'blocks' as const, address: [...IMPLEMENTATIONS] }],
 
-    async decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
+    decode(ctx: AdapterContext, logs: LogBundle, tsOf) {
       const out: Fill[] = [];
-      let upgraded = false;
       for (const log of logs.pool ?? []) {
         if (log?.eventName === 'Upgraded') {
           const impl = String(log?.args?.implementation ?? '').toLowerCase();
-          if (impl === VERIFIED_IMPLEMENTATION) continue;
-          // An ABI change is the one thing a refresh cannot absorb: a changed
+          if (IMPLEMENTATIONS.includes(impl as `0x${string}`)) continue;
+          // An ABI change is the one thing nothing here can absorb: a changed
           // Swapped would match nothing and read exactly like a quiet venue.
+          // Announce it and keep decoding. The decode table is static, so
+          // there is no discovery to redo, and a chain read that failed here
+          // would hold the shared cursor for every venue.
           const label = /^0x[0-9a-f]{40}$/.test(impl) ? shortHex(impl) : 'an unreadable implementation';
-          ctx.note('venue.upgraded', `BTR: proxy upgraded to ${label} — re-verify quote/fill ABIs against the new implementation`);
-          upgraded = true;
+          ctx.note('venue.upgraded', `BTR: proxy ${shortHex(String(log?.address ?? '').toLowerCase())} upgraded to ${label} — re-verify quote/fill ABIs against it and add it to IMPLEMENTATIONS (its mark pushes are untracked until then)`);
           continue;
         }
         let blockNumber: bigint;
@@ -353,7 +400,6 @@ export function createBtrAdapter(): VenueAdapter {
         const fill = decodeBtrSwap(log, tsOf(blockNumber), (tokenKey, amount) => ctx.pricer.usdForToken(tokenKey, amount));
         if (fill) out.push(fill);
       }
-      if (upgraded) await refresh(ctx);
       return out;
     },
   };
