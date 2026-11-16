@@ -556,11 +556,15 @@ export const REALTIME_HOLD_MS = 30_000;
  *  that has stopped emitting is the case that most needs reporting. */
 const REALTIME_CHECK_MS = 5_000;
 
-/** Median compute time of the frames emitted in the last minute, 0 with none. */
+/** Median compute time of the frames emitted in the last minute, 0 with none.
+ *  An even count averages the two middle values: taking the upper one reads a
+ *  window split between fast and slow frames as all slow. */
 export function medianFrameMs(frames: readonly RealtimeFrameSample[], now = Date.now()): number {
   const ms = frames.filter((f) => f.emittedAt >= now - REALTIME_WINDOW_MS && f.durationMs !== undefined)
     .map((f) => f.durationMs!).sort((a, b) => a - b);
-  return ms.length ? ms[Math.floor(ms.length / 2)] : 0;
+  if (!ms.length) return 0;
+  const mid = ms.length >> 1;
+  return ms.length % 2 ? ms[mid] : (ms[mid - 1] + ms[mid]) / 2;
 }
 
 /** Which pace thresholds are crossed right now, as phrases for the note. A
@@ -572,6 +576,25 @@ export function realtimeSymptoms(h: RealtimeHealth, medianMs: number, blockTimeM
   if (h.lagBlocks > REALTIME_DEGRADED.lagBlocks) out.push(`${h.lagBlocks} blocks behind the head`);
   if (medianMs >= blockTimeMs) out.push(`median frame ${Math.round(medianMs)}ms against a ${blockTimeMs}ms block`);
   return out;
+}
+
+/** The symptom of a quote loop that is running and has produced nothing. */
+export const NO_QUOTE_FRAME = 'no quote frame since the quote loop started';
+
+/**
+ * The symptoms of one sample, with or without a frame to judge.
+ *
+ * Before the first frame there is no health to read, and that used to mean
+ * "nothing to report". But a frame that fails is retried silently
+ * (drainQuoteBlocks), so a loop that fails EVERY frame from boot produced no
+ * frame, no health and no note, for as long as it lasted. Once the loop is
+ * running, having no frame is the symptom. It goes through the same hold as
+ * the others, which is its startup grace: the first frame normally lands
+ * within a second of the first head.
+ */
+export function paceSymptoms(p: { health: RealtimeHealth | undefined; medianMs: number; blockTimeMs: number; loopStarted: boolean }): string[] {
+  if (!p.health) return p.loopStarted ? [NO_QUOTE_FRAME] : [];
+  return realtimeSymptoms(p.health, p.medianMs, p.blockTimeMs);
 }
 
 /**
@@ -1970,6 +1993,7 @@ export class LiveDataSource extends BaseSource {
     this.scheduleTail();
     void this.runRereads();
     this.persistTimer = setInterval(() => { void this.persist(); }, config.persistMs);
+    this.quoteLoopSince = Date.now();
     this.realtimeTimer = setInterval(() => this.observeRealtime(), REALTIME_CHECK_MS);
     // rolling retention: without it fills only aged out at boot, so uptime
     // alone grew the table past its window.
@@ -2212,6 +2236,9 @@ export class LiveDataSource extends BaseSource {
   private tailBehindSince: number | undefined;
   private tailHeldNote: { msg?: string; since?: number } = {};
   private realtimeNote: { badSince?: number; goodSince?: number; msg?: string; since?: number } = {};
+  /** When the head watcher began driving quotes; undefined through warm-up,
+   *  when no frame is expected yet. */
+  private quoteLoopSince?: number;
 
   /** The later of the cursor's last move and the tail falling behind. */
   private tailQuietSince(): number {
@@ -2251,18 +2278,20 @@ export class LiveDataSource extends BaseSource {
     });
   }
 
-  /** Keep the quote-pace note in step (checkRealtimeDegraded). Nothing to be
-   *  behind before the first frame. The slowest adapters are named only from a
-   *  frame emitted inside the window: after a stall the last frame's timings
-   *  describe a moment that is over. */
+  /** Keep the quote-pace note in step (checkRealtimeDegraded). Before the
+   *  first frame the sample still runs (paceSymptoms): a loop that never
+   *  produces one is a symptom, not an absence of data. The slowest adapters
+   *  are named only from a frame emitted inside the window: after a stall the
+   *  last frame's timings describe a moment that is over. */
   private observeRealtime(): void {
     const health = this.realtimeHealth();
     const frame = this.quotes.frame;
-    if (!health || !frame) return;
     const now = Date.now();
-    const blockTimeMs = monad.blockTime ?? 300;
-    const symptoms = realtimeSymptoms(health, medianFrameMs(this.realtimeFrames, now), blockTimeMs);
-    const slowest = now - frame.emittedAt <= REALTIME_WINDOW_MS
+    const symptoms = paceSymptoms({
+      health, medianMs: medianFrameMs(this.realtimeFrames, now), blockTimeMs: monad.blockTime ?? 300,
+      loopStarted: this.quoteLoopSince !== undefined,
+    });
+    const slowest = frame && now - frame.emittedAt <= REALTIME_WINDOW_MS
       ? Object.entries(frame.adapterMs).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id, ms]) => `${id} ${Math.round(ms)}ms`).join(', ')
       : '';
     checkRealtimeDegraded(symptoms, slowest ? `slowest adapters: ${slowest}` : '', now, this.realtimeNote, {

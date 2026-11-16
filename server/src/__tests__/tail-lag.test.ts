@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { TAIL_HELD_MS, TAIL_LAG_SHOWN_MS, checkTailHeld, tailIsLagging, tailStatusOf } from '../datasource/live.js';
+import { REALTIME_HOLD_MS, TAIL_HELD_MS, TAIL_LAG_SHOWN_MS, checkTailHeld, tailIsLagging, tailStatusOf } from '../datasource/live.js';
 
 const paths: string[] = [];
 
@@ -268,5 +268,60 @@ describe('LiveDataSource tail status', () => {
       source.observeTail();
       expect('tail' in source.getState()).toBe(false);
     } finally { source.store.close(); }
+  });
+
+  // The quote-pace note shares this harness (its lifecycle is unit-tested in
+  // realtime.test.ts). Review of #171: the sampler returned early while no
+  // frame existed, and a failed frame is retried silently, so a quote loop
+  // failing every frame from boot was never reported at all.
+  describe('quote pace sampler', () => {
+    const SAMPLE_MS = 5_000;
+    const degraded = 'quote.realtime.degraded';
+
+    it('says nothing through warm-up, before the quote loop has started', async () => {
+      const { source, notes, advance } = await setup();
+      try {
+        source.observedHead = 1_000n;
+        for (let i = 0; i < 60; i++) { advance(SAMPLE_MS); source.observeRealtime(); }
+        expect(notes(degraded)).toEqual([]);
+      } finally { source.store.close(); }
+    });
+
+    it('reports a loop that never completes a frame while heads advance, and retracts on the first frame', async () => {
+      const { source, notes, advance } = await setup();
+      try {
+        source.quoteLoopSince = Date.now();   // loops started; every poll() throws and is retried
+        source.observedHead = 1_000n;
+        const sample = () => { advance(SAMPLE_MS); source.observedHead += 16n; source.observeRealtime(); };
+
+        for (let t = 0; t < REALTIME_HOLD_MS; t += SAMPLE_MS) sample(); // the startup grace
+        expect(notes(degraded)).toEqual([]);
+        expect(source.getState().realtime).toBeUndefined();            // nothing to read on /api/health either
+
+        sample();
+        expect(notes(degraded)).toHaveLength(1);
+        expect(notes(degraded)[0]).toMatchObject({
+          level: 'warn',
+          msg: 'quotes are not keeping up with the chain head: no quote frame since the quote loop started — live values on GET /api/health',
+        });
+        for (let i = 0; i < 48; i++) sample();                           // four more minutes of failed frames
+        expect(notes(degraded)).toHaveLength(1);
+
+        // the first frame completes, at the head
+        const at = Date.now();
+        const block = Number(source.observedHead);
+        source.quotes = { block, monUsd: 1, ts: at, rows: [], frame: {
+          headSource: 'http', headObservedAt: at - 150, quoteStartedAt: at - 140, quoteCompletedAt: at, emittedAt: at,
+          durationMs: 140, adapterMs: { 'test-venue': 120 }, missingVenues: [], coalescedBlocks: 0,
+        } };
+        source.realtimeFrames = [{ block, emittedAt: at, coalescedBlocks: 0, durationMs: 140 }];
+        source.observeRealtime();
+        expect(notes(degraded)).toHaveLength(1);                         // clear, not yet trusted
+        advance(REALTIME_HOLD_MS);
+        source.observeRealtime();
+        expect(notes(degraded)).toEqual([]);
+        expect(notes('quote.realtime.recovered').at(-1)).toMatchObject({ level: 'info', msg: 'quotes are keeping up with the chain head again after ~5m' });
+      } finally { source.store.close(); }
+    });
   });
 });

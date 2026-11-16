@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { RealtimeHealth } from '@shared';
 import {
-  captureReferenceFrame, checkRealtimeDegraded, expectedReferenceVenues, medianFrameMs, realtimeCoverage,
-  realtimeSymptoms, REALTIME_DEGRADED, REALTIME_HOLD_MS,
+  captureReferenceFrame, checkRealtimeDegraded, expectedReferenceVenues, medianFrameMs, NO_QUOTE_FRAME, paceSymptoms,
+  realtimeCoverage, realtimeSymptoms, REALTIME_DEGRADED, REALTIME_HOLD_MS,
 } from '../datasource/live.js';
 
 describe('realtime quote coverage', () => {
@@ -67,6 +67,46 @@ describe('quote pace note', () => {
     ];
     expect(medianFrameMs(frames, now)).toBe(140);
     expect(medianFrameMs([], now)).toBe(0);
+  });
+
+  // Review of #171: the upper-middle value read a window split evenly between
+  // 150ms and 400ms frames as 400ms, over the 300ms line, with coverage and
+  // lag healthy. The median of an even count is the mean of the middle two.
+  it('averages the two middle values of an even-sized window', () => {
+    const now = 100_000;
+    const sample = (durationMs: number, i: number) => ({ block: i, emittedAt: now - 1 - i, coalescedBlocks: 0, durationMs });
+    const split = [...Array.from({ length: 100 }, (_, i) => sample(150, i)), ...Array.from({ length: 100 }, (_, i) => sample(400, 100 + i))];
+    expect(medianFrameMs(split, now)).toBe(275);
+    expect(realtimeSymptoms(healthy, medianFrameMs(split, now), 300)).toEqual([]);
+    expect(medianFrameMs([sample(120, 0), sample(140, 1)], now)).toBe(130);
+    // one more slow frame tips a genuine majority over the line
+    expect(medianFrameMs([...split, sample(400, 200)], now)).toBe(400);
+  });
+
+  // Review of #171: a failed frame is retried silently, so a loop failing every
+  // frame from boot had no frame, no health and therefore no note.
+  it('reports a loop that never produces a first frame, and recovers on the first one', () => {
+    const { log, io } = collector();
+    const state = {};
+    const sample = (now: number, health: RealtimeHealth | undefined, loopStarted = true) =>
+      checkRealtimeDegraded(paceSymptoms({ health, medianMs: 150, blockTimeMs: 300, loopStarted }), '', now, state, io);
+
+    sample(0, undefined, false);                                   // warm-up: no frame is expected yet
+    sample(600_000, undefined, false);
+    expect(log).toEqual([]);
+
+    const start = 1_000_000;
+    for (let t = 0; t < REALTIME_HOLD_MS; t += 5_000) sample(start + t, undefined); // the startup grace
+    expect(log).toEqual([]);
+    sample(start + REALTIME_HOLD_MS, undefined);
+    const line = `warn quotes are not keeping up with the chain head: ${NO_QUOTE_FRAME} — live values on GET /api/health`;
+    expect(log).toEqual([line]);
+    sample(start + 240_000, undefined);                            // minutes of failed frames: the same line
+    expect(log).toEqual([line, line]);
+
+    sample(start + 300_000, healthy);                              // the first frame lands
+    sample(start + 300_000 + REALTIME_HOLD_MS, healthy);
+    expect(log.slice(-2)).toEqual([`clear ${line.slice(5)}`, 'info quotes are keeping up with the chain head again after ~5m']);
   });
 
   it('stays silent for a blip, raises once when it lasts, and keeps the same line for the episode', () => {
