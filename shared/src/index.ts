@@ -427,10 +427,13 @@ export interface QuoteSnapshot {
   revision?: number;
   block: number;
   monUsd: number;
-  /** Frame emission time. Older/synthetic producers may omit `frame`, so this
-   *  remains the canonical chart/history timestamp. */
+  /** Frame emission time (equal to `frame.emittedAt` when `frame` is present).
+   *  The stream omits `frame`, so this is the canonical chart/history timestamp. */
   ts: number;
   rows: QuoteRow[];
+  /** REST only (`/api/quotes`, `/api/markets`, and `quoteFrame` on
+   *  `/api/health`). The stream strips it: ~380 bytes of maintainer telemetry
+   *  was 13–15% of every per-pair quote frame. */
   frame?: QuoteFrameTelemetry;
 }
 
@@ -815,6 +818,9 @@ export type NoteCode =
   | 'rpc.failover' | 'rpc.down' | 'rpc.recovered' | 'rpc.endpoint.dropped'
   // live quote head source (server/src/chain/heads.ts)
   | 'quote.head.fallback' | 'quote.head.recovered'
+  // whether quote frames keep pace with the chain head (datasource/live.ts:
+  // checkRealtimeDegraded) — the event; the live numbers are GET /api/health
+  | 'quote.realtime.degraded' | 'quote.realtime.recovered'
   // venue adapters: discovery, market coverage, quoting, decode
   | 'venue.discovery' | 'venue.discovery.degraded' | 'venue.discovery.failed'
   | 'venue.market.unlisted' | 'venue.upgraded' | 'venue.quarantined'
@@ -849,6 +855,7 @@ export type NoteCode =
 export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'rpc.failover': 'warn', 'rpc.down': 'warn', 'rpc.recovered': 'info', 'rpc.endpoint.dropped': 'warn',
   'quote.head.fallback': 'warn', 'quote.head.recovered': 'info',
+  'quote.realtime.degraded': 'warn', 'quote.realtime.recovered': 'info',
   'venue.discovery': 'info', 'venue.discovery.degraded': 'warn', 'venue.discovery.failed': 'warn',
   'venue.market.unlisted': 'warn', 'venue.upgraded': 'warn', 'venue.quarantined': 'warn',
   'venue.quote.unavailable': 'warn', 'venue.quote.recovered': 'info', 'venue.gas.suspect': 'warn',
@@ -907,7 +914,9 @@ export interface MarketState {
    *  pools). Absent when no dedicated archive is configured (the pools are the
    *  same one) and in sim. */
   rpcArchive?: RpcStatus;
-  /** Block-head/quote freshness. Absent before the first live frame. */
+  /** Block-head/quote freshness. Absent before the first live frame, and
+   *  never on the WS stream (StreamState): it is maintainer telemetry, read
+   *  from `GET /api/health`. */
   realtime?: RealtimeHealth;
   /** The fill tail's lag, present ONLY while it trails the head by more than
    *  the server's threshold (and never in sim). At the tip the field is absent
@@ -941,8 +950,13 @@ export interface MarketsResponse {
  * rides the stream at all. Both remain on `GET /api/markets` — which is
  * brotli'd at the edge and re-fetched on connect and on every reconnect — so
  * nothing is lost for maintainers or external consumers.
+ *
+ * `realtime` is the same kind of field: quote-pace telemetry the dashboard
+ * once printed as a strip of numbers nobody comparing venues could act on. It
+ * is served by `GET /api/health`, beside the latest frame's own telemetry
+ * (`quoteFrame`), and a sustained problem raises `quote.realtime.degraded`.
  */
-export type StreamState = Omit<MarketState, 'venues' | 'notes'> & {
+export type StreamState = Omit<MarketState, 'venues' | 'notes' | 'realtime'> & {
   /** present ONLY on the hello frame; later frames omit it and the client keeps
    *  the registry it already holds. */
   venues?: VenueMeta[];
