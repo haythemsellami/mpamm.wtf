@@ -61,17 +61,21 @@ async function setup(a: ReturnType<typeof adapter>, opts: { dedicated?: boolean 
     getLogs: vi.fn(async (_p: any): Promise<any[]> => []),
     getBlock: vi.fn(async (_p: any) => ({ timestamp: BLOCK_SEC })),
     getTransaction: vi.fn(async (_p: any) => ({ to: POOL, from: '0x1111111111111111111111111111111111111111' })),
+    // a decode-time state read: which pool answered is what the value says
+    readContract: vi.fn(async (_p: any): Promise<unknown> => 'hot-state'),
   };
+  const archiveGen = { value: 0 };
   const archive = {
     getBlockNumber: vi.fn(async () => 10_000_000n),
     getLogs: vi.fn(async (_p: any): Promise<any[]> => []),
     getBlock: vi.fn(async (_p: any) => ({ timestamp: BLOCK_SEC })),
     getTransaction: vi.fn(async (_p: any) => ({ to: POOL, from: '0x1111111111111111111111111111111111111111' })),
+    readContract: vi.fn(async (_p: any): Promise<unknown> => 'archive-state'),
   };
   // the real chunker's contract, minus the chunking: the default fetch is the
   // hot client, and a caller-supplied fetch replaces it
   const getLogsChunked = vi.fn(async (params: any, _chunk?: bigint, fetchLogs?: (p: any) => Promise<any[]>) => (fetchLogs ? fetchLogs(params) : hot.getLogs(params)));
-  const publicClient = { getBlockNumber: vi.fn(async () => 100n), getLogs: hot.getLogs, getBlock: hot.getBlock, getTransaction: hot.getTransaction };
+  const publicClient = { getBlockNumber: vi.fn(async () => 100n), getLogs: hot.getLogs, getBlock: hot.getBlock, getTransaction: hot.getTransaction, readContract: hot.readContract };
   vi.doMock('../chain/rpc.js', () => ({
     hotHeadEndpoint: () => ({ generation: 0 }),
     resolveQuoteBlock: async (number: bigint, identity = {}) => ({ number, hash: `0x${number.toString(16).padStart(64, '0')}`, generation: 0, ...identity }),
@@ -89,7 +93,7 @@ async function setup(a: ReturnType<typeof adapter>, opts: { dedicated?: boolean 
     rpcStatus: () => ({ active: 'primary', degraded: false, down: false }),
     rpcGeneration: () => 0,
     archiveRpcStatus: () => archiveStatus,
-    archiveRpcGeneration: () => 0,
+    archiveRpcGeneration: () => archiveGen.value,
     hasDedicatedArchive: opts.dedicated ?? true,
   }));
   vi.doMock('../chain/heads.js', () => ({ HotHeadWatcher: class {} }));
@@ -122,7 +126,7 @@ async function setup(a: ReturnType<typeof adapter>, opts: { dedicated?: boolean 
   /** point the (mocked) chain tip so tailFills sees `head` = tip - 5 */
   const setHead = (head: bigint) => hot.head.mockResolvedValue(head + 5n);
   const notes = (code: string): string[] => source.notes.list().filter((n: any) => n.code === code).map((n: any) => n.msg);
-  return { live, source, a, hot, archive, archiveStatus, getLogsChunked, setHead, notes };
+  return { live, source, a, hot, archive, archiveStatus, archiveGen, getLogsChunked, setHead, notes };
 }
 
 /** the cursor sits 5000 blocks behind: window 1..1000 is 3995 behind the head */
@@ -176,7 +180,7 @@ describe('tailFills pool choice', () => {
       expect(archive.getBlock).toHaveBeenCalledTimes(2);
       expect(hot.getBlock).not.toHaveBeenCalled();
       // decode reads chain state at the window's blocks: it must get the pool that holds them
-      expect(a.decode.mock.calls[0][0].client).toBe(archive);
+      expect(await a.decode.mock.calls[0][0].client.readContract({})).toBe('archive-state');
       expect(archive.getTransaction).toHaveBeenCalledOnce(); // one tx, asked of the archive first
       expect(hot.getTransaction).not.toHaveBeenCalled();
       expect(source.fills.map((f: any) => f.blockNumber)).toEqual([10, 20]);
@@ -199,7 +203,7 @@ describe('tailFills pool choice', () => {
       expect(archive.getLogs).not.toHaveBeenCalled();
       expect(archive.getTransaction).not.toHaveBeenCalled();
       expect(hot.getTransaction).toHaveBeenCalledOnce();
-      expect(a.decode.mock.calls[0][0].client).not.toBe(archive);
+      expect(await a.decode.mock.calls[0][0].client.readContract({})).toBe('hot-state');
       expect(source.fills).toHaveLength(1);
       expect(source.lastBlock).toBe(5000n);
       expect(notes('tail.archive')).toEqual([]);
@@ -331,8 +335,8 @@ describe('tailFills archive fallback (never worse than the hot read)', () => {
     try {
       await source.tailFills();
       expect(a.decode).toHaveBeenCalledTimes(2);
-      expect(a.decode.mock.calls[0][0].client).toBe(archive);
-      expect(a.decode.mock.calls[1][0].client).not.toBe(archive);
+      expect(await a.decode.mock.calls[0][0].client.readContract({})).toBe('archive-state');
+      expect(await a.decode.mock.calls[1][0].client.readContract({})).toBe('hot-state');
       expect(await decode(null, { swap: [] }, () => 0)).toEqual([]); // the harness decode is intact
       expect(source.fills).toHaveLength(1); // counted once, from the hot decode
       expect(source.lastBlock).toBe(1000n);
@@ -350,6 +354,124 @@ describe('tailFills archive fallback (never worse than the hot read)', () => {
       expect(hot.getTransaction).toHaveBeenCalledOnce();
       expect(source.fills[0].category).toBe('DIRECT');
       expect(source.lastBlock).toBe(1000n);
+    } finally { source.store.close(); }
+  });
+});
+
+// decode() reads chain state for the blocks it decodes (Clober's multicall one
+// block before a Take) and adapters cache what they read. The breaker retries
+// transparently, so a read can come back successful after being answered by a
+// backup mid-failover. Every deep read has to pass the availability gate
+// (AGENTS.md): the logs and timestamps did, the decode's own reads did not.
+describe('decode-time reads on the archive pool are guarded reads', () => {
+  /** decode reads one piece of state through ctx.client and records what it was given */
+  function reading() {
+    const a = adapter();
+    const emit = a.decode.getMockImplementation()!;
+    const seen: unknown[] = [];
+    a.decode.mockImplementation(async (ctx: any, bundle: any, tsOf: any) => {
+      seen.push(await ctx.client.readContract({}));
+      return emit(ctx, bundle, tsOf);
+    });
+    return { a, seen };
+  }
+  const UNAVAILABLE = 'RPC pool changed or became unavailable while a read was in flight';
+
+  it('refuses a read that SUCCEEDED across a failover generation change, and re-reads the window from the hot pool', async () => {
+    const { a, seen } = reading();
+    const { source, hot, archive, archiveGen, notes } = await gap(a);
+    archive.getLogs.mockResolvedValueOnce([log(10n)]);
+    hot.getLogs.mockResolvedValueOnce([log(10n)]);
+    // primary → backup → primary inside one await: the answer is a backup's
+    archive.readContract.mockImplementationOnce(async () => { archiveGen.value += 2; return 'backup-state'; });
+    try {
+      await source.tailFills();
+      expect(seen).toEqual(['hot-state']); // the adapter never held the backup's answer, so it cannot have cached it
+      expect(a.decode).toHaveBeenCalledTimes(2);
+      expect(source.fills).toHaveLength(1); // counted once, from the hot decode
+      expect(source.lastBlock).toBe(1000n);
+      expect(notes('venue.decode.failed')).toEqual([`Test Venue decode error on the archive pool — trying the hot pool: ${UNAVAILABLE}`]);
+      expect(notes('tail.archive')).toEqual([]); // the archive did not serve this window
+      expect(source.tailArchiveRetryAt).toBeGreaterThan(Date.now()); // and is backed off
+    } finally { source.store.close(); }
+  });
+
+  it('refuses a read that returns while the pool is on a backup', async () => {
+    const { a, seen } = reading();
+    const { source, hot, archive, archiveStatus } = await gap(a);
+    archive.getLogs.mockResolvedValueOnce([log(10n)]);
+    hot.getLogs.mockResolvedValueOnce([log(10n)]);
+    archive.readContract.mockImplementationOnce(async () => { archiveStatus.degraded = true; return 'backup-state'; });
+    try {
+      await source.tailFills();
+      expect(seen).toEqual(['hot-state']);
+      expect(source.lastBlock).toBe(1000n);
+    } finally { source.store.close(); }
+  });
+
+  it('with neither pool able to answer, holds the cursor: an unchecked answer never consumes it', async () => {
+    const { a, seen } = reading();
+    const { source, hot, archive, archiveGen } = await gap(a);
+    archive.getLogs.mockResolvedValue([log(10n)]);
+    hot.getLogs.mockResolvedValue([log(10n)]);
+    archive.readContract.mockImplementation(async () => { archiveGen.value += 2; return 'backup-state'; });
+    hot.readContract.mockRejectedValue(Object.assign(new Error('x'), { details: 'error getting block header from triedb and archive' }));
+    try {
+      await source.tailFills();
+      expect(seen).toEqual([]);
+      expect(source.fills).toEqual([]);
+      expect(source.lastBlock).toBe(0n);
+    } finally { source.store.close(); }
+  });
+
+  it('guardedClient guards every read, keeps one identity per method, and leaves non-reads alone', async () => {
+    const { source } = await setup(adapter());
+    const live = await import('../chain/failover.js');
+    try {
+      const unwatch = () => {};
+      const raw = { chain: { id: 143 }, readContract: vi.fn(async (x: number) => x * 2), watchBlocks: vi.fn(() => unwatch), extend: vi.fn(() => 'extended') };
+      const guard = vi.fn(<T>(read: () => Promise<T>) => read());
+      const client = live.guardedClient(raw, guard as any);
+
+      expect(await client.readContract(21)).toBe(42);
+      expect(guard).toHaveBeenCalledOnce();
+      expect(client.readContract).toBe(client.readContract);
+      expect(client.chain).toBe(raw.chain);
+      expect(client.watchBlocks()).toBe(unwatch); // synchronous, not a read
+      expect(client.extend()).toBe('extended');
+      expect(guard).toHaveBeenCalledOnce();
+
+      const refusing = live.guardedClient(raw, (async () => { throw new Error(UNAVAILABLE); }) as any);
+      await expect(refusing.readContract(1)).rejects.toThrow(UNAVAILABLE);
+    } finally { source.store.close(); }
+  });
+});
+
+// A held decode is retried every cycle, so its note must name a CLASS of
+// failure: a decode-time RPC error carries the URL, the request body and a
+// block number that moves with each retry.
+describe('decode failure notes carry the normalized reason', () => {
+  it('keeps the node\'s answer, drops the URL and request body, and does not repeat as the block moves', async () => {
+    const a = adapter();
+    const { source, hot, archive, notes } = await gap(a);
+    archive.getLogs.mockResolvedValue([log(10n)]);
+    hot.getLogs.mockResolvedValue([log(10n)]);
+    let block = 121_585_294;
+    a.decode.mockImplementation(async () => {
+      throw Object.assign(new Error(`RPC Request failed.\n\nURL: https://node.example/rpc/SECRET\nRequest body: {"method":"eth_call","params":[{},"0x${(block).toString(16)}"]}`), {
+        shortMessage: 'RPC Request failed.', details: `block ${block++} not available`,
+      });
+    });
+    try {
+      await source.tailFills();
+      expect(notes('venue.decode.failed')).toEqual([
+        'Test Venue decode error on the archive pool — trying the hot pool: block # not available',
+        'Test Venue decode error — holding cursor, retrying: block # not available',
+      ]);
+      source.tailArchiveRetryAt = 0;
+      await source.tailFills(); // two more failures, two different block numbers
+      expect(notes('venue.decode.failed')).toHaveLength(2);
+      expect(source.lastBlock).toBe(0n);
     } finally { source.store.close(); }
   });
 });
@@ -381,7 +503,7 @@ describe('tailFills prices an old window as of its blocks', () => {
       await source.tailFills(); // window 1: nothing learned yet
       await source.tailFills(); // window 2: priced from window 1's MON/USDC fill
       expect(quoted).toEqual([2, 200]);
-      expect(a.decode.mock.calls[1][0].client).toBe(archive); // still the archive context, pricer aside
+      expect(await a.decode.mock.calls[1][0].client.readContract({})).toBe('archive-state'); // still the archive context, pricer aside
     } finally { source.store.close(); }
   });
 

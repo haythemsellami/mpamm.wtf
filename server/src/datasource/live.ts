@@ -12,7 +12,7 @@ import {
   type LeaderboardResponse, type GasResponse, type NoteCode, type QuoteFrameTelemetry,
   type QuoteHeadSource, type RealtimeHealth, type TailStatus,
 } from '@shared';
-import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from '../chain/failover.js';
+import { allPreferAvailability, guardRpcRead, guardedClient, isAvailabilityFailure } from '../chain/failover.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries, supportsHistoricalReference } from '../history/cex.js';
 import { curveComplete, curvePoints } from '../markout-curves.js';
@@ -1540,6 +1540,9 @@ const hotRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, ho
 const archiveLogs = (p: { address: unknown; fromBlock: bigint; toBlock: bigint; events?: unknown }): Promise<unknown[]> =>
   archiveRead(() => archiveClient.getLogs(p as any) as Promise<unknown[]>);
 
+/** The archive client as a tail decode sees it: every read an archiveRead. */
+const tailArchiveClient = guardedClient(archiveClient, archiveRead);
+
 async function holdWhileDegraded(): Promise<boolean> {
   const wasUnavailable = archiveUnavailable();
   while (archiveUnavailable()) await sleep(15_000);
@@ -1633,15 +1636,18 @@ export class LiveDataSource extends BaseSource {
   /** Decode context for a tail window read from the ARCHIVE pool. decode() may
    *  read chain state AT the blocks it is decoding (Clober asks whether a book
    *  was vault-paired one block before a Take), and a hot node that could not
-   *  serve the window's logs cannot serve its state either. Everything but the
-   *  two chain handles is the adapter's ordinary context. */
+   *  serve the window's logs cannot serve its state either. Both chain handles
+   *  are guarded reads (guardedClient, archiveLogs), like the window's logs and
+   *  timestamps: a failover mid-decode fails the decode, and the window is
+   *  re-read whole from the hot pool. Everything else is the adapter's
+   *  ordinary context. */
   private archiveCtxCache = new WeakMap<VenueAdapter, AdapterContext>();
   private archiveCtxFor(a: VenueAdapter): AdapterContext {
     let ctx = this.archiveCtxCache.get(a);
     if (!ctx) {
       ctx = {
         ...this.ctxFor(a),
-        client: archiveClient,
+        client: tailArchiveClient,
         getLogs: (params, chunk, fetchLogs = archiveLogs) => getLogsChunked(params, chunk, fetchLogs),
       };
       this.archiveCtxCache.set(a, ctx);
@@ -4575,7 +4581,11 @@ export class LiveDataSource extends BaseSource {
       try { fresh.push(...this.ownVenues(a, await a.decode(pricer ? { ...base, pricer } : base, bundle, tsOf, failed), 'fill')); }
       catch (e) {
         decodeFailed = true;
-        this.noteOnce('venue.decode.failed', `${a.venues()[0]?.name ?? 'venue'} decode error${on} — ${next}: ${(e as Error).message}`, this.vidOf(a));
+        // the same normalized reason as the source and timestamp paths: a
+        // decode-time RPC error carries the URL, the request body and a block
+        // number that moves, so the raw message never dedupes and can lose
+        // the node's own answer to the note's length cap
+        this.noteOnce('venue.decode.failed', `${a.venues()[0]?.name ?? 'venue'} decode error${on} — ${next}: ${rpcFailureReason(e)}`, this.vidOf(a));
       }
     }
     // Decode is cursor-critical too: if an adapter cannot decode this range, do
