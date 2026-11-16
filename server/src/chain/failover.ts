@@ -142,6 +142,36 @@ export async function guardRpcRead<T>(
   }
 }
 
+/**
+ * A client whose every read is a guarded read (guardRpcRead via `guard`).
+ *
+ * decode() may read chain state for the blocks it is decoding (Clober's
+ * multicall one block before a Take), and adapters cache what they read. The
+ * breaker retries transparently, so a read that "succeeds" may have been
+ * answered by a backup mid-failover. Handed the raw client, decode would cache
+ * that answer and its window would consume the cursor on it: the one deep read
+ * the availability gate did not cover. Guarded, the read throws instead, the
+ * decode fails before the adapter sees a value, and the caller falls back.
+ *
+ * `watch*` and `extend` are not reads (they return synchronously) and pass
+ * through. Wrappers are cached so a method keeps one identity.
+ */
+export function guardedClient<C extends object>(client: C, guard: <T>(read: () => Promise<T>) => Promise<T>): C {
+  const wrapped = new Map<PropertyKey, unknown>();
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== 'function' || prop === 'extend' || (typeof prop === 'string' && prop.startsWith('watch'))) return value;
+      let fn = wrapped.get(prop);
+      if (!fn) {
+        fn = (...args: unknown[]) => guard(async () => (Reflect.get(target, prop, receiver) as (...a: unknown[]) => unknown).apply(target, args));
+        wrapped.set(prop, fn);
+      }
+      return fn;
+    },
+  });
+}
+
 /** Wait for every concurrent archive read, then prefer any availability
  *  failure over answer-level errors. Promise.all reports only the first promise
  *  to reject; if a permanent hole wins that race while a sibling source was

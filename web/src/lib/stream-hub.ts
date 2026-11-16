@@ -107,8 +107,19 @@ export class StreamHub {
         }
         this.sequences.set(envelope.topic, envelope.seq);
         if (envelope.message.ch === 'state') {
+          // The server sends `venues` once (the snapshot) and `quoteMarkets`
+          // only when the catalog changes, so those two are carried forward:
+          // the cached state replayed to a late tab must be complete. NOTHING
+          // else is. A field the server stops sending has stopped being true
+          // (`tail` is present only while the fill tail is behind), and the
+          // blanket merge this replaced would have kept it on screen until
+          // the socket reconnected.
           const prior = this.latest.get(envelope.topic);
-          if (prior?.message.ch === 'state') envelope.message.data = { ...prior.message.data, ...envelope.message.data };
+          if (prior?.message.ch === 'state') {
+            const was = prior.message.data, now = envelope.message.data;
+            const venues = now.venues ?? was.venues, quoteMarkets = now.quoteMarkets ?? was.quoteMarkets;
+            envelope.message.data = { ...now, ...(venues ? { venues } : {}), ...(quoteMarkets ? { quoteMarkets } : {}) };
+          }
         }
         if (envelope.topic !== 'fill') { this.latest.set(envelope.topic, envelope); this.receivedAt.set(envelope.topic, Date.now()); }
         for (const listener of this.listeners.values()) {

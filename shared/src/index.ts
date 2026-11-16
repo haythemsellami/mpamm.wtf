@@ -772,6 +772,26 @@ export interface RpcStatus {
   degradedSinceTs?: number;
 }
 
+/**
+ * How far the fill tail is behind the chain head.
+ *
+ * Quotes and fills are separate loops: quotes read the tip, the tail decodes
+ * every block in order behind one cursor. A healthy RPC chip and a moving
+ * block number say nothing about that cursor, so it reports for itself.
+ */
+export interface TailStatus {
+  /** last block whose fills are decoded and counted. */
+  block: number;
+  /** blocks between that and the observed head. */
+  lagBlocks: number;
+  /** the same distance as chain time: `lagBlocks` × the block time. An
+   *  estimate; the cursor block's own timestamp is not read for it. */
+  lagMs: number;
+  /** true when the cursor has made no progress for a while: stuck, as opposed
+   *  to behind and catching up. */
+  held: boolean;
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // state.notes — developer-facing telemetry
 // ──────────────────────────────────────────────────────────────────────────
@@ -800,8 +820,9 @@ export type NoteCode =
   | 'venue.market.unlisted' | 'venue.upgraded' | 'venue.quarantined'
   | 'venue.quote.unavailable' | 'venue.quote.recovered' | 'venue.gas.suspect'
   | 'venue.source.failed' | 'venue.decode.failed' | 'venue.foreign'
-  // the live fill tail and its resume point
-  | 'tail.resume' | 'tail.caughtup' | 'tail.gap.skipped' | 'tail.failed' | 'tail.timestamps.failed'
+  // the live fill tail and its resume point; `held` = stuck behind the head
+  | 'tail.resume' | 'tail.caughtup' | 'tail.gap.skipped' | 'tail.failed' | 'tail.timestamps.failed' | 'tail.archive'
+  | 'tail.held'
   // deep volume history: adapter seed + the on-chain replay
   | 'backfill.start' | 'backfill.done' | 'backfill.deferred' | 'backfill.held'
   | 'backfill.reset' | 'backfill.paused' | 'backfill.range.skipped' | 'backfill.config.invalid'
@@ -832,7 +853,8 @@ export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'venue.market.unlisted': 'warn', 'venue.upgraded': 'warn', 'venue.quarantined': 'warn',
   'venue.quote.unavailable': 'warn', 'venue.quote.recovered': 'info', 'venue.gas.suspect': 'warn',
   'venue.source.failed': 'warn', 'venue.decode.failed': 'warn', 'venue.foreign': 'warn',
-  'tail.resume': 'info', 'tail.caughtup': 'info', 'tail.gap.skipped': 'warn', 'tail.failed': 'warn', 'tail.timestamps.failed': 'warn',
+  'tail.resume': 'info', 'tail.caughtup': 'info', 'tail.gap.skipped': 'warn', 'tail.failed': 'warn', 'tail.timestamps.failed': 'warn', 'tail.archive': 'info',
+  'tail.held': 'warn',
   'backfill.start': 'info', 'backfill.done': 'info', 'backfill.deferred': 'info', 'backfill.held': 'info',
   'backfill.reset': 'info', 'backfill.paused': 'warn', 'backfill.range.skipped': 'warn', 'backfill.config.invalid': 'warn',
   'backfill.reread': 'info', 'backfill.reread.held': 'warn',
@@ -887,6 +909,11 @@ export interface MarketState {
   rpcArchive?: RpcStatus;
   /** Block-head/quote freshness. Absent before the first live frame. */
   realtime?: RealtimeHealth;
+  /** The fill tail's lag, present ONLY while it trails the head by more than
+   *  the server's threshold (and never in sim). At the tip the field is absent
+   *  so a healthy state frame pays nothing for it; the header reads its
+   *  presence as "fills are not live". `GET /api/health` always carries it. */
+  tail?: TailStatus;
 }
 
 // ──────────────────────────────────────────────────────────────────────────

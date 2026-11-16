@@ -96,4 +96,32 @@ describe('shared subscription hub', () => {
     hub.set('b', { topics: [...topics], message: later, status: vi.fn() });
     expect(later.mock.calls[0][0].message.data).toMatchObject({ block: 2, venues: [] });
   });
+
+  // `tail` rides the state frame only while the fill tail is behind, so its
+  // absence is the "caught up" signal. Merging each frame onto the last kept
+  // the header's FILLS chip up after recovery until the socket reconnected.
+  it('carries forward only what the server sends once: a field it stops sending is gone', async () => {
+    const hub = boot();
+    const topics = [{ channel: 'state' }] as const;
+    const seen = vi.fn();
+    hub.set('a', { topics: [...topics], message: seen, status: vi.fn() }); await tick();
+    const socket = Socket.instances[0]; socket.open();
+    const state = { chainId: 143, block: 1, monUsd: 1, monChangePct: 0, takerBps: 0, markets: [], sizesUsd: [], quoteCadenceMs: 300, source: 'live' as const };
+    const venues = [{ id: 'poe', name: 'LFJ POE', color: { light: '#111', dark: '#eee' }, kind: 'amm' as const, role: 'venue' as const }];
+    const quoteMarkets = { poe: ['MON/USDC'] };
+    const tail = { block: 1, lagBlocks: 5_000, lagMs: 1_500_000, held: false };
+    socket.emit({ v: 2, epoch: 'one', topic: 'state', seq: 0, snapshot: true, message: { ch: 'state', data: { ...state, venues, quoteMarkets, tail } } }); await tick();
+    socket.emit({ v: 2, epoch: 'one', topic: 'state', seq: 1, message: { ch: 'state', data: { ...state, block: 2, tail: { ...tail, lagBlocks: 4_000 } } } }); await tick();
+    socket.emit({ v: 2, epoch: 'one', topic: 'state', seq: 2, message: { ch: 'state', data: { ...state, block: 3 } } }); await tick(); // caught up
+
+    const frames = seen.mock.calls.map((c) => c[0].message.data);
+    expect(frames[1].tail).toMatchObject({ lagBlocks: 4_000 }); // still behind: shown, and current
+    expect(frames[2]).toMatchObject({ block: 3, venues, quoteMarkets }); // the once-only fields survive
+    expect('tail' in frames[2]).toBe(false);
+    // and the cached state a late tab is replayed says the same
+    const later = vi.fn();
+    hub.set('b', { topics: [...topics], message: later, status: vi.fn() });
+    expect(later.mock.calls[0][0].message.data).toMatchObject({ block: 3, venues, quoteMarkets });
+    expect('tail' in later.mock.calls[0][0].message.data).toBe(false);
+  });
 });

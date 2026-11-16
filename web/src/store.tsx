@@ -300,7 +300,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         ]);
         if (!mounted.v || request !== snapshotRequest) return;
         stateBlockRef.current = Math.max(stateBlockRef.current, m.state.block);
-        setState((previous) => previous && previous.block > m.state.block ? { ...m.state, ...previous, venues: m.state.venues } : m.state);
+        // A stream state newer than this snapshot wins field by field, and for
+        // `tail` its ABSENCE wins too: the field is present only while the fill
+        // tail is behind, so a spread alone would resurrect the snapshot's.
+        setState((previous) => previous && previous.block > m.state.block ? { ...m.state, ...previous, venues: m.state.venues, tail: previous.tail } : m.state);
         if (!quotesRef.current) { setQuotes(m.quotes); quotesRef.current = m.quotes; }
         if (ui.tab === 'volume') setVolume(m.volume);
         snapshotLoaded.v = true;

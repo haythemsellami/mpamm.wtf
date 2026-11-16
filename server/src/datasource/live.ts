@@ -10,9 +10,9 @@ import {
   MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase, CURVE_OFFSETS_S, curveMarkMs,
   type DataSourceMode, type MarkoutCurvesResponse, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode, type QuoteFrameTelemetry,
-  type QuoteHeadSource, type RealtimeHealth,
+  type QuoteHeadSource, type RealtimeHealth, type TailStatus,
 } from '@shared';
-import { allPreferAvailability, guardRpcRead, isAvailabilityFailure } from '../chain/failover.js';
+import { allPreferAvailability, guardRpcRead, guardedClient, isAvailabilityFailure } from '../chain/failover.js';
 import { FillAttributor } from '../attribution.js';
 import { pairMidSeries, supportsHistoricalReference } from '../history/cex.js';
 import { curveComplete, curvePoints } from '../markout-curves.js';
@@ -25,6 +25,7 @@ import {
 } from '../chain/rpc.js';
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
+import { FillTimePrices } from '../fill-time-prices.js';
 import { VolumeStore, retentionCutoffMs, type DayFillCount, type ResetDeletes, type SnapshotResult } from '../db.js';
 
 /** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
@@ -46,8 +47,32 @@ const REALTIME_WINDOW_MS = 60_000;
 
 /** Max blocks one tail cycle fetches/decodes/commits (see tailFills). */
 const TAIL_WINDOW_BLOCKS = 1_000;
+/** A tail window whose END trails the hot head by more than this is a DEEP
+ *  read (tailWindowIsDeep). The hot pool is chosen for distance to the tip and
+ *  promises nothing about retention, so only the last few minutes are its job:
+ *  one window ≈ 5 min, which a deploy's restart gap stays inside and a healthy
+ *  archive's head is always past. */
+const TAIL_DEEP_LAG_BLOCKS = TAIL_WINDOW_BLOCKS;
+/** Block-timestamp reads sent to the archive pool at once for one tail window.
+ *  Bounded because the gas tracker and the deep replays share that node; the
+ *  hot path stays unbounded (at the tip it is one or two blocks per cycle). */
+const TAIL_ARCHIVE_BLOCK_READS = 32;
 /** The in-memory recent-fill ring (`/api/markets` tape, ingest dedup window). */
 const FILL_RING_SIZE = 400;
+/** Chain time the fill tail may trail the head and still count as live. Its
+ *  normal distance is the finality margin plus a cycle (a few seconds), and a
+ *  deploy's restart gap is back under this within seconds. Past it the tail's
+ *  status rides the state frame (`MarketState.tail`) so the header stops
+ *  reading as live. ONLY past it: at the tip the frame does not carry the
+ *  field at all (the WS frame budget, AGENTS.md). */
+export const TAIL_LAG_SHOWN_MS = 120_000;
+/** Stored fills read once at boot to learn each asset's last on-chain USD
+ *  print (fill-time-prices.ts): about half a day of tape. */
+const PRICE_SEED_FILLS = 5_000;
+/** Behind by that much AND no cursor progress for this long is a HELD tail,
+ *  as opposed to a gap-fill in progress, which commits a window every few
+ *  seconds. Held is the state that needs a human. */
+export const TAIL_HELD_MS = 120_000;
 
 interface QuoteTrigger {
   identity?: HeadIdentity;
@@ -445,6 +470,47 @@ export function shouldGapFill(lpb: string | undefined, head: bigint, maxBlocks: 
   return head - BigInt(lpb) <= BigInt(maxBlocks);
 }
 
+/** Which pool a tail window belongs to: `hot` reads the tip, `archive` a gap. */
+export type TailPool = 'hot' | 'archive';
+
+/**
+ * Whether a tail window [.., to] is a DEEP read, given the hot head.
+ *
+ * The tail read every window from the hot pool, whatever its age. A gap older
+ * than the hot node holds is answered with a JSON-RPC error, which by design
+ * never trips failover (chain/failover.ts), so the shared cursor holds for
+ * good. On 2026-11-12 the hot pool was unreachable for 31 h; after it reported
+ * recovered, every source's read of the range it had missed still failed on
+ * each cycle with no failover, and the tail stayed at the outage's first block
+ * while the archive pool — healthy throughout — was never asked. ~21.6k fills
+ * (≈$1.9M) were missing a day later with the header reading "RPC OK". (The
+ * note raised then carried no reason, which is why rpcFailureReason exists.)
+ *
+ * So a window that is not at the tip goes to the pool chosen for retention.
+ * Pure so the boundary is unit-testable (tail-archive.test.ts).
+ */
+export function tailWindowIsDeep(to: bigint, hotHead: bigint): boolean {
+  return hotHead - to > BigInt(TAIL_DEEP_LAG_BLOCKS);
+}
+
+/**
+ * Why an RPC read failed, in the node's own words, for a held-cursor note.
+ *
+ * viem's `message` carries the request body and URL: the URL is a secret
+ * (scrubNote strips it) and the body names the block range, which moves with
+ * the head while a window is uncapped. `noteOnce` dedupes VERBATIM, so a
+ * reason that changes per cycle is a new note twice a second. `details` is the
+ * node's answer alone, and long digit runs / hex words are folded so the
+ * reason names a class of failure rather than one request.
+ */
+export function rpcFailureReason(e: unknown): string {
+  const err = (e ?? {}) as { details?: unknown; shortMessage?: unknown; message?: unknown; status?: unknown };
+  const text = [err.details, err.shortMessage, err.message].find((x): x is string => typeof x === 'string' && x.trim() !== '') ?? String(e);
+  const line = text.trim().split('\n')[0].replace(/0x[0-9a-fA-F]{4,}/g, '0x…').replace(/\d{5,}/g, '#').trim();
+  const status = typeof err.status === 'number' ? `HTTP ${err.status}: ` : '';
+  return (status + line).slice(0, 160);
+}
+
 /** Gap-fill catch-up lifecycle for the live tail (family B of #6).
  *
  * On boot the tail resumes from the persisted cursor and raises a sticky
@@ -474,6 +540,65 @@ export function checkGapFill(
   // already moved past it by the time we get here (lastBlock >= target), so
   // "current at block target" would report a block the tail has left behind.
   io.announce(`gap-fill caught up: decoded through block ${target}`);
+}
+
+/**
+ * Where the fill tail is relative to the chain head.
+ *
+ * On 2026-11-12 the tail held for more than three days after an RPC outage
+ * while quotes at the tip were healthy. The header read "live · RPC OK",
+ * /api/health answered ok, and three days of volume were $0 before anyone
+ * looked: neither surface carried the one number that was wrong.
+ *
+ * `lagMs` is blocks × block time, not the cursor block's timestamp: that would
+ * be a read on the pool that may be the one failing. `quietSince` is the later
+ * of the cursor's last move and the moment the tail fell behind, so a tail
+ * that sat at the tip through an outage is not called held the instant the
+ * head jumps ahead of it; it gets TAIL_HELD_MS to commit a window first.
+ *
+ * Pure so the thresholds are unit-testable (tail-lag.test.ts).
+ */
+export function tailStatusOf(p: { lastBlock: bigint; head: bigint; blockTimeMs: number; quietSince: number; now: number }): TailStatus {
+  const lagBlocks = p.head > p.lastBlock ? Number(p.head - p.lastBlock) : 0;
+  const lagMs = lagBlocks * p.blockTimeMs;
+  return { block: Number(p.lastBlock), lagBlocks, lagMs, held: lagMs > TAIL_LAG_SHOWN_MS && p.now - p.quietSince > TAIL_HELD_MS };
+}
+
+/** Whether a status belongs on the state frame (TAIL_LAG_SHOWN_MS). */
+export const tailIsLagging = (t: TailStatus): boolean => t.lagMs > TAIL_LAG_SHOWN_MS;
+
+/**
+ * Held-tail note lifecycle, called once per tail cycle.
+ *
+ * While the tail is held the SAME line is raised every cycle: noteOnce drops
+ * the verbatim repeat, and re-raises it once the buffer has rolled it out, so
+ * a hold of days keeps surfacing in the log instead of scrolling away behind
+ * noisier subsystems. The line therefore names only what is fixed during a
+ * hold (the block), never the lag, which moves with the head.
+ *
+ * When the cursor moves the line is retracted and the resume announced once,
+ * with how long the hold lasted. Pure with injected sinks, like checkGapFill.
+ */
+export function checkTailHeld(
+  t: TailStatus,
+  quietSince: number,
+  now: number,
+  state: { msg?: string; since?: number },
+  io: { warn: (m: string) => void; clear: (m: string) => void; announce: (m: string) => void },
+): void {
+  if (t.held) {
+    if (state.msg === undefined) {
+      state.msg = `fill tail held at block ${t.block}: behind the head with no window committed for ${approximateDuration(TAIL_HELD_MS)} — fills, volume and markouts stop at that block until it moves`;
+      state.since = quietSince;
+    }
+    io.warn(state.msg);
+    return;
+  }
+  if (state.msg === undefined) return;
+  io.clear(state.msg);
+  io.announce(`fill tail moving again after a hold of ${approximateDuration(now - (state.since ?? now))}`);
+  state.msg = undefined;
+  state.since = undefined;
 }
 
 /**
@@ -1142,7 +1267,12 @@ export const rereadAddKey = (vid: string) => `reread_add_${vid}`;
  *  `{ day, markets }`, paid before its marker clears (payRereadRemark). */
 export const rereadRemarkKey = (vid: string) => `reread_remark_${vid}`;
 
-/** A persisted rereadRemarkKey value, or undefined when there is none. */
+/** The remark-cursor rewind the TAIL's closed-day fills are owed, same shape
+ *  (`{ day, markets }`): committed with the fills (persist), paid by the next
+ *  remark of the venue (payTailRemark). */
+export const tailRemarkKey = (vid: string) => `tail_remark_${vid}`;
+
+/** A persisted rereadRemarkKey / tailRemarkKey value, or undefined when there is none. */
 export function parseRereadRemark(v: string | undefined): { day: string; markets: string[] } | undefined {
   if (!v) return undefined;
   try {
@@ -1406,6 +1536,12 @@ const archiveRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read
 /** The same guarantee on the HOT pool, for the today re-read: a result served
  *  across a failover is refused (and retried) rather than mixed. */
 const hotRead = <T>(read: () => Promise<T>): Promise<T> => guardRpcRead(read, hotUnavailable, rpcGeneration);
+/** getLogsChunked's fetch for a deep window: each chunk is an archive read. */
+const archiveLogs = (p: { address: unknown; fromBlock: bigint; toBlock: bigint; events?: unknown }): Promise<unknown[]> =>
+  archiveRead(() => archiveClient.getLogs(p as any) as Promise<unknown[]>);
+
+/** The archive client as a tail decode sees it: every read an archiveRead. */
+const tailArchiveClient = guardedClient(archiveClient, archiveRead);
 
 async function holdWhileDegraded(): Promise<boolean> {
   const wasUnavailable = archiveUnavailable();
@@ -1430,6 +1566,29 @@ export class LiveDataSource extends BaseSource {
   readonly mode: DataSourceMode = 'live';
 
   private pricer = new UsdPricer((key) => REFERENCES.assetUsd(key), (market) => REFERENCES.midForPair(market), (key) => REFERENCES.settledUsd(key));
+  /** The latest on-chain USD print per asset (fill-time-prices.ts): what an
+   *  old tail window is priced from, where `pricer` would be days late. */
+  private fillPrices = new FillTimePrices();
+  /**
+   * The pricer for a tail window that is NOT at the tip: an asset's USD as of
+   * the window's own blocks. `usdForToken` is what decode uses to value a
+   * crypto-quoted fill, and with the live pricer a gap decoded four days late
+   * came out 10–12% low on every MON- and ETH-quoted market. Falls back to
+   * the live price per asset when no nearer print is held, so the worst case
+   * is the previous behaviour. Pair mids stay live: decode does not use them.
+   * Undefined for a window with no logs, which has nothing to price.
+   */
+  private pricerAsOf(blockTs: ReadonlyMap<string, number>): UsdPricer | undefined {
+    if (!blockTs.size) return undefined;
+    let lo = Infinity, hi = -Infinity;
+    for (const t of blockTs.values()) { if (t < lo) lo = t; if (t > hi) hi = t; }
+    const at = (lo + hi) / 2, now = Date.now();
+    return new UsdPricer(
+      (key) => this.fillPrices.usdAt(key, at, now) ?? REFERENCES.assetUsd(key),
+      (market) => REFERENCES.midForPair(market),
+      (key) => this.fillPrices.usdAt(key, at, now) ?? REFERENCES.settledUsd(key),
+    );
+  }
   private store = new VolumeStore(config.dbPath);
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
   // ARCHIVE pool: the gas tracker resolves `gas_from` through blockAtOrAfter and
@@ -1474,6 +1633,27 @@ export class LiveDataSource extends BaseSource {
     }
     return ctx;
   }
+  /** Decode context for a tail window read from the ARCHIVE pool. decode() may
+   *  read chain state AT the blocks it is decoding (Clober asks whether a book
+   *  was vault-paired one block before a Take), and a hot node that could not
+   *  serve the window's logs cannot serve its state either. Both chain handles
+   *  are guarded reads (guardedClient, archiveLogs), like the window's logs and
+   *  timestamps: a failover mid-decode fails the decode, and the window is
+   *  re-read whole from the hot pool. Everything else is the adapter's
+   *  ordinary context. */
+  private archiveCtxCache = new WeakMap<VenueAdapter, AdapterContext>();
+  private archiveCtxFor(a: VenueAdapter): AdapterContext {
+    let ctx = this.archiveCtxCache.get(a);
+    if (!ctx) {
+      ctx = {
+        ...this.ctxFor(a),
+        client: tailArchiveClient,
+        getLogs: (params, chunk, fetchLogs = archiveLogs) => getLogsChunked(params, chunk, fetchLogs),
+      };
+      this.archiveCtxCache.set(a, ctx);
+    }
+    return ctx;
+  }
   /** Frame-local context: on-chain state is pinned by block number, while this
    *  immutable pricer pins every adapter's off-chain bps/sizing inputs to the
    *  same synchronous CEX snapshot captured before the first await. */
@@ -1504,6 +1684,13 @@ export class LiveDataSource extends BaseSource {
    *  buckets and cursor it carries (a finished today re-read clears its
    *  pending marker this way, in the same transaction as the bucket it SET). */
   private snapshotMeta: Record<string, string> = {};
+  /** The remark rewind owed to closed-day fills the tail ingested, per venue
+   *  (oweTailRemark): EVERYTHING unpaid, not a per-snapshot delta. Snapshots
+   *  overlap (each is cut before the previous ACK), so a snapshot that wrote
+   *  only its own fills' debt could commit after, and erase, an earlier one's.
+   *  `tailRemarkDirty` = the venues whose debt the next snapshot must write. */
+  private tailRemarkOwed = new Map<string, { day: string; markets: Set<string> }>();
+  private tailRemarkDirty = new Set<string>();
   /** venue id → UTC day of a pending today re-read (rereadToday). */
   private rereads = new Map<string, string>();
   /** venue id → UTC day of a pending ADDITIVE re-read (rereadAddKey). */
@@ -1943,8 +2130,54 @@ export class LiveDataSource extends BaseSource {
     };
   }
 
+  /** When the tail cursor last moved and when the tail last fell behind (wall
+   *  clock), sampled once per tail cycle (observeTail). Boot counts as a move:
+   *  a hold is measured from this process's start at the earliest. */
+  private tailSeen = { block: 0n, at: Date.now() };
+  private tailBehindSince: number | undefined;
+  private tailHeldNote: { msg?: string; since?: number } = {};
+
+  /** The later of the cursor's last move and the tail falling behind. */
+  private tailQuietSince(): number {
+    return Math.max(this.tailSeen.at, this.tailBehindSince ?? 0);
+  }
+
+  /** The fill tail's distance behind the head (tailStatusOf). Undefined until
+   *  boot has set the resume point: a zero cursor is "not started", and
+   *  reporting it would read as a tail the whole chain behind. */
+  tailStatus(): TailStatus | undefined {
+    if (this.lastBlock === 0n) return undefined;
+    const quoted = BigInt(this.block);
+    return tailStatusOf({
+      lastBlock: this.lastBlock,
+      head: this.observedHead > quoted ? this.observedHead : quoted,
+      blockTimeMs: monad.blockTime ?? 300,
+      quietSince: this.tailQuietSince(),
+      now: Date.now(),
+    });
+  }
+
+  /** Once per tail cycle, whether or not the cycle read anything: record a
+   *  cursor move, track the tail falling behind, and keep the held-tail note
+   *  in step (checkTailHeld). */
+  private observeTail(): void {
+    const now = Date.now();
+    if (this.lastBlock !== this.tailSeen.block) this.tailSeen = { block: this.lastBlock, at: now };
+    const before = this.tailStatus();
+    if (!before) return;
+    if (!tailIsLagging(before)) this.tailBehindSince = undefined;
+    else this.tailBehindSince ??= now;
+    // read again: `held` is measured from the stamps just set
+    checkTailHeld(this.tailStatus()!, this.tailQuietSince(), now, this.tailHeldNote, {
+      warn: (m) => this.noteOnce('tail.held', m),
+      clear: (m) => this.dropNote('tail.held', m),
+      announce: (m) => this.note('tail.resume', m),
+    });
+  }
+
   getState(): MarketState {
     const realtime = this.realtimeHealth();
+    const tail = this.tailStatus();
     return {
       chainId: 143, block: this.block, monUsd: REFERENCES.assetUsd('MON'), monChangePct: REFERENCES.changePctFor('MON'),
       takerBps: config.takerBps, markets: [...MARKETS], sizesUsd: [...SIZES_USD],
@@ -1956,6 +2189,10 @@ export class LiveDataSource extends BaseSource {
       // subsystem that does not exist.
       ...(hasDedicatedArchive ? { rpcArchive: archiveRpcStatus() } : {}),
       ...(realtime ? { realtime } : {}),
+      // Only while it is behind. This object is the state frame, sent on every
+      // head: at the tip the field would be bytes on every tick for a number
+      // nobody needs, and its absence is what the header reads as "live".
+      ...(tail && tailIsLagging(tail) ? { tail } : {}),
     };
   }
   getQuotes(): QuoteSnapshot {
@@ -2027,6 +2264,10 @@ export class LiveDataSource extends BaseSource {
     // seed the dedup guard with the persisted window so a gap-fill re-decode of
     // already-counted fills won't re-count them.
     for (const f of this.fills) this.countedIds.add(f.id);
+    // The newest stored fills end at the cursor: they are the prints the first
+    // window of a gap is priced from. Read deeper than the ring for it: MON
+    // prints every few seconds, but an ETH/USDC fill can be thousands back.
+    this.fillPrices.observe(this.store.recentFills(PRICE_SEED_FILLS));
     // Resume markout aging across a restart (M1): a fill persisted with only its
     // early horizons must go back on the pending queue if a later horizon is
     // still in the future, or ageMarkouts would leave those cells null forever.
@@ -2180,15 +2421,24 @@ export class LiveDataSource extends BaseSource {
     const dirtyDays = this.dirtyDays;
     const dirtyCurves = this.dirtyCurves;
     const extraMeta = this.snapshotMeta;
+    const owedVenues = this.tailRemarkDirty;
     this.dirty = new Set();
     this.dirtyDays = new Set();
     this.dirtyCurves = new Map();
     this.snapshotMeta = {};
+    this.tailRemarkDirty = new Set();
+    // committed WITH the closed-day fills that owe it, so a crash between the
+    // two cannot leave fills the remark sweep will never come back for
+    const remarkDebt: Record<string, string> = {};
+    for (const vid of owedVenues) {
+      const o = this.tailRemarkOwed.get(vid);
+      if (o) remarkDebt[tailRemarkKey(vid)] = JSON.stringify({ day: o.day, markets: [...o.markets].sort() });
+    }
     const snapshot: SnapshotWrite = {
       days: this.days
         .filter((d) => dirtyDays.has(d.utcDay))
         .map((d) => ({ ...d, byVenue: Object.fromEntries(Object.entries(d.byVenue).map(([id, v]) => [id, { ...v }])) })),
-      meta: { ...extraMeta, lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
+      meta: { ...extraMeta, ...remarkDebt, lastProcessedBlock: String(this.lastBlock), lastProcessedDay: utcDay() },
       fills: [...dirtyFills].map((f) => ({ ...f, markoutsBps: [...f.markoutsBps] })),
       curves: [...dirtyCurves].map(([id, curveBps]) => ({ id, curveBps })),
     };
@@ -2205,13 +2455,14 @@ export class LiveDataSource extends BaseSource {
           // drained before stop() closes the writer — this snapshot already
           // committed the cursor past it. Converges: a failure throws here,
           // and a curve requeues at most CURVE_MAX_RETRIES times.
-          if (reportFailure && (this.dirty.size || this.dirtyDays.size || this.dirtyCurves.size || Object.keys(this.snapshotMeta).length)) return this.persist(true);
+          if (reportFailure && (this.dirty.size || this.dirtyDays.size || this.dirtyCurves.size || this.tailRemarkDirty.size || Object.keys(this.snapshotMeta).length)) return this.persist(true);
         },
         (e) => {
           for (const f of dirtyFills) this.dirty.add(f);
           for (const day of dirtyDays) this.dirtyDays.add(day);
           for (const [id, curve] of dirtyCurves) if (!this.dirtyCurves.has(id)) this.dirtyCurves.set(id, curve);
           for (const [k, v] of Object.entries(extraMeta)) if (!(k in this.snapshotMeta)) this.snapshotMeta[k] = v;
+          for (const vid of owedVenues) this.tailRemarkDirty.add(vid);
           // retained + retried next tick, but say so — a broken disk otherwise
           // looks healthy while the cursor silently stops advancing.
           this.noteOnce('store.persist.failed', `persist failed (${(e as Error).message}); ${reportFailure ? 'shutdown flush not acknowledged' : 'retrying'}`);
@@ -3733,6 +3984,8 @@ export class LiveDataSource extends BaseSource {
   /** Mark this venue's still-unmarked persisted fills against archived CEX
    *  prices, per market, walking closed days forward (resumable cursor). */
   private async remarkVenue(vid: string, name: string): Promise<void> {
+    // the tail may have landed fills on days this walk's cursors are past
+    await this.payTailRemark(vid);
     // NOW-relative (not boot-relative): the retry timer runs for the process
     // lifetime, and each sweep may mark newly-closed days. The live aging path
     // owns the most recent window either way.
@@ -3881,6 +4134,7 @@ export class LiveDataSource extends BaseSource {
     const timer = setTimeout(async () => {
       const t0 = Date.now();
       try { await this.tailFills(); } catch (e) { this.noteOnce('tail.failed', `tail failed — holding cursor, retrying: ${(e as Error).message}`); }
+      this.observeTail();
       // between cycles: nothing can ingest while a gate runs (inTail)
       for (const gate of this.tailGates.splice(0)) await gate();
       this.emitMsg({ ch: 'volume', data: this.cloneDay(this.today()) });
@@ -4199,12 +4453,6 @@ export class LiveDataSource extends BaseSource {
     // exactly TAIL_WINDOW_BLOCKS blocks, not one more.
     const to = head - from < BigInt(TAIL_WINDOW_BLOCKS) ? head : from + BigInt(TAIL_WINDOW_BLOCKS) - 1n;
 
-    // Fetch every adapter's declared log sources into a per-adapter bundle. Track
-    // whether any REQUIRED (fill-producing) source failed: if so we must NOT
-    // advance the cursor, or a transient RPC error would look like "no logs" and
-    // silently lose those fills forever (review #1). Only attribution sources
-    // are tolerated on failure; state/discovery sources are cursor-critical.
-    let requiredFailed = false;
     // Gather every adapter's sources BEFORE any fetch starts. logSources() is
     // the fail-closed gate: it throws while discovery hasn't succeeded, and the
     // cursor must hold. Called inside the fetch map below, one adapter's throw
@@ -4213,72 +4461,42 @@ export class LiveDataSource extends BaseSource {
     // held range re-fetched on every retry. That allocation spiral OOM-killed
     // prod within hours of a persistently undiscovered adapter (2026-09-16).
     const declared = ADAPTERS.map((a) => ({ a, sources: a.logSources() }));
-    const perAdapter = await Promise.all(declared.map(async ({ a, sources }) => {
-      const bundle: LogBundle = {};
-      const all: any[] = [];
-      const failed = new Set<string>(); // source keys whose fetch failed (surfaced to decode)
-      await Promise.all(sources.map(async (s) => {
-        // outside its declared span a source cannot have logs: no fetch at all
-        const span = sourceSpan(s, from, to);
-        if (!span) { bundle[s.key] = []; return; }
-        try {
-          const logs = (await getLogsChunked({ address: s.address, fromBlock: span.from, toBlock: span.to, events: s.events as any })) as any[];
-          bundle[s.key] = logs;
-          all.push(...logs);
-        } catch {
-          bundle[s.key] = [];
-          failed.add(s.key);
-          // 'fills' + 'state' sources hold the cursor; only 'attribution' is tolerated.
-          if (s.kind !== 'attribution') {
-            requiredFailed = true;
-            this.noteOnce('venue.source.failed', `${a.venues()[0]?.name ?? 'venue'} log source '${s.key}' failed — holding cursor, retrying`, this.vidOf(a));
-          }
-        }
-      }));
-      return { a, bundle, all, failed };
-    }));
 
-    // ATOMIC (review #1): if any required (fills/state) source failed, skip the
-    // ENTIRE cycle — do NOT resolve timestamps, decode, mutate adapter state,
-    // ingest, emit, or advance the cursor. The identical range is re-tailed next
-    // cycle once every required source is back, so a fill is never partially
-    // decoded, and dedupe (countedIds) is not relied on across a held range.
-    if (requiredFailed) return;
-
-    // resolve block timestamps once for every block that carries a log (audit B2).
-    const blocks = new Set<bigint>();
-    for (const { all } of perAdapter) for (const l of all) blocks.add(l.blockNumber);
-    let blockTs: Map<string, number>;
-    try {
-      blockTs = await this.blockTimes(blocks);
-    } catch (e) {
-      this.noteOnce('tail.timestamps.failed', `block timestamp lookup failed — holding cursor, retrying: ${(e as Error).message}`);
-      return;
+    // ONE pool per window (tailWindowIsDeep): a gap is read where history
+    // lives, the tip where the head is freshest. The archive attempt is an
+    // addition, never a replacement: whatever it cannot do — lagging, failed
+    // over, throttled, or a decode read it will not answer — falls through to
+    // the hot read below, which is the whole of the previous behaviour. So the
+    // worst this can do is what the tail always did.
+    let fresh: Fill[] | null = null;
+    let pool: TailPool = 'hot';
+    // Old is a property of the WINDOW, not of the pool that ends up serving
+    // it: a gap read from the hot pool is priced as of its blocks all the same.
+    const old = tailWindowIsDeep(to, head);
+    if (old && await this.archiveServesTail(to)) {
+      fresh = await this.decodeTailWindow(declared, from, to, 'archive', old);
+      this.tailArchiveOutcome(fresh !== null);
+      if (fresh) pool = 'archive';
     }
-    const tsOf = (bn: bigint) => {
-      const ts = blockTs.get(String(bn));
-      if (ts == null) throw new Error(`missing block timestamp for ${bn}`);
-      return ts;
-    };
-
-    const fresh: Fill[] = [];
-    let decodeFailed = false;
-    for (const { a, bundle, failed } of perAdapter) {
-      try { fresh.push(...this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, failed), 'fill')); }
-      catch (e) {
-        decodeFailed = true;
-        this.noteOnce('venue.decode.failed', `${a.venues()[0]?.name ?? 'venue'} decode error — holding cursor, retrying: ${(e as Error).message}`, this.vidOf(a));
-      }
+    fresh ??= await this.decodeTailWindow(declared, from, to, 'hot', old);
+    // ATOMIC (review #1): a window that could not be read and decoded in full
+    // changes NOTHING — no ingest, no emit, no cursor. The identical range is
+    // re-tailed next cycle, so a fill is never partially decoded, and dedupe
+    // (countedIds) is not relied on across a held range.
+    if (!fresh) return;
+    if (pool === 'archive') {
+      this.noteOnce('tail.archive', `tail is more than ${TAIL_DEEP_LAG_BLOCKS} blocks behind the head — reading the gap from the archive pool`);
     }
-    // Decode is cursor-critical too: if an adapter cannot decode this range, do
-    // not count any fills from it and do not advance. The exact range is retried.
-    if (decodeFailed) return;
 
     fresh.sort((a, b) => a.blockNumber - b.blockNumber);
     // best-effort label enrichment (UNKNOWN → DIRECT / Router - X). Never
     // cursor-critical: a lookup failure leaves the adapter's honest UNKNOWN.
-    try { await this.attributor.attribute(fresh); } catch { /* labels only */ }
+    // A gap's transactions are asked of the pool that served its logs first.
+    try { await this.attributor.attribute(fresh, pool === 'archive' ? [archiveClient, publicClient] : undefined); } catch { /* labels only */ }
     for (const f of fresh) this.ingest(f);
+    // every window, tip included: when a hold begins, the last prints before
+    // it are what the first window after it is priced from
+    this.fillPrices.observe(fresh);
     // Publish the cursor only after every decoded fill has landed in memory.
     // backgroundHistory waits on this value before applying authoritative
     // closed-day SETs; exposing it earlier leaves a race where a late tail
@@ -4292,13 +4510,134 @@ export class LiveDataSource extends BaseSource {
     });
   }
 
-  /** Block timestamps (ms) for the blocks that carry logs (audit B2). */
-  private async blockTimes(blocks: Set<bigint>): Promise<Map<string, number>> {
-    const m = new Map<string, number>();
-    await Promise.all([...blocks].map(async (bn) => {
-      const b = await publicClient.getBlock({ blockNumber: bn });
-      m.set(String(bn), Number(b.timestamp) * 1000);
+  /**
+   * Read and decode ONE tail window from ONE pool: every source's logs, the
+   * timestamps of the blocks that carry them, then each adapter's decode.
+   * Returns the window's fills, or null when any cursor-critical step failed
+   * (noted, with the pool and the node's reason). Nothing is ingested here.
+   *
+   * Cursor-critical means: a 'fills' or 'state' log source (only 'attribution'
+   * is tolerated on failure — a transient RPC error must never read as "no
+   * logs here" and lose those fills for good, review #1), the timestamps, and
+   * decode itself.
+   */
+  private async decodeTailWindow(
+    declared: ReadonlyArray<{ a: VenueAdapter; sources: LogSource[] }>, from: bigint, to: bigint, pool: TailPool, old = false,
+  ): Promise<Fill[] | null> {
+    const deep = pool === 'archive';
+    // what a failure on this pool does next, for the note
+    const on = deep ? ' on the archive pool' : '';
+    const next = deep ? 'trying the hot pool' : 'holding cursor, retrying';
+    let requiredFailed = false;
+    const perAdapter = await Promise.all(declared.map(async ({ a, sources }) => {
+      const bundle: LogBundle = {};
+      const all: any[] = [];
+      const failed = new Set<string>(); // source keys whose fetch failed (surfaced to decode)
+      await Promise.all(sources.map(async (s) => {
+        // outside its declared span a source cannot have logs: no fetch at all
+        const span = sourceSpan(s, from, to);
+        if (!span) { bundle[s.key] = []; return; }
+        const range = { address: s.address, fromBlock: span.from, toBlock: span.to, events: s.events as any };
+        try {
+          const logs = (await (deep ? getLogsChunked(range, undefined, archiveLogs) : getLogsChunked(range))) as any[];
+          bundle[s.key] = logs;
+          all.push(...logs);
+        } catch (e) {
+          bundle[s.key] = [];
+          failed.add(s.key);
+          if (s.kind !== 'attribution') {
+            requiredFailed = true;
+            this.noteOnce('venue.source.failed', `${a.venues()[0]?.name ?? 'venue'} log source '${s.key}' failed${on} — ${next}: ${rpcFailureReason(e)}`, this.vidOf(a));
+          }
+        }
+      }));
+      return { a, bundle, all, failed };
     }));
+    // before timestamps and decode: a partial bundle must not mutate adapter state
+    if (requiredFailed) return null;
+
+    // resolve block timestamps once for every block that carries a log (audit B2).
+    const blocks = new Set<bigint>();
+    for (const { all } of perAdapter) for (const l of all) blocks.add(l.blockNumber);
+    let blockTs: Map<string, number>;
+    try {
+      blockTs = await this.blockTimes(blocks, pool);
+    } catch (e) {
+      this.noteOnce('tail.timestamps.failed', `block timestamp lookup failed${on} — ${next}: ${rpcFailureReason(e)}`);
+      return null;
+    }
+    const tsOf = (bn: bigint) => {
+      const ts = blockTs.get(String(bn));
+      if (ts == null) throw new Error(`missing block timestamp for ${bn}`);
+      return ts;
+    };
+
+    // an old window is priced as of its own blocks (pricerAsOf); the tip, live
+    const pricer = old ? this.pricerAsOf(blockTs) : undefined;
+    const fresh: Fill[] = [];
+    let decodeFailed = false;
+    for (const { a, bundle, failed } of perAdapter) {
+      const base = deep ? this.archiveCtxFor(a) : this.ctxFor(a);
+      try { fresh.push(...this.ownVenues(a, await a.decode(pricer ? { ...base, pricer } : base, bundle, tsOf, failed), 'fill')); }
+      catch (e) {
+        decodeFailed = true;
+        // the same normalized reason as the source and timestamp paths: a
+        // decode-time RPC error carries the URL, the request body and a block
+        // number that moves, so the raw message never dedupes and can lose
+        // the node's own answer to the note's length cap
+        this.noteOnce('venue.decode.failed', `${a.venues()[0]?.name ?? 'venue'} decode error${on} — ${next}: ${rpcFailureReason(e)}`, this.vidOf(a));
+      }
+    }
+    // Decode is cursor-critical too: if an adapter cannot decode this range, do
+    // not count any fills from it and do not advance. The exact range is retried.
+    return decodeFailed ? null : fresh;
+  }
+
+  /** Whether the archive pool can serve a deep window ending at `to` right
+   *  now: a dedicated pool (shared pools ARE the hot read), on its primary,
+   *  out of the back-off a failed attempt set, and with a head at or past the
+   *  window. The head check is the one that matters for correctness — a node
+   *  asked for a range beyond its head can answer "no logs", and an empty
+   *  answer consumes the cursor. Any "no" just leaves the window to the hot
+   *  pool, as before. */
+  private async archiveServesTail(to: bigint): Promise<boolean> {
+    if (!hasDedicatedArchive || archiveUnavailable() || Date.now() < this.tailArchiveRetryAt) return false;
+    try {
+      return (await archiveRead(() => archiveClient.getBlockNumber())) >= to;
+    } catch {
+      this.tailArchiveOutcome(false);
+      return false;
+    }
+  }
+
+  /** Space out archive attempts after one fails. The tail retries a held
+   *  window every cycle (500 ms); pointed at a throttled archive that is the
+   *  tight loop archiveRetryDelayMs exists to prevent, on the node the gas
+   *  tracker and every deep replay depend on. */
+  private tailArchiveFailures = 0;
+  private tailArchiveRetryAt = 0;
+  private tailArchiveOutcome(ok: boolean): void {
+    if (ok) { this.tailArchiveFailures = 0; this.tailArchiveRetryAt = 0; return; }
+    this.tailArchiveRetryAt = Date.now() + archiveRetryDelayMs(++this.tailArchiveFailures);
+  }
+
+  /** Block timestamps (ms) for the blocks that carry logs (audit B2). */
+  private async blockTimes(blocks: Set<bigint>, pool: TailPool = 'hot'): Promise<Map<string, number>> {
+    const m = new Map<string, number>();
+    if (pool === 'hot') {
+      await Promise.all([...blocks].map(async (bn) => {
+        const b = await publicClient.getBlock({ blockNumber: bn });
+        m.set(String(bn), Number(b.timestamp) * 1000);
+      }));
+      return m;
+    }
+    const list = [...blocks];
+    for (let i = 0; i < list.length; i += TAIL_ARCHIVE_BLOCK_READS) {
+      await Promise.all(list.slice(i, i + TAIL_ARCHIVE_BLOCK_READS).map(async (bn) => {
+        const b = await archiveRead(() => archiveClient.getBlock({ blockNumber: bn }));
+        m.set(String(bn), Number(b.timestamp) * 1000);
+      }));
+    }
     return m;
   }
 
@@ -4328,7 +4667,63 @@ export class LiveDataSource extends BaseSource {
     vd.usd += f.usd;
     vd.swaps += 1;
     this.dirtyDays.add(d.utcDay);
+    if (d.utcDay < utcDay()) this.oweTailRemark(f, d.utcDay);
     this.emitMsg({ ch: 'fill', data: f });
+  }
+
+  /**
+   * A fill the tail lands on a CLOSED day is owed a remark-cursor rewind.
+   *
+   * Its markout horizons passed before it was decoded, so only the remark
+   * sweep can mark it, and the sweep writes its cursor for every day it walks
+   * whether or not the day held any fills yet. A tail held across days
+   * (2026-11-12: three of them) comes back to days the sweep may already be
+   * past, and their fills would then stay unmarked for good. It is the debt a
+   * 'markets' revision and an additive re-read already carry
+   * (rewindRemarkCursors), from the one writer that did not.
+   *
+   * Recorded here, committed by persist() in the snapshot that carries the
+   * fill, paid by payTailRemark before the venue's next walk. Today's fills
+   * owe nothing: the sweep never walks today.
+   */
+  private oweTailRemark(f: Fill, day: string): void {
+    if (f.pxApprox) return; // never marked, live or historical
+    let o = this.tailRemarkOwed.get(f.venueId);
+    if (!o) {
+      // start from what a previous process left unpaid on disk
+      const was = parseRereadRemark(this.store.getMeta(tailRemarkKey(f.venueId)));
+      this.tailRemarkOwed.set(f.venueId, o = { day: was?.day ?? day, markets: new Set(was?.markets ?? []) });
+    }
+    if (day < o.day) o.day = day;
+    o.markets.add(f.market);
+    this.tailRemarkDirty.add(f.venueId);
+  }
+
+  /**
+   * Pay what the tail owes `vid`'s remark cursors, then clear the debt, in one
+   * snapshot. Called under the remark lock by the walk it clears the way for.
+   *
+   * In the tail gate, behind a flush: the debt on disk is then complete (every
+   * closed-day fill ingested so far is committed with its share of it) and
+   * nothing can add to it until the clear has landed. A fill ingested after
+   * that owes afresh, to the next walk.
+   */
+  private async payTailRemark(vid: string): Promise<void> {
+    const key = tailRemarkKey(vid);
+    if (!this.tailRemarkOwed.has(vid) && !this.store.getMeta(key)) return; // the usual case: no gate, no flush
+    await this.inTail(async () => {
+      await this.persist(true);
+      const debt = parseRereadRemark(this.store.getMeta(key));
+      const write: Record<string, string> = { [key]: '' };
+      for (const market of debt?.markets ?? []) {
+        const cursor = `mkhist_cursor_${vid}_${market}`;
+        const cur = this.store.getMeta(cursor);
+        if (cur && debt && cur > debt.day) write[cursor] = debt.day;
+      }
+      await this.writeSnapshot({ days: [], meta: write, fills: [] });
+      this.tailRemarkOwed.delete(vid);
+      this.tailRemarkDirty.delete(vid);
+    });
   }
 
   /** Find/create the daily bucket for a fill's execution timestamp (audit B2). */

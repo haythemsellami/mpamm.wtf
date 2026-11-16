@@ -60,13 +60,14 @@ Never let the indexer boot on an empty or wrong `/data`: an empty volume re-runs
    railway volume files --volume mpamm-virginia-mpamm-data-virginia upload ./mpamm-snapshot.db /mpamm.db.incoming
    ```
    Inside the container (`railway ssh`), check `sha256sum` and `PRAGMA integrity_check`, then `mv /data/mpamm.db.incoming /data/mpamm.db`.
-5. **Release the hold.** `railway config plan` should show the start command being cleared and nothing destructive; then `railway config apply`. The boot log must say `tail.resume: resuming: gap-filling N block(s)`; `cold start` means the indexer did not find the restored file. Keep the snapshot-to-boot gap short. The fills tail catches up on the hot node, which keeps only a couple of days of history, and fills inside the gap lose their short-horizon markouts.
+5. **Release the hold.** `railway config plan` should show the start command being cleared and nothing destructive; then `railway config apply`. The boot log must say `tail.resume: resuming: gap-filling N block(s)`; `cold start` means the indexer did not find the restored file. Keep the snapshot-to-boot gap short. The fills tail catches up from the archive pool until it is within ~1000 blocks of the head (`tail.archive` in the boot log; the hot pool is the fallback), so the gap's fills and volume are recovered whatever the hot node retains, but fills inside the gap lose their short-horizon markouts.
 6. **Verify:**
    - `/api/bootstrap` returns 200 (it is 503 until history has loaded, unlike `/api/health`).
    - Every completed day in `/api/volume` and `/api/gas` matches the source.
    - `/api/fills` holds the same recent ids.
    - `state.notes` has no `rpc.` warnings.
    - `/api/health` `coveragePct60s` is near 100.
+   - `/api/health` `tail.held` is false and `tail.lagBlocks` is falling to a few blocks. A restore starts behind and catches up; `held: true` means the cursor has stopped, and the header shows `FILLS HELD` for it (`state.notes` has the `tail.held` line).
 
 ## Any container host / local
 
@@ -85,7 +86,7 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 
 | Variable | What |
 |---|---|
-| `RPC_HTTP_URL` | hot Monad node — quotes + fills tail (default: public endpoint). Choose for tip freshness |
+| `RPC_HTTP_URL` | hot Monad node — quotes + the fills tail at the tip (default: public endpoint). Choose for tip freshness |
 | `RPC_WS_URL` | optional hot-node WebSocket; prefers `monadNewHeads`, falls back to `newHeads` (default: unset ⇒ HTTP head watcher only) |
 | `RPC_HTTP_BACKUP_URLS` | ordered failover nodes for the hot pool, comma-separated (default: public endpoint; `""` disables failover). `RPC_BACKUP_URLS` is the pre-split name, still honored |
 | `RPC_WS_BACKUP_URLS` | positional WS peers of `RPC_HTTP_BACKUP_URLS`; empty entries use HTTP only. No endpoint URL is inferred from another protocol |
@@ -94,7 +95,7 @@ All optional (defaults in [`server/src/config.ts`](../server/src/config.ts)):
 | `RPC_DEPTH_WS_URL` | optional depth-node WebSocket (unset ⇒ uses hot WS only when the depth HTTP URL equals the hot URL) |
 | `RPC_DEPTH_BACKUP_URLS` | ordered failover nodes for a configured `RPC_DEPTH_URL`, comma-separated (default: none); when `RPC_DEPTH_URL` is unset, the worker inherits `RPC_HTTP_BACKUP_URLS` instead |
 | `RPC_DEPTH_WS_BACKUP_URLS` | positional WS peers of `RPC_DEPTH_BACKUP_URLS`; empty entries use HTTP only; when `RPC_DEPTH_URL` is unset, the worker inherits `RPC_WS_BACKUP_URLS` instead |
-| `RPC_ARCHIVE_URL` | deep-history node — volume backfill, markout onboarding, gas, `blockAtOrAfter` (default: unset ⇒ same node as `RPC_HTTP_URL`). Choose for retention |
+| `RPC_ARCHIVE_URL` | deep-history node — volume backfill, markout onboarding, gas, `blockAtOrAfter`, and the fills tail while it is gap-filling (default: unset ⇒ same node as `RPC_HTTP_URL`). Choose for retention |
 | `RPC_ARCHIVE_BACKUP_URLS` | ordered failover nodes for the archive pool (default: **none** — the public endpoint serves headers/logs/receipts to block 0 but refuses historical `eth_getCode`, which the gas tracker needs). Rejected at boot without `RPC_ARCHIVE_URL` |
 | `GETLOGS_CHUNK` | getLogs span the tail attempts (default 900 — the devcore4 fleet serves 1000/call; the public endpoint caps at ~100) |
 | `GETLOGS_MIN_CHUNK` | narrowest span, and the floor every adaptive crawl shrinks to (default 90 — works on the public endpoint). Keep `<= BACKFILL_CHUNK` |
