@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { WebSocket } from 'ws';
 import {
   parseTopics, topicKey, STREAM_V2_GZIP,
-  type StreamTopic, type StreamEnvelope, type StreamMessage, type TopicMessage,
+  type QuoteSnapshot, type StreamTopic, type StreamEnvelope, type StreamMessage, type TopicMessage,
 } from '@shared';
 import type { DataSource } from './datasource/index.js';
 
@@ -21,6 +21,16 @@ type Group = {
   encoding: boolean; pending?: TopicMessage; lastJson?: string; lastCatalog?: string; lastAt: number;
   initial?: { json: string; payload: Promise<Payload> };
 };
+
+/** A quote snapshot as it travels on either stream: without `frame`, the
+ *  per-frame telemetry (timestamps, per-adapter timings, missing venues). No
+ *  viewer acts on it and it was 13–15% of a per-pair frame, several times a
+ *  second per tab (the WS frame budget, AGENTS.md). `ts` already carries the
+ *  emission time the chart needs; the rest is on GET /api/health. */
+export function streamQuotes(quotes: QuoteSnapshot): QuoteSnapshot {
+  const { frame: _frame, ...rest } = quotes;
+  return rest;
+}
 
 /** Public frames are encoded once per topic. Slow snapshots replace pending
  * snapshots; durable fill updates either arrive in order or force a resync. */
@@ -104,7 +114,7 @@ export class SubscriptionGateway {
 
   private snapshot(topic: StreamTopic): TopicMessage | undefined {
     if (topic.channel === 'state') {
-      const { notes: _, ...state } = this.source.getState();
+      const { notes: _, realtime: __, ...state } = this.source.getState();
       return { ch: 'state', data: state };
     }
     if (topic.channel === 'quotes') return this.select(topic, { ch: 'quotes', data: this.source.getQuotes() });
@@ -122,11 +132,11 @@ export class SubscriptionGateway {
     if (message.ch !== topic.channel) return;
     if (message.ch === 'quotes' && topic.channel === 'quotes') {
       const baselines = baselineIds ?? new Set(this.source.getState().venues.filter((v) => v.role === 'baseline').map((v) => v.id));
-      return { ch: 'quotes', data: { ...message.data, rows: message.data.rows.filter((r) =>
+      return { ch: 'quotes', data: { ...streamQuotes(message.data), rows: message.data.rows.filter((r) =>
         r.market === topic.market && r.sizeUsd === topic.sizeUsd && (topic.baseline || !baselines.has(r.venueId))) } };
     }
     if (message.ch === 'state') {
-      const { notes: _, venues: __, ...state } = message.data as ReturnType<DataSource['getState']>;
+      const { notes: _, venues: __, realtime: ___, ...state } = message.data as ReturnType<DataSource['getState']>;
       return { ch: 'state', data: state };
     }
     return message;

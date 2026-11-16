@@ -130,7 +130,35 @@ describe('WS state frames', () => {
       chainId: 143, block: 12_345, monUsd: 0.0262, monChangePct: -1.2, takerBps: 2,
       markets: ['MON/USDC'], sizesUsd: [100, 1000], quoteCadenceMs: 300, source: 'live',
     });
-    expect(tick.realtime?.lagBlocks).toBe(1); // freshness/health chips
+  });
+
+  // Quote-pace telemetry (head/lag/coverage, and each frame's own timings and
+  // missing venues) used to ride every state and quote frame to feed a strip of
+  // numbers on the Execution tab. It is maintainer telemetry like `notes`: it
+  // is served by GET /api/health and never travels the stream.
+  it('never puts the quote-pace telemetry on the stream', async () => {
+    const frame = {
+      headSource: 'ws', headObservedAt: 80, quoteStartedAt: 81, quoteCompletedAt: 99, emittedAt: 100,
+      durationMs: 18, adapterMs: { poe: 17.2, clober: 4 }, missingVenues: ['clober'], coalescedBlocks: 0,
+    };
+    const quotes = { block: 12_345, monUsd: 0.0262, ts: 100, rows: [], frame };
+    const { source, port } = await boot({ getQuotes: () => quotes });
+    const { frames } = await collect(port, 2, () => {
+      source.emit('message', { ch: 'quotes', data: { ...quotes, block: 12_346 } });
+      source.emit('message', { ch: 'state', data: STATE });
+    });
+
+    const states = frames.filter((f) => f.msg.ch === 'state');
+    const quoteFrames = frames.filter((f) => f.msg.ch === 'quotes');
+    expect(states).toHaveLength(2);       // hello + tick
+    expect(quoteFrames).toHaveLength(2);  // hello + tick
+    for (const { msg } of states) expect('realtime' in (msg.data as object)).toBe(false);
+    for (const { msg } of quoteFrames) {
+      expect('frame' in (msg.data as object)).toBe(false);
+      expect((msg.data as { ts: number }).ts).toBe(100); // the chart's timestamp stays
+    }
+    // …and no trace of it on the wire under another key
+    expect(frames.some((f) => /coveragePct60s|adapterMs|missingVenues/.test(JSON.stringify(f.msg)))).toBe(false);
   });
 
   it('costs an order of magnitude less than the frame it replaced', async () => {
@@ -194,6 +222,25 @@ describe('GET /api/health', () => {
   it('has no tail field for a source without one (sim)', async () => {
     const { port } = await boot();
     expect('tail' in (await (await health(port)).json() as object)).toBe(false);
+  });
+
+  // The one place the quote-pace numbers are served now that neither the
+  // stream nor the dashboard carries them: one small request, the whole strip.
+  it('serves the quote-pace telemetry: the rolling view and the latest frame', async () => {
+    const frame = {
+      headSource: 'ws', headObservedAt: 80, quoteStartedAt: 81, quoteCompletedAt: 99, emittedAt: 100,
+      durationMs: 18, adapterMs: { poe: 17.2, clober: 4 }, missingVenues: ['clober'], coalescedBlocks: 0,
+    };
+    const { port } = await boot({ getQuotes: () => ({ block: 12_344, monUsd: 0.0262, ts: 100, rows: [], frame }) });
+    const body = await (await health(port)).json() as Record<string, unknown>;
+
+    expect(body.realtime).toEqual(STATE.realtime);
+    expect(body.quoteFrame).toEqual({ block: 12_344, ...frame });
+  });
+
+  it('has no quoteFrame before the first frame', async () => {
+    const { port } = await boot();
+    expect('quoteFrame' in (await (await health(port)).json() as object)).toBe(false);
   });
 });
 

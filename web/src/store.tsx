@@ -156,6 +156,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
   const seriesRef = useRef<Record<string, Series>>({});
   const quotesRef = useRef<QuoteSnapshot | null>(null);
+  // Whether quotesRef holds a frame the stream delivered, as opposed to the
+  // bootstrap placeholder (the head with no rows). The frame's own telemetry
+  // used to mark that, and the stream no longer carries it; a real frame can
+  // have no rows for a pair nobody quotes, so the rows cannot stand in for it.
+  const quotesObservedRef = useRef(false);
   // the venue ids the buffers are keyed by — read inside the (stable) stream
   // callback so we never close over a stale registry.
   const idsRef = useRef<string[]>([]);
@@ -345,8 +350,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // The latest completed frame can legitimately be one block behind it.
         const current = quotesRef.current;
         if (current && (msg.data.revision ?? 0) < (current.revision ?? 0)) return;
-        if (current && (current.frame || current.rows.length > 0) && msg.data.block < current.block
+        if (current && quotesObservedRef.current && msg.data.block < current.block
           && (msg.data.revision ?? 0) === (current.revision ?? 0)) return;
+        quotesObservedRef.current = true;
         setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1);
       }
       else if (msg.ch === 'volume') {
@@ -367,6 +373,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       if (s === 'reconnecting') {
         wasDropped.v = true;
         quotesRef.current = null;
+        quotesObservedRef.current = false;
         // A new connection must request fresh history, even when the previous
         // request is pending. Pre-drop frames may belong to a replaced branch.
         seedFetchRef.current = null;

@@ -66,7 +66,7 @@ Never let the indexer boot on an empty or wrong `/data`: an empty volume re-runs
    - Every completed day in `/api/volume` and `/api/gas` matches the source.
    - `/api/fills` holds the same recent ids.
    - `state.notes` has no `rpc.` warnings.
-   - `/api/health` `coveragePct60s` is near 100.
+   - `/api/health` `realtime.coveragePct60s` is near 100 and `realtime.lagBlocks` is 0–1 (`quoteFrame.missingVenues` names any venue that emitted no row; `state.notes` has no `quote.realtime.degraded` line).
    - `/api/health` `tail.held` is false and `tail.lagBlocks` is falling to a few blocks. A restore starts behind and catches up; `held: true` means the cursor has stopped, and the header shows `FILLS HELD` for it (`state.notes` has the `tail.held` line).
 
 ## Any container host / local

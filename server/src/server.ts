@@ -2,7 +2,7 @@ import express from 'express';
 import compression from 'compression';
 import { constants as zlib } from 'node:zlib';
 import { AnalyticsPublications } from './analytics-publications.js';
-import { SubscriptionGateway } from './stream-v2.js';
+import { SubscriptionGateway, streamQuotes } from './stream-v2.js';
 import { STREAM_V2_GZIP, STREAM_V2_JSON, SIZES_USD } from '@shared';
 import cors from 'cors';
 import { createServer, type Server } from 'node:http';
@@ -58,9 +58,10 @@ export const PERMESSAGE_DEFLATE = {
 
 /** The hello frame: everything the client needs to render, minus the
  *  maintainer-only `notes` buffer (~10KB the dashboard never reads — it is
- *  served by GET /api/markets, which the client fetches on connect anyway). */
+ *  served by GET /api/markets, which the client fetches on connect anyway) and
+ *  the quote-pace telemetry (`realtime`, served by GET /api/health). */
 export function helloFrame(state: MarketState): StreamState {
-  const { notes: _notes, ...rest } = state;
+  const { notes: _notes, realtime: _realtime, ...rest } = state;
   return rest;
 }
 
@@ -152,13 +153,22 @@ export function startServer(source: DataSource): Server {
   // always present on the live source, with `lastFillTs` (the newest fill
   // held, undefined before any) beside the block lag because "no fill since
   // Tuesday" is the symptom a monitor can alert on without knowing the head.
+  //
+  // This is also the ONE home of the quote-pace telemetry, which the stream
+  // does not carry: `realtime` (head, quoted block, lag, coverage, loop delay,
+  // head source) and `quoteFrame`, the latest frame's own record (its block,
+  // lifecycle timestamps, per-adapter timings, venues that emitted no row).
+  // Instantaneous by design; the history is the `quote.*` notes in the log.
   app.get('/api/health', (_req, res) => {
     const state = source.getState();
     const tail = source.tailStatus?.();
+    const quotes = source.getQuotes();
     res.json({
       ok: true, source: source.mode, block: state.block,
       ...(tail ? { tail: { ...tail, lastFillTs: newestFillTs(source.getFills()) } } : {}),
-      realtime: state.realtime, stream: { protocol: 'v2', ...gateway.metrics },
+      realtime: state.realtime,
+      ...(quotes.frame ? { quoteFrame: { block: quotes.block, ...quotes.frame } } : {}),
+      stream: { protocol: 'v2', ...gateway.metrics },
     });
   });
 
@@ -365,11 +375,11 @@ export function startServer(source: DataSource): Server {
       if (source.fullQuoteSnapshot) {
         void source.fullQuoteSnapshot(true).then((quotes) => {
           if (!clients.has(ws) || ws.readyState !== WebSocket.OPEN) return;
-          safeSend(ws, { ch: 'quotes', data: quotes });
+          safeSend(ws, { ch: 'quotes', data: streamQuotes(quotes) });
           legacyReady.add(ws);
         }).catch(() => cut(ws));
       } else {
-        safeSend(ws, { ch: 'quotes', data: source.getQuotes() });
+        safeSend(ws, { ch: 'quotes', data: streamQuotes(source.getQuotes()) });
         legacyReady.add(ws);
       }
     }
@@ -389,7 +399,8 @@ export function startServer(source: DataSource): Server {
     // Serialize ONCE for the whole fanout, and strip the state frame down to
     // what actually changes (see StreamState — this is the single biggest
     // egress win in the protocol).
-    const payload = JSON.stringify(m.ch === 'state' ? { ch: 'state', data: tickFrame(m.data) } : m);
+    const payload = JSON.stringify(m.ch === 'state' ? { ch: 'state', data: tickFrame(m.data) }
+      : m.ch === 'quotes' ? { ch: 'quotes', data: streamQuotes(m.data) } : m);
     for (const ws of legacy) {
       // BACKPRESSURE: a stalled peer (sleeping laptop, backgrounded phone,
       // half-dead TCP) never closes, so every frame we push queues in OUR

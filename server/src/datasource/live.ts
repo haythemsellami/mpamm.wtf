@@ -86,6 +86,8 @@ interface RealtimeFrameSample {
   block: number;
   emittedAt: number;
   coalescedBlocks: number;
+  /** quote compute time; absent on samples built before it was recorded (tests). */
+  durationMs?: number;
 }
 
 /** Unique emitted block coverage across the retained wall-time window. The
@@ -540,6 +542,99 @@ export function checkGapFill(
   // already moved past it by the time we get here (lastBlock >= target), so
   // "current at block target" would report a block the tail has left behind.
   io.announce(`gap-fill caught up: decoded through block ${target}`);
+}
+
+/** How far quotes may trail the chain before it is worth a human's attention.
+ *  Ordinary operation skips a block now and then (one skipped block in a
+ *  minute is 99.5% coverage) and sits 0–1 blocks behind, so these are set well
+ *  clear of that: the note is for "quotes are stale", not for jitter. */
+export const REALTIME_DEGRADED = { coveragePct: 95, lagBlocks: 5 } as const;
+/** A symptom must persist this long to raise the note, and stay clear this
+ *  long to retract it: single slow frames come and go within a second. */
+export const REALTIME_HOLD_MS = 30_000;
+/** How often the pace is sampled. A timer, not the quote loop: a quote loop
+ *  that has stopped emitting is the case that most needs reporting. */
+const REALTIME_CHECK_MS = 5_000;
+
+/** Median compute time of the frames emitted in the last minute, 0 with none.
+ *  An even count averages the two middle values: taking the upper one reads a
+ *  window split between fast and slow frames as all slow. */
+export function medianFrameMs(frames: readonly RealtimeFrameSample[], now = Date.now()): number {
+  const ms = frames.filter((f) => f.emittedAt >= now - REALTIME_WINDOW_MS && f.durationMs !== undefined)
+    .map((f) => f.durationMs!).sort((a, b) => a - b);
+  if (!ms.length) return 0;
+  const mid = ms.length >> 1;
+  return ms.length % 2 ? ms[mid] : (ms[mid - 1] + ms[mid]) / 2;
+}
+
+/** Which pace thresholds are crossed right now, as phrases for the note. A
+ *  median frame that takes a whole block cannot quote every block, whatever
+ *  coverage says yet. */
+export function realtimeSymptoms(h: RealtimeHealth, medianMs: number, blockTimeMs: number): string[] {
+  const out: string[] = [];
+  if (h.coveragePct60s < REALTIME_DEGRADED.coveragePct) out.push(`${h.coveragePct60s.toFixed(1)}% of blocks quoted over the last 60s`);
+  if (h.lagBlocks > REALTIME_DEGRADED.lagBlocks) out.push(`${h.lagBlocks} blocks behind the head`);
+  if (medianMs >= blockTimeMs) out.push(`median frame ${Math.round(medianMs)}ms against a ${blockTimeMs}ms block`);
+  return out;
+}
+
+/** The symptom of a quote loop that is running and has produced nothing. */
+export const NO_QUOTE_FRAME = 'no quote frame since the quote loop started';
+
+/**
+ * The symptoms of one sample, with or without a frame to judge.
+ *
+ * Before the first frame there is no health to read, and that used to mean
+ * "nothing to report". But a frame that fails is retried silently
+ * (drainQuoteBlocks), so a loop that fails EVERY frame from boot produced no
+ * frame, no health and no note, for as long as it lasted. Once the loop is
+ * running, having no frame is the symptom. It goes through the same hold as
+ * the others, which is its startup grace: the first frame normally lands
+ * within a second of the first head.
+ */
+export function paceSymptoms(p: { health: RealtimeHealth | undefined; medianMs: number; blockTimeMs: number; loopStarted: boolean }): string[] {
+  if (!p.health) return p.loopStarted ? [NO_QUOTE_FRAME] : [];
+  return realtimeSymptoms(p.health, p.medianMs, p.blockTimeMs);
+}
+
+/**
+ * Quote-pace note lifecycle, sampled every REALTIME_CHECK_MS.
+ *
+ * These numbers used to be a strip on the Execution tab, fed by telemetry on
+ * every stream frame. Nobody watches a strip at 03:00, and it kept no history.
+ * The values now live on GET /api/health; this turns a SUSTAINED problem into
+ * one line in the log, which is where "what happened last night" is answered.
+ *
+ * Same shape as checkTailHeld: the line is fixed for the episode (the numbers
+ * at onset) and re-raised verbatim, so noteOnce drops the repeat and restores
+ * it once noisier subsystems have rolled it out of the window. Recovery
+ * retracts it and says how long the episode lasted. Pure with injected sinks.
+ */
+export function checkRealtimeDegraded(
+  symptoms: readonly string[],
+  detail: string,
+  now: number,
+  state: { badSince?: number; goodSince?: number; msg?: string; since?: number },
+  io: { warn: (m: string) => void; clear: (m: string) => void; announce: (m: string) => void },
+): void {
+  if (symptoms.length) {
+    state.goodSince = undefined;
+    state.badSince ??= now;
+    if (state.msg === undefined && now - state.badSince >= REALTIME_HOLD_MS) {
+      state.msg = `quotes are not keeping up with the chain head: ${symptoms.join('; ')}${detail ? ` (${detail})` : ''} — live values on GET /api/health`;
+      state.since = state.badSince;
+    }
+    if (state.msg !== undefined) io.warn(state.msg);
+    return;
+  }
+  state.badSince = undefined;
+  if (state.msg === undefined) return;
+  state.goodSince ??= now;
+  // not yet clear for long enough: the episode is still open
+  if (now - state.goodSince < REALTIME_HOLD_MS) { io.warn(state.msg); return; }
+  io.clear(state.msg);
+  io.announce(`quotes are keeping up with the chain head again after ${approximateDuration(state.goodSince - (state.since ?? state.goodSince))}`);
+  state.msg = state.since = state.goodSince = undefined;
 }
 
 /**
@@ -1750,6 +1845,7 @@ export class LiveDataSource extends BaseSource {
   private loopsStopped = false;
   private stopPromise?: Promise<void>;
   private persistTimer?: ReturnType<typeof setInterval>;
+  private realtimeTimer?: ReturnType<typeof setInterval>;
   private pruneTimer?: ReturnType<typeof setInterval>;
   private snapshotWriter?: SnapshotWriter;
   private storeWriter: StoreWriter = directStoreWriter(this.store);
@@ -1897,6 +1993,8 @@ export class LiveDataSource extends BaseSource {
     this.scheduleTail();
     void this.runRereads();
     this.persistTimer = setInterval(() => { void this.persist(); }, config.persistMs);
+    this.quoteLoopSince = Date.now();
+    this.realtimeTimer = setInterval(() => this.observeRealtime(), REALTIME_CHECK_MS);
     // rolling retention: without it fills only aged out at boot, so uptime
     // alone grew the table past its window.
     this.pruneTimer = setInterval(() => this.kickMaintenance(), config.pruneIntervalMs);
@@ -2068,6 +2166,7 @@ export class LiveDataSource extends BaseSource {
     if (this.quoteRetryTimer) clearTimeout(this.quoteRetryTimer);
     if (this.postQuoteImmediate) clearImmediate(this.postQuoteImmediate);
     if (this.persistTimer) clearInterval(this.persistTimer);
+    if (this.realtimeTimer) clearInterval(this.realtimeTimer);
     if (this.pruneTimer) clearInterval(this.pruneTimer);
     if (this.rediscoverTimer) clearInterval(this.rediscoverTimer);
     if (this.remarkTimer) clearInterval(this.remarkTimer);
@@ -2136,6 +2235,10 @@ export class LiveDataSource extends BaseSource {
   private tailSeen = { block: 0n, at: Date.now() };
   private tailBehindSince: number | undefined;
   private tailHeldNote: { msg?: string; since?: number } = {};
+  private realtimeNote: { badSince?: number; goodSince?: number; msg?: string; since?: number } = {};
+  /** When the head watcher began driving quotes; undefined through warm-up,
+   *  when no frame is expected yet. */
+  private quoteLoopSince?: number;
 
   /** The later of the cursor's last move and the tail falling behind. */
   private tailQuietSince(): number {
@@ -2172,6 +2275,29 @@ export class LiveDataSource extends BaseSource {
       warn: (m) => this.noteOnce('tail.held', m),
       clear: (m) => this.dropNote('tail.held', m),
       announce: (m) => this.note('tail.resume', m),
+    });
+  }
+
+  /** Keep the quote-pace note in step (checkRealtimeDegraded). Before the
+   *  first frame the sample still runs (paceSymptoms): a loop that never
+   *  produces one is a symptom, not an absence of data. The slowest adapters
+   *  are named only from a frame emitted inside the window: after a stall the
+   *  last frame's timings describe a moment that is over. */
+  private observeRealtime(): void {
+    const health = this.realtimeHealth();
+    const frame = this.quotes.frame;
+    const now = Date.now();
+    const symptoms = paceSymptoms({
+      health, medianMs: medianFrameMs(this.realtimeFrames, now), blockTimeMs: monad.blockTime ?? 300,
+      loopStarted: this.quoteLoopSince !== undefined,
+    });
+    const slowest = frame && now - frame.emittedAt <= REALTIME_WINDOW_MS
+      ? Object.entries(frame.adapterMs).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id, ms]) => `${id} ${Math.round(ms)}ms`).join(', ')
+      : '';
+    checkRealtimeDegraded(symptoms, slowest ? `slowest adapters: ${slowest}` : '', now, this.realtimeNote, {
+      warn: (m) => this.noteOnce('quote.realtime.degraded', m),
+      clear: (m) => this.dropNote('quote.realtime.degraded', m),
+      announce: (m) => this.note('quote.realtime.recovered', m),
     });
   }
 
@@ -4424,7 +4550,7 @@ export class LiveDataSource extends BaseSource {
     };
     this.quotes = { block: this.block, blockHash: pinned.hash, ...(pinned.revision ? { revision: pinned.revision } : {}), monUsd, ts: emittedAt, rows, frame };
     this.quotesFull = requestedAdapters.every((adapter) => completedAdapters.has(adapter));
-    this.realtimeFrames.push({ block: this.block, emittedAt, coalescedBlocks: trigger.coalescedBlocks });
+    this.realtimeFrames.push({ block: this.block, emittedAt, coalescedBlocks: trigger.coalescedBlocks, durationMs: frame.durationMs });
     this.realtimeFrames = this.realtimeFrames.filter((f) => f.emittedAt >= emittedAt - REALTIME_WINDOW_MS);
     this.emitMsg({ ch: 'quotes', data: this.quotes });
     this.schedulePostQuoteMaintenance();

@@ -8,7 +8,16 @@ import { SubscriptionGateway } from '../stream-v2.js';
 import { SIZES_USD, STREAM_V2_GZIP, STREAM_V2_JSON, type MarketState, type QuoteSnapshot, type StreamEnvelope, type StreamTopic, type StreamMessage } from '@shared';
 
 process.env.API_PORT = '0';
-const row = { venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000, bidBps: -1.23, askBps: 2.34, bidPx: .024123456789, askPx: .024132198765, spreadBps: 3.57, filledFull: true, feeBps: .2, ts: 100 };
+// A row as prod ships it (full-precision floats, the CEX-as-taker pair): ~320
+// bytes. The size matters here: a per-pair frame must clear the gateway's
+// 512-byte compression threshold on its rows alone, as real ones do (7–8 rows,
+// ~2.5KB), now that the frame telemetry no longer pads it.
+const row = {
+  venueId: 'venue', market: 'MON/USDC', sizeUsd: 1000, bidBps: -25.113599704000844, askBps: 26.180428069468853,
+  bidPx: 0.015558350990069999, askPx: 0.015638356962646323, spreadBps: 51.29402777346969, filledFull: true,
+  feeBps: 21.28521667311415, ts: 100, cexAskBps: 15.105414314744436, cexBidBps: 14.246109677127361,
+};
+const blockHash = `0x${'ab'.repeat(32)}`;
 class Source extends BaseSource {
   readonly mode = 'sim' as const;
   catalog: Record<string, string[]> = { venue: ['MON/USDC'] };
@@ -16,7 +25,7 @@ class Source extends BaseSource {
   getState(): MarketState { return { chainId: 143, block: 1, monUsd: .024, monChangePct: 0, takerBps: 1, markets: ['MON/USDC', 'BTC/USDC'], sizesUsd: [1000], quoteCadenceMs: 300, source: 'sim', venues: [
     { id: 'venue', name: 'Venue', kind: 'amm', role: 'venue', color: { dark: '#fff', light: '#000' } },
   ], quoteMarkets: this.catalog, notes: [{ ts: 0, level: 'info', code: 'source.sim', msg: 'private diagnostic' }] }; }
-  getQuotes(): QuoteSnapshot { return { block: 1, monUsd: .024, ts: 100, frame: { headSource: 'sim', headObservedAt: 80, quoteStartedAt: 81, quoteCompletedAt: 99, emittedAt: 100, durationMs: 18, adapterMs: { venue: 17 }, missingVenues: [], coalescedBlocks: 0 }, rows: [row, { ...row, market: 'BTC/USDC' }, { ...row, sizeUsd: 100 }] }; }
+  getQuotes(): QuoteSnapshot { return { block: 1, blockHash, monUsd: .024, ts: 100, frame: { headSource: 'sim', headObservedAt: 80, quoteStartedAt: 81, quoteCompletedAt: 99, emittedAt: 100, durationMs: 18, adapterMs: { venue: 17 }, missingVenues: [], coalescedBlocks: 0 }, rows: [row, { ...row, market: 'BTC/USDC' }, { ...row, sizeUsd: 100 }] }; }
   getFills() { return []; } getVolume() { return []; }
   push(message: StreamMessage) { this.emitMsg(message); }
 }
@@ -55,6 +64,34 @@ function localPeer(gateway: SubscriptionGateway) {
 }
 
 describe('subscription transport', () => {
+  // Maintainer telemetry never rides the stream (AGENTS.md: the WS frame
+  // budget). `frame` alone was 13–15% of a per-pair quote frame on prod.
+  it('keeps quote-pace telemetry off state and quote frames, snapshot and update alike', async () => {
+    const realtime = { headBlock: 2, quoteBlock: 1, lagBlocks: 1, frameMs: 18, headToFrameMs: 20, eventLoopLagMs: 3, coveragePct60s: 99.5, coalescedBlocks60s: 1, headSource: 'ws' as const, wsStatus: 'connected' as const };
+    class Paced extends Source { getState(): MarketState { return { ...super.getState(), realtime }; } }
+    const { source, port } = await boot(new Paced());
+    const topics: StreamTopic[] = [{ channel: 'state' }, { channel: 'quotes', market: 'MON/USDC', sizeUsd: 1000, baseline: false }];
+    const client = await connect(port, topics, STREAM_V2_JSON);
+    await waitFor(() => client.frames.length === 2);
+    source.push({ ch: 'quotes', data: { ...source.getQuotes(), block: 2 } });
+    await waitFor(() => client.frames.length === 3);
+    const later = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 1_001); // past the 1/s state throttle
+    source.push({ ch: 'state', data: { ...source.getState(), block: 2 } });
+    await waitFor(() => client.frames.length === 4);
+    later.mockRestore();
+
+    const states = client.frames.filter((f) => f.message.ch === 'state');
+    const quotes = client.frames.filter((f) => f.message.ch === 'quotes');
+    expect(states).toHaveLength(2);
+    expect(quotes).toHaveLength(2);
+    for (const f of states) expect(f.message.data).not.toHaveProperty('realtime');
+    for (const f of quotes) {
+      expect(f.message.data).not.toHaveProperty('frame');
+      expect(f.message.data).toMatchObject({ ts: 100, rows: [row] }); // what the chart reads is intact
+    }
+    expect(source.getQuotes().frame).toBeDefined(); // the source's own snapshot (REST) is untouched
+  });
+
   it('sends the catalog once on subscription, then only when it changes', async () => {
     let now = Date.now();
     vi.spyOn(Date, 'now').mockImplementation(() => now);
@@ -442,7 +479,9 @@ describe('legacy snapshot and idle history', () => {
     const full = { ...source.getQuotes(), block: 3 };
     resolve(full);
     await waitFor(() => frames.some((frame) => frame.ch === 'quotes'));
-    expect(frames.find((frame) => frame.ch === 'quotes')?.data).toEqual(full);
+    // the full matrix, minus the frame telemetry no stream carries
+    const { frame: _telemetry, ...lean } = full;
+    expect(frames.find((frame) => frame.ch === 'quotes')?.data).toEqual(lean);
     source.push({ ch: 'quotes', data: { ...full, block: 4 } });
     await waitFor(() => frames.filter((frame) => frame.ch === 'quotes').length === 2);
     expect(frames.at(-1)?.data).toMatchObject({ block: 4 });

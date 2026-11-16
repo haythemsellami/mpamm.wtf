@@ -131,10 +131,10 @@ describe('fill snapshot resynchronization', () => {
     const bootstrap = await vi.mocked(api.fetchMarkets)();
     bootstrap.state.block = 100; bootstrap.quotes.block = 100;
     await mount();
-    const frame = (block: number): QuoteSnapshot => ({ block, monUsd: 1, ts: Date.now(), rows: [], frame: {
-      headSource: 'http', headObservedAt: 1, quoteStartedAt: 1, quoteCompletedAt: 2, emittedAt: 2,
-      durationMs: 1, adapterMs: {}, missingVenues: [], coalescedBlocks: 0,
-    } });
+    // As the stream delivers it: no `frame` telemetry, and no rows for a pair
+    // nobody quotes. Neither may make an observed frame look like the
+    // bootstrap placeholder, or a stale frame could replace a newer one.
+    const frame = (block: number): QuoteSnapshot => ({ block, monUsd: 1, ts: Date.now(), rows: [] });
     await act(async () => message({ ch: 'quotes', data: frame(99) }));
     expect(dashboard.quotes?.block).toBe(99);
     await act(async () => message({ ch: 'quotes', data: frame(98) }));
