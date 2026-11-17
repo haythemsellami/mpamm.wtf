@@ -6,8 +6,8 @@
 // reference, a second or two after the trade. A history replay decodes days,
 // weeks or months after the trade, and the live reference is then the price on
 // the day of the replay: BTR's lifetime backfill ran on 2026-11-16 and booked
-// its 150 crypto-quoted fills of 10-13..11-08 at $19,663, where minute candles
-// at each fill say $26,059 (MON had gone from $0.024–0.034 to $0.015).
+// its 150 crypto-quoted fills of 10-13..11-08 at $19,663, where they were
+// worth $26,017 at their own second (MON had gone from $0.024–0.034 to $0.015).
 //
 // fill-time-prices.ts solves this for the tail with the chain's own prints,
 // because the tail cannot wait on an exchange. A replay can: it runs in the

@@ -105,6 +105,11 @@ const IMPLEMENTATIONS: readonly `0x${string}`[] = [
  *
  * Found by tallying tx.to over every Swapped, not from BTR's docs: a new
  * executor shows up as a `0xbbbbbbb…` tx.to the attributor leaves UNKNOWN.
+ *
+ * Listing one labels the fills the tail (or a re-read) decodes from then on.
+ * It does not re-label history: the volume replay and the onboarding fill
+ * scan never ask the core attributor, so every fill they store keeps the
+ * adapter's UNKNOWN (all 1,143 did in a rehearsal of the scan, 2026-11-17).
  */
 const BTR_EXECUTORS = [
   '0xbbbbbbb0d5cfe5bc7939ae0fce2cf21b95e806a7',
@@ -295,10 +300,10 @@ export function createBtrAdapter(): VenueAdapter {
     backfillFromUtc: '2026-10-01',
     // The lifetime backfill ran on 2026-11-16 and valued the crypto-quoted
     // fills (150 of them, the first on 10-13) at that day's prices: $19,663
-    // booked where minute candles at each fill say $26,059. The replay now
-    // prices a closed day as of its own blocks (closed-day-prices.ts), so
-    // re-run it from the first affected day. It also re-labels the fills of
-    // the two executors added above. Stable-quoted days come back unchanged.
+    // booked where they were worth $26,017 at their own second. The replay
+    // now prices a closed day as of its own blocks (closed-day-prices.ts), so
+    // re-run it from the first affected day. Swap counts and stable-quoted
+    // days come back unchanged.
     historyRevisions: [{ id: 'fill-time-usd', from: '2026-10-13' }],
 
     discover: refresh,
