@@ -184,9 +184,10 @@ export interface HistoryRevision {
    *
    * Use 'fills' only when the fills are right and the day buckets are not,
    * i.e. fills were booked on the wrong day. A replay would rewrite every
-   * day from `from` to yesterday. It re-prices cross-quoted pairs at the
-   * replay's CEX mid and drops closed-day fills' live markout curves, which
-   * cannot be rebuilt. 'fills' changes only the window.
+   * day from `from` to yesterday. It re-values cross-quoted pairs from the
+   * exchanges' archived prices (closed-day-prices.ts: close to what the tail
+   * booked, not identical) and drops closed-day fills' live markout curves,
+   * which cannot be rebuilt. 'fills' changes only the window.
    *
    * The window must be inside fills retention when the build boots (a
    * pruned day has nothing to sum). The window's total must also be

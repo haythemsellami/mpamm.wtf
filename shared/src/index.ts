@@ -832,7 +832,7 @@ export type NoteCode =
   // deep volume history: adapter seed + the on-chain replay
   | 'backfill.start' | 'backfill.done' | 'backfill.deferred' | 'backfill.held'
   | 'backfill.reset' | 'backfill.paused' | 'backfill.range.skipped' | 'backfill.config.invalid'
-  | 'backfill.reread' | 'backfill.reread.held'
+  | 'backfill.reread' | 'backfill.reread.held' | 'backfill.price.live'
   // markout onboarding scan + the archived-price remark
   | 'markout.scan.start' | 'markout.scan.done' | 'markout.scan.held'
   | 'markout.remark.done' | 'markout.deferred' | 'markout.archive.pending' | 'markout.archive.published' | 'markout.archive.unsupported'
@@ -864,7 +864,7 @@ export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'tail.held': 'warn',
   'backfill.start': 'info', 'backfill.done': 'info', 'backfill.deferred': 'info', 'backfill.held': 'info',
   'backfill.reset': 'info', 'backfill.paused': 'warn', 'backfill.range.skipped': 'warn', 'backfill.config.invalid': 'warn',
-  'backfill.reread': 'info', 'backfill.reread.held': 'warn',
+  'backfill.reread': 'info', 'backfill.reread.held': 'warn', 'backfill.price.live': 'info',
   'markout.scan.start': 'info', 'markout.scan.done': 'info', 'markout.scan.held': 'info',
   'markout.remark.done': 'info', 'markout.deferred': 'info', 'markout.archive.pending': 'info', 'markout.archive.published': 'info', 'markout.archive.unsupported': 'info',
   'markout.paused': 'warn', 'markout.range.skipped': 'warn', 'markout.market.unregistered': 'warn',

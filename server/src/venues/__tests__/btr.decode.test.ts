@@ -41,7 +41,10 @@ describe('BTR sources', () => {
     const entries = createBtrAdapter().entryPoints!();
     expect(entries.filter((e) => !e.router).map((e) => e.address)).toEqual([BTR_POOL, BTR_RETIRED_POOL]);
     const periphery = entries.filter((e) => e.router);
-    expect(periphery).toHaveLength(3);
+    // the four that fronted the retired pool, and the one on pool v2
+    expect(periphery).toHaveLength(5);
+    expect(periphery.map((e) => e.address)).toContain('0xbbbbbbb0f8c5d06406a6ff39abe1d514e25ade2e');
+    expect(periphery.map((e) => e.address)).toContain('0xbbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf');
     expect(periphery.every((e) => e.router === 'BTR' && /^0xbbbbbbb[0-9a-f]{33}$/.test(e.address))).toBe(true);
   });
 

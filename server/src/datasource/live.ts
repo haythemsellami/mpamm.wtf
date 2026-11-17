@@ -26,6 +26,7 @@ import {
 import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { FillTimePrices } from '../fill-time-prices.js';
+import { ClosedDayPrices } from '../closed-day-prices.js';
 import { VolumeStore, retentionCutoffMs, type DayFillCount, type ResetDeletes, type SnapshotResult } from '../db.js';
 
 /** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
@@ -761,6 +762,43 @@ export async function stampChunkDays(
   }
   const boundary = blocks[hi], laterMs = hiMs;
   return (bn) => (bn >= boundary ? laterMs : anchorMs);
+}
+
+/** The chain time one closed-day decode is priced at a single instant for
+ *  (priceSlices). Seconds, not minutes: swaps bunch up exactly when prices
+ *  run. With each replay chunk (≤ 1,000 blocks, ≈ 5 min) priced at its first
+ *  log, BTR's ten ETH-quoted fills of 2026-11-08 21:55–22:01 came out 0.8%
+ *  high; with minute slices its 41 crypto-quoted fills of 2026-10-14, a day
+ *  MON fell through, were still 0.7% high. */
+export const PRICE_SLICE_MS = 5_000;
+
+/**
+ * Cut a bundle's log blocks into runs of at most `spanMs` of chain time, each
+ * with the instant it is priced at (its midpoint). `blocks` is distinct and
+ * ascending; `timeOf` is a block's time in ms. Pure (closed-day-prices.test.ts).
+ */
+export function priceSlices(blocks: readonly bigint[], timeOf: (bn: bigint) => number, spanMs = PRICE_SLICE_MS): Array<{ from: bigint; to: bigint; atMs: number }> {
+  const out: Array<{ from: bigint; to: bigint; atMs: number }> = [];
+  let first = 0;
+  for (let i = 1; i <= blocks.length; i++) {
+    if (i < blocks.length && timeOf(blocks[i]) - timeOf(blocks[first]) <= spanMs) continue;
+    if (i > first) out.push({ from: blocks[first], to: blocks[i - 1], atMs: (timeOf(blocks[first]) + timeOf(blocks[i - 1])) / 2 });
+    first = i;
+  }
+  return out;
+}
+
+/**
+ * A block's time from two blocks whose times are known, on a straight line.
+ * The volume replay reads only a chunk's first and last log blocks
+ * (stampChunkDays); this places the logs between them to within a second or
+ * two (Monad's block time is steady over a few minutes) with no further read.
+ * Fit for pricing, not for a fill's own `ts`: that stays the day stamp.
+ */
+export function interpolateBlockTime(b0: bigint, t0: number, b1: bigint, t1: number): (bn: bigint) => number {
+  if (b1 <= b0 || !(t1 > t0)) return () => t0;
+  const perBlock = (t1 - t0) / Number(b1 - b0);
+  return (bn) => t0 + Number(bn - b0) * perBlock;
 }
 
 /**
@@ -1683,6 +1721,50 @@ export class LiveDataSource extends BaseSource {
       (market) => REFERENCES.midForPair(market),
       (key) => this.fillPrices.usdAt(key, at, now) ?? REFERENCES.settledUsd(key),
     );
+  }
+  /** Asset USD prices of past days, from the exchanges' archives
+   *  (closed-day-prices.ts): what a CLOSED day is priced from when a replay
+   *  decodes it, where `pricer` is the price on the day of the replay. */
+  private closedPrices = new ClosedDayPrices();
+  /**
+   * decode() for logs of a CLOSED day, with every crypto-quoted fill valued
+   * as of its own blocks instead of now. Every closed-day decode goes through
+   * here: the volume replay, the onboarding fill scan and a re-read that
+   * outlived its day. `timeOf` is a block's time, for pricing only (`tsOf`
+   * still stamps the fills); the bundle is decoded in runs of at most
+   * PRICE_SLICE_MS, each priced at its midpoint.
+   *
+   * Throws when an archive that should answer has not (a Bybit day published
+   * late, a failed download): the caller's own pause-and-retry holds its
+   * cursor, as for a decode that threw. Never a silent fallback to today's
+   * price; the one fallback, an asset with no archive at all, is noted.
+   */
+  private async decodeClosed(a: VenueAdapter, bundle: LogBundle, tsOf: (bn: bigint) => number, timeOf: (bn: bigint) => number): Promise<Fill[]> {
+    const ctx = this.ctxFor(a);
+    const live = { assetUsd: (key: string) => REFERENCES.assetUsd(key), pairMid: (market: string) => REFERENCES.midForPair(market), settledUsd: (key: string) => REFERENCES.settledUsd(key) };
+    const onLive = (assetKey: string) => this.noteOnce('backfill.price.live', `${a.venues()[0]?.name ?? 'venue'}: no archived price for ${assetKey} — its crypto-quoted fills on replayed days are valued at the price when replayed`, this.vidOf(a));
+    const seen = new Set<bigint>();
+    for (const logs of Object.values(bundle)) for (const l of logs) seen.add(BigInt(l.blockNumber));
+    const blocks = [...seen].sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+    const slices = priceSlices(blocks, timeOf);
+    // no logs, nothing to price: decode still runs once, as it always has
+    if (!slices.length) return a.decode(ctx, bundle, tsOf, new Set());
+    const out: Fill[] = [];
+    for (const { from, to, atMs } of slices) {
+      // Decoding a run of blocks on its own is what a smaller chunk would have
+      // fetched: the scans already shrink their chunks at will, and a tx's
+      // logs share a block, so nothing an adapter correlates is split.
+      let part = bundle;
+      if (slices.length > 1) {
+        part = {};
+        for (const [key, logs] of Object.entries(bundle)) {
+          part[key] = logs.filter((l) => { const bn = BigInt(l.blockNumber); return bn >= from && bn <= to; });
+        }
+      }
+      const slice = part;
+      out.push(...await this.closedPrices.decode(atMs, live, (pricer) => a.decode({ ...ctx, pricer }, slice, tsOf, new Set()), onLive));
+    }
+    return out;
   }
   private store = new VolumeStore(config.dbPath);
   /** QUOTE_UPDATE_BURN accrual — destination-keyed per-venue keeper gas. */
@@ -3587,7 +3669,11 @@ export class LiveDataSource extends BaseSource {
         if (t == null) throw new Error(`missing block timestamp for ${bn}`);
         return t;
       };
-      const fills = this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, new Set()), 'fill');
+      // A closed day is priced as of its own blocks (decodeClosed). Today is
+      // not in any archive yet and keeps the live price, at most a day late.
+      const fills = this.ownVenues(a, deep
+        ? await this.decodeClosed(a, bundle, tsOf, tsOf)
+        : await a.decode(this.ctxFor(a), bundle, tsOf, new Set()), 'fill');
       for (const f of fills) if (f.venueId === vid && f.ts >= dayStartMs && f.ts < dayEndMs) out.push(f);
       await sleep(config.backfillPaceMs);
     }
@@ -3787,9 +3873,16 @@ export class LiveDataSource extends BaseSource {
         // bisect when they fall on different days — see stampChunkDays for why
         // one stamp per chunk was not enough. Each block read is retried on a
         // transient error; an availability failure holds the chunk intact.
+        // kept: the two ends stampChunkDays reads also place every log of the
+        // chunk in time for pricing (interpolateBlockTime)
+        const read = new Map<bigint, number>();
         const readBlockMs = async (bn: bigint): Promise<number> => {
           for (let i = 0; ; i++) {
-            try { return Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: bn }))).timestamp) * 1000; }
+            try {
+              const ms = Number((await archiveRead(() => archiveClient.getBlock({ blockNumber: bn }))).timestamp) * 1000;
+              read.set(bn, ms);
+              return ms;
+            }
             catch (e) {
               if (isAvailabilityFailure(e) || i >= 2) throw e;
               await sleep(config.backfillPaceMs * 5 * (i + 1));
@@ -3807,7 +3900,11 @@ export class LiveDataSource extends BaseSource {
         if (tsOf) {
           const bundle: LogBundle = {};
           sources.forEach((s, i) => { bundle[s.key] = batches![i]; });
-          const fills = this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, new Set()), 'backfill fill');
+          // priced as of its own blocks, not of this replay (decodeClosed)
+          const known = [...read.keys()].sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+          const b0 = known[0], b1 = known[known.length - 1];
+          const timeOf = known.length ? interpolateBlockTime(b0, read.get(b0)!, b1, read.get(b1)!) : tsOf;
+          const fills = this.ownVenues(a, await this.decodeClosed(a, bundle, tsOf, timeOf), 'backfill fill');
           for (const f of fills) {
             const day = utcDay(f.ts);
             if (day >= today) continue; // today is owned by the live tail — no overlap
@@ -4085,7 +4182,9 @@ export class LiveDataSource extends BaseSource {
         };
         const bundle: LogBundle = {};
         sources.forEach((s, i) => { bundle[s.key] = batches![i]; });
-        const fills = this.ownVenues(a, await a.decode(this.ctxFor(a), bundle, tsOf, new Set()), 'onboarding fill');
+        // these rows are the tape and the leaderboard: valued as of their own
+        // blocks too, or a venue's fills would disagree with its own volume
+        const fills = this.ownVenues(a, await this.decodeClosed(a, bundle, tsOf, tsOf), 'onboarding fill');
         // today is owned by the live tail (its volume/markouts accrue there).
         for (const f of fills) if (utcDay(f.ts) < today) batch.push(f);
       }

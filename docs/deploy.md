@@ -135,12 +135,30 @@ wait for a run with both `BACKFILL` and `MARKOUT_BACKFILL` on. Never edit an
 applied entry — add a new id.
 
 **A replay rewrites every closed day from `from`, not just the wrong ones**, and
-two things in those days do not come back as they were. Cross-quoted pairs
-(`*/MON`, `*/ETH`) are re-priced at the CEX mid at the time of the replay, not
-the time of the fill. Closed-day fills also lose their live markout curves,
+two things in those days do not come back exactly as they were. Cross-quoted
+pairs (`*/MON`, `*/ETH`) are re-valued from the exchanges' archived prices as of
+each fill's own block, to within a few seconds (`server/src/closed-day-prices.ts`:
+Bybit's book mids for MON, Binance 1-minute closes joined by lines for the
+rest), where the tail had valued them at the live mid a second after the fill:
+close, not identical. A pair quoted in an asset with no archive (an xStock) is still
+valued at the price on the day of the replay, and the replay says so
+(`backfill.price.live`). Closed-day fills also lose their live markout curves,
 which have no archive (`markout-curves.ts`). Set `from` to the first wrong day.
-For a venue with cross pairs, compare the fix against that cost before
-shipping.
+
+The replay holds (`backfill.paused`, retried automatically) while an archive it
+needs is not published yet: Bybit's book file for a day appears the next day,
+at times hours after midnight. It does not fall back to today's price while
+the file may still come; one still missing three days after its day closed is
+treated as an asset with no archive (live price, noted).
+Two decodes of old blocks still use the live price: the re-read of TODAY
+(today is in no archive yet; the price is at most a day old) and a `markets`
+revision (it reads no block time before it decodes).
+
+Until this was added (2026-11) every replay valued cross-quoted fills at the
+price on the day it ran. BTR's lifetime backfill of 2026-11-16 booked its
+October MON- and ETH-quoted fills 24.5% low, and was repaired by the
+`fill-time-usd` revision. A venue-day that an earlier replay wrote, and no
+later one has rewritten, is still valued at that replay's price.
 
 **When the fills are right and only the days are wrong** (fills booked on the
 wrong UTC day), re-derive the days from the fills instead:

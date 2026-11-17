@@ -95,15 +95,28 @@ const IMPLEMENTATIONS: readonly `0x${string}`[] = [
 ];
 
 /**
- * BTR's own executors: contracts from the pools' deployer (0x0a37aec2…) that
- * fronted the retired pool — each is both tx.to and the event's `sender`,
- * driven by one EOA. None is on pool v2's swap gate (2026-11-16), where the
- * flow is expected through aggregators the core's registry already names.
+ * BTR's own executors: contracts the pools' deployer (0x0a37aec2…) created
+ * through its vanity factory — each is both tx.to and the event's `sender`,
+ * and one EOA (0xd1b33b54…) drives them all: 612 of the retired pool's 1,731
+ * swaps, about 44% of its USD (the sampled ones are atomic arbitrage against
+ * other venues). The first four fronted the retired pool; the last is the
+ * only one that has swapped through pool v2 (from 2026-11-16), whose other
+ * flow comes through aggregators the core's registry already names.
+ *
+ * Found by tallying tx.to over every Swapped, not from BTR's docs: a new
+ * executor shows up as a `0xbbbbbbb…` tx.to the attributor leaves UNKNOWN.
+ *
+ * Listing one labels the fills the tail (or a re-read) decodes from then on.
+ * It does not re-label history: the volume replay and the onboarding fill
+ * scan never ask the core attributor, so every fill they store keeps the
+ * adapter's UNKNOWN (all 1,143 did in a rehearsal of the scan, 2026-11-17).
  */
 const BTR_EXECUTORS = [
   '0xbbbbbbb0d5cfe5bc7939ae0fce2cf21b95e806a7',
   '0xbbbbbbb0f219f537a64d41a907192ba41b5225be',
   '0xbbbbbbb1e1dabc155c79f4688cdb462a462f4040',
+  '0xbbbbbbb0f8c5d06406a6ff39abe1d514e25ade2e', // 151 swaps, 2026-10-15 → 10-29
+  '0xbbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf', // pool v2
 ] as const;
 
 /** Pool risk-flag bit: the leg may be swapped at all. */
@@ -285,6 +298,13 @@ export function createBtrAdapter(): VenueAdapter {
     quoteMarkets: () => [...quotable.keys()],
     // the retired pool's deployment day — see BTR_VENUE.
     backfillFromUtc: '2026-10-01',
+    // The lifetime backfill ran on 2026-11-16 and valued the crypto-quoted
+    // fills (150 of them, the first on 10-13) at that day's prices: $19,663
+    // booked where they were worth $26,017 at their own second. The replay
+    // now prices a closed day as of its own blocks (closed-day-prices.ts), so
+    // re-run it from the first affected day. Swap counts and stable-quoted
+    // days come back unchanged.
+    historyRevisions: [{ id: 'fill-time-usd', from: '2026-10-13' }],
 
     discover: refresh,
 

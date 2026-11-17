@@ -67,6 +67,13 @@ async function fetchJson(url: string): Promise<any> {
 
 /** Binance klines (data mirror) → StepSeries of closes stamped at close time. */
 export async function binanceKlineSeries(symbol: string, interval: '1s' | '1m', fromMs: number, toMs: number): Promise<StepSeries> {
+  const { ts, px } = await binanceKlineCloses(symbol, interval, fromMs, toMs);
+  return makeSeries(ts, px, interval === '1s' ? STALE_BASE_MS : STALE_SLOW_MS);
+}
+
+/** The raw points behind binanceKlineSeries: every kline's close, stamped at
+ *  its close time. The staleness cap is the reader's. */
+async function binanceKlineCloses(symbol: string, interval: '1s' | '1m', fromMs: number, toMs: number): Promise<{ ts: number[]; px: number[] }> {
   const ts: number[] = [], px: number[] = [];
   let start = fromMs;
   while (start < toMs) {
@@ -80,7 +87,7 @@ export async function binanceKlineSeries(symbol: string, interval: '1s' | '1m', 
     if (rows.length < 1000 && start < toMs) break; // exchange has no more data in range
     await sleep(config.backfillPaceMs);
   }
-  return makeSeries(ts, px, interval === '1s' ? STALE_BASE_MS : STALE_SLOW_MS);
+  return { ts, px };
 }
 
 // ── Bybit daily orderbook archives → BBO-mid series ─────────────────────────
@@ -338,6 +345,98 @@ async function assetUsdtSeries(assetKey: string, fromMs: number, toMs: number): 
   return a.cex === 'binance'
     ? binanceKlineSeries(a.cexSymbol, '1s', fromMs - STALE_BASE_MS, toMs)
     : bybitBookMidSeries(a.cexSymbol, fromMs - STALE_BASE_MS, toMs, STALE_BASE_MS);
+}
+
+// ── an asset's USD price over one closed day (history replays) ───────────────
+
+/** One asset's USD price across one UTC day. Unlike a StepSeries it always
+ *  answers: a fill has to be valued, where a markout can be left out. */
+export interface DayPrices { at(t: number): number }
+
+/** How long after a day closes its Bybit archive may still be on its way.
+ *  The file is published the next day, usually within minutes of midnight
+ *  and at times hours later; one still missing after this is not coming. */
+const ARCHIVE_PUBLISH_GRACE_MS = 3 * 86_400_000;
+
+/** Two kline closes further apart than this are not joined by a line: the
+ *  exchange was down in between, and the last close before it is carried. */
+const KLINE_JOIN_MS = 2 * 60_000;
+
+/**
+ * An asset's USD price over one CLOSED UTC day, from the same archives as the
+ * markout series: what a history replay values a crypto-quoted fill with. A
+ * replay decodes a day long after it traded, and the live reference it used
+ * to take the price from is the price at replay time (BTR's lifetime
+ * backfill, run 2026-11-16, valued its October MON- and ETH-quoted fills
+ * 24.5% low: MON had halved since).
+ *
+ * The same quantity as the live `assetUsd`: the asset's own book in USDT
+ * terms, USDT taken as $1.
+ *  - Bybit (MON): the day's whole BBO-mid curve, a point every few seconds at
+ *    most, read as the last mid at or before t. It is the file the markouts
+ *    already download, reduced to a few tens of thousands of points.
+ *  - Binance: 1-MINUTE closes joined by straight lines. Seconds matter here
+ *    (swaps bunch up in the very minutes a price runs: on 2026-10-14 the
+ *    candle midpoint was 0.5% off for BTR's six MON/ETH fills), but 1-second
+ *    klines are 87 requests per asset-day and a venue's lifetime is hundreds
+ *    of them. A line between two closes has no lag, where the last close
+ *    alone is 0–60s old and biased against the move.
+ *
+ * `at(t)` before the day's first price is that first price (a Bybit day
+ * starts a few seconds after midnight). No staleness cap: through an exchange
+ * outage the last price before it is still far nearer the fill than today's.
+ *
+ * Null: nothing archived will ever answer for this asset-day: a Kraken xStock
+ * (no keyless archive), an asset its exchange did not list yet, or a Bybit day
+ * still unpublished days after it closed. The caller keeps the live price and
+ * says so.
+ * Throws: the archive should answer and has not yet (a Bybit day not
+ * published, a failed download). The caller holds and retries; it must not
+ * fall back, or a closed day would be priced from today on a bad connection.
+ */
+export async function assetUsdDay(assetKey: string, day: string, nowMs = Date.now()): Promise<DayPrices | null> {
+  const a = assetOf(assetKey);
+  const dayStart = Date.parse(`${day}T00:00:00Z`);
+  if (!a || a.cex === 'kraken' || !Number.isFinite(dayStart)) return null;
+  const dayEnd = dayStart + 86_400_000;
+  let ts: number[], px: number[];
+  if (a.cex === 'binance') {
+    // klines are served as they close, so an empty closed day is a day the
+    // symbol did not trade, not one still to come
+    ({ ts, px } = await binanceKlineCloses(a.cexSymbol, '1m', dayStart, dayEnd - 1));
+  } else {
+    // A failed download is retried here before it is thrown: a throw pauses
+    // the whole scan until its next retry tick, and one connect timeout to
+    // the archive's CDN did exactly that to a rehearsal of this (2026-11-17).
+    // Not the 404, which bybitBookDay returns as null: that is an answer.
+    let pts: { ts: number[]; px: number[] } | null;
+    for (let i = 0; ; i++) {
+      try { pts = await bybitBookDay(a.cexSymbol, day); break; }
+      catch (e) {
+        if (i >= 2) throw e;
+        await sleep(500 * (i + 1));
+      }
+    }
+    if (!pts) {
+      if (nowMs - dayEnd > ARCHIVE_PUBLISH_GRACE_MS) return null;
+      throw new Error(`bybit book archive ${a.cexSymbol} ${day} is not published yet`);
+    }
+    // without the outage markers (NaN): the mid before one is carried over it
+    ts = []; px = [];
+    for (let i = 0; i < pts.ts.length; i++) if (pts.px[i] > 0) { ts.push(pts.ts[i]); px.push(pts.px[i]); }
+  }
+  if (!ts.length) return null;
+  const join = a.cex === 'binance';
+  return {
+    at(t: number): number {
+      let lo = 0, hi = ts.length - 1, ans = -1;
+      while (lo <= hi) { const mid = (lo + hi) >> 1; if (ts[mid] <= t) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
+      if (ans < 0) return px[0];
+      const next = ans + 1;
+      if (!join || next >= ts.length || ts[next] - ts[ans] > KLINE_JOIN_MS) return px[ans];
+      return px[ans] + (px[next] - px[ans]) * (t - ts[ans]) / (ts[next] - ts[ans]);
+    },
+  };
 }
 
 /** No matching Kraken xStock BBO archive is available. Minute candles or
