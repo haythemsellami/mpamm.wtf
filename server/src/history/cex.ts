@@ -405,7 +405,18 @@ export async function assetUsdDay(assetKey: string, day: string, nowMs = Date.no
     // symbol did not trade, not one still to come
     ({ ts, px } = await binanceKlineCloses(a.cexSymbol, '1m', dayStart, dayEnd - 1));
   } else {
-    const pts = await bybitBookDay(a.cexSymbol, day);
+    // A failed download is retried here before it is thrown: a throw pauses
+    // the whole scan until its next retry tick, and one connect timeout to
+    // the archive's CDN did exactly that to a rehearsal of this (2026-11-17).
+    // Not the 404, which bybitBookDay returns as null: that is an answer.
+    let pts: { ts: number[]; px: number[] } | null;
+    for (let i = 0; ; i++) {
+      try { pts = await bybitBookDay(a.cexSymbol, day); break; }
+      catch (e) {
+        if (i >= 2) throw e;
+        await sleep(500 * (i + 1));
+      }
+    }
     if (!pts) {
       if (nowMs - dayEnd > ARCHIVE_PUBLISH_GRACE_MS) return null;
       throw new Error(`bybit book archive ${a.cexSymbol} ${day} is not published yet`);

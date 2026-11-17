@@ -99,6 +99,24 @@ describe('assetUsdDay', () => {
     await expect(assetUsdDay('MON', DAY, now)).rejects.toThrow('bybit book archive MONUSDT 2026-10-14 is not published yet');
   });
 
+  it('retries a download that failed before giving up: one dropped connection must not pause a whole scan', async () => {
+    const now = D + 86_400_000 + 4 * 3_600_000;
+    let attempts = 0;
+    fetchMock.mockImplementation(async () => {
+      attempts++;
+      if (attempts < 3) throw new TypeError('fetch failed'); // a connect timeout, as undici reports it
+      return new Response(null, { status: 404 });
+    });
+    // the third attempt gets an answer; here it is "not published", which is thrown as itself
+    await expect(assetUsdDay('MON', DAY, now)).rejects.toThrow('is not published yet');
+    expect(attempts).toBe(3);
+
+    attempts = 0;
+    fetchMock.mockImplementation(async () => { attempts++; throw new TypeError('fetch failed'); });
+    await expect(assetUsdDay('MON', DAY, now)).rejects.toThrow('fetch failed');
+    expect(attempts).toBe(3); // bounded: the scan's own pause-and-retry takes over
+  });
+
   it('is null for a Bybit day still missing days after it closed: it is not coming, and a replay must not wait forever', async () => {
     const now = D + 86_400_000 + 3 * 86_400_000 + 1;
     expect(await assetUsdDay('MON', DAY, now)).toBeNull();
