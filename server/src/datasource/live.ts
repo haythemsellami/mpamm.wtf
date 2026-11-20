@@ -1970,6 +1970,16 @@ export class LiveDataSource extends BaseSource {
     await WRAPPER_PARITY.refresh(publicClient);
     if (!this.loopsStopped) this.parityReport();
   }
+  /** A market's reference ring as a markout may read it: nothing while the
+   *  pair's reference is withheld. The check is made HERE, at the read, and
+   *  not only when a refresh reports: a confirmed rate also expires by the
+   *  clock, between refreshes, and the samples taken up to that instant are
+   *  still within midNear's reach of a horizon that elapses just after it. */
+  private ringOf(market: string): { t: number; mid: number }[] {
+    const pair = pairOf(market);
+    if (pair && !WRAPPER_PARITY.valid(pair)) { this.midHist.delete(market); return []; }
+    return this.midHist.get(market) ?? [];
+  }
   /** venue+market+day keys with a still-unpublished CEX archive (checkArchivePending,
    *  family A of #6). Retracted when that archive publishes; per-key so each deferred
    *  day re-arms its own recovery independently. */
@@ -5024,7 +5034,7 @@ export class LiveDataSource extends BaseSource {
     // its markouts null and stop tracking it (defense in depth; adapters gate
     // discovery/decode on the pair registry so this shouldn't be reachable).
     if (!pairOf(f.market)) { this.pending.delete(f); this.noteOnce('markout.market.unregistered', `fill market '${f.market}' is not a registered pair — markouts skipped`, f.venueId); return; }
-    const hist = this.midHist.get(f.market) ?? [];
+    const hist = this.ringOf(f.market);
     // queued for the curve alone: the legacy horizons are left untouched.
     if (this.curveOnly.has(f)) {
       this.takeCurve(f, hist, now);
@@ -5075,7 +5085,7 @@ export class LiveDataSource extends BaseSource {
    *  a fill to a reference sample minutes away from its horizon. */
   private static readonly MID_NEAR_TOL_MS = 6_000;
   private midNear(market: string, t: number): number {
-    const hist = this.midHist.get(market) ?? [];
+    const hist = this.ringOf(market);
     const sample = nearestReferenceSample(hist, t, LiveDataSource.MID_NEAR_TOL_MS);
     if (sample) return sample.mid;
     // live fallback only when NOW is an honest mark for t

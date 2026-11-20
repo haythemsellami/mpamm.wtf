@@ -27,6 +27,9 @@ import { fromUnits } from './util.js';
  * that is too old are all "no reference". One failed read does not erase the
  * last good one (a dropped eth_call must not blank a market for a minute), but
  * that answer expires after WRAPPER_PARITY_MAX_AGE_MS without a fresh one.
+ * An answer is as old as its REQUEST, and one that lands after a later
+ * request's answer is dropped: a read slower than the refresh interval would
+ * otherwise put the old rate back over a newer one, stamped as fresh.
  *
  * The limit: a rebase is seen at the next read, so what was quoted or marked
  * in the WRAPPER_PARITY_REFRESH_MS before it used the old rate.
@@ -68,9 +71,11 @@ export interface ShareRateReader {
 }
 
 export class WrapperParity {
-  /** the last rate each wrapper ANSWERED, and when */
-  private readonly last = new Map<string, { perShare: bigint; at: number }>();
-  constructor(private readonly now: () => number = Date.now) {}
+  /** the rate each wrapper answered to the most recent request that got an
+   *  answer: when that request was SENT, and its place in the order of sends */
+  private readonly last = new Map<string, { perShare: bigint; at: number; seq: number }>();
+  private sent = 0;
+  constructor(private readonly now: () => number = () => Date.now()) {}
 
   /** Every wrapper a registered pair trades: what a refresh reads. */
   tokens(): string[] { return [...new Set(PAIRS.flatMap((pair) => parityWrappersOf(pair)))]; }
@@ -89,17 +94,24 @@ export class WrapperParity {
   }
   valid(pair: Pair): boolean { return this.why(pair) === null; }
 
-  /** One wrapper's answer. null = it did not answer: the last answer stands
-   *  until it is too old. */
-  record(tokenKey: string, perShare: bigint | null): void {
-    if (perShare !== null) this.last.set(tokenKey, { perShare, at: this.now() });
+  /** One wrapper's answer to request number `seq`, sent at `at`. null = it
+   *  did not answer: the last answer stands until it is too old. An answer to
+   *  an EARLIER request than the one on record is dropped. */
+  private record(tokenKey: string, perShare: bigint | null, at: number, seq: number): void {
+    if (perShare === null) return;
+    const held = this.last.get(tokenKey);
+    if (held && held.seq > seq) return;
+    this.last.set(tokenKey, { perShare, at, seq });
   }
 
   /** Re-read every wrapper. Never throws: a read that failed as a whole is
-   *  every wrapper not answering. */
+   *  every wrapper not answering. Calls may overlap (a slow read, the next
+   *  tick): each is stamped when it is sent, so the latest SENT wins whatever
+   *  order they land in, and a hung one blocks nothing. */
   async refresh(client: ShareRateReader): Promise<void> {
     const keys = this.tokens();
     if (!keys.length) return;
+    const seq = ++this.sent, at = this.now();
     let results: readonly { status: 'success' | 'failure'; result?: unknown }[];
     try {
       results = await client.multicall({
@@ -109,7 +121,7 @@ export class WrapperParity {
     } catch { return; }
     keys.forEach((key, i) => {
       const r = results[i];
-      this.record(key, r?.status === 'success' && typeof r.result === 'bigint' ? r.result : null);
+      this.record(key, r?.status === 'success' && typeof r.result === 'bigint' ? r.result : null, at, seq);
     });
   }
 }

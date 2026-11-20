@@ -433,6 +433,45 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
+  it('marks nothing against a share-wrapper pair once its confirmed rate has expired, before any refresh reports it', async () => {
+    const { source } = await setup();
+    const { publicClient } = await import('../chain/rpc.js');
+    const { WRAPPER_PARITY_MAX_AGE_MS } = await import('../wrapper-parity.js');
+    (publicClient as any).multicall = vi.fn(async ({ contracts }: any) => contracts.map(() => ({ status: 'success', result: 10n ** 18n })));
+    const fill = (id: string, market: string, ts: number): Fill => ({
+      id, ts, venueId: 'test-venue', market, side: 'buy', category: 'DIRECT', usd: 100, baseAmount: 100,
+      execPx: 1, blockNumber: 1, txHash: '0x1', to: 'direct', pool: 'pool', markoutsBps: [null, null, null, null, null],
+    });
+    const ring = (now: number) => Array.from({ length: 1201 }, (_, i) => ({ t: now - 120_000 + i * 100, mid: 2 }));
+    const age = async (id: string) => {
+      const now = Date.now();
+      const wrapped = fill(id, 'wANTx/USDC', now - 65_000), plain = fill(`${id}-mon`, 'MON/USDC', now - 65_000);
+      source.pending = new Set([wrapped, plain]);
+      for (const market of ['wANTx/USDC', 'MON/USDC']) source.midHist.set(market, ring(now));
+      await source.ageMarkouts();
+      return { wrapped, plain };
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const confirmedAt = Date.now();
+      await source.refreshWrapperParity();
+      // every read after that one fails, and no refresh runs again in this test:
+      // only the clock can withdraw the reference
+      (publicClient as any).multicall = vi.fn(async () => { throw new Error('HTTP 429'); });
+
+      vi.setSystemTime(confirmedAt + WRAPPER_PARITY_MAX_AGE_MS);            // the last instant it is trusted
+      const before = await age('before');
+      expect(before.wrapped.markoutsBps).toEqual(Array(5).fill(10_000));
+
+      vi.setSystemTime(confirmedAt + WRAPPER_PARITY_MAX_AGE_MS + 1);
+      const after = await age('after');
+      expect(after.wrapped.markoutsBps).toEqual([null, null, null, null, null]);
+      expect(source.dirtyCurves.has('after')).toBe(false);
+      expect(source.midHist.has('wANTx/USDC')).toBe(false);                 // dropped at the read
+      expect(after.plain.markoutsBps).toEqual(Array(5).fill(10_000));       // every other pair is untouched
+    } finally { vi.useRealTimers(); source.store.close(); }
+  });
+
   it('a fill reset drops cached aggregates and keeps a pre-reset pass from caching its result', async () => {
     const { source } = await setup();
     const resolvers: Array<(r: unknown) => void> = [];

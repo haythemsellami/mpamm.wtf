@@ -310,12 +310,13 @@ describe('Metric v1 share-wrapper base (wANTx): the reference decides, not the a
 describe('Metric v1 with no reference for any live pool', () => {
   const setup = async () => {
     const seen: { code: string; msg: string }[] = [];
-    const state = { mid: 0, legsFail: false };
+    const state = { mid: 0, legsFail: false, legsEmpty: false };
     const a = createMetricAdapter();
     const ctx = {
       ...stub([], {
         pools: [P.wantx], pairMid: () => state.mid,
-        quote: (args) => (state.legsFail ? { status: 'failure' } : { status: 'success', result: [args[3] as bigint, args[3] as bigint] }),
+        quote: (args) => (state.legsFail ? { status: 'failure' }
+          : { status: 'success', result: state.legsEmpty ? [0n, 0n] : [args[3] as bigint, args[3] as bigint] }),
       }),
       note: (code: string, msg: string) => { if (code !== 'venue.discovery') seen.push({ code, msg }); },
     } as any;
@@ -369,6 +370,17 @@ describe('Metric v1 with no reference for any live pool', () => {
     state.legsFail = false;
     await frames(a, ctx, 1);
     expect(seen.slice(2).map((n) => n.code)).toEqual(['venue.quote.recovered', 'venue.quote.recovered']);
+  });
+
+  it('nor while every leg answers with nothing: a multicall that succeeded is not a quote', async () => {
+    const { a, ctx, seen, state } = await setup();
+    await frames(a, ctx, NO_REFERENCE_FRAMES);
+    state.mid = 97; state.legsEmpty = true;      // the quoter answers [0, 0] on every leg: no row is built
+    expect(await frames(a, ctx, 3)).toBe(0);
+    expect(seen.map((n) => n.code)).toEqual(['venue.quote.unavailable']);
+    state.legsEmpty = false;
+    expect(await frames(a, ctx, 1)).toBe(1);
+    expect(seen.map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered']);
   });
 
   it('a market subset (the depth worker) neither raises nor clears it', async () => {

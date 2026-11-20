@@ -109,6 +109,64 @@ describe('WrapperParity: fail closed, but not on one dropped read', () => {
   });
 });
 
+describe('WrapperParity: overlapping reads (one slower than the refresh interval)', () => {
+  /** a client whose answer lands only when `land(rate)` is called */
+  const slow = () => {
+    let land!: (rate: bigint | null) => void;
+    const answered = new Promise<bigint | null>((resolve) => { land = resolve; });
+    return { land, multicall: async ({ contracts }: any) => { const a = await answered; return contracts.map(() => (a === null ? { status: 'failure' as const } : { status: 'success' as const, result: a })); } };
+  };
+
+  it('an older request landing late does not put its rate back over a newer off-parity answer', async () => {
+    const { c, now } = clock();
+    const parity = new WrapperParity(now);
+    const first = slow();
+    const pending = parity.refresh(first);                 // sent while the rate was still 1
+    c.t += 60_000;
+    await parity.refresh(reader(() => DRIFT));             // the next tick lands first: a rebase
+    expect(parity.why(WANTX)).toBe('1 wANTx = 1.003456 underlying');
+    c.t += 5_000;
+    first.land(ONE); await pending;
+    expect(parity.why(WANTX)).toBe('1 wANTx = 1.003456 underlying');
+  });
+
+  it('nor does a late off-parity answer undo a newer good one', async () => {
+    const { c, now } = clock();
+    const parity = new WrapperParity(now);
+    const first = slow();
+    const pending = parity.refresh(first);
+    c.t += 60_000;
+    await parity.refresh(reader(() => ONE));
+    first.land(DRIFT); await pending;
+    expect(parity.valid(WANTX)).toBe(true);
+  });
+
+  it('a late answer still counts when the request sent after it got none', async () => {
+    const { c, now } = clock();
+    const parity = new WrapperParity(now);
+    const first = slow();
+    const pending = parity.refresh(first);
+    c.t += 60_000;
+    await parity.refresh(reader(() => 'throw'));
+    first.land(ONE); await pending;
+    expect(parity.valid(WANTX)).toBe(true);
+  });
+
+  it('an answer is as old as its request: four minutes in flight leaves it one minute of trust', async () => {
+    const { c, now } = clock();
+    const parity = new WrapperParity(now);
+    const first = slow();
+    const pending = parity.refresh(first);
+    c.t += 4 * 60_000;
+    first.land(ONE); await pending;
+    expect(parity.valid(WANTX)).toBe(true);
+    c.t += 60_000;
+    expect(parity.valid(WANTX)).toBe(true);
+    c.t += 1;
+    expect(parity.valid(WANTX)).toBe(false);
+  });
+});
+
 describe('parity notes', () => {
   const setup = () => {
     const state: { why: string | null } = { why: null };

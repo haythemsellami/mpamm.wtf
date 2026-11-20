@@ -379,7 +379,6 @@ export function createMetricV1Generation(): VenueGeneration {
       const names = qRes.map((r) => (r.status === 'failure' ? metricV1RevertName(r.error) : null));
       const named: MulticallOutcome[] = qRes.map((r, i) => (r.status === 'failure' && names[i] ? { status: 'failure', error: { reason: names[i] } } : r));
       if (reportOutage(ctx, named)) return [];
-      if (!markets) { unreferencedFrames = 0; noReference(ctx, null); }
 
       // A whole SIDE refusing (every size of one direction on one market) is a
       // venue state, not thin liquidity: say why, once, and announce the heal.
@@ -432,6 +431,10 @@ export function createMetricV1Generation(): VenueGeneration {
         else row.oneSided = true;
         if (row.askPx > 0 || row.bidPx > 0) out.push(row);
       }
+      // The no-reference episode ends with a ROW, not with a multicall that
+      // answered: a leg can succeed with zero in or out and is dropped above,
+      // and "quoting again" over an empty frame would be a lie.
+      if (!markets && out.length) { unreferencedFrames = 0; noReference(ctx, null); }
       return out;
     },
 
