@@ -87,6 +87,25 @@ describe('xStock pair terms', () => {
     expect(row.askPx).toBeCloseTo(800 * 1.001 / 1.002 * (1 + config.krakenXstockTakerBps / 1e4), 10);
     expect(row.bidPx).toBeCloseTo(800 * 0.999 / 1.002 * (1 - config.krakenXstockTakerBps / 1e4), 10);
   });
+  it('gives a share-wrapper pair the underlying book at one per share, and nothing at all while parity is not vouched for', () => {
+    mids.set('ANTx/USD', 91.5);
+    const state = { ok: true };
+    const r = createReferenceRegistry({ valid: (pair) => pair.symbol !== 'wANTx/USDC' || state.ok });
+    expect(r.midForPair('wANTx/USDC')).toBeCloseTo(91.5 / 1.002, 10);
+    expect(r.quote([100], new Set(['wANTx/USDC']))).toHaveLength(1);
+    state.ok = false;
+    // no mid = no bps anchor for any adapter and no markout sample; no walk rows either
+    expect(r.midForPair('wANTx/USDC')).toBe(0);
+    expect(r.quote([100], new Set(['wANTx/USDC', 'SPYx/USDC'])).map((row) => row.market)).toEqual(['SPYx/USDC']);
+    // the asset's USD stays: it sizes and values, it is not a bps anchor
+    expect(r.assetUsd('ANTx')).toBe(91.5);
+  });
+  it('fails closed by default: the process-wide parity state has read nothing in a fresh process', () => {
+    mids.set('ANTx/USD', 91.5);
+    const r = createReferenceRegistry();
+    expect(r.midForPair('wANTx/USDC')).toBe(0);
+    expect(r.midForPair('SPYx/USDC')).toBeGreaterThan(0);
+  });
   it('distinguishes unsupported xStock archives from existing crypto histories', async () => {
     expect(supportsHistoricalReference('SPYx/USDC')).toBe(false);
     expect(supportsHistoricalReference('QQQx/SPYx')).toBe(false);

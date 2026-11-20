@@ -6,9 +6,9 @@
 import { describe, expect, it } from 'vitest';
 import { TOKENS } from '@shared';
 import { createMetricAdapter } from '../metric.js';
-import { admitMetricPool, isMetricPoolLive, metricPoolLiveness, wrapperAtParity } from '../metric-shared.js';
+import { admitMetricPool, isMetricPoolLive, metricPoolLiveness } from '../metric-shared.js';
 import { V0_LAST_SWAP_BLOCK, V0_POOLS, V0_PUSH_ORACLE } from '../metric-v0.js';
-import { V1_FACTORY, V1_FACTORY_BLOCK, V1_SIMPLE_ROUTER, metricV1RevertName } from '../metric-v1.js';
+import { NO_REFERENCE_FRAMES, V1_FACTORY, V1_FACTORY_BLOCK, V1_SIMPLE_ROUTER, metricV1RevertName } from '../metric-v1.js';
 import { readFileSync } from 'node:fs';
 import { sourceSpan } from '../adapter.js';
 import { classifyGasSourceChange, gasSourcesSignature } from '../../gas.js';
@@ -58,28 +58,6 @@ describe('admitMetricPool (structural admission)', () => {
   it('admits the wANTx/USDC pool under the wrapper\'s own market, sized in wrapper units', () => {
     const r = admitMetricPool(POOL, im(TOKENS.WANTX.address, TOKENS.USDC.address));
     expect(r).toMatchObject({ ok: true, value: { market: 'wANTx/USDC', baseToken: 'WANTX', baseDec: 18, baseIsToken0: true, stableSym: 'USDC' } });
-  });
-});
-
-describe('wrapperAtParity (share-wrapper base vs its underlying\'s book)', () => {
-  const ONE = 10n ** 18n;
-  it('holds at exactly one underlying per share — wANTx as read on 2026-11-20', () => {
-    expect(wrapperAtParity(ONE, 18)).toBe(true);
-  });
-
-  it('tolerates the wei of rounding a rebasing underlying leaves, in either direction', () => {
-    expect(wrapperAtParity(ONE - 1n, 18)).toBe(true);
-    expect(wrapperAtParity(ONE + 10n ** 13n, 18)).toBe(true);    // 0.1 bp: the edge of the band
-  });
-
-  it('fails on a real rebase — wQQQx read 1.003456 on 2026-11-09 — and just past the band', () => {
-    expect(wrapperAtParity(1_003_456_000_000_000_000n, 18)).toBe(false);
-    expect(wrapperAtParity(ONE + 10n ** 13n + 1n, 18)).toBe(false);
-    expect(wrapperAtParity(ONE / 2n, 18)).toBe(false);
-  });
-
-  it('is not parity when the wrapper did not answer — never guess', () => {
-    expect(wrapperAtParity(null, 18)).toBe(false);
   });
 });
 
@@ -135,9 +113,9 @@ interface StubOpts {
   /** the pool's CURRENT provider differs from the one it was created with. */
   currentProvider?: (pool: string) => string;
   oracleOf?: (provider: string) => string | null;
-  /** what the wrapper's convertToAssets(1 share) answers (default: exactly
-   *  the shares asked about = parity; null = it reverts). */
-  sharesWorth?: bigint | null;
+  /** the frame's pair-terms reference mid (default 1 for every market; 0 =
+   *  the pair has no reference: closed market, or a wrapper off parity). */
+  pairMid?: (market: string) => number;
   /** quoter: [amountIn used, amountOut] per call (default: full fill at 1:1). */
   quote?: (args: readonly unknown[]) => { status: 'success'; result: [bigint, bigint] } | { status: 'failure'; error?: Error };
 }
@@ -180,7 +158,6 @@ const stub = (notes: string[], o: StubOpts = {}) => {
               return { status: 'success', result: b0 };
             }
             case 'getSellAndBuyPrices': return o.priceFails ? { status: 'failure' } : { status: 'success', result: [100n, 101n] };
-            case 'convertToAssets': return o.sharesWorth === null ? { status: 'failure' } : { status: 'success', result: o.sharesWorth ?? c.args[0] };
             case 'offchainOracle': {
               const or = o.oracleOf ? o.oracleOf(addr) : ORACLE;
               return or === null ? { status: 'failure' } : { status: 'success', result: or };
@@ -192,7 +169,7 @@ const stub = (notes: string[], o: StubOpts = {}) => {
         return allowFailure === false ? out.map((r: any) => r.result) : out;
       },
     },
-    pricer: { pairMid: () => 1, usdPerToken: () => 1, usdForToken: () => 1, tokenForUsd: () => 1, assetUsd: () => 1 },
+    pricer: { pairMid: (m: string) => (o.pairMid ? o.pairMid(m) : 1), usdPerToken: () => 1, usdForToken: () => 1, tokenForUsd: () => 1, assetUsd: () => 1 },
     note: (_code: string, m: string) => notes.push(m),
   } as any;
 };
@@ -303,58 +280,106 @@ describe('Metric v1 discovery (factory enumeration)', () => {
   });
 });
 
-describe('Metric v1 share-wrapper base (wANTx): quoted only at parity with its underlying', () => {
-  const DRIFT = 1_003_456_000_000_000_000n;   // what wQQQx read on 2026-11-09
+// Whether wANTx is worth one ANTx is the REFERENCE's question (wrapper-parity.ts):
+// off parity the pair has no mid, and the adapter sees that as any missing anchor.
+describe('Metric v1 share-wrapper base (wANTx): the reference decides, not the adapter', () => {
   const quoted = async (a: ReturnType<typeof createMetricAdapter>, ctx: any) => [...new Set((await a.quote!(ctx, [100], 1n)).map((r) => r.market))];
 
-  it('quotes the pool while one share is one underlying', async () => {
-    const notes: string[] = [];
+  it('quotes the pool like any other while its pair has a reference, and reads no share rate of its own', async () => {
     const a = createMetricAdapter();
-    const ctx = stub(notes, { pools: [P.wantx] });
+    const ctx = stub([], { pools: [P.wantx] });
     await a.discover(ctx);
-    expect(ctx.calls.filter((c: any) => c.functionName === 'convertToAssets').map((c: any) => [String(c.address).toLowerCase(), c.args[0]]))
-      .toEqual([[TOKENS.WANTX.address, 10n ** 18n]]);
     expect(await quoted(a, ctx)).toEqual(['wANTx/USDC']);
-    expect(notes.some((n) => /wrapper/.test(n))).toBe(false);
-  });
-
-  it('stops quoting after a rebase and says why — the pool stays tailed, its fills still count', async () => {
-    const notes: string[] = [];
-    const a = createMetricAdapter();
-    const ctx = stub(notes, { pools: [P.wmon, P.wantx], sharesWorth: DRIFT });
-    await a.discover(ctx);
-    expect(await quoted(a, ctx)).toEqual(['MON/USDC']);          // the other pool is unaffected
-    expect((swapSource(a).address as string[]).map((x) => x.toLowerCase()).sort()).toEqual([P.wantx, P.wmon].sort());
-    expect(notes.some((n) => /wANTx\/USDC \(1 wANTx = 1\.003456 underlying\) is not quoted/.test(n))).toBe(true);
-    expect(notes.some((n) => /1 off wrapper parity/.test(n))).toBe(true);
-  });
-
-  it('does not quote when the wrapper will not answer', async () => {
-    const notes: string[] = [];
-    const a = createMetricAdapter();
-    const ctx = stub(notes, { pools: [P.wantx], sharesWorth: null });
-    await a.discover(ctx);
-    expect(await quoted(a, ctx)).toEqual([]);
-    expect(notes.some((n) => /wANTx did not answer convertToAssets/.test(n))).toBe(true);
-  });
-
-  it('latches the warning for the episode and announces the return to parity', async () => {
-    const seen: { code: string; msg: string }[] = [];
-    const a = createMetricAdapter();
-    const ctx = (o: StubOpts) => ({ ...stub([], { pools: [P.wantx], ...o }), note: (code: string, msg: string) => seen.push({ code, msg }) });
-    await a.discover(ctx({ sharesWorth: DRIFT }));
-    await a.discover(ctx({ sharesWorth: DRIFT }));    // still off: no second warning
-    const back = ctx({});
-    await a.discover(back);
-    expect(seen.filter((n) => n.code !== 'venue.discovery').map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered']);
-    expect(await quoted(a, back)).toEqual(['wANTx/USDC']);
-  });
-
-  it('reads no share price when no admitted pool has a wrapper base', async () => {
-    const a = createMetricAdapter();
-    const ctx = stub([]);
-    await a.discover(ctx);
     expect(ctx.calls.some((c: any) => c.functionName === 'convertToAssets')).toBe(false);
+  });
+
+  it('asks the quoter nothing for it while the reference is withheld — the pool stays tailed, the other pool quotes', async () => {
+    const a = createMetricAdapter();
+    const ctx = stub([], { pools: [P.wmon, P.wantx], pairMid: (m) => (m === 'wANTx/USDC' ? 0 : 1) });
+    await a.discover(ctx);
+    expect(await quoted(a, ctx)).toEqual(['MON/USDC']);
+    expect(ctx.calls.filter((c: any) => c.functionName === 'quoteLiveExactInSingle').map((c: any) => String(c.args[0]).toLowerCase()))
+      .toEqual([P.wmon, P.wmon]);
+    expect((swapSource(a).address as string[]).map((x) => x.toLowerCase()).sort()).toEqual([P.wantx, P.wmon].sort());
+  });
+});
+
+// Metric's one live pool is an xStock: Kraken closes it every weekend, and a
+// wrapper can leave parity. Either way the venue returns nothing, and without
+// the adapter saying why the core's backstop reports it as offline.
+describe('Metric v1 with no reference for any live pool', () => {
+  const setup = async () => {
+    const seen: { code: string; msg: string }[] = [];
+    const state = { mid: 0, legsFail: false };
+    const a = createMetricAdapter();
+    const ctx = {
+      ...stub([], {
+        pools: [P.wantx], pairMid: () => state.mid,
+        quote: (args) => (state.legsFail ? { status: 'failure' } : { status: 'success', result: [args[3] as bigint, args[3] as bigint] }),
+      }),
+      note: (code: string, msg: string) => { if (code !== 'venue.discovery') seen.push({ code, msg }); },
+    } as any;
+    await a.discover(ctx);
+    return { a, ctx, seen, state };
+  };
+  const frames = async (a: ReturnType<typeof createMetricAdapter>, ctx: any, n: number, markets?: ReadonlySet<string>) => {
+    let rows = 0;
+    for (let i = 0; i < n; i++) rows += (await a.quote!(ctx, [100], BigInt(i + 1), markets)).length;
+    return rows;
+  };
+
+  it('says why it is silent once the gap outlasts a cold start, once for the episode', async () => {
+    const { a, ctx, seen } = await setup();
+    expect(await frames(a, ctx, NO_REFERENCE_FRAMES - 1)).toBe(0);
+    expect(seen).toEqual([]);
+    await frames(a, ctx, 1);
+    expect(seen.map((n) => n.code)).toEqual(['venue.quote.unavailable']);
+    expect(seen[0].msg).toMatch(/Metric is not quoted — its live pool\(s\) trade wANTx\/USDC, which has no CEX reference/);
+    await frames(a, ctx, 50);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('says nothing about a gap shorter than that (references warming at boot)', async () => {
+    const { a, ctx, seen, state } = await setup();
+    await frames(a, ctx, 3);
+    state.mid = 97;
+    expect(await frames(a, ctx, 2)).toBe(2);
+    // the counter restarts: a later short gap is not added to the first one
+    state.mid = 0;
+    await frames(a, ctx, NO_REFERENCE_FRAMES - 1);
+    expect(seen).toEqual([]);
+  });
+
+  it('announces the return when the reference is back and it quotes', async () => {
+    const { a, ctx, seen, state } = await setup();
+    await frames(a, ctx, NO_REFERENCE_FRAMES);
+    state.mid = 97;
+    expect(await frames(a, ctx, 3)).toBe(3);
+    expect(seen.map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered']);
+    expect(seen[1].msg).toMatch(/Metric quoting again \(was "no reference for wANTx\/USDC"\)/);
+  });
+
+  it('does not announce a return while another cause still blocks it: the reference is back but every leg fails', async () => {
+    const { a, ctx, seen, state } = await setup();
+    await frames(a, ctx, NO_REFERENCE_FRAMES);
+    state.mid = 97; state.legsFail = true;
+    expect(await frames(a, ctx, 3)).toBe(0);
+    expect(seen.map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.unavailable']);
+    expect(seen[1].msg).toMatch(/Metric quotes unavailable — all 2 legs failed/);
+    state.legsFail = false;
+    await frames(a, ctx, 1);
+    expect(seen.slice(2).map((n) => n.code)).toEqual(['venue.quote.recovered', 'venue.quote.recovered']);
+  });
+
+  it('a market subset (the depth worker) neither raises nor clears it', async () => {
+    const { a, ctx, seen, state } = await setup();
+    const subset = new Set(['wANTx/USDC']);
+    await frames(a, ctx, NO_REFERENCE_FRAMES * 3, subset);
+    expect(seen).toEqual([]);
+    await frames(a, ctx, NO_REFERENCE_FRAMES);
+    state.mid = 97;
+    expect(await frames(a, ctx, 2, subset)).toBe(2);
+    expect(seen.map((n) => n.code)).toEqual(['venue.quote.unavailable']);
   });
 });
 

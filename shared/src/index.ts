@@ -110,8 +110,10 @@ export interface TokenInfo {
    *  wrapped/unwrapped basis. Parity is a fact about the chain, not a
    *  constant: a rebase of the underlying moves `convertToAssets(1 share)`
    *  (wQQQx read 1.003456 on 2026-11-09), and every bps published against the
-   *  reference is then off by that much. An adapter quoting such a token must
-   *  read the ratio and stop quoting when it leaves 1 (metric-v1.ts does). */
+   *  reference is then off by that much. The core reads the ratio
+   *  (server/src/wrapper-parity.ts) and a pair trading such a token has NO
+   *  reference while it is off 1 or unread: no venue is quoted on it and none
+   *  of its fills is marked out. Nothing for an adapter to do. */
   parityWrapper?: boolean;
 }
 
@@ -864,6 +866,9 @@ export type NoteCode =
   | 'gas.range.skipped' | 'gas.destination.conflict' | 'gas.mode.mixed'
   // CEX reference feeds
   | 'reference.starved' | 'reference.recovered'
+  // a share-wrapper pair without its reference (server/src/wrapper-parity.ts);
+  // its return is a 'reference.recovered'
+  | 'reference.parity'
   // SQLite store migrations / persistence, and the boot swap-count reconcile
   // (a closed day's stored count disagreeing with its fills)
   | 'store.migrated' | 'store.persist.failed' | 'store.swaps.drift'
@@ -892,7 +897,7 @@ export const NOTE_LEVEL: Record<NoteCode, NoteLevel> = {
   'markout.paused': 'warn', 'markout.range.skipped': 'warn', 'markout.market.unregistered': 'warn',
   'gas.scan.start': 'info', 'gas.series.reset': 'info', 'gas.scan.paused': 'warn',
   'gas.range.skipped': 'warn', 'gas.destination.conflict': 'warn', 'gas.mode.mixed': 'warn',
-  'reference.starved': 'warn', 'reference.recovered': 'info',
+  'reference.starved': 'warn', 'reference.recovered': 'info', 'reference.parity': 'warn',
   'store.migrated': 'info', 'store.persist.failed': 'warn', 'store.swaps.drift': 'warn',
   'source.sim': 'info',
 };

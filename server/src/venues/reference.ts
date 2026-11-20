@@ -5,6 +5,7 @@ import { BybitFeed, type WalkResult } from '../bybit.js';
 import { BinanceFeed } from '../binance.js';
 import { KrakenFeed } from '../kraken.js';
 import type { ReferenceRegistry } from './adapter.js';
+import { WRAPPER_PARITY, type WrapperParity } from '../wrapper-parity.js';
 
 // Published advanced-trader tiers; the name carries the fee assumption into
 // every chip/legend. Kraken xStocks have their own schedule, not crypto fees.
@@ -27,8 +28,12 @@ const KRAKEN_VENUE: VenueMeta = { id: 'kraken', name: 'Kraken Pro xStocks ($1B+)
  * with existing crypto benchmarks. These are synthetic comparisons, not the
  * cost of executing every leg of a cross-asset hedge. cbBTC retains the
  * explicit parity assumption because there is no traded cbBTC/BTC basis.
+ *
+ * A share-wrapper pair (wANTx/USDC) is the underlying's book at one underlying
+ * per share, and has no reference at all while `parity` cannot vouch for that
+ * rate (wrapper-parity.ts): no mid, no walk rows, the same as a cold leg.
  */
-export function createReferenceRegistry(): ReferenceRegistry {
+export function createReferenceRegistry(parity: Pick<WrapperParity, 'valid'> = WRAPPER_PARITY): ReferenceRegistry {
   const stableQuoted = PAIRS.filter((p) => p.quoteKind !== 'asset');
   const crosses = (cex: 'bybit' | 'binance') => [...new Set(stableQuoted
     .filter((p) => cexForBase(p.base) === cex).map((p) => TOKENS[p.quote]?.usdtCross)
@@ -92,6 +97,7 @@ export function createReferenceRegistry(): ReferenceRegistry {
     return m > 0 ? m : 0;
   };
   const pairFactor = (pair: Pair): number => {
+    if (!parity.valid(pair)) return 0; // a wrapper off parity: nothing like-for-like to quote
     const q = quoteLeg(pair);
     return q > 0 ? wrapFactor(pair) / q : 0;
   };

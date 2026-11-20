@@ -5,7 +5,7 @@ import { fromUnits, toUnits, shortHex } from '../util.js';
 import type { AdapterContext, LogBundle } from './adapter.js';
 import type { VenueGeneration } from './generations.js';
 import { createQuoteOutageLatch, createQuoteOutageReporter, type MulticallOutcome } from './quote-health.js';
-import { METRIC_VENUE, admitMetricPool, metricFill, metricPoolLiveness, wrapperAtParity, type MetricPool, type NotLiveReason } from './metric-shared.js';
+import { METRIC_VENUE, admitMetricPool, metricFill, metricPoolLiveness, type MetricPool, type NotLiveReason } from './metric-shared.js';
 
 /**
  * Metric v1 — the LIVE deployment (since 2026-09-15; first swap 2026-10-04,
@@ -84,8 +84,12 @@ export const metricV1QuoterAbi = parseAbi([
   'function quoteLiveExactInSingle(address pool, address sender, bool zeroForOne, uint128 amountIn, uint128 priceLimitX64) view returns (uint256 amountIn, uint256 amountOut)',
 ]);
 const erc20Abi = parseAbi(['function balanceOf(address) view returns (uint256)']);
-/** ERC-4626 share price, read for a `parityWrapper` base (see refresh step 4). */
-const shareWrapperAbi = parseAbi(['function convertToAssets(uint256 shares) view returns (uint256)']);
+
+/** Consecutive full-market frames without a reference before the adapter says
+ *  so. Long enough to sit out a cold start (the books warm within a few
+ *  blocks), and well under the core's backstop (QUOTE_DARK_CYCLES, 34 frames),
+ *  so the explanation is on the record before the core asks for one. */
+export const NO_REFERENCE_FRAMES = 10;
 
 /** The custom errors a v1 quote leg reverts with (SDK abis/*.ts). The quoter
  *  re-raises a pool or extension failure as WrappedError(target, selector,
@@ -133,6 +137,14 @@ export function createMetricV1Generation(): VenueGeneration {
    *  other trades — Metric's stop-loss extension refused every MON-out leg
    *  for ~2 minutes on 2026-10-12 (16:18:01 → 16:20:05 UTC) */
   const sideLatches = new Map<string, ReturnType<typeof createQuoteOutageLatch>>();
+  /** Live pools, and no reference for any of their markets: Kraken's xStock
+   *  market is closed (24/5), its feed is cold, or a share wrapper left parity
+   *  (wrapper-parity.ts). The reference's own note says which. What only the
+   *  adapter knows is that THIS is why Metric is silent: `quoteMarkets()` is
+   *  every admitted pool, so the core cannot tell, and its backstop would call
+   *  the venue offline every weekend its one live pool is an xStock. */
+  const noReference = createQuoteOutageLatch(METRIC_VENUE.name);
+  let unreferencedFrames = 0;
   // THREE different questions, three different sets — conflating them is what
   // let real fills go uncounted (issue #61):
   //   candidates → every pool the factory lists.
@@ -157,8 +169,6 @@ export function createMetricV1Generation(): VenueGeneration {
   /** the no-price warning currently on the record (null = none) — this latch
    *  owns the dedupe, so its transition notes are `repeatable` (adapter.ts note) */
   let noPriceWarned: string | null = null;
-  /** the same latch for a share-wrapper base that left parity */
-  let offParityWarned: string | null = null;
   /** every oracle an admitted pool's provider reads — sorted + deduped so the
    *  gas tracker's destination fingerprint is stable (see gasSources). */
   let pushOracles: `0x${string}`[] = [];
@@ -260,37 +270,15 @@ export function createMetricV1Generation(): VenueGeneration {
       }),
       allowFailure: true,
     }) : [];
-    // A share-wrapper base (wANTx) is benchmarked against its UNDERLYING's
-    // book, so the pool is quotable only while one share is one underlying. A
-    // quote-side gate like the price check above: the pool's fills carry their
-    // USD on the stable leg and stay tailed. No call at all without such a pool.
-    const wrapped = admitted.filter((p) => TOKENS[p.baseToken]?.parityWrapper);
-    const shareRes = wrapped.length ? await ctx.client.multicall({
-      contracts: wrapped.map((p) => ({ address: TOKENS[p.baseToken].address, abi: shareWrapperAbi, functionName: 'convertToAssets' as const, args: [10n ** BigInt(p.baseDec)] as const })),
-      allowFailure: true,
-    }) : [];
-    const offParity = new Map<string, string>();        // pool → what its wrapper answered
-    wrapped.forEach((p, i) => {
-      const r = shareRes[i];
-      const perShare = r.status === 'success' ? (r.result as bigint) : null;
-      if (!wrapperAtParity(perShare, p.baseDec)) {
-        const sym = TOKENS[p.baseToken].symbol;
-        offParity.set(p.pool, perShare === null ? `${sym} did not answer convertToAssets` : `1 ${sym} = ${fromUnits(perShare, p.baseDec)} underlying`);
-      }
-    });
     const live: MetricPool[] = [];
     const notLive: Record<NotLiveReason, number> = { unfunded: 0, 'no-price': 0, unreadable: 0 };
-    const liveOffParity: string[] = [];
     for (let i = 0; i < admitted.length; i++) {
       const b0 = liveRes[i * 3], b1 = liveRes[i * 3 + 1], q = liveRes[i * 3 + 2];
       const bal0 = b0.status === 'success' ? (b0.result as bigint) : null;
       const bal1 = b1.status === 'success' ? (b1.result as bigint) : null;
       const px = q.status === 'success' ? (q.result as readonly [bigint, bigint]) : null;
       const verdict = metricPoolLiveness(bal0, bal1, px ? px[0] : null, px ? px[1] : null);
-      const parity = offParity.get(admitted[i].pool);
-      if (verdict !== 'live') notLive[verdict]++;
-      else if (parity) liveOffParity.push(`${admitted[i].market} (${parity})`);
-      else live.push(admitted[i]);
+      if (verdict === 'live') live.push(admitted[i]); else notLive[verdict]++;
     }
 
     // ── 5. gas destinations: every oracle an ADMITTED pool's provider reads ──
@@ -326,7 +314,6 @@ export function createMetricV1Generation(): VenueGeneration {
       notLive.unfunded ? `${notLive.unfunded} unfunded` : '',
       notLive['no-price'] ? `${notLive['no-price']} funded but no oracle price` : '',
       notLive.unreadable ? `${notLive.unreadable} unreadable` : '',
-      liveOffParity.length ? `${liveOffParity.length} off wrapper parity` : '',
     ].filter(Boolean);
     ctx.note('venue.discovery', `Metric: ${live.length} live base/stable pool(s)${why.length ? ` (+${why.join(', ')}; not quoted)` : ''}`);
     // Funded capital we cannot price is a DEGRADATION, not lifecycle — warn,
@@ -343,18 +330,6 @@ export function createMetricV1Generation(): VenueGeneration {
     } else if (noPriceWarned) {
       noPriceWarned = null;
       ctx.note('venue.quote.recovered', `Metric quoting again — oracle price back for funded pool(s)`, { repeatable: true });
-    }
-    // Same latch for parity: the bps anchor is wrong by the drift, and only a
-    // code change (a ratio in the reference) brings the market back.
-    if (liveOffParity.length) {
-      const msg = `Metric: ${liveOffParity.join(', ')} is not quoted — its reference assumes the wrapper is worth exactly one underlying (fills are still tailed)`;
-      if (msg !== offParityWarned) {
-        offParityWarned = msg;
-        ctx.note('venue.quote.unavailable', msg, { repeatable: true });
-      }
-    } else if (offParityWarned) {
-      offParityWarned = null;
-      ctx.note('venue.quote.recovered', `Metric quoting again — wrapper back at parity with its underlying`, { repeatable: true });
     }
   };
 
@@ -389,7 +364,14 @@ export function createMetricV1Generation(): VenueGeneration {
           calls.push({ address: V1_QUOTER, abi: metricV1QuoterAbi, functionName: 'quoteLiveExactInSingle', args: [p.pool, ZERO, sellZeroForOne, sellIn, sellZeroForOne ? PRICE_LIMIT_DOWN : PRICE_LIMIT_UP] });
         }
       }
-      if (!calls.length) return [];
+      if (!calls.length) {
+        // A market subset (the depth worker) cannot speak for the venue.
+        if (!markets && ++unreferencedFrames >= NO_REFERENCE_FRAMES) {
+          const unreferenced = [...new Set(selectedPools.map((p) => p.market))].sort().join(', ');
+          noReference(ctx, { reason: `no reference for ${unreferenced}`, msg: `${METRIC_VENUE.name} is not quoted — its live pool(s) trade ${unreferenced}, which has no CEX reference right now (market closed, feed cold, or a share wrapper off parity)` });
+        }
+        return [];
+      }
       const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
       ctx.quoteSignal?.throwIfAborted();
       // Hand the health reporter the DECODED name: it reads Error(string)
@@ -397,6 +379,7 @@ export function createMetricV1Generation(): VenueGeneration {
       const names = qRes.map((r) => (r.status === 'failure' ? metricV1RevertName(r.error) : null));
       const named: MulticallOutcome[] = qRes.map((r, i) => (r.status === 'failure' && names[i] ? { status: 'failure', error: { reason: names[i] } } : r));
       if (reportOutage(ctx, named)) return [];
+      if (!markets) { unreferencedFrames = 0; noReference(ctx, null); }
 
       // A whole SIDE refusing (every size of one direction on one market) is a
       // venue state, not thin liquidity: say why, once, and announce the heal.

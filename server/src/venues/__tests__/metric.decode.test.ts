@@ -147,7 +147,7 @@ describe('Metric v1 wANTx/USDC decode (18-decimal share wrapper, real logs)', ()
     expect(f.execPx).toBeCloseTo(0.298325 / SHARES, 9);
   });
 
-  it('tails a pool whose wrapper never answered a parity read: the gate is on quotes, not fills', async () => {
+  it('counts both fills with no reference at all (this ctx has no pricer): parity gates the reference, never fills', async () => {
     expect((await decode11()).map((f) => f.market)).toEqual(['wANTx/USDC', 'wANTx/USDC']);
   });
 });

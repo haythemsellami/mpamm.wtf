@@ -406,6 +406,33 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
+  it('a share wrapper leaving parity drops its pair from the markout ring and is noted once; the return is announced', async () => {
+    const { source } = await setup();
+    const { publicClient } = await import('../chain/rpc.js');
+    let perShare = 10n ** 18n;
+    (publicClient as any).multicall = vi.fn(async ({ contracts }: any) => contracts.map(() => ({ status: 'success', result: perShare })));
+    const referenceNotes = () => source.notes.list().filter((n: StateNote) => n.code.startsWith('reference.')).map((n: StateNote) => n.code);
+    const seed = () => { for (const market of ['wANTx/USDC', 'MON/USDC']) source.midHist.set(market, [{ t: Date.now(), mid: 2 }]); };
+    try {
+      await source.refreshWrapperParity();
+      seed();
+      await source.refreshWrapperParity();
+      expect([...source.midHist.keys()].sort()).toEqual(['MON/USDC', 'wANTx/USDC']);
+      expect(referenceNotes()).toEqual([]);
+
+      perShare = 1_003_456_000_000_000_000n;   // a rebase: samples taken since the last read used the old rate
+      await source.refreshWrapperParity();
+      await source.refreshWrapperParity();
+      expect([...source.midHist.keys()]).toEqual(['MON/USDC']);
+      expect(referenceNotes()).toEqual(['reference.parity']);
+      expect(source.notes.list().find((n: StateNote) => n.code === 'reference.parity')).toMatchObject({ level: 'warn', msg: expect.stringContaining('1 wANTx = 1.003456 underlying') });
+
+      perShare = 10n ** 18n;
+      await source.refreshWrapperParity();
+      expect(referenceNotes()).toEqual(['reference.recovered']);
+    } finally { source.store.close(); }
+  });
+
   it('a fill reset drops cached aggregates and keeps a pre-reset pass from caching its result', async () => {
     const { source } = await setup();
     const resolvers: Array<(r: unknown) => void> = [];
