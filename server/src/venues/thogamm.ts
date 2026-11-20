@@ -1,6 +1,6 @@
 import { parseAbi } from 'viem';
 import type { Fill, QuoteRow, Side, TokenInfo, VenueMeta } from '@shared';
-import { ASSETS, PAIRS, TOKENS } from '@shared';
+import { PAIRS, TOKENS } from '@shared';
 import { fromUnits, shortHex, toUnits } from '../util.js';
 import type { AdapterContext, LogBundle, VenueAdapter } from './adapter.js';
 import { tokenKeysForPair } from './pair-tokens.js';
@@ -31,6 +31,10 @@ export const THOGAMM_ADDRESS = '0x80c74517BCC2D67fFE02D3ED886796272F647210' as c
 
 /** Blocks a "maker: balance" leg sits out before it is probed again (~10 s). */
 export const DRAINED_REPROBE_BLOCKS = 25n;
+
+/** The xStock bases ThogAMM listed on 2026-10-27: the scope of its
+ *  'xstocks-usd-references' history revision, frozen (see historyRevisions). */
+const THOG_XSTOCKS_2026_10: readonly string[] = ['SPYx', 'QQQx', 'EWYx', 'NVDAx', 'TSLAx'];
 
 const THOGAMM_VENUE: VenueMeta = {
   id: 'thogamm',
@@ -283,8 +287,12 @@ export function createThogammAdapter(): VenueAdapter {
     // 116,945,831 (2026-10-27). XAUt/BTC: the first XAUt0<->WBTC
     // MakerSwapExecuted is block 101,922,564 (2026-09-04, tx 0x8912123b…);
     // 15 swaps since, none before.
+    // The xStock list is PINNED to the five ThogAMM listed that day, not every
+    // Kraken-priced pair: an applied revision's marker is its text, so a pair
+    // another venue adds later (wANTx/USDC, Metric) would edit this entry and
+    // re-run it on the next deploy.
     historyRevisions: [
-      { id: 'xstocks-usd-references', source: 'markets', from: '2026-10-26', markets: PAIRS.filter((p) => ASSETS[p.base]?.cex === 'kraken').map((p) => p.symbol) },
+      { id: 'xstocks-usd-references', source: 'markets', from: '2026-10-26', markets: PAIRS.filter((p) => THOG_XSTOCKS_2026_10.includes(p.base)).map((p) => p.symbol) },
       { id: 'xaut-wbtc-quote-basis', source: 'markets', from: '2026-09-04', markets: ['XAUt/BTC'] },
     ],
 

@@ -162,6 +162,7 @@ export function ExecutionTab() {
     const wrapSym = wrapBasisFor(p); // per-pair: WBTC pairs adjust, cbBTC pairs are parity
     const baseSym = p.symbol.split('/')[0];
     if (wrapSym) notes.push(`${pair} trades a wrapped asset — the ${refName} reference is adjusted by the ${wrapSym} mid (wrapped/native basis, a proxy for the bridged asset), so the CEX line is shown in wrapped terms for a like-for-like comparison.`);
+    else if (p.wrapBasisOverride === '' && Object.values(TOKENS).some((t) => t.symbol === baseSym && t.parityWrapper)) notes.push(`${pair} trades ${baseSym}, an on-chain share wrapper of ${p.base} that no CEX lists — the ${refName} reference is ${p.base}’s own book, taken at one ${p.base} per ${baseSym}. That is the wrapper’s rate today; a venue is not quoted here while the rate is anything else.`);
     else if (p.wrapBasisOverride === '') notes.push(`${pair} trades ${baseSym}, a wrapped asset with NO CEX basis market — the ${refName} reference assumes parity with native ${p.base} (${baseSym} is 1:1 mint/redeemable, typically sub-bp; there is no live basis feed to price it).`);
     const usdBase = cexForBase(p.base) === 'kraken';
     if (p.quoteKind === 'asset') {

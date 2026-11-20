@@ -74,5 +74,34 @@
  "v1PoolPausedRevert": {
   "_source": "eth_call SwapQuoter.quoteLiveExactInSingle(pool #6 WMON/USDC, buy 100 USDC) through the PAUSE-AWARE quoter 0x3b9ea79f… (SDK 0.6.7) while the factory admin had the pool paused (since 2026-10-13 20:24 UTC); recorded at block 117628333 via multicall",
   "raw": "0xc713b395000000000000000000000000e6831acf980c2dfc5ae993f06b198d872fddf5150000000000000000000000000000000000000000000000000000000000000001"
- }
+ },
+ "_sourceWantx": "Monad mainnet, recorded 2026-11-20 via eth_getLogs (raw topics/data) + block timestamps: the only two Swaps of v1 pool #11 (wANTx/USDC 0x035c19f3…, created block 123564619) — a buy then a sell of 0.003082174078727451 wANTx, six seconds apart, by the pool #10 admin through Metric's SimpleRouter. Amounts cross-checked against each tx's ERC-20 Transfer logs (wANTx + USDC, pool side).",
+ "v1WantxSwaps": [
+  {
+   "address": "0x035c19f38b2c391067e5aa9ade3644c9171fb71c",
+   "topics": [
+    "0x9734819749a91fc3be03ea83205f924ee08479bd3f0da48efc91d94d050cac1e",
+    "0x00000000000000000000000002201e6f13c41506c7bb635d7543f98826229ab7",
+    "0x00000000000000000000000000dbaaba170f8fd94180b105d4a3c27db0d9abef"
+   ],
+   "data": "0x0000000000000000000000000000000001000000a1983d7eb665c2f8d51cc86bfffffffffffffffffff50cc76ce6cae5000000000000000000000000000493e000000000000000000000693d3ac46c8b00000000000000000000000000000000",
+   "blockNumber": "0x75eb8fb",
+   "transactionHash": "0xc9f4c9e090d1b0e21bcf504a9fdbab8ff6b8344953278a5861309f5f54fad861",
+   "logIndex": "0xec",
+   "blockTimestamp": 1795111313
+  },
+  {
+   "address": "0x035c19f38b2c391067e5aa9ade3644c9171fb71c",
+   "topics": [
+    "0x9734819749a91fc3be03ea83205f924ee08479bd3f0da48efc91d94d050cac1e",
+    "0x00000000000000000000000002201e6f13c41506c7bb635d7543f98826229ab7",
+    "0x00000000000000000000000000dbaaba170f8fd94180b105d4a3c27db0d9abef"
+   ],
+   "data": "0x000000000000000000000000000000000100000000d70462075dbb4a3b894a5a0000000000000000000af3389319351bfffffffffffffffffffffffffffb72ab000000000000000000000115816366d300000000000000000000000000000000",
+   "blockNumber": "0x75eb910",
+   "transactionHash": "0x9fa0000123a9efa823bbe6ff624687e9c328597ffe9d6dcd9a4c9b54b72756c4",
+   "logIndex": "0xa7",
+   "blockTimestamp": 1795111319
+  }
+ ]
 }

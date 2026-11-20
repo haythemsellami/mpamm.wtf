@@ -23,7 +23,16 @@ import { createMetricV1Generation } from './metric-v1.js';
  * retirement and v1 only from its factory's creation.
  */
 export function createMetricAdapter(): VenueAdapter {
-  return composeGenerations(METRIC_VENUE, { backfillFromUtc: METRIC_VENUE.sinceUtc }, {
+  return composeGenerations(METRIC_VENUE, {
+    backfillFromUtc: METRIC_VENUE.sinceUtc,
+    // wANTx/USDC was registered after its pool started trading: v1 pool #11
+    // (0x035c19f3…) is block 123,564,619 (2026-11-19 10:57 UTC) and its first
+    // Swap block 123,648,251 (18:01 UTC, tx 0xc9f4c9e0…), so `from` is the
+    // market's first possible fill and the revision adds its whole history.
+    historyRevisions: [
+      { id: 'wantx-usdc', source: 'markets', from: '2026-11-19', markets: ['wANTx/USDC'] },
+    ],
+  }, {
     v0: createMetricV0Generation(),
     v1: createMetricV1Generation(),
   });

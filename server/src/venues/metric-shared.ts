@@ -111,6 +111,19 @@ export function isMetricPoolLive(bal0: bigint | null, bal1: bigint | null, bid: 
   return metricPoolLiveness(bal0, bal1, bid, ask) === 'live';
 }
 
+/** PARITY: a pool whose base is a share wrapper (@shared `parityWrapper`) is
+ *  benchmarked against the UNDERLYING's book, which is only like-for-like while
+ *  one share is worth one underlying. `assetsPerShare` is the wrapper's
+ *  convertToAssets(1 share); null = it did not answer, which is not parity
+ *  either (never guess). The 0.1 bp band is far above the wei of rounding a
+ *  rebasing underlying leaves and far below any real rebase (wQQQx: 34.6 bp). */
+export function wrapperAtParity(assetsPerShare: bigint | null, decimals: number): boolean {
+  if (assetsPerShare === null) return false;
+  const one = 10n ** BigInt(decimals);
+  const off = assetsPerShare > one ? assetsPerShare - one : one - assetsPerShare;
+  return off <= one / 100_000n;
+}
+
 /** One landed swap → a Fill. Both generations report the pool's NET token
  *  flows with the same sign convention (positive = the pool GAINED the token),
  *  so the money math lives here exactly once. Null for a degenerate log. */

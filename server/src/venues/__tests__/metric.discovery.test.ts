@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { TOKENS } from '@shared';
 import { createMetricAdapter } from '../metric.js';
-import { admitMetricPool, isMetricPoolLive, metricPoolLiveness } from '../metric-shared.js';
+import { admitMetricPool, isMetricPoolLive, metricPoolLiveness, wrapperAtParity } from '../metric-shared.js';
 import { V0_LAST_SWAP_BLOCK, V0_POOLS, V0_PUSH_ORACLE } from '../metric-v0.js';
 import { V1_FACTORY, V1_FACTORY_BLOCK, V1_SIMPLE_ROUTER, metricV1RevertName } from '../metric-v1.js';
 import { readFileSync } from 'node:fs';
@@ -54,6 +54,33 @@ describe('admitMetricPool (structural admission)', () => {
   it('is case-insensitive about token addresses (events and calls disagree on casing)', () => {
     expect(admitMetricPool(POOL, im(TOKENS.WMON.address.toUpperCase().replace('0X', '0x'), TOKENS.USDC.address)).ok).toBe(true);
   });
+
+  it('admits the wANTx/USDC pool under the wrapper\'s own market, sized in wrapper units', () => {
+    const r = admitMetricPool(POOL, im(TOKENS.WANTX.address, TOKENS.USDC.address));
+    expect(r).toMatchObject({ ok: true, value: { market: 'wANTx/USDC', baseToken: 'WANTX', baseDec: 18, baseIsToken0: true, stableSym: 'USDC' } });
+  });
+});
+
+describe('wrapperAtParity (share-wrapper base vs its underlying\'s book)', () => {
+  const ONE = 10n ** 18n;
+  it('holds at exactly one underlying per share — wANTx as read on 2026-11-20', () => {
+    expect(wrapperAtParity(ONE, 18)).toBe(true);
+  });
+
+  it('tolerates the wei of rounding a rebasing underlying leaves, in either direction', () => {
+    expect(wrapperAtParity(ONE - 1n, 18)).toBe(true);
+    expect(wrapperAtParity(ONE + 10n ** 13n, 18)).toBe(true);    // 0.1 bp: the edge of the band
+  });
+
+  it('fails on a real rebase — wQQQx read 1.003456 on 2026-11-09 — and just past the band', () => {
+    expect(wrapperAtParity(1_003_456_000_000_000_000n, 18)).toBe(false);
+    expect(wrapperAtParity(ONE + 10n ** 13n + 1n, 18)).toBe(false);
+    expect(wrapperAtParity(ONE / 2n, 18)).toBe(false);
+  });
+
+  it('is not parity when the wrapper did not answer — never guess', () => {
+    expect(wrapperAtParity(null, 18)).toBe(false);
+  });
 });
 
 describe('isMetricPoolLive (liveness gate)', () => {
@@ -88,6 +115,7 @@ describe('isMetricPoolLive (liveness gate)', () => {
 const P = {
   wmon: '0xe6831acf980c2dfc5ae993f06b198d872fddf515',   // #6, funded
   weth: '0x22fcd163a8a317047ae64194baaa4c3857251e5f',   // #7, empty shell
+  wantx: '0x035c19f38b2c391067e5aa9ade3644c9171fb71c',  // #11, share-wrapper base
   ausd: '0x94d5e3543a39c0ec1171f14a45100bd62bee49bc',   // #9, stable/stable
 };
 const ORACLE = '0x30a88bf894d1b806125a23ebf23d715496fd7102';
@@ -107,6 +135,9 @@ interface StubOpts {
   /** the pool's CURRENT provider differs from the one it was created with. */
   currentProvider?: (pool: string) => string;
   oracleOf?: (provider: string) => string | null;
+  /** what the wrapper's convertToAssets(1 share) answers (default: exactly
+   *  the shares asked about = parity; null = it reverts). */
+  sharesWorth?: bigint | null;
   /** quoter: [amountIn used, amountOut] per call (default: full fill at 1:1). */
   quote?: (args: readonly unknown[]) => { status: 'success'; result: [bigint, bigint] } | { status: 'failure'; error?: Error };
 }
@@ -116,6 +147,7 @@ const stub = (notes: string[], o: StubOpts = {}) => {
     [P.wmon]: [TOKENS.WMON.address, TOKENS.USDC.address],
     [P.weth]: [TOKENS.WETH.address, TOKENS.USDC.address],
     [P.ausd]: [TOKENS.AUSD.address, TOKENS.USDC.address],
+    [P.wantx]: [TOKENS.WANTX.address, TOKENS.USDC.address],
     ...o.tokens,
   };
   const calls: any[] = [];
@@ -148,6 +180,7 @@ const stub = (notes: string[], o: StubOpts = {}) => {
               return { status: 'success', result: b0 };
             }
             case 'getSellAndBuyPrices': return o.priceFails ? { status: 'failure' } : { status: 'success', result: [100n, 101n] };
+            case 'convertToAssets': return o.sharesWorth === null ? { status: 'failure' } : { status: 'success', result: o.sharesWorth ?? c.args[0] };
             case 'offchainOracle': {
               const or = o.oracleOf ? o.oracleOf(addr) : ORACLE;
               return or === null ? { status: 'failure' } : { status: 'success', result: or };
@@ -267,6 +300,61 @@ describe('Metric v1 discovery (factory enumeration)', () => {
     const eps = a.entryPoints!();
     expect(eps).toContainEqual({ address: V1_SIMPLE_ROUTER, router: 'Metric' });
     expect(eps.map((e) => e.address.toLowerCase())).toContain(P.wmon);
+  });
+});
+
+describe('Metric v1 share-wrapper base (wANTx): quoted only at parity with its underlying', () => {
+  const DRIFT = 1_003_456_000_000_000_000n;   // what wQQQx read on 2026-11-09
+  const quoted = async (a: ReturnType<typeof createMetricAdapter>, ctx: any) => [...new Set((await a.quote!(ctx, [100], 1n)).map((r) => r.market))];
+
+  it('quotes the pool while one share is one underlying', async () => {
+    const notes: string[] = [];
+    const a = createMetricAdapter();
+    const ctx = stub(notes, { pools: [P.wantx] });
+    await a.discover(ctx);
+    expect(ctx.calls.filter((c: any) => c.functionName === 'convertToAssets').map((c: any) => [String(c.address).toLowerCase(), c.args[0]]))
+      .toEqual([[TOKENS.WANTX.address, 10n ** 18n]]);
+    expect(await quoted(a, ctx)).toEqual(['wANTx/USDC']);
+    expect(notes.some((n) => /wrapper/.test(n))).toBe(false);
+  });
+
+  it('stops quoting after a rebase and says why — the pool stays tailed, its fills still count', async () => {
+    const notes: string[] = [];
+    const a = createMetricAdapter();
+    const ctx = stub(notes, { pools: [P.wmon, P.wantx], sharesWorth: DRIFT });
+    await a.discover(ctx);
+    expect(await quoted(a, ctx)).toEqual(['MON/USDC']);          // the other pool is unaffected
+    expect((swapSource(a).address as string[]).map((x) => x.toLowerCase()).sort()).toEqual([P.wantx, P.wmon].sort());
+    expect(notes.some((n) => /wANTx\/USDC \(1 wANTx = 1\.003456 underlying\) is not quoted/.test(n))).toBe(true);
+    expect(notes.some((n) => /1 off wrapper parity/.test(n))).toBe(true);
+  });
+
+  it('does not quote when the wrapper will not answer', async () => {
+    const notes: string[] = [];
+    const a = createMetricAdapter();
+    const ctx = stub(notes, { pools: [P.wantx], sharesWorth: null });
+    await a.discover(ctx);
+    expect(await quoted(a, ctx)).toEqual([]);
+    expect(notes.some((n) => /wANTx did not answer convertToAssets/.test(n))).toBe(true);
+  });
+
+  it('latches the warning for the episode and announces the return to parity', async () => {
+    const seen: { code: string; msg: string }[] = [];
+    const a = createMetricAdapter();
+    const ctx = (o: StubOpts) => ({ ...stub([], { pools: [P.wantx], ...o }), note: (code: string, msg: string) => seen.push({ code, msg }) });
+    await a.discover(ctx({ sharesWorth: DRIFT }));
+    await a.discover(ctx({ sharesWorth: DRIFT }));    // still off: no second warning
+    const back = ctx({});
+    await a.discover(back);
+    expect(seen.filter((n) => n.code !== 'venue.discovery').map((n) => n.code)).toEqual(['venue.quote.unavailable', 'venue.quote.recovered']);
+    expect(await quoted(a, back)).toEqual(['wANTx/USDC']);
+  });
+
+  it('reads no share price when no admitted pool has a wrapper base', async () => {
+    const a = createMetricAdapter();
+    const ctx = stub([]);
+    await a.discover(ctx);
+    expect(ctx.calls.some((c: any) => c.functionName === 'convertToAssets')).toBe(false);
   });
 });
 

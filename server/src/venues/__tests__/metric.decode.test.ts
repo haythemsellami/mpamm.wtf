@@ -21,7 +21,7 @@ const asCoreLog = (raw: any, abi: readonly unknown[]) => ({
   args: (decodeEventLog({ abi: abi as any, data: raw.data, topics: raw.topics }) as any).args,
 });
 const tsOf = (bn: bigint) => {
-  const hit = [...FX.v0Swaps, ...FX.v1Swaps].find((l: any) => BigInt(l.blockNumber) === bn);
+  const hit = [...FX.v0Swaps, ...FX.v1Swaps, ...FX.v1WantxSwaps].find((l: any) => BigInt(l.blockNumber) === bn);
   if (!hit) throw new Error(`no fixture timestamp for ${bn}`);
   return hit.blockTimestamp * 1000;
 };
@@ -90,6 +90,65 @@ describe('Metric v1 Swap decode (packed deltas)', () => {
   it('drops the AUSD/USDC pool: stable/stable is not a benchmarkable market', async () => {
     const fills = await decodeAll();
     expect(fills.some((x) => x.txHash === FX.v1Swaps[2].transactionHash)).toBe(false);
+  });
+});
+
+// v1 pool #11, the first pool with a share-wrapper base. Hand-checked from the
+// raw amountDeltas words: 0xfff…f50cc76ce6cae5 | 0x…493e0 is −3082174078727451
+// wei of wANTx and +300000 of USDC, and the tx's pool-side Transfers are the
+// same two numbers (wANTx out, USDC in); the second swap is the mirror.
+describe('Metric v1 wANTx/USDC decode (18-decimal share wrapper, real logs)', () => {
+  const WANTX_POOL = '0x035c19f38b2c391067e5aa9ade3644c9171fb71c';
+  const SHARES = 0.003082174078727451;
+  const ctx11 = {
+    client: {
+      readContract: async () => 2n,
+      multicall: async ({ contracts, allowFailure }: any) => {
+        const out = contracts.map((c: any) => {
+          if (c.functionName === 'idxToPool') return { status: 'success', result: WANTX_POOL };
+          if (c.functionName === 'getImmutables') return { status: 'success', result: { factory: V1_FACTORY, token0: TOKENS.WANTX.address, token1: TOKENS.USDC.address, immutablePriceProvider: '0x' + '0'.repeat(40) } };
+          if (c.functionName === 'priceProvider') return { status: 'success', result: '0x' + 'b'.repeat(40) };
+          return { status: 'failure' };
+        });
+        return allowFailure === false ? out.map((r: any) => r.result) : out;
+      },
+    },
+    note: () => {},
+  } as any;
+  const decode11 = async () => {
+    const a = createMetricAdapter();
+    await a.discover(ctx11);
+    const key = a.logSources().find((s) => s.key.startsWith('v1:swap@'))!.key;
+    return a.decode(ctx11, { 'v0:swap': [], [key]: FX.v1WantxSwaps.map((l: any) => asCoreLog(l, metricV1PoolAbi)), 'v1:poolCreated': [] }, tsOf, new Set());
+  };
+
+  it('unpacks both swaps to the wei: the same shares out, then back in', () => {
+    const deltas = FX.v1WantxSwaps.map((raw: any) => unpackAmountDeltas((decodeEventLog({ abi: metricV1PoolAbi, data: raw.data, topics: raw.topics }) as any).args.amountDeltas));
+    expect(deltas).toEqual([[-3_082_174_078_727_451n, 300_000n], [3_082_174_078_727_451n, -298_325n]]);
+  });
+
+  it('the first swap: a BUY of 0.003082174078727451 wANTx for 0.30 USDC (tx 0xc9f4c9e0…)', async () => {
+    const f = (await decode11()).find((x) => x.txHash === FX.v1WantxSwaps[0].transactionHash)!;
+    expect(f).toMatchObject({
+      id: `metric-${FX.v1WantxSwaps[0].transactionHash}-236`,
+      venueId: 'metric', market: 'wANTx/USDC', side: 'buy', category: 'UNKNOWN',
+      blockNumber: 123648251, pool: 'metric 0x035c19', ts: 1795111313000,
+    });
+    expect(f.usd).toBeCloseTo(0.3, 12);
+    expect(f.baseAmount).toBeCloseTo(SHARES, 18);
+    expect(f.execPx).toBeCloseTo(97.33389236, 6);      // USDC per wANTx; Kraken's ANTx/USD traded ~$97 that hour
+  });
+
+  it('the round trip back: a SELL of the same shares for 0.298325 USDC (tx 0x9fa00001…, log 167)', async () => {
+    const f = (await decode11()).find((x) => x.txHash === FX.v1WantxSwaps[1].transactionHash)!;
+    expect(f).toMatchObject({ id: `metric-${FX.v1WantxSwaps[1].transactionHash}-167`, market: 'wANTx/USDC', side: 'sell', blockNumber: 123648272 });
+    expect(f.usd).toBeCloseTo(0.298325, 12);
+    expect(f.baseAmount).toBeCloseTo(SHARES, 18);
+    expect(f.execPx).toBeCloseTo(0.298325 / SHARES, 9);
+  });
+
+  it('tails a pool whose wrapper never answered a parity read: the gate is on quotes, not fills', async () => {
+    expect((await decode11()).map((f) => f.market)).toEqual(['wANTx/USDC', 'wANTx/USDC']);
   });
 });
 
