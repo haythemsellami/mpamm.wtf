@@ -184,7 +184,7 @@ describe('frame reference capture', () => {
 });
 
 describe('expected reference venues', () => {
-  const XSTOCKS = ['SPYx', 'QQQx', 'EWYx', 'NVDAx', 'TSLAx'];
+  const XSTOCKS = ['SPYx', 'QQQx', 'EWYx', 'NVDAx', 'TSLAx', 'ANTx'];
   it('expects every CEX while its markets are open', () => {
     expect(expectedReferenceVenues(new Set()).sort()).toEqual(['binance', 'bybit', 'kraken']);
   });

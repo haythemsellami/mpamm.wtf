@@ -10,7 +10,7 @@ import {
   MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase, CURVE_OFFSETS_S, curveMarkMs,
   type DataSourceMode, type MarkoutCurvesResponse, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode, type QuoteFrameTelemetry,
-  type QuoteHeadSource, type RealtimeHealth, type TailStatus,
+  type QuoteHeadSource, type RealtimeHealth, type TailStatus, type Pair,
 } from '@shared';
 import { allPreferAvailability, guardRpcRead, guardedClient, isAvailabilityFailure } from '../chain/failover.js';
 import { FillAttributor } from '../attribution.js';
@@ -27,6 +27,7 @@ import { HotHeadWatcher, type HeadIdentity } from '../chain/heads.js';
 import { UsdPricer } from '../pricer.js';
 import { FillTimePrices } from '../fill-time-prices.js';
 import { ClosedDayPrices } from '../closed-day-prices.js';
+import { WRAPPER_PARITY, WRAPPER_PARITY_REFRESH_MS, createParityReporter } from '../wrapper-parity.js';
 import { VolumeStore, retentionCutoffMs, type DayFillCount, type ResetDeletes, type SnapshotResult } from '../db.js';
 
 /** routine sweeps (a few expired fills every 10 min) stay quiet in the log. */
@@ -1844,6 +1845,7 @@ export class LiveDataSource extends BaseSource {
   private quoteRunner = new QuoteRunner();
   private referenceTimer?: ReturnType<typeof setInterval>;
   private markoutTimer?: ReturnType<typeof setInterval>;
+  private parityTimer?: ReturnType<typeof setInterval>;
   private markoutWork?: Promise<void>;
   private quotes: QuoteSnapshot = { block: 0, monUsd: 0, ts: 0, rows: [] };
   private days: DailyVolume[] = [];
@@ -1951,6 +1953,43 @@ export class LiveDataSource extends BaseSource {
   );
   /** base asset key → when its reference mid went dark (checkReferenceStarvation). */
   private starvedSince = new Map<string, number>();
+  /** A share-wrapper pair losing or regaining its reference (wrapper-parity.ts).
+   *  The pair's ring is dropped with it: samples from the seconds before the
+   *  read that saw the rate move are within reach of a pending horizon
+   *  (midNear), and they were taken at the old rate. */
+  private parityReport = createParityReporter(WRAPPER_PARITY, {
+    warn: (m) => this.noteOnce('reference.parity', m),
+    clear: (m) => this.dropNote('reference.parity', m),
+    announce: (m) => this.note('reference.recovered', m),
+    unreferenced: (market) => { this.midHist.delete(market); },
+  });
+  /** Re-read every share wrapper's rate and put what changed on the record.
+   *  The registry consults the same state, so from the next sample on the pair
+   *  has (or lacks) a mid. Never throws. */
+  private async refreshWrapperParity(): Promise<void> {
+    await WRAPPER_PARITY.refresh(publicClient);
+    if (!this.loopsStopped) this.parityReport();
+  }
+  /** False, with the pair's ring dropped, while a share-wrapper pair's
+   *  reference is withheld (always true for any other pair). Asked wherever
+   *  the ring is touched, not only when a refresh reports, because a
+   *  confirmed rate also expires by the clock, between refreshes:
+   *   - at the READ (ringOf), so nothing is marked from that instant on;
+   *   - by the SAMPLER, which runs every 100 ms whether or not a fill is
+   *     pending, so no sample outlives the reference it was taken against. A
+   *     ring that survived a gap nobody read during would mark a late-decoded
+   *     fill's horizon inside the gap from a sample taken before it. */
+  private referenceStands(pair: Pair): boolean {
+    if (WRAPPER_PARITY.valid(pair)) return true;
+    this.midHist.delete(pair.symbol);
+    return false;
+  }
+  /** A market's reference ring as a markout may read it. */
+  private ringOf(market: string): { t: number; mid: number }[] {
+    const pair = pairOf(market);
+    if (pair && !this.referenceStands(pair)) return [];
+    return this.midHist.get(market) ?? [];
+  }
   /** venue+market+day keys with a still-unpublished CEX archive (checkArchivePending,
    *  family A of #6). Retracted when that archive publishes; per-key so each deferred
    *  day re-arms its own recovery independently. */
@@ -2001,6 +2040,10 @@ export class LiveDataSource extends BaseSource {
     const archiveProbePending = probeArchiveChain();
 
     await REFERENCES.start();
+    // before the first sample and the first quote: a wrapper pair has no
+    // reference until its rate has been read once
+    await this.refreshWrapperParity();
+    this.parityTimer = setInterval(() => { void this.refreshWrapperParity(); }, WRAPPER_PARITY_REFRESH_MS);
     this.sampleReferences();
     this.referenceTimer = setInterval(() => this.sampleReferences(), 100);
     this.markoutTimer = setInterval(() => { void this.ageMarkouts(); }, 300);
@@ -2243,6 +2286,7 @@ export class LiveDataSource extends BaseSource {
     this.quoteRunner.stop();
     if (this.referenceTimer) clearInterval(this.referenceTimer);
     if (this.markoutTimer) clearInterval(this.markoutTimer);
+    if (this.parityTimer) clearInterval(this.parityTimer);
     this.eventLoopDelay.disable();
     if (this.tailTimer) clearTimeout(this.tailTimer);
     if (this.quoteRetryTimer) clearTimeout(this.quoteRetryTimer);
@@ -4499,6 +4543,7 @@ export class LiveDataSource extends BaseSource {
   private sampleReferences(): void {
     const now = Date.now();
     for (const pair of PAIRS) {
+      if (!this.referenceStands(pair)) continue;
       const mid = REFERENCES.midForPair(pair.symbol);
       if (!(mid > 0)) continue;
       const history = this.midHist.get(pair.symbol) ?? [];
@@ -5000,7 +5045,7 @@ export class LiveDataSource extends BaseSource {
     // its markouts null and stop tracking it (defense in depth; adapters gate
     // discovery/decode on the pair registry so this shouldn't be reachable).
     if (!pairOf(f.market)) { this.pending.delete(f); this.noteOnce('markout.market.unregistered', `fill market '${f.market}' is not a registered pair — markouts skipped`, f.venueId); return; }
-    const hist = this.midHist.get(f.market) ?? [];
+    const hist = this.ringOf(f.market);
     // queued for the curve alone: the legacy horizons are left untouched.
     if (this.curveOnly.has(f)) {
       this.takeCurve(f, hist, now);
@@ -5051,7 +5096,7 @@ export class LiveDataSource extends BaseSource {
    *  a fill to a reference sample minutes away from its horizon. */
   private static readonly MID_NEAR_TOL_MS = 6_000;
   private midNear(market: string, t: number): number {
-    const hist = this.midHist.get(market) ?? [];
+    const hist = this.ringOf(market);
     const sample = nearestReferenceSample(hist, t, LiveDataSource.MID_NEAR_TOL_MS);
     if (sample) return sample.mid;
     // live fallback only when NOW is an honest mark for t

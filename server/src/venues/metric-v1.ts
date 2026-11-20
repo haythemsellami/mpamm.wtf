@@ -85,6 +85,12 @@ export const metricV1QuoterAbi = parseAbi([
 ]);
 const erc20Abi = parseAbi(['function balanceOf(address) view returns (uint256)']);
 
+/** Consecutive full-market frames without a reference before the adapter says
+ *  so. Long enough to sit out a cold start (the books warm within a few
+ *  blocks), and well under the core's backstop (QUOTE_DARK_CYCLES, 34 frames),
+ *  so the explanation is on the record before the core asks for one. */
+export const NO_REFERENCE_FRAMES = 10;
+
 /** The custom errors a v1 quote leg reverts with (SDK abis/*.ts). The quoter
  *  re-raises a pool or extension failure as WrappedError(target, selector,
  *  reason), so the useful name is one or two layers down — and a custom error
@@ -131,6 +137,14 @@ export function createMetricV1Generation(): VenueGeneration {
    *  other trades — Metric's stop-loss extension refused every MON-out leg
    *  for ~2 minutes on 2026-10-12 (16:18:01 → 16:20:05 UTC) */
   const sideLatches = new Map<string, ReturnType<typeof createQuoteOutageLatch>>();
+  /** Live pools, and no reference for any of their markets: Kraken's xStock
+   *  market is closed (24/5), its feed is cold, or a share wrapper left parity
+   *  (wrapper-parity.ts). The reference's own note says which. What only the
+   *  adapter knows is that THIS is why Metric is silent: `quoteMarkets()` is
+   *  every admitted pool, so the core cannot tell, and its backstop would call
+   *  the venue offline every weekend its one live pool is an xStock. */
+  const noReference = createQuoteOutageLatch(METRIC_VENUE.name);
+  let unreferencedFrames = 0;
   // THREE different questions, three different sets — conflating them is what
   // let real fills go uncounted (issue #61):
   //   candidates → every pool the factory lists.
@@ -350,7 +364,14 @@ export function createMetricV1Generation(): VenueGeneration {
           calls.push({ address: V1_QUOTER, abi: metricV1QuoterAbi, functionName: 'quoteLiveExactInSingle', args: [p.pool, ZERO, sellZeroForOne, sellIn, sellZeroForOne ? PRICE_LIMIT_DOWN : PRICE_LIMIT_UP] });
         }
       }
-      if (!calls.length) return [];
+      if (!calls.length) {
+        // A market subset (the depth worker) cannot speak for the venue.
+        if (!markets && ++unreferencedFrames >= NO_REFERENCE_FRAMES) {
+          const unreferenced = [...new Set(selectedPools.map((p) => p.market))].sort().join(', ');
+          noReference(ctx, { reason: `no reference for ${unreferenced}`, msg: `${METRIC_VENUE.name} is not quoted — its live pool(s) trade ${unreferenced}, which has no CEX reference right now (market closed, feed cold, or a share wrapper off parity)` });
+        }
+        return [];
+      }
       const qRes = await ctx.client.multicall({ contracts: calls, allowFailure: true, blockNumber });
       ctx.quoteSignal?.throwIfAborted();
       // Hand the health reporter the DECODED name: it reads Error(string)
@@ -410,6 +431,10 @@ export function createMetricV1Generation(): VenueGeneration {
         else row.oneSided = true;
         if (row.askPx > 0 || row.bidPx > 0) out.push(row);
       }
+      // The no-reference episode ends with a ROW, not with a multicall that
+      // answered: a leg can succeed with zero in or out and is dropped above,
+      // and "quoting again" over an empty frame would be a lie.
+      if (!markets && out.length) { unreferencedFrames = 0; noReference(ctx, null); }
       return out;
     },
 

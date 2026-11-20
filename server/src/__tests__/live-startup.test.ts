@@ -406,6 +406,113 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
+  it('a share wrapper leaving parity drops its pair from the markout ring and is noted once; the return is announced', async () => {
+    const { source } = await setup();
+    const { publicClient } = await import('../chain/rpc.js');
+    let perShare = 10n ** 18n;
+    (publicClient as any).multicall = vi.fn(async ({ contracts }: any) => contracts.map(() => ({ status: 'success', result: perShare })));
+    const referenceNotes = () => source.notes.list().filter((n: StateNote) => n.code.startsWith('reference.')).map((n: StateNote) => n.code);
+    const seed = () => { for (const market of ['wANTx/USDC', 'MON/USDC']) source.midHist.set(market, [{ t: Date.now(), mid: 2 }]); };
+    try {
+      await source.refreshWrapperParity();
+      seed();
+      await source.refreshWrapperParity();
+      expect([...source.midHist.keys()].sort()).toEqual(['MON/USDC', 'wANTx/USDC']);
+      expect(referenceNotes()).toEqual([]);
+
+      perShare = 1_003_456_000_000_000_000n;   // a rebase: samples taken since the last read used the old rate
+      await source.refreshWrapperParity();
+      await source.refreshWrapperParity();
+      expect([...source.midHist.keys()]).toEqual(['MON/USDC']);
+      expect(referenceNotes()).toEqual(['reference.parity']);
+      expect(source.notes.list().find((n: StateNote) => n.code === 'reference.parity')).toMatchObject({ level: 'warn', msg: expect.stringContaining('1 wANTx = 1.003456 underlying') });
+
+      perShare = 10n ** 18n;
+      await source.refreshWrapperParity();
+      expect(referenceNotes()).toEqual(['reference.recovered']);
+    } finally { source.store.close(); }
+  });
+
+  it('marks nothing against a share-wrapper pair once its confirmed rate has expired, before any refresh reports it', async () => {
+    const { source } = await setup();
+    const { publicClient } = await import('../chain/rpc.js');
+    const { WRAPPER_PARITY_MAX_AGE_MS } = await import('../wrapper-parity.js');
+    (publicClient as any).multicall = vi.fn(async ({ contracts }: any) => contracts.map(() => ({ status: 'success', result: 10n ** 18n })));
+    const fill = (id: string, market: string, ts: number): Fill => ({
+      id, ts, venueId: 'test-venue', market, side: 'buy', category: 'DIRECT', usd: 100, baseAmount: 100,
+      execPx: 1, blockNumber: 1, txHash: '0x1', to: 'direct', pool: 'pool', markoutsBps: [null, null, null, null, null],
+    });
+    const ring = (now: number) => Array.from({ length: 1201 }, (_, i) => ({ t: now - 120_000 + i * 100, mid: 2 }));
+    const age = async (id: string) => {
+      const now = Date.now();
+      const wrapped = fill(id, 'wANTx/USDC', now - 65_000), plain = fill(`${id}-mon`, 'MON/USDC', now - 65_000);
+      source.pending = new Set([wrapped, plain]);
+      for (const market of ['wANTx/USDC', 'MON/USDC']) source.midHist.set(market, ring(now));
+      await source.ageMarkouts();
+      return { wrapped, plain };
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const confirmedAt = Date.now();
+      await source.refreshWrapperParity();
+      // every read after that one fails, and no refresh runs again in this test:
+      // only the clock can withdraw the reference
+      (publicClient as any).multicall = vi.fn(async () => { throw new Error('HTTP 429'); });
+
+      vi.setSystemTime(confirmedAt + WRAPPER_PARITY_MAX_AGE_MS);            // the last instant it is trusted
+      const before = await age('before');
+      expect(before.wrapped.markoutsBps).toEqual(Array(5).fill(10_000));
+
+      vi.setSystemTime(confirmedAt + WRAPPER_PARITY_MAX_AGE_MS + 1);
+      const after = await age('after');
+      expect(after.wrapped.markoutsBps).toEqual([null, null, null, null, null]);
+      expect(source.dirtyCurves.has('after')).toBe(false);
+      expect(source.midHist.has('wANTx/USDC')).toBe(false);                 // dropped at the read
+      expect(after.plain.markoutsBps).toEqual(Array(5).fill(10_000));       // every other pair is untouched
+    } finally { vi.useRealTimers(); source.store.close(); }
+  });
+
+  it('a share-wrapper pair keeps no sample across a gap in its reference, even one no fill was pending for', async () => {
+    const { source } = await setup();
+    const { publicClient } = await import('../chain/rpc.js');
+    const { WRAPPER_PARITY_MAX_AGE_MS } = await import('../wrapper-parity.js');
+    const answers = async ({ contracts }: any) => contracts.map(() => ({ status: 'success', result: 10n ** 18n }));
+    (publicClient as any).multicall = vi.fn(answers);
+    const ring = (market: string) => (source.midHist.get(market) ?? []).map((sample: { t: number }) => sample.t);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await source.refreshWrapperParity();
+      const expiry = Date.now() + WRAPPER_PARITY_MAX_AGE_MS;          // the last instant the confirmed rate is trusted
+      (publicClient as any).multicall = vi.fn(async () => { throw new Error('HTTP 429'); });
+      vi.setSystemTime(expiry - 1_000); source.sampleReferences();
+      vi.setSystemTime(expiry); source.sampleReferences();
+      expect(ring('wANTx/USDC')).toEqual([expiry - 1_000, expiry]);
+
+      // the sampler's next tick: the rate has expired, no refresh has run, nothing is pending
+      vi.setSystemTime(expiry + 100); source.sampleReferences();
+      expect(ring('wANTx/USDC')).toEqual([]);
+      expect(ring('MON/USDC')).toEqual([expiry - 1_000, expiry, expiry + 100]);
+
+      // a minute later a read lands and the reference is back
+      vi.setSystemTime(expiry + 60_000);
+      (publicClient as any).multicall = vi.fn(answers);
+      await source.refreshWrapperParity();
+      source.sampleReferences();
+      vi.setSystemTime(expiry + 63_000); source.sampleReferences();
+      expect(ring('wANTx/USDC')).toEqual([expiry + 60_000, expiry + 63_000]);
+
+      // a fill from inside the gap, decoded late: its first horizon is 2s after the last
+      // pre-expiry sample (within midNear's reach of it), its last is back under the reference
+      const late: Fill = {
+        id: 'late', ts: expiry + 2_000, venueId: 'test-venue', market: 'wANTx/USDC', side: 'buy', category: 'DIRECT', usd: 100, baseAmount: 100,
+        execPx: 0.5, blockNumber: 1, txHash: '0x1', to: 'direct', pool: 'pool', markoutsBps: [null, null, null, null, null],
+      };
+      source.pending = new Set([late]);
+      await source.ageMarkouts();
+      expect(late.markoutsBps).toEqual([null, null, null, null, 10_000]);
+    } finally { vi.useRealTimers(); source.store.close(); }
+  });
+
   it('a fill reset drops cached aggregates and keeps a pre-reset pass from caching its result', async () => {
     const { source } = await setup();
     const resolvers: Array<(r: unknown) => void> = [];
