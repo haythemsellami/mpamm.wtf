@@ -472,6 +472,47 @@ describe('live startup archive gate', () => {
     } finally { vi.useRealTimers(); source.store.close(); }
   });
 
+  it('a share-wrapper pair keeps no sample across a gap in its reference, even one no fill was pending for', async () => {
+    const { source } = await setup();
+    const { publicClient } = await import('../chain/rpc.js');
+    const { WRAPPER_PARITY_MAX_AGE_MS } = await import('../wrapper-parity.js');
+    const answers = async ({ contracts }: any) => contracts.map(() => ({ status: 'success', result: 10n ** 18n }));
+    (publicClient as any).multicall = vi.fn(answers);
+    const ring = (market: string) => (source.midHist.get(market) ?? []).map((sample: { t: number }) => sample.t);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await source.refreshWrapperParity();
+      const expiry = Date.now() + WRAPPER_PARITY_MAX_AGE_MS;          // the last instant the confirmed rate is trusted
+      (publicClient as any).multicall = vi.fn(async () => { throw new Error('HTTP 429'); });
+      vi.setSystemTime(expiry - 1_000); source.sampleReferences();
+      vi.setSystemTime(expiry); source.sampleReferences();
+      expect(ring('wANTx/USDC')).toEqual([expiry - 1_000, expiry]);
+
+      // the sampler's next tick: the rate has expired, no refresh has run, nothing is pending
+      vi.setSystemTime(expiry + 100); source.sampleReferences();
+      expect(ring('wANTx/USDC')).toEqual([]);
+      expect(ring('MON/USDC')).toEqual([expiry - 1_000, expiry, expiry + 100]);
+
+      // a minute later a read lands and the reference is back
+      vi.setSystemTime(expiry + 60_000);
+      (publicClient as any).multicall = vi.fn(answers);
+      await source.refreshWrapperParity();
+      source.sampleReferences();
+      vi.setSystemTime(expiry + 63_000); source.sampleReferences();
+      expect(ring('wANTx/USDC')).toEqual([expiry + 60_000, expiry + 63_000]);
+
+      // a fill from inside the gap, decoded late: its first horizon is 2s after the last
+      // pre-expiry sample (within midNear's reach of it), its last is back under the reference
+      const late: Fill = {
+        id: 'late', ts: expiry + 2_000, venueId: 'test-venue', market: 'wANTx/USDC', side: 'buy', category: 'DIRECT', usd: 100, baseAmount: 100,
+        execPx: 0.5, blockNumber: 1, txHash: '0x1', to: 'direct', pool: 'pool', markoutsBps: [null, null, null, null, null],
+      };
+      source.pending = new Set([late]);
+      await source.ageMarkouts();
+      expect(late.markoutsBps).toEqual([null, null, null, null, 10_000]);
+    } finally { vi.useRealTimers(); source.store.close(); }
+  });
+
   it('a fill reset drops cached aggregates and keeps a pre-reset pass from caching its result', async () => {
     const { source } = await setup();
     const resolvers: Array<(r: unknown) => void> = [];

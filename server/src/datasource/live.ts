@@ -10,7 +10,7 @@ import {
   MARKETS, SIZES_USD, MARKOUT_HORIZONS, ASSETS, PAIRS, pairOf, cexForBase, CURVE_OFFSETS_S, curveMarkMs,
   type DataSourceMode, type MarkoutCurvesResponse, type MarketState, type QuoteSnapshot, type QuoteRow, type Fill, type DailyVolume,
   type LeaderboardResponse, type GasResponse, type NoteCode, type QuoteFrameTelemetry,
-  type QuoteHeadSource, type RealtimeHealth, type TailStatus,
+  type QuoteHeadSource, type RealtimeHealth, type TailStatus, type Pair,
 } from '@shared';
 import { allPreferAvailability, guardRpcRead, guardedClient, isAvailabilityFailure } from '../chain/failover.js';
 import { FillAttributor } from '../attribution.js';
@@ -1970,14 +1970,24 @@ export class LiveDataSource extends BaseSource {
     await WRAPPER_PARITY.refresh(publicClient);
     if (!this.loopsStopped) this.parityReport();
   }
-  /** A market's reference ring as a markout may read it: nothing while the
-   *  pair's reference is withheld. The check is made HERE, at the read, and
-   *  not only when a refresh reports: a confirmed rate also expires by the
-   *  clock, between refreshes, and the samples taken up to that instant are
-   *  still within midNear's reach of a horizon that elapses just after it. */
+  /** False, with the pair's ring dropped, while a share-wrapper pair's
+   *  reference is withheld (always true for any other pair). Asked wherever
+   *  the ring is touched, not only when a refresh reports, because a
+   *  confirmed rate also expires by the clock, between refreshes:
+   *   - at the READ (ringOf), so nothing is marked from that instant on;
+   *   - by the SAMPLER, which runs every 100 ms whether or not a fill is
+   *     pending, so no sample outlives the reference it was taken against. A
+   *     ring that survived a gap nobody read during would mark a late-decoded
+   *     fill's horizon inside the gap from a sample taken before it. */
+  private referenceStands(pair: Pair): boolean {
+    if (WRAPPER_PARITY.valid(pair)) return true;
+    this.midHist.delete(pair.symbol);
+    return false;
+  }
+  /** A market's reference ring as a markout may read it. */
   private ringOf(market: string): { t: number; mid: number }[] {
     const pair = pairOf(market);
-    if (pair && !WRAPPER_PARITY.valid(pair)) { this.midHist.delete(market); return []; }
+    if (pair && !this.referenceStands(pair)) return [];
     return this.midHist.get(market) ?? [];
   }
   /** venue+market+day keys with a still-unpublished CEX archive (checkArchivePending,
@@ -4533,6 +4543,7 @@ export class LiveDataSource extends BaseSource {
   private sampleReferences(): void {
     const now = Date.now();
     for (const pair of PAIRS) {
+      if (!this.referenceStands(pair)) continue;
       const mid = REFERENCES.midForPair(pair.symbol);
       if (!(mid > 0)) continue;
       const history = this.midHist.get(pair.symbol) ?? [];
