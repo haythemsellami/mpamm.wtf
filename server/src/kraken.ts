@@ -147,8 +147,10 @@ export class KrakenFeed {
     });
   }
   // Kraken acknowledges each book separately. Unsubscribe first, then ask for
-  // a fresh snapshot on the same connection. A silent or rejected repair gets
-  // another attempt on the watchdog, even on a book with no further trades.
+  // a fresh snapshot on the same connection. The first attempt goes out as
+  // soon as the book fails (waiting for the watchdog kept it dark ~10 s); a
+  // silent or rejected one gets another on the watchdog, even on a book with
+  // no further trades.
   private retryBooks(): void {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -174,6 +176,8 @@ export class KrakenFeed {
           // snapshot is required in either case before this symbol can quote.
           repair.unsubscribing = false;
           this.ws?.send(JSON.stringify({ method: 'subscribe', req_id: repair.reqId, params: { channel: 'book', symbol: [symbol], depth: DEPTH, snapshot: true } }));
+        } else if (msg.method === 'subscribe' && msg.success === false) {
+          console.warn(`[kraken] ${symbol} resubscribe rejected (${String(msg.error)}); retrying within ${BOOK_RETRY_MS / 1000}s`);
         }
         break;
       }
@@ -215,6 +219,7 @@ export class KrakenFeed {
       return;
     }
     if (msg.channel !== 'book') return;
+    let failed = false;
     for (const d of msg.data ?? []) {
       if (!this.symbols.includes(d.symbol)) continue;
       const snapshot = msg.type === 'snapshot';
@@ -225,12 +230,17 @@ export class KrakenFeed {
         this.repairs.delete(d.symbol);
       } catch (e) {
         this.books.delete(d.symbol);
-        if (!repair) {
-          console.warn(`[kraken] ${e instanceof Error ? e.message : 'invalid order book'}; awaiting a fresh ${d.symbol} snapshot`);
+        const why = e instanceof Error ? e.message : 'invalid order book';
+        if (repair) {
+          console.warn(`[kraken] ${why}; ${d.symbol} repair snapshot rejected, retrying within ${BOOK_RETRY_MS / 1000}s`);
+        } else {
+          console.warn(`[kraken] ${why}; awaiting a fresh ${d.symbol} snapshot`);
           this.repairs.set(d.symbol, { unsubscribing: false, retryAt: Date.now() });
+          failed = true;
         }
       }
     }
+    if (failed) this.retryBooks();
   }
 
   private applyBook(d: { symbol: string; asks?: Level[]; bids?: Level[]; checksum?: number }, snapshot: boolean): void {
@@ -248,8 +258,13 @@ export class KrakenFeed {
     }
     const crcInput = [...levels(b.asks, true).slice(0, 10), ...levels(b.bids, false).slice(0, 10)]
       .map((l) => checksumDigits(l.price) + checksumDigits(l.qty)).join('');
-    if (d.checksum === undefined || crc32(crcInput) !== d.checksum) {
-      throw new Error(`book checksum mismatch for ${d.symbol}`);
+    const crc = crc32(crcInput);
+    if (d.checksum === undefined || crc !== d.checksum) {
+      // The levels as hashed, so the log can tell a formatting fault from a
+      // missed delta: NVDAx/USD and ANTx/USD failed every few minutes in
+      // production (2026-11-23) while every other book passed.
+      const top = (side: Map<number, Level>, ascending: boolean) => levels(side, ascending).slice(0, 10).map((l) => `${l.price}@${l.qty}`).join(' ');
+      throw new Error(`book checksum mismatch for ${d.symbol} (got ${d.checksum}, computed ${crc}; asks ${top(b.asks, true)} | bids ${top(b.bids, false)})`);
     }
     // A checksum-valid locked or crossed book can continue receiving deltas.
     // Withhold its mid and both walks until its two sides separate again.

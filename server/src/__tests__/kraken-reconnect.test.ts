@@ -104,9 +104,11 @@ it('repairs just the damaged subscription and keeps pricing other stocks and the
     expect([f.mid(good), f.mid(cross)]).toEqual([10.5, 10.5]);
     expect(ws.closed).toBe(false);
 
-    vi.advanceTimersByTime(10_000);
+    // sent with the failure, not on the next watchdog tick
     const unsub = ws.sent.at(-1);
     expect(unsub).toMatchObject({ method: 'unsubscribe', params: { symbol: [bad], depth: 25 } });
+    vi.advanceTimersByTime(10_000);
+    expect(ws.sent.at(-1)).toBe(unsub);
     book(bad);   // old subscription, its unsubscribe has not been acknowledged
     expect(f.mid(bad)).toBe(0);
     send({ method: 'unsubscribe', req_id: unsub.req_id, success: true });
@@ -134,13 +136,12 @@ it('retries a silent repair on a live connection and cancels its requests on dis
     const send = (msg: object) => ws.emit('message', Buffer.from(JSON.stringify(msg)));
     ws.emit('open');
     send({ channel: 'book', type: 'update', data: [{ symbol }] });
-    vi.advanceTimersByTime(10_000);
     const first = ws.sent.at(-1);
     expect(first.method).toBe('unsubscribe');
+    vi.advanceTimersByTime(20_000);
     send({ channel: 'heartbeat' });
-    vi.advanceTimersByTime(29_999);
+    vi.advanceTimersByTime(9_999);
     expect(ws.sent.at(-1)).toBe(first);
-    send({ channel: 'heartbeat' });
     vi.advanceTimersByTime(1);
     const retry = ws.sent.at(-1);
     expect(retry.method).toBe('unsubscribe');
@@ -155,5 +156,65 @@ it('retries a silent repair on a live connection and cancels its requests on dis
     next.emit('message', Buffer.from('{"channel":"heartbeat"}'));
     vi.advanceTimersByTime(10_000);
     expect(next.sent.map((msg: any) => msg.params.channel)).toEqual(['instrument', 'book', 'ticker']);
+  } finally { f.stop(); }
+});
+
+/** A one-symbol feed past its first good snapshot; `book` sends an 11/10 book. */
+async function repairedFeed(symbol: string) {
+  const f = new KrakenFeed([symbol]);
+  await f.start();
+  const ws = sockets[sockets.length - 1];
+  const send = (msg: object) => ws.emit('message', Buffer.from(JSON.stringify(msg)));
+  const book = (type = 'snapshot', checksum = crc32('111101')) =>
+    send({ channel: 'book', type, data: [{ symbol, asks: [{ price: 11, qty: 1 }], bids: [{ price: 10, qty: 1 }], checksum }] });
+  ws.emit('open');
+  send({ channel: 'status', data: [{ system: 'online' }] });
+  send({ channel: 'instrument', data: { pairs: [{ symbol, status: 'online' }] } });
+  book();
+  return { f, ws, send, book };
+}
+
+it('resubscribes after a rejected unsubscribe, and says so when the resubscribe is rejected', async () => {
+  vi.useFakeTimers();
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const { f, ws, send } = await repairedFeed('NVDAx/USD');
+  try {
+    send({ channel: 'book', type: 'update', data: [{ symbol: 'NVDAx/USD', asks: [], bids: [], checksum: 0 }] });
+    // the mismatch carries what was hashed, for diagnosing it from the log
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining(`(got 0, computed ${crc32('111101')}; asks 11@1 | bids 10@1)`));
+    const unsub = ws.sent.at(-1);
+    // a lost ack's retry, or a book Kraken already dropped: still resubscribe
+    send({ method: 'unsubscribe', req_id: unsub.req_id, success: false, error: 'Subscription Not Found' });
+    expect(ws.sent.at(-1)).toMatchObject({ method: 'subscribe', req_id: unsub.req_id, params: { symbol: ['NVDAx/USD'], snapshot: true } });
+    send({ method: 'subscribe', req_id: unsub.req_id, success: false, error: 'Already subscribed' });
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('NVDAx/USD resubscribe rejected (Already subscribed)'));
+    expect(f.mid('NVDAx/USD')).toBe(0);
+  } finally { f.stop(); }
+});
+
+it('keeps the repair when its fresh snapshot also fails, and retries on the watchdog', async () => {
+  vi.useFakeTimers();
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const { f, ws, send, book } = await repairedFeed('ANTx/USD');
+  try {
+    book('update', 0);
+    const unsub = ws.sent.at(-1);
+    send({ method: 'unsubscribe', req_id: unsub.req_id, success: true });
+    const sent = ws.sent.length;
+    book('snapshot', 0);
+    expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('ANTx/USD repair snapshot rejected'));
+    expect(ws.sent).toHaveLength(sent);        // no new request until the retry is due
+    book('update');                              // deltas on a rejected snapshot are not applied
+    expect(f.mid('ANTx/USD')).toBe(0);
+
+    vi.advanceTimersByTime(20_000);
+    send({ channel: 'heartbeat' });
+    vi.advanceTimersByTime(10_000);
+    const retry = ws.sent.at(-1);
+    expect(retry).toMatchObject({ method: 'unsubscribe', params: { symbol: ['ANTx/USD'] } });
+    expect(retry.req_id).not.toBe(unsub.req_id);
+    send({ method: 'unsubscribe', req_id: retry.req_id, success: true });
+    book();
+    expect(f.mid('ANTx/USD')).toBe(10.5);
   } finally { f.stop(); }
 });
