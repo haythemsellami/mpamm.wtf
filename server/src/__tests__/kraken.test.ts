@@ -32,9 +32,26 @@ describe('Kraken token books', () => {
     (f as any).onMessage(first);
     const sym = JSON.parse(first).data[0].symbol;
     expect(f.mid(sym)).toBeGreaterThan(0);
-    expect(() => (f as any).onMessage(first.replace(/"checksum":\s*\d+/, '"checksum":0'))).toThrow('checksum mismatch');
+    (f as any).onMessage(first.replace(/"checksum":\s*\d+/, '"checksum":0'));
     expect(f.mid(sym)).toBe(0);
   });
+  it('keeps processing checksum-valid locked or crossed books until they become executable', () => {
+    const f = feed(), sym = symbols[0];
+    const message = (type: string, a: number, b: number, previousAsk?: number) => JSON.stringify({
+      channel: 'book', type, data: [{ symbol: sym, bids: [{ price: b, qty: 1 }],
+        asks: [...(previousAsk ? [{ price: previousAsk, qty: 0 }] : []), { price: a, qty: 1 }], checksum: crc32(`${a}1${b}1`) }],
+    });
+    (f as any).onMessage(message('snapshot', 11, 10));
+    for (const [ask, previous] of [[10, 11], [9, 10]]) {
+      (f as any).onMessage(message('update', ask, 10, previous));
+      expect(f.mid(sym)).toBe(0);
+      expect(f.walk(sym, 'sell', 1).filledFull).toBe(false);
+      expect(f.settledMid(sym)).toBe(10.5);
+    }
+    (f as any).onMessage(message('update', 12, 10, 9));
+    expect(f.mid(sym)).toBe(11);
+  });
+
   it('honors market/engine status, heartbeat liveness, and reset until a new snapshot', () => {
     vi.useFakeTimers();
     const f = feed(), first = messages[0], sym = JSON.parse(first).data[0].symbol;
@@ -117,10 +134,11 @@ describe('Kraken token books', () => {
     (f as any).reset(); (f as any).onMessage('{"channel":"heartbeat"}');
     expect(f.marketClosed(sym)).toBe(false);                  // nothing reported yet
   });
-  it('rejects updates before a snapshot and subscription errors', () => {
+  it('withholds updates before a snapshot and rejects unscoped subscription errors', () => {
     const f = feed();
     const upd = messages.find((raw) => JSON.parse(raw).type === 'update')!;
-    expect(() => (f as any).onMessage(upd)).toThrow('before snapshot');
+    (f as any).onMessage(upd);
+    expect(f.mid(JSON.parse(upd).data[0].symbol)).toBe(0);
     expect(() => (f as any).onMessage('{"success":false,"error":"invalid symbol"}')).toThrow('invalid symbol');
   });
 });
