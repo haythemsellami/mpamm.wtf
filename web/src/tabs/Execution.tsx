@@ -174,7 +174,7 @@ export function ExecutionTab() {
       const crossSym = usdBase ? TOKENS[p.quote]?.usdCross : TOKENS[p.quote]?.usdtCross;
       if (crossSym) notes.push(`${pair} is converted from the ${refName} book’s ${usdBase ? 'USD' : 'USDT'} price using the live ${crossSym} mid.`);
     }
-    if (usdBase) notes.push('The reference uses the actual xStock token book on Kraken, with its market hours and status. Historical markouts are unavailable without a matching book archive; live markouts are collected while the feed is running.');
+    if (usdBase) notes.push(`The reference uses ${underlying ? `the ${underlying} token book` : 'the actual xStock token book'} on Kraken, with its market hours and status. Historical markouts are unavailable without a matching book archive; live markouts are collected while the feed is running.`);
     return notes;
   }, [pair, refName]);
 

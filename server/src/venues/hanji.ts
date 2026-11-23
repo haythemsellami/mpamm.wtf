@@ -105,6 +105,16 @@ const FAST_QUOTERS = [
  *  volume until 2026-10-20 (see KNOWN_MARKETS). */
 const XAUT_FAST_QUOTER = '0x1fb37a1e6dc03a523bba106cb25e398e8608a010' as const;
 
+/** The xStock books' FastQuoters, one per deployment, live beside gen8 like
+ *  XAUT_FAST_QUOTER (traced: a STOCKS_HELPER book read touches only the first,
+ *  a STOCKS_2_HELPER one only the second). Created at blocks 120436595
+ *  (2026-11-08 10:05 UTC) and 123709246 (2026-11-19 23:10 UTC), each the day
+ *  its five books launched; owner() 0xA24D2aF7…, fastLaneCall in the bytecode.
+ *  In 41 blocks on 2026-11-23 they took 215 of 239 direct updatePrices pushes:
+ *  without them the books' volume was booked with ~10% of the burn behind it. */
+const STOCKS_FAST_QUOTER = '0x02fe828a897b18ea37fa477436a8013578a3aa96' as const;
+const STOCKS_2_FAST_QUOTER = '0xae5b4a1775f05b8818209e35c01630feac99b60b' as const;
+
 /** FASTLANE ROUTE (gen8+): from ~2026-09-22 the keeper also pushes through
  *  FastLane's AuctionHandler — `flashExecutionBid(bidAmount, txHashes,
  *  targetBlockNumber, executeOnLoss, payBidOnFail, searcherToAddress,
@@ -120,9 +130,9 @@ const XAUT_FAST_QUOTER = '0x1fb37a1e6dc03a523bba106cb25e398e8608a010' as const;
  *  fastLaneCall selector (gen0–7 bytecode lacks it), so the route is scoped
  *  to FASTLANE_QUOTERS: adding it rebuilds from gen8's creation day, not
  *  the lifetime. Example: tx 0x644e6bbe…7a13. XAUT_FAST_QUOTER takes the
- *  same route (example: tx 0xc874430a…). */
+ *  same route (example: tx 0xc874430a…), and the xStock quoters can. */
 const FASTLANE_AUCTION_HANDLER = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58' as const;
-const FASTLANE_QUOTERS = ['0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b', XAUT_FAST_QUOTER] as const;
+const FASTLANE_QUOTERS = ['0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b', XAUT_FAST_QUOTER, STOCKS_FAST_QUOTER, STOCKS_2_FAST_QUOTER] as const;
 
 // Each xStock deployment has its own book helper. The CLOB scales quantities in
 // wrapped tokens and prices in USDC per wrapper share, including on an unwrap-facade trade.
@@ -162,7 +172,10 @@ const KNOWN_MARKETS: readonly {
 ];
 
 const lobAbi = parseAbi([
-  // verified layout (all six CLOBs share the implementation): scaling factors,
+  // verified layout, all 17 CLOBs: the first six share one implementation;
+  // XAUt/USDC and the ten xStock CLOBs return the same getConfig shape
+  // (fixtures/hanji-config.json) and emit this OrderPlaced topic0 (xStock:
+  // checked on the wMUx sale, tx 0xc6627e8b…, log 167). Scaling factors,
   // token addresses, and the 1e18-scaled taker fee rate at index 9.
   'function getConfig() view returns (uint256 scalingX, uint256 scalingY, address tokenX, address tokenY, uint256 f4, uint256 f5, address a6, address a7, uint256 f8, uint256 takerFeeRate, uint256 f10, uint256 f11, uint256 f12)',
   'event OrderPlaced(address indexed owner, address indexed initiator, uint64 order_id, bool indexed isAsk, uint128 quantity, uint72 price, uint128 passive_shares, uint128 passive_fee, uint128 aggressive_shares, uint128 aggressive_value, uint128 aggressive_fee, bool market_only, bool post_only)',
@@ -365,7 +378,7 @@ export function createHanjiAdapter(): VenueAdapter {
     // build tracked 0x0000a8fd…8888 — another protocol's pool (mistaken
     // trace inference, since replaced by this team-confirmed destination).
     // gen8+ pushes also arrive via the FastLane relay — see FASTLANE_AUCTION_HANDLER.
-    // XAUT_FAST_QUOTER prices the XAUt/USDC book.
+    // XAUT_FAST_QUOTER prices the XAUt/USDC book, the STOCKS quoters the xStock books.
     gasSources() {
       const fastLane = new Set<string>(FASTLANE_QUOTERS);
       return [

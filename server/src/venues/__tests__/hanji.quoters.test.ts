@@ -28,6 +28,10 @@ const GEN8 = GENERATIONS[8];
 /** Not a generation: Hanji's XAUt0/USDC book's own quoter, live beside gen8
  *  since 2026-09-21 (same owner, same fleet, same two push routes). */
 const XAUT = '0x1fb37a1e6dc03a523bba106cb25e398e8608a010';
+/** Not generations either: the xStock books' quoters, one per deployment
+ *  (created 2026-11-08 and 2026-11-19, same owner; traced from each helper). */
+const STOCKS = '0x02fe828a897b18ea37fa477436a8013578a3aa96';
+const STOCKS_2 = '0xae5b4a1775f05b8818209e35c01630feac99b60b';
 const HANDLER = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58';
 
 /** Same selector, own rotating fleet — but owner() is 0x6792e60a… and it ran
@@ -41,12 +45,12 @@ const destinations = () => {
 };
 
 describe('hanji FastQuoter generations', () => {
-  it('tracks every generation plus the XAUt0/USDC quoter, in blocks mode', () => {
+  it('tracks every generation plus the XAUt0/USDC and xStock quoters, in blocks mode', () => {
     const sources = createHanjiAdapter().gasSources?.() ?? [];
     // blocks mode is load-bearing: updates emit no logs, so there is no event
     // to enumerate them with.
     expect(sources.every((s) => s.mode === 'blocks')).toBe(true);
-    expect(destinations()).toEqual([...GENERATIONS, XAUT]);
+    expect(destinations()).toEqual([...GENERATIONS, XAUT, STOCKS, STOCKS_2]);
   });
 
   it('excludes the same-selector contract owned by someone else', () => {
@@ -64,14 +68,17 @@ describe('adding a generation rebuilds the minimum', () => {
   const sigNow = gasSourcesSignature(createHanjiAdapter().gasSources?.() ?? []);
   const RELAY_TOKEN = `${GEN8}@${HANDLER}:0x0c7abd22:5`;
   const XAUT_RELAY_TOKEN = `${XAUT}@${HANDLER}:0x0c7abd22:5`;
+  const STOCKS_TOKENS = [STOCKS, STOCKS_2, ...[STOCKS, STOCKS_2].map((q) => `${q}@${HANDLER}:0x0c7abd22:5`)];
   /** what production fingerprinted before the XAUt quoter was listed */
   const SIG_BEFORE_XAUT = [...GENERATIONS, RELAY_TOKEN].sort().join(',');
+  /** ... and before the xStock quoters were */
+  const SIG_BEFORE_STOCKS = [...GENERATIONS, XAUT, RELAY_TOKEN, XAUT_RELAY_TOKEN].sort().join(',');
 
   it('is case-insensitive — gen1 is checksummed in the source, the rest are not', () => {
     // tailBlocks matches receipts on a lowercased set; if the signature kept
     // case, a re-checksummed entry would read as a source change and wipe
     // history for nothing.
-    expect(sigNow).toBe([...GENERATIONS, XAUT, RELAY_TOKEN, XAUT_RELAY_TOKEN].sort().join(','));
+    expect(sigNow).toBe([...GENERATIONS, XAUT, RELAY_TOKEN, XAUT_RELAY_TOKEN, ...STOCKS_TOKENS].sort().join(','));
   });
 
   it('the gen8 + FastLane migration rebuilds from gen8 alone, not the lifetime', () => {
@@ -85,12 +92,18 @@ describe('adding a generation rebuilds the minimum', () => {
   it('adding the XAUt0/USDC quoter rebuilds from its own creation day, not the lifetime', () => {
     // its direct and relay tokens both name it, so the rebuild is bounded by
     // its creation (2026-09-21 18:16 UTC) — the days before keep their rows.
-    expect(classifyGasSourceChange(SIG_BEFORE_XAUT, sigNow)).toEqual({ kind: 'partial', added: [XAUT] });
+    expect(classifyGasSourceChange(SIG_BEFORE_XAUT, SIG_BEFORE_STOCKS)).toEqual({ kind: 'partial', added: [XAUT] });
+  });
+
+  it('adding the xStock quoters rebuilds from the first one’s creation day (2026-11-08), not the lifetime', () => {
+    const change = classifyGasSourceChange(SIG_BEFORE_STOCKS, sigNow);
+    expect(change.kind).toBe('partial');
+    expect(change.added.sort()).toEqual([STOCKS, STOCKS_2].sort());
   });
 
   it('appending is a PARTIAL rebuild — earlier days survive', () => {
     const newest = GENERATIONS[GENERATIONS.length - 1];
-    const before = [...GENERATIONS.filter((a) => a !== GENERATIONS[0] && a !== newest), XAUT, XAUT_RELAY_TOKEN].sort().join(',');
+    const before = [...GENERATIONS.filter((a) => a !== GENERATIONS[0] && a !== newest), XAUT, XAUT_RELAY_TOKEN, ...STOCKS_TOKENS].sort().join(',');
     const change = classifyGasSourceChange(before, sigNow);
     // pure addition ⇒ rebuild from the earliest ADDED contract's creation day
     // (gen0, 2026-06-26), which is after Hanji's 2026-06-05 anchor. Dropping
@@ -119,7 +132,7 @@ describe('hanji FastLane relay route', () => {
 
   it('is scoped to gen8+ — gen0-7 bytecode has no fastLaneCall, so they can never be the searcher', () => {
     expect(relaySources).toHaveLength(1);
-    expect((relaySources[0].address as string[]).map((a) => a.toLowerCase())).toEqual([GEN8, XAUT]);
+    expect((relaySources[0].address as string[]).map((a) => a.toLowerCase())).toEqual([GEN8, XAUT, STOCKS, STOCKS_2]);
   });
 
   it('counts the XAUt0/USDC quoter on both routes — relayed bids (reverted too) and direct pushes', () => {

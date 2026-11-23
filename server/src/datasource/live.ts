@@ -4577,13 +4577,16 @@ export class LiveDataSource extends BaseSource {
     // asset's pairs — they silently vanish from the UI otherwise (this is exactly
     // how a geo-blocked Binance feed hid BTC/ETH in prod; feeds swallow their
     // own connection errors, so the mid is the observable signal). Grace period
-    // covers the normal cold-start warmup.
+    // covers the normal cold-start warmup. A share wrapper's price is the CEX
+    // mid × its on-chain rate, so a missing rate zeroes it while the feed is
+    // healthy: reference.parity reports that gap (wrapper-rates.ts), and like a
+    // closed market it neither starts nor ends a starvation here.
     if (quoteStartedAt - this.bootMs > 60_000) {
       checkReferenceStarvation(Object.values(ASSETS), (k) => assetPrices.get(k) ?? 0, this.starvedSince, quoteStartedAt, {
         warn: (m) => this.noteOnce('reference.starved', m),
         clear: (m) => this.dropNote('reference.starved', m),
         announce: (m) => this.note('reference.recovered', m),
-      }, (k) => closedAssets.has(k));
+      }, (k) => closedAssets.has(k) || !(WRAPPER_RATES.rate(ASSETS[k].token) > 0));
     }
     const pinned = await resolveQuoteBlock(blockNumber, trigger.identity ?? this.headWatcher.identity(blockNumber));
     trigger.identity = pinned;

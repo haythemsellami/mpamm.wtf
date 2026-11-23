@@ -1,6 +1,6 @@
 {
   "recordedAt": "2026-11-23T16:31:09.000Z",
-  "method": "FastQuoterHelper.assembleOrderbooksFromOrders(proxy, 60) eth_call at each pinned Monad block (archive RPC); no transactions.",
+  "method": "assembleOrderbooksFromOrders(proxy, 60) eth_call at each pinned Monad block (archive RPC) on the FastQuoterHelper, or on the book's own `helper` where one is given (the xStock deployments); no transactions.",
   "books": [
     {
       "block": 110682151,
