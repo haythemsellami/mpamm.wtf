@@ -9,7 +9,7 @@ import { config } from '../config.js';
 import { buildDepthSnapshot } from '../depth.js';
 import { UsdPricer } from '../pricer.js';
 import { ADAPTERS, REFERENCES, validateRegistry } from '../venues/registry.js';
-import { WRAPPER_PARITY, WRAPPER_PARITY_REFRESH_MS } from '../wrapper-parity.js';
+import { WRAPPER_RATES, WRAPPER_RATES_REFRESH_MS } from '../wrapper-rates.js';
 import type { AdapterContext, VenueAdapter } from '../venues/adapter.js';
 import type { DepthWorkerRequest, DepthWorkerResponse } from './protocol.js';
 
@@ -21,7 +21,7 @@ let ready = false;
 let stopped = false;
 let lastWarning = '';
 let lastWarningAt = 0;
-let parityTimer: ReturnType<typeof setInterval> | undefined;
+let wrapperRateTimer: ReturnType<typeof setInterval> | undefined;
 
 const send = (message: DepthWorkerResponse): void => {
   if (process.connected && process.send) process.send(message);
@@ -108,7 +108,7 @@ async function shutdown(): Promise<void> {
   watcher.stop();
   scheduler.stop();
   runner.stop();
-  if (parityTimer) clearInterval(parityTimer);
+  if (wrapperRateTimer) clearInterval(wrapperRateTimer);
   REFERENCES.stop();
   if (process.connected) process.disconnect();
   // The worker owns no persistent state. Exit explicitly so a stop received
@@ -139,11 +139,11 @@ async function boot(): Promise<void> {
   const probe = await probeChain();
   if (!probe.ok) throw new Error(`depth RPC sanity check failed (${probe.reason})`);
   await REFERENCES.start();
-  // This process has its own registry, so its own view of wrapper parity: a
+  // This process has its own registry, so its own view of the share rates: a
   // share-wrapper pair has no depth reference until it is read here. Silent,
   // like every other depth health signal; the main process raises the note.
-  await WRAPPER_PARITY.refresh(publicClient);
-  parityTimer = setInterval(() => { void WRAPPER_PARITY.refresh(publicClient); }, WRAPPER_PARITY_REFRESH_MS);
+  await WRAPPER_RATES.refresh(publicClient);
+  wrapperRateTimer = setInterval(() => { void WRAPPER_RATES.refresh(publicClient); }, WRAPPER_RATES_REFRESH_MS);
   const bootstrapPricer = new UsdPricer((key) => REFERENCES.assetUsd(key), (market) => REFERENCES.midForPair(market));
   for (const adapter of ADAPTERS) {
     try { await adapter.discover(ctxFor(adapter, bootstrapPricer)); }

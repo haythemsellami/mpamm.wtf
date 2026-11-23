@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { RealtimeHealth } from '@shared';
+import { ASSETS, type RealtimeHealth } from '@shared';
 import {
   captureReferenceFrame, checkRealtimeDegraded, expectedReferenceVenues, medianFrameMs, NO_QUOTE_FRAME, paceSymptoms,
   realtimeCoverage, realtimeSymptoms, REALTIME_DEGRADED, REALTIME_HOLD_MS,
@@ -184,7 +184,7 @@ describe('frame reference capture', () => {
 });
 
 describe('expected reference venues', () => {
-  const XSTOCKS = ['SPYx', 'QQQx', 'EWYx', 'NVDAx', 'TSLAx', 'ANTx'];
+  const XSTOCKS = Object.values(ASSETS).filter((a) => a.cex === 'kraken').map((a) => a.key);
   it('expects every CEX while its markets are open', () => {
     expect(expectedReferenceVenues(new Set()).sort()).toEqual(['binance', 'bybit', 'kraken']);
   });

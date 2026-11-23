@@ -1,7 +1,7 @@
 {
-  "recordedAt": "2026-10-20T16:11:11.819Z",
-  "block": 115084407,
-  "method": "Actual getConfig multicall at one pinned Monad block; no transactions.",
+  "recordedAt": "2026-11-23T16:31:09.000Z",
+  "block": 124766750,
+  "method": "getConfig at one pinned Monad mainnet block.",
   "markets": [
     {
       "market": "MON/USDC",
@@ -129,6 +129,196 @@
         "0",
         "0x6c01FFB0711f2A71DA423607ce89350a1Cb291C8",
         "0x6850D4362AE0b5954AdA7BEa717828757b7dBA1a",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wTSLAx/USDC",
+      "address": "0x09EB706c2786eFd4a91b7a5b9EeB11ccF656f34d",
+      "result": [
+        "100000000000000",
+        "1",
+        "0xc3FdBe3A68EE5dE461D30415a8165cf9Aefe1171",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x72Ba4a349FbC96112AEE24E7226Fe5674Ed5a378",
+        "0x9e6E9A9787Bf73f3FE3381157A7E93983638eC09",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wNVDAx/USDC",
+      "address": "0xC08ef5B51b72A6F74757f04A658779BeFeF3607A",
+      "result": [
+        "100000000000000",
+        "1",
+        "0xa8ddb5Cd96b5222AFe198316E9A57CAA642850D5",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x178820B1656b1d23D4529F5E8511686e715a7810",
+        "0xeEC286C96614a8cabB45D7ACD549A5E5bc35ed61",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wSPYx/USDC",
+      "address": "0x3A7c91C12c3190f107B1940D4154639585c7eA94",
+      "result": [
+        "100000000000000",
+        "1",
+        "0xE7E553Cd128F0011777323A0b44a7b96EA1CB540",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x6523e73539d3e802507E0360cC86806223196c57",
+        "0x1fCde9e8434c068613E485402106b18A210B3281",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wQQQx/USDC",
+      "address": "0x3f1fb72726D300B2d636c23d7513Fd6cE22dB34A",
+      "result": [
+        "100000000000000",
+        "1",
+        "0x4C1AE29c159838fC1b224636E28E086EB69101f7",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x3dB27b0bD35c709719f0E1b4D00735C3Dbf20B56",
+        "0xb6AcfB265F70A5d83ba81094BeEc7035d50BA49E",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wEWYx/USDC",
+      "address": "0x9b135FcB6F2cD1c963179fd63C5F4a571B9c9634",
+      "result": [
+        "100000000000000",
+        "1",
+        "0x021b40617982074748C81a19d22046CC2548C3bE",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x9D162b42526956AdB3fdDF85A0dD5b5127d558bF",
+        "0x4Fc78836b4463e0D42e9722639ca87EE987b9EBd",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wANTx/USDC",
+      "address": "0x3F9adE74Cdcde8d7CA0d0BBa3B61FaE77cCB3e29",
+      "result": [
+        "100000000000000",
+        "1",
+        "0xabec6AeAb037b77c09a2a99264F9C81a35B02649",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x0C1369a06F5A1FdeF4cdbB295aa85E4A955493f6",
+        "0x1B35Ee2806fd6d8f8B5d62d3De4C927F84337159",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wSPCXx/USDC",
+      "address": "0xC51d3678624ec9511b8A992a59746831769308e8",
+      "result": [
+        "100000000000000",
+        "1",
+        "0x8e2eeD8b8B5E13Ea7BF38e50d7821d2C57309072",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x7BcB89861Ee6ff239FD4626bc1df9f6FF886C93b",
+        "0x68e80D9Cdb7804AEf2344243aE946a546B43171d",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wMUx/USDC",
+      "address": "0x16EC8F28325b6dbF171c28056814A1F3Bafb5100",
+      "result": [
+        "100000000000000",
+        "1",
+        "0xe2047ee3bdDb5C99ae428AB83df63f8730698e30",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x8d170352C9570df02f1bE6FeA2aDaC64294b3220",
+        "0x97ECab61a97f4D5D63A20Ce5D67bcb683bD99851",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wSKHYx/USDC",
+      "address": "0x3C4713169d50c78d37A09cea043f7b83F56C4dE9",
+      "result": [
+        "100000000000000",
+        "1",
+        "0x6215a58ed045d71F2561AaAbe54f4C885C522998",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x474Df41b31e62EF44f97600D861451dE1A3028e0",
+        "0x23DA5020754CaF463f790C10BCc0a7A61cCC3496",
+        "500000000000000000",
+        "100000000000000",
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "market": "wSMHx/USDC",
+      "address": "0x574e0853dee419D5EA6b4e660A2bc320066c4F49",
+      "result": [
+        "100000000000000",
+        "1",
+        "0x23c4BDDea5e7E284fB4027c6050bC5E6f7FaE23f",
+        "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
+        "0",
+        "0",
+        "0x7053B20EbcFAe45beB3e7A78d8F5de9e381cf5Ed",
+        "0x5f4f0D4a4ACFE6165D3110860CE1E6BBe5a3bb2B",
         "500000000000000000",
         "100000000000000",
         "0",

@@ -124,6 +124,11 @@ const XAUT_FAST_QUOTER = '0x1fb37a1e6dc03a523bba106cb25e398e8608a010' as const;
 const FASTLANE_AUCTION_HANDLER = '0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58' as const;
 const FASTLANE_QUOTERS = ['0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b', XAUT_FAST_QUOTER] as const;
 
+// Each xStock deployment has its own book helper. The CLOB scales quantities in
+// wrapped tokens and prices in USDC per wrapper share, including on an unwrap-facade trade.
+const STOCKS_HELPER = '0x9e6092fc526AB6e0927C146911a186fbCF7Df318';
+const STOCKS_2_HELPER = '0x4A92a35eE23E07B3ba1C9D954DEA315Dd91030c9';
+
 /** Hanji markets (team-provided, tokens verified on-chain via getConfig).
  *  `market` is the @shared pair symbol; base/quote are TOKENS registry keys.
  *
@@ -134,7 +139,9 @@ const FASTLANE_QUOTERS = ['0x125f12a1938b97f11fdc35b1a5fb4d5217cda50b', XAUT_FAS
  *  2026-10-20 — 3,332 fills, $2.41M — though the pair was registered on
  *  2026-09-16: the gas audit took it for unregistered. Recovered by the
  *  'xaut-book' revision below. */
-const KNOWN_MARKETS = [
+const KNOWN_MARKETS: readonly {
+  market: string; clob: `0x${string}`; proxy: `0x${string}`; baseTok: string; quoteTok: string; helper?: `0x${string}`;
+}[] = [
   { market: 'MON/USDC', clob: '0xC35b1Ca1a2C398A21df5783b3a5eA6A2D56f298F', proxy: '0x1aeD222dda944a87703c918745b11bE13f8eEf10', baseTok: 'WMON', quoteTok: 'USDC' },
   { market: 'ETH/USDC', clob: '0xAC652E05Ac4B2e9eCaE5C65595E4E4E2734F61Cc', proxy: '0x0ACBA24cecd750bAdB3179FB9eE3F2Cd27431778', baseTok: 'WETH', quoteTok: 'USDC' },
   { market: 'cbBTC/USDC', clob: '0xbc87C6e5A9788404C143D42474508956267B253D', proxy: '0xC11805e92CA6a36cE9507902Ab6Bb5Cd11e438bf', baseTok: 'CBBTC', quoteTok: 'USDC' },
@@ -142,7 +149,17 @@ const KNOWN_MARKETS = [
   { market: 'cbBTC/MON', clob: '0x77ED4fcB978fa0CE78799064cB38D12FE7c3ce7d', proxy: '0x012e06b56EEE881603E47748931dC38EfaBf54eF', baseTok: 'CBBTC', quoteTok: 'WMON' },
   { market: 'cbBTC/ETH', clob: '0x8A89f08d3B5aB37f634f2B4dCf2DB29Ecf9938c7', proxy: '0x05e028d33fA727168bC9396bDAc5Cab387c8a196', baseTok: 'CBBTC', quoteTok: 'WETH' },
   { market: 'XAUt/USDC', clob: '0xa49d9ea941e4adb7e60aeee49fd6c9fb122925ab', proxy: '0x88687e499846ce3037e63754a6e2e7b53483c70e', baseTok: 'XAUT0', quoteTok: 'USDC' },
-] as const;
+  { market: 'wTSLAx/USDC', clob: '0x09EB706c2786eFd4a91b7a5b9EeB11ccF656f34d', proxy: '0x1a430B224c69F74587F1A8c0a24C0741B976Aefc', baseTok: 'WTSLAX', quoteTok: 'USDC', helper: STOCKS_HELPER },
+  { market: 'wNVDAx/USDC', clob: '0xC08ef5B51b72A6F74757f04A658779BeFeF3607A', proxy: '0x6432165433eFf6611dBB124acec6Db14F93554Ad', baseTok: 'WNVDAX', quoteTok: 'USDC', helper: STOCKS_HELPER },
+  { market: 'wSPYx/USDC', clob: '0x3A7c91C12c3190f107B1940D4154639585c7eA94', proxy: '0x76bD7aC128f9387B2a2162C8c2d5026016984B33', baseTok: 'WSPYX', quoteTok: 'USDC', helper: STOCKS_HELPER },
+  { market: 'wQQQx/USDC', clob: '0x3f1fb72726D300B2d636c23d7513Fd6cE22dB34A', proxy: '0x3955594b8FD2aB0728f242A6dfC446D2f289B293', baseTok: 'WQQQX', quoteTok: 'USDC', helper: STOCKS_HELPER },
+  { market: 'wEWYx/USDC', clob: '0x9b135FcB6F2cD1c963179fd63C5F4a571B9c9634', proxy: '0x65b7076C9a6b2C5c2435fC9b7b0CD6458005B114', baseTok: 'WEWYX', quoteTok: 'USDC', helper: STOCKS_HELPER },
+  { market: 'wANTx/USDC', clob: '0x3F9adE74Cdcde8d7CA0d0BBa3B61FaE77cCB3e29', proxy: '0x4EB3333571098AEb6710fB0db9Ee91eBb9dF0295', baseTok: 'WANTX', quoteTok: 'USDC', helper: STOCKS_2_HELPER },
+  { market: 'wSPCXx/USDC', clob: '0xC51d3678624ec9511b8A992a59746831769308e8', proxy: '0xbdf8eF217027c8AA355bA6019184b6CE67E8b526', baseTok: 'WSPCXX', quoteTok: 'USDC', helper: STOCKS_2_HELPER },
+  { market: 'wMUx/USDC', clob: '0x16EC8F28325b6dbF171c28056814A1F3Bafb5100', proxy: '0x403A596d1E9e0ed4b7b2fEcD2c22580CD5388AB7', baseTok: 'WMUX', quoteTok: 'USDC', helper: STOCKS_2_HELPER },
+  { market: 'wSKHYx/USDC', clob: '0x3C4713169d50c78d37A09cea043f7b83F56C4dE9', proxy: '0x91C2366B8131EF640adc3eAeC2B9C30A21b79EDe', baseTok: 'WSKHYX', quoteTok: 'USDC', helper: STOCKS_2_HELPER },
+  { market: 'wSMHx/USDC', clob: '0x574e0853dee419D5EA6b4e660A2bc320066c4F49', proxy: '0x060Cbd657298dbE452b9Fa49D0FCE4984bC807Bc', baseTok: 'WSMHX', quoteTok: 'USDC', helper: STOCKS_2_HELPER },
+];
 
 const lobAbi = parseAbi([
   // verified layout (all six CLOBs share the implementation): scaling factors,
@@ -175,6 +192,7 @@ interface HanjiMarket {
   market: string;
   clob: `0x${string}`;
   proxy: `0x${string}`;
+  helper: `0x${string}`;
   baseTok: string;   // TOKENS key
   quoteTok: string;  // TOKENS key
   /** shares → human base: shares × baseShare (= scalingX / 10^xDec). */
@@ -219,6 +237,8 @@ export function createHanjiAdapter(): VenueAdapter {
     historyRevisions: [
       { id: 'replay-0921-midnight', source: 'fills', from: '2026-09-17', until: '2026-09-20' },
       { id: 'xaut-book', source: 'markets', from: '2026-09-21', markets: ['XAUt/USDC'] },
+      { id: 'wrapped-xstocks', source: 'markets', from: '2026-11-08', markets: ['wTSLAx/USDC', 'wNVDAx/USDC', 'wSPYx/USDC', 'wQQQx/USDC', 'wEWYx/USDC'] },
+      { id: 'wrapped-xstocks-2', source: 'markets', from: '2026-11-19', markets: ['wANTx/USDC', 'wSPCXx/USDC', 'wMUx/USDC', 'wSKHYx/USDC', 'wSMHx/USDC'] },
     ],
 
     async discover(ctx: AdapterContext) {
@@ -246,7 +266,7 @@ export function createHanjiAdapter(): VenueAdapter {
         const quoteShare = Number(sy) / 10 ** quote.decimals;
         found.push({
           market: m.market, clob: m.clob as `0x${string}`, proxy: m.proxy as `0x${string}`,
-          baseTok: m.baseTok, quoteTok: m.quoteTok,
+          baseTok: m.baseTok, quoteTok: m.quoteTok, helper: m.helper ?? FAST_QUOTER_HELPER,
           baseShare, quoteShare,
           pxScale: quoteShare / baseShare, // humanPrice = raw × quoteShare ÷ baseShare⁻¹… = raw × (sy/10^yDec)/(sx/10^xDec)
           feeBps: Number(takerFeeRate) / 1e14, // 1e18-scaled rate → bps
@@ -264,7 +284,7 @@ export function createHanjiAdapter(): VenueAdapter {
       // one multicall for every market's book (proxy → includes vault liquidity).
       const res = await ctx.client.multicall({
         contracts: selectedMarkets.map((m) => ({
-          address: FAST_QUOTER_HELPER, abi: helperAbi,
+          address: m.helper, abi: helperAbi,
           functionName: 'assembleOrderbooksFromOrders' as const,
           args: [m.proxy, BOOK_LEVELS] as const,
         })),

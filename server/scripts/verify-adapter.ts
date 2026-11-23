@@ -13,7 +13,7 @@ import { config } from '../src/config.js';
 import { publicClient, getLogsChunked, probeChain } from '../src/chain/rpc.js';
 import { UsdPricer } from '../src/pricer.js';
 import { ADAPTERS, REFERENCES, validateRegistry } from '../src/venues/registry.js';
-import { WRAPPER_PARITY } from '../src/wrapper-parity.js';
+import { WRAPPER_RATES } from '../src/wrapper-rates.js';
 import type { AdapterContext, LogBundle } from '../src/venues/adapter.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -51,16 +51,15 @@ if (meta.role === 'venue') {
 
 // warm the CEX references (quotes anchor on pairMid)
 console.log('… warming CEX reference feeds');
-await REFERENCES.start();
+await Promise.all([REFERENCES.start(), WRAPPER_RATES.refresh(publicClient)]);
 const t0 = Date.now();
 while (Date.now() - t0 < 25_000 && Object.values(ASSETS).some((a) => REFERENCES.assetUsd(a.key) <= 0)) await sleep(500);
 const cold = Object.values(ASSETS).filter((a) => REFERENCES.assetUsd(a.key) <= 0).map((a) => a.key);
 if (cold.length) warn(`reference mids not warm for ${cold.join(',')} — quotes for those pairs will be absent`);
 else pass('reference mids warm');
-// a share-wrapper pair has no reference until its rate is read (wrapper-parity.ts)
-await WRAPPER_PARITY.refresh(publicClient);
+// a share-wrapper pair has no reference until its rate is read (wrapper-rates.ts)
 for (const pair of PAIRS) {
-  const why = WRAPPER_PARITY.why(pair);
+  const why = WRAPPER_RATES.why(pair);
   if (why) warn(`${pair.symbol} has no reference (${why}) — it will not be quoted`);
 }
 

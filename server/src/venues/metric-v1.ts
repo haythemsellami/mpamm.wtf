@@ -138,8 +138,8 @@ export function createMetricV1Generation(): VenueGeneration {
    *  for ~2 minutes on 2026-10-12 (16:18:01 → 16:20:05 UTC) */
   const sideLatches = new Map<string, ReturnType<typeof createQuoteOutageLatch>>();
   /** Live pools, and no reference for any of their markets: Kraken's xStock
-   *  market is closed (24/5), its feed is cold, or a share wrapper left parity
-   *  (wrapper-parity.ts). The reference's own note says which. What only the
+   *  market is closed (24/5), its feed is cold, or a share conversion is unavailable
+   *  (wrapper-rates.ts). The reference's own note says which. What only the
    *  adapter knows is that THIS is why Metric is silent: `quoteMarkets()` is
    *  every admitted pool, so the core cannot tell, and its backstop would call
    *  the venue offline every weekend its one live pool is an xStock. */
@@ -368,7 +368,7 @@ export function createMetricV1Generation(): VenueGeneration {
         // A market subset (the depth worker) cannot speak for the venue.
         if (!markets && ++unreferencedFrames >= NO_REFERENCE_FRAMES) {
           const unreferenced = [...new Set(selectedPools.map((p) => p.market))].sort().join(', ');
-          noReference(ctx, { reason: `no reference for ${unreferenced}`, msg: `${METRIC_VENUE.name} is not quoted — its live pool(s) trade ${unreferenced}, which has no CEX reference right now (market closed, feed cold, or a share wrapper off parity)` });
+          noReference(ctx, { reason: `no reference for ${unreferenced}`, msg: `${METRIC_VENUE.name} is not quoted — its live pool(s) trade ${unreferenced}, which has no CEX reference right now (market closed, feed cold, or a missing wrapper rate)` });
         }
         return [];
       }
