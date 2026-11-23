@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { SIZES_USD, TOKENS, cexForBase, pairOf, wrapBasisFor, type DepthSnapshot, type VenueMeta, type QuoteRow } from '@shared';
+import { SIZES_USD, TOKENS, baseTokenOf, cexForBase, pairOf, wrapBasisFor, type DepthSnapshot, type VenueMeta, type QuoteRow } from '@shared';
 import { useDashboard } from '../store';
 import { connectLiveDepth } from '../lib/api';
 import { useViewport } from '../lib/viewport';
@@ -161,8 +161,9 @@ export function ExecutionTab() {
     const notes: string[] = [];
     const wrapSym = wrapBasisFor(p); // per-pair: WBTC pairs adjust, cbBTC pairs are parity
     const baseSym = p.symbol.split('/')[0];
+    const underlying = baseTokenOf(p.base)?.underlyingXStock;
     if (wrapSym) notes.push(`${pair} trades a wrapped asset — the ${refName} reference is adjusted by the ${wrapSym} mid (wrapped/native basis, a proxy for the bridged asset), so the CEX line is shown in wrapped terms for a like-for-like comparison.`);
-    else if (p.wrapBasisOverride === '' && Object.values(TOKENS).some((t) => t.symbol === baseSym && t.parityWrapper)) notes.push(`${pair} trades ${baseSym}, an on-chain share wrapper of ${p.base} that no CEX lists — the ${refName} reference is ${p.base}’s own book, taken at one ${p.base} per ${baseSym}. That is the wrapper’s rate today; a venue is not quoted here while the rate is anything else.`);
+    else if (underlying) notes.push(`Prices are in ${p.quote} per ${baseSym}. The ${refName} reference uses the ${underlying} book and the wrapper’s on-chain rate in ${underlying} per share.`);
     else if (p.wrapBasisOverride === '') notes.push(`${pair} trades ${baseSym}, a wrapped asset with NO CEX basis market — the ${refName} reference assumes parity with native ${p.base} (${baseSym} is 1:1 mint/redeemable, typically sub-bp; there is no live basis feed to price it).`);
     const usdBase = cexForBase(p.base) === 'kraken';
     if (p.quoteKind === 'asset') {
@@ -173,7 +174,7 @@ export function ExecutionTab() {
       const crossSym = usdBase ? TOKENS[p.quote]?.usdCross : TOKENS[p.quote]?.usdtCross;
       if (crossSym) notes.push(`${pair} is converted from the ${refName} book’s ${usdBase ? 'USD' : 'USDT'} price using the live ${crossSym} mid.`);
     }
-    if (usdBase) notes.push('The reference uses the actual xStock token book on Kraken, with its market hours and status. Historical markouts are unavailable without a matching book archive; live markouts are collected while the feed is running.');
+    if (usdBase) notes.push(`The reference uses ${underlying ? `the ${underlying} token book` : 'the actual xStock token book'} on Kraken, with its market hours and status. Historical markouts are unavailable without a matching book archive; live markouts are collected while the feed is running.`);
     return notes;
   }, [pair, refName]);
 

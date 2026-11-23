@@ -19,10 +19,10 @@ describe('pair filter', () => {
   });
 
   it('matches every term anywhere, or base/quote parts around a slash', () => {
-    expect(MARKETS.filter((m) => matchPair(m, 'nvda usdc'))).toEqual(['NVDAx/USDC']);
+    expect(MARKETS.filter((m) => matchPair(m, 'nvda usdc'))).toEqual(['NVDAx/USDC', 'wNVDAx/USDC']);
     expect(MARKETS.filter((m) => matchPair(m, 'btc/ mon'))).toEqual(['BTC/MON', 'cbBTC/MON']);
     expect(MARKETS.filter((m) => matchPair(m, '/mon')).every((m) => m.endsWith('/MON'))).toBe(true);
-    expect(MARKETS.filter((m) => matchPair(m, 'tsla/'))).toEqual(MARKETS.filter((m) => m.startsWith('TSLAx/')));
+    expect(MARKETS.filter((m) => matchPair(m, 'tsla/'))).toEqual(MARKETS.filter((m) => m.split('/')[0].endsWith('TSLAx')));
     expect(groupPairs(MARKETS, 'nope')).toEqual([]);
   });
 });

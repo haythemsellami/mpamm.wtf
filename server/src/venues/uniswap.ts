@@ -72,10 +72,10 @@ const poolIdOf = (k: PoolKey) => keccak256(encodeAbiParameters(
  *  exist precisely to disambiguate wrappers); stables' display symbols equal
  *  their TOKENS keys. A pair whose side resolves to nothing is SKIPPED — an
  *  entry missing here silently omits that whole market from the baseline. */
-const DISPLAY_TOKEN: Record<string, string> = { ETH: 'WETH', BTC: 'WBTC', cbBTC: 'CBBTC', XAUt: 'XAUT0', SPYx: 'SPYX', QQQx: 'QQQX', EWYx: 'EWYX', NVDAx: 'NVDAX', TSLAx: 'TSLAX', wANTx: 'WANTX' };
+const DISPLAY_TOKEN: Record<string, string> = { ETH: 'WETH', BTC: 'WBTC', cbBTC: 'CBBTC', XAUt: 'XAUT0' };
 function currencyFor(displaySym: string): { addr: `0x${string}`; dec: number; tok: string } | undefined {
   if (displaySym === 'MON') return { addr: NATIVE_MON as `0x${string}`, dec: 18, tok: 'MON' };
-  const key = DISPLAY_TOKEN[displaySym] ?? displaySym;
+  const key = DISPLAY_TOKEN[displaySym] ?? displaySym.toUpperCase();
   const t = TOKENS[key];
   return t ? { addr: t.address, dec: t.decimals, tok: key } : undefined;
 }

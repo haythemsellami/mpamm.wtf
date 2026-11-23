@@ -406,29 +406,35 @@ describe('live startup archive gate', () => {
     } finally { source.store.close(); }
   });
 
-  it('a share wrapper leaving parity drops its pair from the markout ring and is noted once; the return is announced', async () => {
+  it('a rebase clears the old share-price samples; a missing rate suppresses the reference until recovery', async () => {
     const { source } = await setup();
     const { publicClient } = await import('../chain/rpc.js');
+    const { TOKENS } = await import('@shared');
     let perShare = 10n ** 18n;
-    (publicClient as any).multicall = vi.fn(async ({ contracts }: any) => contracts.map(() => ({ status: 'success', result: perShare })));
+    (publicClient as any).multicall = vi.fn(async ({ contracts }: any) => contracts.map((c: any) => ({
+      status: 'success', result: c.address === TOKENS.WANTX.address ? perShare : 10n ** 18n,
+    })));
     const referenceNotes = () => source.notes.list().filter((n: StateNote) => n.code.startsWith('reference.')).map((n: StateNote) => n.code);
     const seed = () => { for (const market of ['wANTx/USDC', 'MON/USDC']) source.midHist.set(market, [{ t: Date.now(), mid: 2 }]); };
     try {
-      await source.refreshWrapperParity();
+      await source.refreshWrapperRates();
       seed();
-      await source.refreshWrapperParity();
+      await source.refreshWrapperRates();
       expect([...source.midHist.keys()].sort()).toEqual(['MON/USDC', 'wANTx/USDC']);
       expect(referenceNotes()).toEqual([]);
 
       perShare = 1_003_456_000_000_000_000n;   // a rebase: samples taken since the last read used the old rate
-      await source.refreshWrapperParity();
-      await source.refreshWrapperParity();
+      await source.refreshWrapperRates();
+      await source.refreshWrapperRates();
       expect([...source.midHist.keys()]).toEqual(['MON/USDC']);
+      expect(referenceNotes()).toEqual([]);
+      perShare = 0n;
+      await source.refreshWrapperRates();
       expect(referenceNotes()).toEqual(['reference.parity']);
-      expect(source.notes.list().find((n: StateNote) => n.code === 'reference.parity')).toMatchObject({ level: 'warn', msg: expect.stringContaining('1 wANTx = 1.003456 underlying') });
+      expect(source.notes.list().find((n: StateNote) => n.code === 'reference.parity')).toMatchObject({ level: 'warn', msg: expect.stringContaining('wANTx has no fresh positive convertToAssets rate') });
 
       perShare = 10n ** 18n;
-      await source.refreshWrapperParity();
+      await source.refreshWrapperRates();
       expect(referenceNotes()).toEqual(['reference.recovered']);
     } finally { source.store.close(); }
   });
@@ -436,7 +442,7 @@ describe('live startup archive gate', () => {
   it('marks nothing against a share-wrapper pair once its confirmed rate has expired, before any refresh reports it', async () => {
     const { source } = await setup();
     const { publicClient } = await import('../chain/rpc.js');
-    const { WRAPPER_PARITY_MAX_AGE_MS } = await import('../wrapper-parity.js');
+    const { WRAPPER_RATES_MAX_AGE_MS } = await import('../wrapper-rates.js');
     (publicClient as any).multicall = vi.fn(async ({ contracts }: any) => contracts.map(() => ({ status: 'success', result: 10n ** 18n })));
     const fill = (id: string, market: string, ts: number): Fill => ({
       id, ts, venueId: 'test-venue', market, side: 'buy', category: 'DIRECT', usd: 100, baseAmount: 100,
@@ -454,16 +460,16 @@ describe('live startup archive gate', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       const confirmedAt = Date.now();
-      await source.refreshWrapperParity();
+      await source.refreshWrapperRates();
       // every read after that one fails, and no refresh runs again in this test:
       // only the clock can withdraw the reference
       (publicClient as any).multicall = vi.fn(async () => { throw new Error('HTTP 429'); });
 
-      vi.setSystemTime(confirmedAt + WRAPPER_PARITY_MAX_AGE_MS);            // the last instant it is trusted
+      vi.setSystemTime(confirmedAt + WRAPPER_RATES_MAX_AGE_MS);            // the last instant it is trusted
       const before = await age('before');
       expect(before.wrapped.markoutsBps).toEqual(Array(5).fill(10_000));
 
-      vi.setSystemTime(confirmedAt + WRAPPER_PARITY_MAX_AGE_MS + 1);
+      vi.setSystemTime(confirmedAt + WRAPPER_RATES_MAX_AGE_MS + 1);
       const after = await age('after');
       expect(after.wrapped.markoutsBps).toEqual([null, null, null, null, null]);
       expect(source.dirtyCurves.has('after')).toBe(false);
@@ -475,14 +481,14 @@ describe('live startup archive gate', () => {
   it('a share-wrapper pair keeps no sample across a gap in its reference, even one no fill was pending for', async () => {
     const { source } = await setup();
     const { publicClient } = await import('../chain/rpc.js');
-    const { WRAPPER_PARITY_MAX_AGE_MS } = await import('../wrapper-parity.js');
+    const { WRAPPER_RATES_MAX_AGE_MS } = await import('../wrapper-rates.js');
     const answers = async ({ contracts }: any) => contracts.map(() => ({ status: 'success', result: 10n ** 18n }));
     (publicClient as any).multicall = vi.fn(answers);
     const ring = (market: string) => (source.midHist.get(market) ?? []).map((sample: { t: number }) => sample.t);
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
-      await source.refreshWrapperParity();
-      const expiry = Date.now() + WRAPPER_PARITY_MAX_AGE_MS;          // the last instant the confirmed rate is trusted
+      await source.refreshWrapperRates();
+      const expiry = Date.now() + WRAPPER_RATES_MAX_AGE_MS;          // the last instant the confirmed rate is trusted
       (publicClient as any).multicall = vi.fn(async () => { throw new Error('HTTP 429'); });
       vi.setSystemTime(expiry - 1_000); source.sampleReferences();
       vi.setSystemTime(expiry); source.sampleReferences();
@@ -496,7 +502,7 @@ describe('live startup archive gate', () => {
       // a minute later a read lands and the reference is back
       vi.setSystemTime(expiry + 60_000);
       (publicClient as any).multicall = vi.fn(answers);
-      await source.refreshWrapperParity();
+      await source.refreshWrapperRates();
       source.sampleReferences();
       vi.setSystemTime(expiry + 63_000); source.sampleReferences();
       expect(ring('wANTx/USDC')).toEqual([expiry + 60_000, expiry + 63_000]);

@@ -1,13 +1,8 @@
-// A share-wrapper pair (wANTx/USDC) is benchmarked against the UNDERLYING's
-// book at one underlying per share. These cover the one place that fact is
-// checked: what counts as parity, what a failed or stale read does, and the
-// notes around it. The registry and adapter ends are in
-// venues/__tests__/reference.xstocks.test.ts and metric.discovery.test.ts.
 import { describe, expect, it } from 'vitest';
-import { PAIRS, TOKENS, pairOf } from '@shared';
+import { TOKENS, pairOf } from '@shared';
 import {
-  WRAPPER_PARITY_MAX_AGE_MS, WrapperParity, createParityReporter, parityWrappersOf, wrapperAtParity,
-} from '../wrapper-parity.js';
+  WRAPPER_RATES_MAX_AGE_MS, WrapperRates, createWrapperRateReporter, shareWrappersOf,
+} from '../wrapper-rates.js';
 
 const ONE = 10n ** 18n;
 const DRIFT = 1_003_456_000_000_000_000n;   // what wQQQx read on 2026-11-09
@@ -28,88 +23,73 @@ const reader = (answer: () => bigint | null | 'throw') => {
   };
 };
 
-describe('wrapperAtParity', () => {
-  it('holds at exactly one underlying per share — wANTx as read on 2026-11-20', () => {
-    expect(wrapperAtParity(ONE, 18)).toBe(true);
-  });
-  it('tolerates the wei of rounding a rebasing underlying leaves, in either direction', () => {
-    expect(wrapperAtParity(ONE - 1n, 18)).toBe(true);
-    expect(wrapperAtParity(ONE + 10n ** 13n, 18)).toBe(true);    // 0.1 bp: the edge of the band
-  });
-  it('fails on a real rebase and just past the band', () => {
-    expect(wrapperAtParity(DRIFT, 18)).toBe(false);
-    expect(wrapperAtParity(ONE + 10n ** 13n + 1n, 18)).toBe(false);
-    expect(wrapperAtParity(ONE / 2n, 18)).toBe(false);
-  });
-});
-
 describe('which pairs are gated', () => {
-  it('only a pair that trades a parityWrapper token — today wANTx/USDC alone', () => {
-    expect(parityWrappersOf(WANTX)).toEqual(['WANTX']);
-    expect(PAIRS.filter((p) => parityWrappersOf(p).length).map((p) => p.symbol)).toEqual(['wANTx/USDC']);
-    expect(new WrapperParity().tokens()).toEqual(['WANTX']);
+  it('reads the ten listed wrapper contracts and leaves unwrapped books alone', () => {
+    const keys = new WrapperRates().tokens();
+    expect(keys.sort()).toEqual(['WANTX', 'WEWYX', 'WMUX', 'WNVDAX', 'WQQQX', 'WSKHYX', 'WSMHX', 'WSPCXX', 'WSPYX', 'WTSLAX']);
+    for (const key of keys) expect(shareWrappersOf(pairOf(`${TOKENS[key].symbol}/USDC`)!)).toEqual([key]);
   });
   it('never a pair without one, read or not: cbBTC is parity by redemption, not by a rate', () => {
-    const parity = new WrapperParity();
+    const parity = new WrapperRates();
     for (const symbol of ['MON/USDC', 'cbBTC/USDC', 'SPYx/USDC', 'BTC/USDC']) expect(parity.valid(pairOf(symbol)!)).toBe(true);
   });
 });
 
-describe('WrapperParity: fail closed, but not on one dropped read', () => {
+describe('WrapperRates: fail closed, but not on one dropped read', () => {
   it('has no reference before the first read', () => {
-    const parity = new WrapperParity();
+    const parity = new WrapperRates();
     expect(parity.valid(WANTX)).toBe(false);
-    expect(parity.why(WANTX)).toBe('wANTx has not answered convertToAssets');
+    expect(parity.why(WANTX)).toBe('wANTx has no fresh positive convertToAssets rate');
   });
 
   it('reads convertToAssets(1 share) of the wrapper itself, and stands at exactly one underlying', async () => {
-    const parity = new WrapperParity();
+    const parity = new WrapperRates();
     const r = reader(() => ONE);
     await parity.refresh(r);
-    expect(r.calls.map((c) => [c.address, c.functionName, c.args[0]])).toEqual([[TOKENS.WANTX.address, 'convertToAssets', ONE]]);
+    expect(r.calls.map((c) => [c.address, c.functionName, c.args[0]])).toEqual(parity.tokens().map((k) => [TOKENS[k].address, 'convertToAssets', ONE]));
     expect(parity.why(WANTX)).toBeNull();
   });
 
-  it('has no reference once the rate leaves one, and says what it read', async () => {
-    const parity = new WrapperParity();
+  it('uses the observed non-unit rate after a rebase', async () => {
+    const parity = new WrapperRates();
     await parity.refresh(reader(() => ONE));
     await parity.refresh(reader(() => DRIFT));
-    expect(parity.why(WANTX)).toBe('1 wANTx = 1.003456 underlying');
+    expect(parity.rate('WANTX')).toBe(1.003456);
     expect(parity.valid(MON)).toBe(true);
   });
 
   it('keeps the last answer through failed reads, whether the call or the whole request failed', async () => {
     const { c, now } = clock();
-    const parity = new WrapperParity(now);
+    const parity = new WrapperRates(now);
     await parity.refresh(reader(() => ONE));
     c.t += 60_000; await parity.refresh(reader(() => null));
     c.t += 60_000; await parity.refresh(reader(() => 'throw'));
     expect(parity.valid(WANTX)).toBe(true);
   });
 
-  it('a failed read never revives an off-parity verdict either', async () => {
+  it('keeps a non-unit rate through a dropped read', async () => {
     const { c, now } = clock();
-    const parity = new WrapperParity(now);
+    const parity = new WrapperRates(now);
     await parity.refresh(reader(() => DRIFT));
     c.t += 60_000; await parity.refresh(reader(() => null));
-    expect(parity.why(WANTX)).toBe('1 wANTx = 1.003456 underlying');
+    expect(parity.rate('WANTX')).toBe(1.003456);
   });
 
   it('expires a good answer that nothing has confirmed for too long, and recovers on the next read', async () => {
     const { c, now } = clock();
-    const parity = new WrapperParity(now);
+    const parity = new WrapperRates(now);
     await parity.refresh(reader(() => ONE));
-    c.t += WRAPPER_PARITY_MAX_AGE_MS;
+    c.t += WRAPPER_RATES_MAX_AGE_MS;
     await parity.refresh(reader(() => 'throw'));
     expect(parity.valid(WANTX)).toBe(true);                 // exactly at the limit
     c.t += 1;
-    expect(parity.why(WANTX)).toBe('wANTx has not answered convertToAssets');
+    expect(parity.why(WANTX)).toBe('wANTx has no fresh positive convertToAssets rate');
     await parity.refresh(reader(() => ONE));
     expect(parity.valid(WANTX)).toBe(true);
   });
 });
 
-describe('WrapperParity: overlapping reads (one slower than the refresh interval)', () => {
+describe('WrapperRates: overlapping reads (one slower than the refresh interval)', () => {
   /** a client whose answer lands only when `land(rate)` is called */
   const slow = () => {
     let land!: (rate: bigint | null) => void;
@@ -119,31 +99,31 @@ describe('WrapperParity: overlapping reads (one slower than the refresh interval
 
   it('an older request landing late does not put its rate back over a newer off-parity answer', async () => {
     const { c, now } = clock();
-    const parity = new WrapperParity(now);
+    const parity = new WrapperRates(now);
     const first = slow();
     const pending = parity.refresh(first);                 // sent while the rate was still 1
     c.t += 60_000;
     await parity.refresh(reader(() => DRIFT));             // the next tick lands first: a rebase
-    expect(parity.why(WANTX)).toBe('1 wANTx = 1.003456 underlying');
+    expect(parity.rate('WANTX')).toBe(1.003456);
     c.t += 5_000;
     first.land(ONE); await pending;
-    expect(parity.why(WANTX)).toBe('1 wANTx = 1.003456 underlying');
+    expect(parity.rate('WANTX')).toBe(1.003456);
   });
 
   it('nor does a late off-parity answer undo a newer good one', async () => {
     const { c, now } = clock();
-    const parity = new WrapperParity(now);
+    const parity = new WrapperRates(now);
     const first = slow();
     const pending = parity.refresh(first);
     c.t += 60_000;
     await parity.refresh(reader(() => ONE));
     first.land(DRIFT); await pending;
-    expect(parity.valid(WANTX)).toBe(true);
+    expect(parity.rate('WANTX')).toBe(1);
   });
 
   it('a late answer still counts when the request sent after it got none', async () => {
     const { c, now } = clock();
-    const parity = new WrapperParity(now);
+    const parity = new WrapperRates(now);
     const first = slow();
     const pending = parity.refresh(first);
     c.t += 60_000;
@@ -154,7 +134,7 @@ describe('WrapperParity: overlapping reads (one slower than the refresh interval
 
   it('an answer is as old as its request: four minutes in flight leaves it one minute of trust', async () => {
     const { c, now } = clock();
-    const parity = new WrapperParity(now);
+    const parity = new WrapperRates(now);
     const first = slow();
     const pending = parity.refresh(first);
     c.t += 4 * 60_000;
@@ -172,9 +152,9 @@ describe('parity notes', () => {
     const state: { why: string | null } = { why: null };
     const log: string[] = [];
     const dropped: string[] = [];
-    const report = createParityReporter({ why: (pair) => (pair.symbol === 'wANTx/USDC' ? state.why : null) }, {
+    const report = createWrapperRateReporter({ rate: () => 1, why: (pair) => (pair.symbol === 'wANTx/USDC' ? state.why : null) }, {
       warn: (m) => log.push(`warn ${m}`), clear: (m) => log.push(`clear ${m}`), announce: (m) => log.push(`announce ${m}`),
-      unreferenced: (market) => dropped.push(market),
+      invalidateSamples: (market) => dropped.push(market),
     });
     return { state, log, dropped, report };
   };
@@ -188,17 +168,17 @@ describe('parity notes', () => {
 
   it('warns once for the episode, names the rate, and tells the caller to drop the pair’s samples every time', () => {
     const { state, log, dropped, report } = setup();
-    state.why = '1 wANTx = 1.003456 underlying';
+    state.why = 'wANTx returned zero';
     report(); report(); report();
     expect(log).toHaveLength(1);
-    expect(log[0]).toMatch(/^warn wANTx\/USDC has no reference — 1 wANTx = 1\.003456 underlying/);
+    expect(log[0]).toMatch(/^warn wANTx\/USDC has no reference — wANTx returned zero/);
     expect(log[0]).toMatch(/No venue is quoted on it and its fills are not marked out \(they are still counted\)/);
     expect(dropped).toEqual(['wANTx/USDC', 'wANTx/USDC', 'wANTx/USDC']);
   });
 
   it('retracts the exact warning and announces the return only when the RATE is back', () => {
     const { state, log, report } = setup();
-    state.why = '1 wANTx = 1.003456 underlying';
+    state.why = 'wANTx returned zero';
     report();
     const warned = log[0].slice('warn '.length);
     // a read that failed in between is not a return to parity
@@ -206,14 +186,14 @@ describe('parity notes', () => {
     expect(log).toHaveLength(1);
     state.why = null;
     report(); report();
-    expect(log.slice(1)).toEqual([`clear ${warned}`, 'announce wANTx/USDC has its kraken reference again — the wrapper is back at one underlying per share']);
+    expect(log.slice(1)).toEqual([`clear ${warned}`, 'announce wANTx/USDC has its kraken reference again — the wrapper conversion rate is available']);
   });
 
   it('a changed cause replaces the line instead of stacking a second one', () => {
     const { state, log, report } = setup();
-    state.why = 'wANTx has not answered convertToAssets';
+    state.why = 'wANTx has no fresh positive convertToAssets rate';
     report();
-    state.why = '1 wANTx = 1.003456 underlying';
+    state.why = 'wANTx returned zero';
     report();
     expect(log.map((l) => l.split(' ')[0])).toEqual(['warn', 'clear', 'warn']);
     expect(log[1].slice('clear '.length)).toBe(log[0].slice('warn '.length));

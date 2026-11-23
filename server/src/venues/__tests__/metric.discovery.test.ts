@@ -114,7 +114,7 @@ interface StubOpts {
   currentProvider?: (pool: string) => string;
   oracleOf?: (provider: string) => string | null;
   /** the frame's pair-terms reference mid (default 1 for every market; 0 =
-   *  the pair has no reference: closed market, or a wrapper off parity). */
+   *  the pair has no reference: closed market, or a missing wrapper rate). */
   pairMid?: (market: string) => number;
   /** quoter: [amountIn used, amountOut] per call (default: full fill at 1:1). */
   quote?: (args: readonly unknown[]) => { status: 'success'; result: [bigint, bigint] } | { status: 'failure'; error?: Error };
@@ -280,8 +280,7 @@ describe('Metric v1 discovery (factory enumeration)', () => {
   });
 });
 
-// Whether wANTx is worth one ANTx is the REFERENCE's question (wrapper-parity.ts):
-// off parity the pair has no mid, and the adapter sees that as any missing anchor.
+// The reference registry handles share conversion. The adapter sees a missing rate as a missing mid.
 describe('Metric v1 share-wrapper base (wANTx): the reference decides, not the adapter', () => {
   const quoted = async (a: ReturnType<typeof createMetricAdapter>, ctx: any) => [...new Set((await a.quote!(ctx, [100], 1n)).map((r) => r.market))];
 

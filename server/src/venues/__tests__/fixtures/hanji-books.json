@@ -1,6 +1,6 @@
 {
-  "recordedAt": "2026-10-13T08:05:15.673Z",
-  "method": "FastQuoterHelper.assembleOrderbooksFromOrders(proxy, 60) eth_call at each pinned Monad block (archive RPC); no transactions.",
+  "recordedAt": "2026-11-23T16:31:09.000Z",
+  "method": "assembleOrderbooksFromOrders(proxy, 60) eth_call at each pinned Monad block (archive RPC) on the FastQuoterHelper, or on the book's own `helper` where one is given (the xStock deployments); no transactions.",
   "books": [
     {
       "block": 110682151,
@@ -155,6 +155,42 @@
           "31918",
           "1",
           "1"
+        ]
+      ]
+    },
+    {
+      "block": 124766750,
+      "market": "wMUx/USDC",
+      "proxy": "0x403A596d1E9e0ed4b7b2fEcD2c22580CD5388AB7",
+      "helper": "0x4A92a35eE23E07B3ba1C9D954DEA315Dd91030c9",
+      "result": [
+        [
+          "70950",
+          "70928",
+          "70893",
+          "70808",
+          "70382"
+        ],
+        [
+          "1138",
+          "1138",
+          "3417",
+          "5132",
+          "573"
+        ],
+        [
+          "70981",
+          "71003",
+          "71038",
+          "71123",
+          "71549"
+        ],
+        [
+          "3751",
+          "3751",
+          "11254",
+          "16881",
+          "1875"
         ]
       ]
     }

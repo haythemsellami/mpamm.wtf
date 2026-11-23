@@ -113,3 +113,22 @@ describe('Hanji XAUt/USDC decode (recorded logs)', () => {
     expect(sell.execPx).toBeCloseTo(4158.1900, 3);
   });
 });
+
+it('decodes a wMUx sale in wrapper units at the gross USDC execution price', async () => {
+  // Monad block 124766671, OrderPlaced log 167. The wrapper Transfer into the
+  // CLOB is 95200000000000000 wei and the USDC payout is 67612846 after fees.
+  const log = {
+    address: '0x16ec8f28325b6dbf171c28056814a1f3bafb5100',
+    transactionHash: '0xc6627e8b42f106d02117ff1372b7451e22a46a5a166026c5c258163499f0a2ca',
+    blockNumber: 124766671n, logIndex: 167,
+    args: { initiator: '0x403A596d1E9e0ed4b7b2fEcD2c22580CD5388AB7', isAsk: true, price: 1n,
+      aggressive_shares: 952n, aggressive_value: 67619608n, aggressive_fee: 6762n },
+  };
+  const adapter = createHanjiAdapter();
+  await adapter.discover(ctx);
+  const [fill] = await adapter.decode(ctx, { orderPlaced: [log] as any }, Number, new Set());
+  expect(fill).toMatchObject({ market: 'wMUx/USDC', side: 'sell' });
+  expect(fill.baseAmount).toBeCloseTo(0.0952, 12);
+  expect(fill.usd).toBeCloseTo(67.619608, 9);
+  expect(fill.execPx).toBeCloseTo(67.619608 / 0.0952, 9);
+});

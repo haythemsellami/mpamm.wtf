@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mids = vi.hoisted(() => new Map<string, number>());
 const walked = vi.hoisted(() => [] as string[]);   // every symbol a mock feed walked
-const walk = (symbol: string, side: string, size: number) => { walked.push(symbol); return { price: mids.get(symbol)! * (side === 'buy' ? 1.001 : 0.999), filledBase: size, filledFull: true }; };
-vi.mock('../../kraken.js', () => ({ KrakenFeed: class { mid(s: string) { return mids.get(s) ?? 0; } walk = walk; changePct() { return 3; } } }));
+const walkedSizes = vi.hoisted(() => [] as number[]);
+const walk = (symbol: string, side: string, size: number) => { walked.push(symbol); walkedSizes.push(size); return { price: mids.get(symbol)! * (side === 'buy' ? 1.001 : 0.999), filledBase: size, filledFull: true }; };
+vi.mock('../../kraken.js', () => ({ KrakenFeed: class { settledMid(s: string) { return mids.get(s) ?? 0; } mid(s: string) { return mids.get(s) ?? 0; } walk = walk; changePct() { return 3; } } }));
 vi.mock('../../binance.js', () => ({ BinanceFeed: class { mid(s: string) { return mids.get(s) ?? 0; } walk = walk; changePct() { return 2; } } }));
 vi.mock('../../bybit.js', () => ({ BybitFeed: class {
   mid() { return mids.get('MONUSDT') ?? 0; }
@@ -10,6 +11,7 @@ vi.mock('../../bybit.js', () => ({ BybitFeed: class {
   walk(side: string, size: number) { return walk('MONUSDT', side, size); }
   changePct() { return 1; }
 } }));
+import { UsdPricer } from '../../pricer.js';
 import { createReferenceRegistry } from '../reference.js';
 import { supportsHistoricalReference, pairMidSeries } from '../../history/cex.js';
 import { config } from '../../config.js';
@@ -87,23 +89,28 @@ describe('xStock pair terms', () => {
     expect(row.askPx).toBeCloseTo(800 * 1.001 / 1.002 * (1 + config.krakenXstockTakerBps / 1e4), 10);
     expect(row.bidPx).toBeCloseTo(800 * 0.999 / 1.002 * (1 - config.krakenXstockTakerBps / 1e4), 10);
   });
-  it('gives a share-wrapper pair the underlying book at one per share, and nothing at all while parity is not vouched for', () => {
-    mids.set('ANTx/USD', 91.5);
-    const state = { ok: true };
-    const r = createReferenceRegistry({ valid: (pair) => pair.symbol !== 'wANTx/USDC' || state.ok });
-    expect(r.midForPair('wANTx/USDC')).toBeCloseTo(91.5 / 1.002, 10);
-    expect(r.quote([100], new Set(['wANTx/USDC']))).toHaveLength(1);
-    state.ok = false;
-    // no mid = no bps anchor for any adapter and no markout sample; no walk rows either
-    expect(r.midForPair('wANTx/USDC')).toBe(0);
-    expect(r.quote([100], new Set(['wANTx/USDC', 'SPYx/USDC'])).map((row) => row.market)).toEqual(['SPYx/USDC']);
-    // the asset's USD stays: it sizes and values, it is not a bps anchor
-    expect(r.assetUsd('ANTx')).toBe(91.5);
+  it('converts the Kraken mid and walk to share units and sizes the Hanji leg in shares', () => {
+    const rate = 1.25;
+    const r = createReferenceRegistry({ rate: (token) => token === 'WQQQX' ? rate : 1 });
+    const px = 700 * rate / 1.002;
+    expect(r.midForPair('wQQQx/USDC')).toBeCloseTo(px, 10);
+    expect(r.midForPair('QQQx/USDC')).toBeCloseTo(700 / 1.002, 10);
+    const pricer = new UsdPricer(r.assetUsd, r.midForPair, r.settledUsd);
+    expect(pricer.tokenForUsd('WQQQX', 875)).toBe(1);
+    expect(pricer.tokenForUsd('QQQX', 875)).toBe(1.25);
+    expect(pricer.usdForToken('WQQQX', 2)).toBe(1750);
+    walkedSizes.length = 0;
+    const [row] = r.quote([875], new Set(['wQQQx/USDC']));
+    expect(walkedSizes).toEqual([1.25, 1.25]);  // the Kraken book is in underlying units
+    expect(row.askPx).toBeCloseTo(px * 1.001 * (1 + config.krakenXstockTakerBps / 1e4), 9);
+    expect(row.bidPx).toBeCloseTo(px * 0.999 * (1 - config.krakenXstockTakerBps / 1e4), 9);
   });
   it('fails closed by default: the process-wide parity state has read nothing in a fresh process', () => {
     mids.set('ANTx/USD', 91.5);
     const r = createReferenceRegistry();
     expect(r.midForPair('wANTx/USDC')).toBe(0);
+    expect(r.assetUsd('ANTx')).toBe(0);
+    expect(r.quote([100], new Set(['wANTx/USDC']))).toEqual([]);
     expect(r.midForPair('SPYx/USDC')).toBeGreaterThan(0);
   });
   it('distinguishes unsupported xStock archives from existing crypto histories', async () => {

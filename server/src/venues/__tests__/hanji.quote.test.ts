@@ -24,10 +24,11 @@ const configRows = new Map(configFixture.markets.map((m) => [m.address.toLowerCa
   [2, 3, 6, 7].includes(i) ? v : BigInt(v))]));
 
 const bookFixture = JSON.parse(readFileSync(new URL('./fixtures/hanji-books.json', import.meta.url), 'utf8')) as {
-  books: Array<{ block: number; market: string; proxy: string; result: string[][] }>;
+  books: Array<{ block: number; market: string; proxy: string; helper?: string; result: string[][] }>;
 };
 
 const MIDS: Record<number, Record<string, number>> = {
+  124766750: { 'wMUx/USDC': 709.655 }, // recorded BBO midpoint, per wrapped unit
   110682151: { 'MON/USDC': 0.032328, 'cbBTC/MON': 2655237.9 },
   110960000: { 'MON/USDC': 0.029299 }, // bid ladder empty: just under the best ask
   112661510: { 'MON/USDC': 0.0266755 },
@@ -37,11 +38,11 @@ const SIZES = [100, 1_000, 10_000, 100_000];
 async function quoteAt(block: number, market: string): Promise<QuoteRow[]> {
   const mids = MIDS[block];
   const monUsd = mids['MON/USDC'];
-  const usdPer: Record<string, number> = { WMON: monUsd, CBBTC: (mids['cbBTC/MON'] ?? 0) * monUsd };
+  const usdPer: Record<string, number> = { WMUX: mids['wMUx/USDC'], WMON: monUsd, CBBTC: (mids['cbBTC/MON'] ?? 0) * monUsd };
   const multicall = async ({ contracts }: any) => contracts.map((c: any) => {
     if (c.functionName === 'getConfig') return { status: 'success', result: configRows.get(c.address.toLowerCase()) };
     const book = bookFixture.books.find((b) => b.block === block && b.proxy.toLowerCase() === c.args[0].toLowerCase());
-    if (!book) return { status: 'failure', error: new Error('no recorded book') };
+    if (!book || (book.helper && book.helper !== c.address)) return { status: 'failure', error: new Error('no recorded book') };
     return { status: 'success', result: book.result.map((a) => a.map(BigInt)) };
   });
   const ctx = {
@@ -105,4 +106,14 @@ describe('Hanji quote walk ignores far-tick stub orders', () => {
     expect(r).toMatchObject({ oneSided: true, filledFull: true, bidPx: 0, bidBps: 0, spreadBps: 0 });
     expect(r.askPx).toBeCloseTo(0.0293 * 1.0001, 12);
   });
+});
+
+it('quotes the wMUx proxy through its stock helper in USDC per wrapped token', async () => {
+  const [row] = await quoteAt(124766750, 'wMUx/USDC');
+  // $100 buys ~0.141 shares. The ask fits at level one; the bid walks two levels.
+  const shares = 100 / 709.655;
+  const bid = (0.1138 * 709.50 + (shares - 0.1138) * 709.28) / shares;
+  expect(row.askPx).toBeCloseTo(709.81 * 1.0001, 9);
+  expect(row.bidPx).toBeCloseTo(bid * 0.9999, 9);
+  expect(row.filledFull).toBe(true);
 });

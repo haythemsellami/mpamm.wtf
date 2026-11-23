@@ -5,7 +5,7 @@ import { BybitFeed, type WalkResult } from '../bybit.js';
 import { BinanceFeed } from '../binance.js';
 import { KrakenFeed } from '../kraken.js';
 import type { ReferenceRegistry } from './adapter.js';
-import { WRAPPER_PARITY, type WrapperParity } from '../wrapper-parity.js';
+import { WRAPPER_RATES, type WrapperRates } from '../wrapper-rates.js';
 
 // Published advanced-trader tiers; the name carries the fee assumption into
 // every chip/legend. Kraken xStocks have their own schedule, not crypto fees.
@@ -29,11 +29,10 @@ const KRAKEN_VENUE: VenueMeta = { id: 'kraken', name: 'Kraken Pro xStocks ($1B+)
  * cost of executing every leg of a cross-asset hedge. cbBTC retains the
  * explicit parity assumption because there is no traded cbBTC/BTC basis.
  *
- * A share-wrapper pair (wANTx/USDC) is the underlying's book at one underlying
- * per share, and has no reference at all while `parity` cannot vouch for that
- * rate (wrapper-parity.ts): no mid, no walk rows, the same as a cold leg.
+ * Wrapped xStocks are priced per ERC-4626 share. Kraken book quantities
+ * remain in underlying units when the reference is walked for a USD notional.
  */
-export function createReferenceRegistry(parity: Pick<WrapperParity, 'valid'> = WRAPPER_PARITY): ReferenceRegistry {
+export function createReferenceRegistry(rates: Pick<WrapperRates, 'rate'> = WRAPPER_RATES): ReferenceRegistry {
   const stableQuoted = PAIRS.filter((p) => p.quoteKind !== 'asset');
   const crosses = (cex: 'bybit' | 'binance') => [...new Set(stableQuoted
     .filter((p) => cexForBase(p.base) === cex).map((p) => TOKENS[p.quote]?.usdtCross)
@@ -64,6 +63,10 @@ export function createReferenceRegistry(parity: Pick<WrapperParity, 'valid'> = W
     const a = assetOf(base);
     return a ? feeds[a.cex].mid(a.cexSymbol) : 0;
   };
+  const shareRate = (base: string): number => {
+    const a = assetOf(base);
+    return a ? rates.rate(a.token) : 0;
+  };
   const wrapFactor = (pair: Pair): number => {
     const sym = wrapBasisFor(pair);
     if (!sym) return 1;
@@ -73,7 +76,7 @@ export function createReferenceRegistry(parity: Pick<WrapperParity, 'valid'> = W
   const quoteLeg = (pair: Pair): number => {
     const usdBase = cexForBase(pair.base) === 'kraken';
     if (pair.quoteKind === 'asset') {
-      let m = rawMid(pair.quote);
+      let m = rawMid(pair.quote) * shareRate(pair.quote);
       const usdQuote = cexForBase(pair.quote) === 'kraken';
       if (usdBase !== usdQuote) {
         const usdtUsd = kraken.mid('USDT/USD');
@@ -97,9 +100,8 @@ export function createReferenceRegistry(parity: Pick<WrapperParity, 'valid'> = W
     return m > 0 ? m : 0;
   };
   const pairFactor = (pair: Pair): number => {
-    if (!parity.valid(pair)) return 0; // a wrapper off parity: nothing like-for-like to quote
     const q = quoteLeg(pair);
-    return q > 0 ? wrapFactor(pair) / q : 0;
+    return q > 0 ? shareRate(pair.base) * wrapFactor(pair) / q : 0;
   };
 
   return {
@@ -107,14 +109,14 @@ export function createReferenceRegistry(parity: Pick<WrapperParity, 'valid'> = W
     stop() { bybit.stop(); binance.stop(); kraken.stop(); },
     metas: () => [BYBIT_VENUE, BINANCE_VENUE, KRAKEN_VENUE].map((v) => ({ ...v, takerBps: feeds[v.id as CexId].feeBps() })),
     refVenueIdForBase: (base) => cexForBase(base),
-    assetUsd: (base) => rawMid(base), // Kraken is USD; crypto sizing keeps USDT≈$1
+    assetUsd: (base) => rawMid(base) * shareRate(base), // Kraken is USD; crypto sizing keeps USDT≈$1
     marketClosed(base) {
       const a = assetOf(base);
       return a?.cex === 'kraken' ? kraken.marketClosed(a.cexSymbol) : false;
     },
     settledUsd(base) {
       const a = assetOf(base);
-      return a?.cex === 'kraken' ? kraken.settledMid(a.cexSymbol) : rawMid(base);
+      return a?.cex === 'kraken' ? kraken.settledMid(a.cexSymbol) * shareRate(base) : rawMid(base);
     },
     midForPair(market) {
       const pair = pairOf(market);
@@ -145,7 +147,7 @@ export function createReferenceRegistry(parity: Pick<WrapperParity, 'valid'> = W
         const feeBps = feed.feeBps();
         const fee = feeBps / 1e4;
         for (const size of sizesUsd) {
-          const walkKey = `${a.key}|${size}`;
+          const walkKey = `${a.cex}|${a.cexSymbol}|${size}`;
           let walked = walks.get(walkKey);
           if (!walked) {
             const base = size / mid;

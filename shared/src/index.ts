@@ -105,16 +105,8 @@ export interface TokenInfo {
    *  asset's canonical wrapper (e.g. cbBTC → 'BTC'; WBTC is already
    *  ASSETS.BTC.token). Lets `assetForToken` price alternative wrappers. */
   baseAsset?: string;
-  /** An ERC-4626 share over the asset the CEX actually lists, referenced at
-   *  PARITY (1 share = 1 underlying) because no exchange quotes the
-   *  wrapped/unwrapped basis. Parity is a fact about the chain, not a
-   *  constant: a rebase of the underlying moves `convertToAssets(1 share)`
-   *  (wQQQx read 1.003456 on 2026-11-09), and every bps published against the
-   *  reference is then off by that much. The core reads the ratio
-   *  (server/src/wrapper-parity.ts) and a pair trading such a token has NO
-   *  reference while it is off 1 or unread: no venue is quoted on it and none
-   *  of its fills is marked out. Nothing for an adapter to do. */
-  parityWrapper?: boolean;
+  /** Symbol of the rebasing xStock held by this ERC-4626 share. Both tokens have 18 decimals. */
+  underlyingXStock?: string;
 }
 
 /**
@@ -126,6 +118,24 @@ export interface TokenInfo {
  */
 export const NATIVE_MON = '0x0000000000000000000000000000000000000000';
 export const WMON_ADDRESS = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a';
+
+// Each wrapped unit has its own market and price history. Keep ANTx's existing asset key.
+const wrappedXStocks = [
+  ['TSLAx', '0xc3fdbe3a68ee5de461d30415a8165cf9aefe1171'],
+  ['NVDAx', '0xa8ddb5cd96b5222afe198316e9a57caa642850d5'],
+  ['SPYx', '0xe7e553cd128f0011777323a0b44a7b96ea1cb540'],
+  ['QQQx', '0x4c1ae29c159838fc1b224636e28e086eb69101f7'],
+  ['EWYx', '0x021b40617982074748c81a19d22046cc2548c3be'],
+  ['ANTx', '0xabec6aeab037b77c09a2a99264f9c81a35b02649'],
+  ['SPCXx', '0x8e2eed8b8b5e13ea7bf38e50d7821d2c57309072'],
+  ['MUx', '0xe2047ee3bddb5c99ae428ab83df63f8730698e30'],
+  ['SKHYx', '0x6215a58ed045d71f2561aaabe54f4c885c522998'],
+  ['SMHx', '0x23c4bddea5e7e284fb4027c6050bc5e6f7fae23f'],
+] as const;
+const shareAssets = wrappedXStocks.map(([underlying, address]) => {
+  const symbol = `w${underlying}`;
+  return { underlying, address, symbol, token: symbol.toUpperCase(), key: underlying === 'ANTx' ? 'ANTx' : symbol };
+});
 
 export const TOKENS: Record<string, TokenInfo> = {
   USDC: { symbol: 'USDC', address: '0x754704bc059f8c67012fed69bc8a327a5aafb603', decimals: 6, stable: true, usdtCross: 'USDCUSDT', usdCross: 'USDC/USD' },
@@ -158,12 +168,8 @@ export const TOKENS: Record<string, TokenInfo> = {
   EWYX: { symbol: 'EWYx', address: '0x299c95eb52bfd5bc98d924bce17197b64864589b', decimals: 18, stable: false },
   NVDAX: { symbol: 'NVDAx', address: '0xc845b2894dbddd03858fd2d643b4ef725fe0849d', decimals: 18, stable: false },
   TSLAX: { symbol: 'TSLAx', address: '0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0', decimals: 18, stable: false },
-  // Wrapped Anthropic xStock: the ERC-4626 share over the rebasing ANTx
-  // (asset() = 0x909369940f22dc1c143ac78753a33f41597138b1), and the only form
-  // of it trading on Monad (Metric pool #11, 2026-11-19). Kraken's book is the
-  // UNWRAPPED ANTx/USD, so amounts are shares and the reference is parity:
-  // convertToAssets(1e18) read exactly 1e18 at block 123,797,243 (2026-11-20).
-  WANTX: { symbol: 'wANTx', address: '0xabec6aeab037b77c09a2a99264f9c81a35b02649', decimals: 18, stable: false, parityWrapper: true },
+  ...Object.fromEntries(shareAssets.map(({ token, symbol, address, underlying }) =>
+    [token, { symbol, address, decimals: 18, stable: false, underlyingXStock: underlying }])),
   // Coinbase wrapped BTC (Hanji's BTC representation). NO CEX lists a cbBTC/BTC
   // basis pair, so cbBTC pairs use wrapBasisOverride: '' (parity — Coinbase 1:1
   // mint/redeem keeps it ~sub-bp) with a UI caveat, unlike WBTC's live WBTCBTC.
@@ -225,10 +231,8 @@ export const ASSETS: Record<string, AssetSpec> = {
   EWYx: { key: 'EWYx', symbol: 'EWYx', token: 'EWYX', cex: 'kraken', cexSymbol: 'EWYx/USD' },
   NVDAx: { key: 'NVDAx', symbol: 'NVDAx', token: 'NVDAX', cex: 'kraken', cexSymbol: 'NVDAx/USD' },
   TSLAx: { key: 'TSLAx', symbol: 'TSLAx', token: 'TSLAX', cex: 'kraken', cexSymbol: 'TSLAx/USD' },
-  // Its on-chain token is the WRAPPER (TOKENS.WANTX): no venue trades the
-  // unwrapped ANTx on Monad. If one lists it, ANTx becomes the canonical token
-  // and wANTx an alternative wrapper (`baseAsset`), as cbBTC is to WBTC.
-  ANTx: { key: 'ANTx', symbol: 'ANTx', token: 'WANTX', cex: 'kraken', cexSymbol: 'ANTx/USD' },
+  ...Object.fromEntries(shareAssets.map(({ key, symbol, token, underlying }): [string, AssetSpec] =>
+    [key, { key, symbol, token, cex: 'kraken', cexSymbol: `${underlying}/USD` }])),
 };
 
 /** A tracked market: a base asset vs a quote. `symbol` is the display key used
@@ -303,10 +307,7 @@ export const PAIRS: Pair[] = [
     { symbol: `${base}/BTC`, base, quote: 'BTC', quoteKind: 'asset', quoteWrapBasisSymbol: 'WBTCBTC' },
     { symbol: `${base}/cbBTC`, base, quote: 'BTC', quoteKind: 'asset' },
   ]),
-  // Named for the token that trades (the wrapper), referenced by the ANTx
-  // book at parity: '' is the same "no CEX basis market" marker as cbBTC's, and
-  // it puts the parity caveat on the Execution tab. Only the pair with a pool.
-  { symbol: 'wANTx/USDC', base: 'ANTx', quote: 'USDC', wrapBasisOverride: '' },
+  ...shareAssets.map(({ key, symbol }) => ({ symbol: `${symbol}/USDC`, base: key, quote: 'USDC' })),
 ];
 
 /** Market symbols (derived from the pair registry). */
@@ -866,7 +867,7 @@ export type NoteCode =
   | 'gas.range.skipped' | 'gas.destination.conflict' | 'gas.mode.mixed'
   // CEX reference feeds
   | 'reference.starved' | 'reference.recovered'
-  // a share-wrapper pair without its reference (server/src/wrapper-parity.ts);
+  // a share-wrapper pair without its reference (server/src/wrapper-rates.ts);
   // its return is a 'reference.recovered'
   | 'reference.parity'
   // SQLite store migrations / persistence, and the boot swap-count reconcile
