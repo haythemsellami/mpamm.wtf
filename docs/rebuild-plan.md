@@ -48,7 +48,7 @@ path for M8.
 | M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | All 11 ported and identical; p90 gate blocked on RPC cores |
 | M11 | Stream and REST | 4 | M8, M10 | — | Today's REST and v2 stream ported; compact protocol left |
 | M12 | Frontend on the new stream | 4 | M11 | — | Today's dashboard runs unchanged on the Rust API |
-| M13 | Data migration and replication | 4 | M8 | object storage bucket | Migration tool built |
+| M13 | Data migration and replication | 4 | M8 | object storage bucket | Rehearsed on production's database; replication left |
 | M14 | Operations readiness | 4 | M11, M13 | hot fallback WS, TLS hostname, on-call | Alerts, notes, runbooks written; fallback mode left |
 | M15 | Switch-over and merge (phase-4 gate) | 4 | M12–M14 | DNS change | Not started |
 | M16 | Edge relays (optional) | 5 | M15 | relay hosting | Only if chosen |
@@ -468,8 +468,14 @@ browser, with proposal → paint p50 at most 200 ms near the host.
       and curves, daily tables, every meta key under `v1:`, the fills cursor as the commit
       cursor), verified row for row; rehearsed on a database built from production's
       public API (`server/scripts/v1-db-from-api.ts`): 50,000 trades in 2 s
-- [ ] Rehearse on a snapshot of production's database (needs a read of the Railway
-      volume), then verify a sample against the chain
+- [x] Rehearse on a snapshot of production's database: 2026-11-27 16:09 UTC, a read-only
+      `VACUUM INTO` copy streamed off Railway (sha256 checked, the container copy removed).
+      526,378 trades, 1,586 volume and 1,642 gas rows, 216 meta keys, verified field for
+      field in 49 s. The service then ran on it on the host as the shadow run: it resumed
+      at the snapshot's cursor + 1, replayed the 808 blocks since from the ring and was at
+      the tip within 45 s (0 gaps); all 372 closed days match production's `/api/volume`
+      exactly ($1,599,917,586.58, 3,261,628 swaps), the dashboard shows the full history, and
+      the trades it decodes from that block on are diffed against production hourly
 - [ ] Continuous replication of the new database off the host (write-ahead-log copy to
       object storage and a replica on Railway) *(DevOps: bucket)*
 - [ ] Restore drill: rebuild the database from the copy on another machine
