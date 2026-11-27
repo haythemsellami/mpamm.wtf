@@ -20,7 +20,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use mpamm_chain::{parse_b32, parse_quantity, quantity, Rpc};
-use mpamm_core::{ChainCx, DecodeCx, FinalLog, Pricer, VenueState};
+use mpamm_core::{ChainCx, DecodeCx, FinalLog, Pricer, VenueError, VenueState};
 use mpamm_pricing::{Fees, Prices};
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::hex;
@@ -290,8 +290,24 @@ async fn decode_range(
     for n in wanted {
         let block = fetcher.block(n, &watch).await.map_err(|e| format!("block {n}: {e}"))?;
         let pricer = prices.at(block.time_ms());
-        let cx = DecodeCx { registry, pricer: &pricer as &dyn Pricer, state: &state };
-        fills.extend(venue.decode(&cx, &block).map_err(|e| format!("block {n}: {e}"))?);
+        // A venue that holds a block until discovery has read the chain
+        // (Clober's unclassified books) is retried after one, as the service
+        // retries the held block and rediscovers.
+        let mut retries = 0;
+        let decoded = loop {
+            let cx = DecodeCx { registry, pricer: &pricer as &dyn Pricer, state: &state };
+            match venue.decode(&cx, &block) {
+                Ok(f) => break f,
+                Err(VenueError::NotReady(e)) if retries < 5 => {
+                    retries += 1;
+                    eprintln!("block {n}: {e}; rediscovering");
+                    state.take_pending();
+                    venue.discover(&ChainCx { rpc: &rpc, registry }).await.map_err(|e| e.to_string())?;
+                }
+                Err(e) => return Err(format!("block {n}: {e}")),
+            }
+        };
+        fills.extend(decoded);
         // Venue state persists across blocks, as committed in the service.
         let writes = state.take_pending();
         state.apply(&writes);
