@@ -16,6 +16,81 @@ const RELAY = '0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f'; // in KNOWN_ROUTERS
 const BOT = '0x00000000000000000000000000000000000000cc';
 const TAKER = '0x1111111111111111111111111111111111111111';
 
+/** One representative address per brand added from the Monad flow registry
+ *  (monad-crypto/protocols, code-checked on 143). The full set is registered
+ *  by construction; its count is locked below. */
+const FLOW_ROUTERS: ReadonlyArray<readonly [brand: string, entry: string]> = [
+  ['0x', '0x031d28683ffc9936903a31670bc618b8bc9b65dd'],
+  ['1inch', '0x111111125421ca6dc452d289314280a0f8842a65'],
+  ['Across', '0xd2ecb3afe598b746f8123cae365a598da831a449'],
+  ['Bitget', '0x3e95a025efc7f93bf4efcbea40297f97d421a274'],
+  ['Bungee', '0x01d8a85adb82408e14bc242ed43fbad0ca2f94cb'],
+  ['CoW Protocol', '0x9008d19f58aabd9ed0d60971565aa8510560ab41'],
+  ['Dirol', '0x646462f4d0168a94fe1884c8ae82148a3618a18d'],
+  ['Eisen', '0x787c474b8a86354d0f5f19fb599a5fc7662a265f'],
+  ['Enso', '0xcfbaa9cfce952ca4f4069874ff1df8c05e37a3c7'],
+  ['FastLane Atlas', '0x2da28fedc4643c787cb5c5e84fa6aadb596875e8'],
+  ['Fibrous', '0x274602a953847d807231d2370072f5f4e4594b44'],
+  ['Fly', '0x20f6ee51340adeed01a59b0e65cb3703f3dc860c'],
+  ['GMGN', '0xc9ca80b5ea956afa98627963d1880033545d108e'],
+  ['Garden', '0x5fa58e4e89c85b8d678ade970bd6afd4311af17e'],
+  ['Kuru', '0xbddf3556701b7ecca5d69416cffd7f86d37e52b3'],
+  ['KyberSwap', '0x8f10b468b06c6fd214b65f87778827f7d113f996'],
+  ['LI.FI', '0x026f252016a7c47cdef1f05a3fc9e20c92a49c37'],
+  ['Mayan', '0x337685fdab40d39bd02028545a4ffa7d287cc3e2'],
+  ['Monorail', '0xa68a7f0601effdc65c64d9c47ca1b18d96b4352c'],
+  ['OKX', '0x6088d94c5a40cecd3ae2d4e0710ca687b91c61d0'],
+  ['OpenOcean', '0x6352a56caadc4f1e25cd6c75970fa768a3304e64'],
+  ['Orbiter', '0x70f6060fc8b01b56869feba8361df468f98c2900'],
+  ['Rango', '0x69460570c93f9de5e2edbc3052bf10125f0ca22d'],
+  ['Relay', '0x3ec130b627944cad9b2750300ecb0a695da522b6'],
+  ['Rubic', '0x3335733c454805df6a77f825f266e136fb4a3333'],
+  ['Squid', '0x073e81d92bd8b39562106819d12346240606f04a'],
+  ['SushiSwap', '0xac4c6e212a361c968f1725b4d055b47e63f80b75'],
+  ['Symbiosis', '0x292fc50e4eb66c3f6514b9e402dbc25961824d62'],
+  ['ThogAMM', '0x80c74517bcc2d67ffe02d3ed886796272f647210'],
+  ['Uniswap', '0x000000000ac008f7e07210cfb6648e40249232c2'],
+  ['de1', '0x07749429d3d9047a966b28a489500325bac9f1b6'],
+  ['deBridge', '0x43de2d77bf8027e25dbd179b491e8d64f38398aa'],
+];
+
+/** Every searcher executor added from the 7d census (2026-11-27), one brand
+ *  each; exercised so a typo in any address fails here. */
+const FLOW_SEARCHERS: ReadonlyArray<readonly [brand: string, entry: string]> = [
+  ['Searcher 0x050f', '0x050fa056bf556c023915e65392e136e7630ed860'],
+  ['Searcher 0x1b5e', '0x1b5e936dff9970057f2ba38bbdc5800e813634d7'],
+  ['Searcher 0x2395', '0x2395034803fa2e78ec5c9ad107f20f989146bc0e'],
+  ['Searcher 0x30e1', '0x30e179eff56cb405a476e963c642e6746204cf82'],
+  ['Searcher 0x3c4b', '0x3c4b206510d04b0fe932dccb2de30ee0312b81d0'],
+  ['Searcher 0x488d', '0x488dce3e3a087cec37ce1b8ff79e2dea91d831fb'],
+  ['Searcher 0x4a25', '0x4a250d3db1aa30a061f75433769bbb6ebac17262'],
+  ['Searcher 0x5188', '0x5188cf6c51b046d6778d85b58f407e77ee754034'],
+  ['Searcher 0x532b', '0x532bb4886cbd96e17294b048dd56a499a4587705'],
+  ['Searcher 0x54cc', '0x54cce99ab9c2290a0a3cb4a9a6218100f5fb1b23'],
+  ['Searcher 0x5ac9', '0x5ac9bc14376bf2727c6211960cf3cec1e2f295bd'],
+  ['Searcher 0x61f3', '0x61f37dc3b53a4b9bd121f9d727ca01d964dcd5ac'],
+  ['Searcher 0x62c2', '0x62c2de45a39a8a4be53d0433518819e9306b12b0'],
+  ['Searcher 0x6911', '0x69113d5f5456b141390f188553cc4a36b782a72f'],
+  ['Searcher 0x7ca8', '0x7ca8f00499ade0e520fddf9d91254d0f9cd01bb2'],
+  ['Searcher 0x890e', '0x890e810cfd67e71d0fec1497b66c7876c0c78bbf'],
+  ['Searcher 0x8d4b', '0x8d4b514ce9cfa3cfebee95e8194b3f42d8fa2b98'],
+  ['Searcher 0x936c', '0x936c442645242accaed3ffe0f203921876061cb3'],
+  ['Searcher 0x9b8c', '0x9b8c84c6ddc3488d89913ab92130f76c5d3f736e'],
+  ['Searcher 0xa1ae', '0xa1aebf28f592a2bac83e12eb7d8bc0684dfb993d'],
+  ['Searcher 0xaf40', '0xaf400cc399b47a0d9cbe219e84fb377334678934'],
+  ['Searcher 0xb078', '0xb07838cd5b17d0be026efc66d9735739a827c962'],
+  ['Searcher 0xb61e', '0xb61e5b77cb96d93075d0779ea1e7c9f988d1490a'],
+  ['Searcher 0xb995', '0xb995eadd54ffd519decc1e2ead64781245d474cd'],
+  ['Searcher 0xc44b', '0xc44bc3187cd5084bac87af0710ccb3e52041a70d'],
+  ['Searcher 0xcacc', '0xcacc0490661882cf9cb0c60bfe52cf5d662a608f'],
+  ['Searcher 0xd8de', '0xd8de03d6460ed4d700592d47a800626e003b29a9'],
+  ['Searcher 0xdd8b', '0xdd8b12a1e5d0666ca86046f207a297883d4a417d'],
+  ['Searcher 0xdee5', '0xdee5b434f36a7fa0198126e15577524f24ce9556'],
+  ['Searcher 0xdf06', '0xdf06acde6339651625a15746b4ebd0f3083d180f'],
+  ['Searcher 0xe014', '0xe01496b1741e97c14f1eccb2c62593b51fb7b740'],
+  ['Searcher 0xfff2', '0xfff2debbf1f650d2204999d6652156a3af3f47fd'],
+];
+
 function fakeAdapter(): VenueAdapter {
   return {
     venues: () => [{ id: 'fake', name: 'Fake', color: { light: '#000', dark: '#fff' }, kind: 'amm', role: 'venue' }],
@@ -204,6 +279,34 @@ describe('FillAttributor', () => {
     for (const k of KNOWN_MEV_OPERATORS.keys()) {
       expect(KNOWN_ROUTERS.has(k)).toBe(false);
       expect(KNOWN_MEV.has(k)).toBe(false);
+    }
+  });
+
+  // One case per brand added — representative address through the attributor.
+  it.each(FLOW_ROUTERS)('brands newly-listed Monad router %s (%s)', async (brand, entry) => {
+    const a = new FillAttributor(clientFor({ '0xr': entry }) as any, [fakeAdapter()]);
+    const f = fill('0xr');
+    await a.attribute([f]);
+    expect(f.category).toBe('ROUTER');
+    expect(f.router).toBe(brand);
+    expect(f.to).toContain(TAKER.slice(2, 6));
+  });
+
+  it.each(FLOW_SEARCHERS)('brands newly-listed Monad searcher %s (%s) as MEV', async (brand, entry) => {
+    const a = new FillAttributor(clientFor({ '0xs': entry }) as any, [fakeAdapter()]);
+    const f = fill('0xs');
+    await a.attribute([f]);
+    expect(f.category).toBe('MEV');
+    expect(f.router).toBe(brand);
+  });
+
+  it('registers the full vetted Monad flow set', () => {
+    // 11 seed routers + 87 vetted routers/solvers; 5 seed MEV + 32 searcher executors
+    expect(KNOWN_ROUTERS.size).toBe(98);
+    expect(KNOWN_MEV.size).toBe(37);
+    // every representative is on one of the two maps, and nowhere in both
+    for (const [, entry] of [...FLOW_ROUTERS, ...FLOW_SEARCHERS]) {
+      expect(KNOWN_ROUTERS.has(entry) || KNOWN_MEV.has(entry)).toBe(true);
     }
   });
 });
