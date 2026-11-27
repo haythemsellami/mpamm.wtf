@@ -40,14 +40,14 @@ path for M8.
 | M2 | CI, release artifacts, deploy script | 1 | — | registry credentials (publishing only); the unit edit (deploy rehearsal) | In progress |
 | M3 | Service skeleton: crates, config, store, commit pipeline, registry | 2 | M1 | — | Done (types' TS export moves to M11) |
 | M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | Done (archives → M7; USD parity checked in M8) |
-| M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | 8 of 10 decoding venues done |
+| M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | All 11 ported; verify-venue and adapters.md left |
 | M6 | Exact gas and attribution | 2 | M5 | — | Built; 3-day recount pending |
 | M7 | Markouts and analytics | 2 | M4, M5 | — | Built; archives pending |
-| M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Shadow run under way; parity tool built |
+| M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Shadow run with all 11 venues under way; parity hourly |
 | M9 | Quote engine | 3 | M3, M4 | — | Built; depth curves pending |
-| M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | In progress |
-| M11 | Stream and REST | 4 | M8, M10 | — | In progress |
-| M12 | Frontend on the new stream | 4 | M11 | — | Not started |
+| M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | 6 of 11 quote ports done |
+| M11 | Stream and REST | 4 | M8, M10 | — | Today's REST and v2 stream ported; compact protocol left |
+| M12 | Frontend on the new stream | 4 | M11 | — | Today's dashboard runs unchanged on the Rust API |
 | M13 | Data migration and replication | 4 | M8 | object storage bucket | Migration tool built |
 | M14 | Operations readiness | 4 | M11, M13 | hot fallback WS, TLS hostname, on-call | Not started |
 | M15 | Switch-over and merge (phase-4 gate) | 4 | M12–M14 | DNS change | Not started |
@@ -270,9 +270,13 @@ test ported:
 - [x] BTR (executors): 84 trades over 206,000 blocks identical (crypto-quoted USD within
       the live-price tolerance)
 - [x] Crystal (vault maker scope): no vault trade in the node's history; 18 fixture tests
-- [ ] Uniswap v4 (quote-only baseline: no trades; ported with its quotes in M10)
-- [ ] Clober (on-chain book classification, subgraph fallback)
-- [ ] Lunarbase (paused; decode only until it resumes)
+- [x] Uniswap v4 (quote-only baseline: no trades; ported with its quotes in M10)
+- [x] Clober (on-chain book classification; the subgraph fallback is not ported): 281
+      trades over 20,000 blocks of 2026-10 identical, bit for bit, on the public RPC (the
+      node's history starts later); a Take no seen Open or discovery answer settles holds
+      the block and asks for a rediscovery
+- [x] Lunarbase (paused; decode only until it resumes): 42 trades over 20,000 blocks of
+      2026-08 identical
 - [ ] `tools/verify-venue` (port of `verify-adapter`)
 - [ ] Rewrite `docs/adapters.md` for Rust venue modules
 
@@ -317,15 +321,20 @@ the precise anchor, and every analytics endpoint's numbers match today's.
 ### M8 · Shadow run and daily parity (phase-2 gate)
 
 - [ ] Run the service on the host with its own database beside today's production
-      (under way since 2026-11-27 with the 8 ported venues; the first hour found two bugs,
-      both fixed: gas rules read before WOOFi's decode had loaded its oracles held the first
-      block, and reads pinned to a just-proposed block failed until its state was readable)
+      (under way since 2026-11-27 09:04 UTC, all 11 venues since 09:36; the first hour
+      found two bugs, both fixed: gas rules read before WOOFi's decode had loaded its
+      oracles held the first block, and reads pinned to a just-proposed block failed until
+      its state was readable). First 5,586 blocks: 842 trades, every id and field identical
+      to production but 3 BTC/MON USD values priced at different moments (0.23–0.37%;
+      MON/USDC trades in the same second side with the service)
 - [ ] `tools/parity`: daily diff against today's system: trade id sets, USD per trade,
       volume and counts per venue-day; reports every difference with its cause
       (`mpamm-tools parity`: trades per venue over a common block window against
-      production's `/api/fills`; volume per venue-day still to add)
+      production's `/api/fills`, per venue-day volume on whole days against `/api/volume`,
+      crypto-quoted pricing drift reported apart; runs hourly on the host)
 - [ ] Exact-gas check against a chain recount for sampled days
-- [ ] Gap and restart drills during the run
+- [ ] Gap and restart drills during the run (restart 1, 2026-11-27: stopped at block
+      125,826,805, resumed at 125,826,806 from the ring, 0 gaps, 0 holds)
 
 **Done when:** 7 consecutive days with identical trade ids, USD and per-venue volume, and
 exact gas matching the recount. *(DevOps: env file with archive URLs.)*
@@ -352,12 +361,19 @@ pace with every block for 24 h without a missed job.
 ### M10 · Venue quote ports and same-block parity (phase-3 gate)
 
 - [ ] Port each venue's quote path (same order as M5); split Hanji's helper call and
-      Uniswap v4's 22M / 150M calls under 8.1M gas
+      Uniswap v4's 22M / 150M calls under 8.1M gas. Done: POE, Metric, WOOFi, BTR, Crystal,
+      Uniswap v4 (one leg per call; it also quotes WBTC/cbBTC, which today's 12-leg
+      multicalls lose to out-of-gas walkers). Left: Hanji, ThogAMM, Capricorn, Clober,
+      Lunarbase
+- [x] Every leg failing is the venue missing for that block, with the commonest reason;
+      a revert's reason travels with the error (`Error(string)`, `Panic`, custom selector)
+- [x] Reads pinned to a just-proposed block retry while its state is not yet readable
 - [x] Quote parity: `mpamm-tools capture-prices` freezes the reference, `quote-at` and
       `server/scripts/quote-at.ts` quote the same block with it, `compare-quotes.py` diffs
       every row (POE: identical)
-- [x] POE quotes
-- [ ] Per-venue timing on the host under live load
+- [x] POE quotes (identical); Metric and WOOFi (identical at 7 blocks); BTR and Crystal
+      (identical at 3 blocks); Uniswap v4 (identical at 3 blocks with one call per leg)
+- [ ] Per-venue timing on the host under live load (POE p90 ~10 ms in the shadow run)
 
 **Done when:** every venue's rows match today's at the same block, and per-venue p90 is at
 most 60 ms. *(DevOps: CPU set for the service.)*
@@ -372,6 +388,10 @@ most 60 ms. *(DevOps: CPU set for the service.)*
       `quotes` / `trades` / `depth` / `volume` / `state`, per-venue quote messages batched
       over 20 ms, merged snapshots, sequence numbers and resync, per-viewer backpressure
 - [ ] Dictionary build, hashing and serving; JS inflate on the client side
+- [x] Today's v2 stream and REST on axum (`crates/api`), with the service as its source
+      (`mpamm/src/source`): per-block quote frames, the execution history, the tape,
+      volume, the store's fills, gas and analytics; 26 unit, 22 REST and 16 stream tests,
+      plus the source end to end behind the real router
 - [ ] REST: every endpoint the UI uses today, with the rebuild's semantics
       (`/api/bootstrap`, `/api/markets`, `/api/quotes`, `/api/quotes/history`,
       `/api/quotes/stats`, `/api/fills`, `/api/volume`, `/api/gas`, `/api/venues`,
@@ -384,6 +404,9 @@ REST endpoint returns the same data as today's for the same window.
 
 ### M12 · Frontend on the new stream
 
+- [x] Today's dashboard on the Rust API unchanged: the four tabs live from the host's
+      shadow run (browser-checked), and today's browser suite (9 tests) against the API's
+      fake example, in CI (`npm -w web run test:e2e:rust`)
 - [ ] Stream client for the new protocol (dictionary, compact schema), keeping the
       SharedWorker connection
 - [ ] Adapter from the new messages to today's view models; per-channel stores
