@@ -388,7 +388,13 @@ pace with every block for 24 h without a missed job.
       concurrent batches of 25 and Uniswap's failing legs sitting out 25 blocks, every
       venue's p90 is within 60 ms and none is late (BTR 50, Uniswap 60, WOOFi 47, Crystal 41,
       POE 40, Metric 32). The fast venues slowed (POE 16 → 40) because every venue now
-      reaches the node's RPC at once and it runs on 4 cores: the CPU set is DevOps'
+      reaches the node's RPC at once and it runs on 4 cores: the CPU set is DevOps'.
+      With Hanji, ThogAMM and Capricorn quoting too (nine venues), every venue's p90 is
+      95–120 ms, under the 150 ms deadline but over 60: `monad-rpc` (pinned to 4 of the
+      host's 16 cores; execution has 7, consensus 4, the reader 1) spends ~450 ms of CPU
+      per block on the eth_calls, mostly ThogAMM's ~345 legs at ~0.4M gas and Uniswap's.
+      Today's production frame takes ~205 ms. Meeting 60 ms needs more RPC cores, fewer
+      legs (resting ThogAMM's "side off" legs too), or M17's in-process EVM
 
 **Done when:** every venue's rows match today's at the same block, and per-venue p90 is at
 most 60 ms. *(DevOps: CPU set for the service.)*
