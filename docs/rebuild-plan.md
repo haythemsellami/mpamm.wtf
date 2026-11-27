@@ -327,7 +327,11 @@ the precise anchor, and every analytics endpoint's numbers match today's.
       oracles held the first block, and reads pinned to a just-proposed block failed until
       its state was readable). First 5,586 blocks: 842 trades, every id and field identical
       to production but 3 BTC/MON USD values priced at different moments (0.23–0.37%;
-      MON/USDC trades in the same second side with the service)
+      MON/USDC trades in the same second side with the service). Over the first ~8 hours
+      (blocks 125,820,570–125,892,322) 9,000+ trades matched id for id: Hanji 6,952, WOOFi
+      494, Metric 452, ThogAMM 414, Capricorn 252, POE 208, BTR 142; the only gaps were 23
+      ThogAMM trades in the five xStocks production listed mid-run (#177), now in the
+      service's registry too, and the parity window restarts at its redeploy
 - [ ] `tools/parity`: daily diff against today's system: trade id sets, USD per trade,
       volume and counts per venue-day; reports every difference with its cause
       (`mpamm-tools parity`: trades per venue over a common block window against
