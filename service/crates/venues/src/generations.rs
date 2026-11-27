@@ -360,7 +360,7 @@ mod tests {
     async fn runs_every_discover_even_when_one_fails_then_surfaces_the_failure() {
         let (v, _, ok) =
             compose(Gen { addr: 1, discover_fails: true, ..Gen::default() }, Gen { addr: 2, ..Gen::default() });
-        let rpc = mpamm_chain::Rpc::new("test", "http://127.0.0.1:9", std::time::Duration::from_millis(10));
+        let rpc = mpamm_chain::Rpc::new("test", "", std::time::Duration::from_millis(10));
         let cx = ChainCx { rpc: &rpc, registry: Registry::get() };
         assert_eq!(v.discover(&cx).await, Err(VenueError::Chain("rpc".into())));
         assert_eq!(ok.discovered.load(Ordering::Relaxed), 1);
