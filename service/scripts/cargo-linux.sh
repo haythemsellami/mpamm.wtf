@@ -8,8 +8,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 docker build -q --platform linux/amd64 -t mpamm-service-build -f build/Dockerfile build >/dev/null
+# The whole repo is mounted: the service reads shared/registry.json.
 exec docker run --rm --platform linux/amd64 \
-  -v "$PWD":/src -w /src \
+  -v "$PWD/..":/src -w /src/service \
   -v mpamm-cargo-registry:/root/.cargo/registry \
   -v mpamm-cargo-git:/root/.cargo/git \
   -v mpamm-cargo-target:/target \

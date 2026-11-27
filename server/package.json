@@ -14,7 +14,8 @@
     "benchmark:runtime": "tsx scripts/benchmark-runtime.ts",
     "benchmark:markouts": "tsx scripts/benchmark-markouts.ts",
     "benchmark:heads": "tsx scripts/benchmark-heads.ts",
-    "benchmark:live": "tsx scripts/benchmark-live-stream.ts"
+    "benchmark:live": "tsx scripts/benchmark-live-stream.ts",
+    "registry:golden": "tsx scripts/registry-golden.ts"
   },
   "dependencies": {
     "@mpamm/shared": "*",
