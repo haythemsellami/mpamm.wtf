@@ -3,7 +3,7 @@
 # because the event ring's schema hash ties a reader build to a node version.
 [workspace]
 resolver = "2"
-members = ["reader", "crates/ring", "crates/chain", "crates/registry"]
+members = ["reader", "crates/ring", "crates/chain", "crates/registry", "crates/types", "crates/store"]
 
 [workspace.package]
 edition = "2021"
@@ -24,6 +24,7 @@ signal-hook = "0.3"
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 toml = "0.8"
 indexmap = { version = "2", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 codegen-units = 1
