@@ -5,9 +5,16 @@ the tasks in each, what "done" means, and what waits on DevOps. The spec says *w
 and *why*; this file says *how* and *in what order*. Tick a box when its work is on
 `v2` (PR #176); a milestone is done only when its **Done when** checks pass.
 
-Status as of 2026-11-27: M1's code is done and its 7-day gate run is under way on the
-node host (started 07:17 UTC, by hand until the unit edit lands); M2 is in place except
-the deploy rehearsal; M3 has started (ring, chain and registry crates).
+Status as of 2026-11-27 (evening): M1's 7-day gate run is under way on the node host
+(started 07:17 UTC, by hand until the unit edit lands). M2–M4 and M6 are in place; M5 has
+5 of 9 decoding venues ported and identical to today's on real blocks (the other 4 are
+being ported); M7's markouts, curves and analytics, M9's engine and M13's migration tool
+are built; M10 and M11 are under way.
+
+**The node keeps about 17 hours of history** (it served blocks from 125,604,242 when the
+head was 125,811,220). Repairs beyond that, a catch-up after a long outage, and history
+replays all need the hosted archive: the env file with its URL is now on the critical
+path for M8.
 
 ## Ground rules
 
@@ -33,15 +40,15 @@ the deploy rehearsal; M3 has started (ring, chain and registry crates).
 | M2 | CI, release artifacts, deploy script | 1 | — | registry credentials (publishing only); the unit edit (deploy rehearsal) | In progress |
 | M3 | Service skeleton: crates, config, store, commit pipeline, registry | 2 | M1 | — | Done (types' TS export moves to M11) |
 | M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | Done (archives → M7; USD parity checked in M8) |
-| M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | In progress |
-| M6 | Exact gas and attribution | 2 | M5 | — | Not started |
-| M7 | Markouts and analytics | 2 | M4, M5 | — | Not started |
+| M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | 5 of 9 decoding venues done |
+| M6 | Exact gas and attribution | 2 | M5 | — | Built; 3-day recount pending |
+| M7 | Markouts and analytics | 2 | M4, M5 | — | Built; archives pending |
 | M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Not started |
-| M9 | Quote engine | 3 | M3, M4 | — | Not started |
-| M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | Not started |
-| M11 | Stream and REST | 4 | M8, M10 | — | Not started |
+| M9 | Quote engine | 3 | M3, M4 | — | Built; depth curves pending |
+| M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | In progress |
+| M11 | Stream and REST | 4 | M8, M10 | — | In progress |
 | M12 | Frontend on the new stream | 4 | M11 | — | Not started |
-| M13 | Data migration and replication | 4 | M8 | object storage bucket | Not started |
+| M13 | Data migration and replication | 4 | M8 | object storage bucket | Migration tool built |
 | M14 | Operations readiness | 4 | M11, M13 | hot fallback WS, TLS hostname, on-call | Not started |
 | M15 | Switch-over and merge (phase-4 gate) | 4 | M12–M14 | DNS change | Not started |
 | M16 | Edge relays (optional) | 5 | M15 | relay hosting | Only if chosen |
@@ -240,15 +247,23 @@ Port in order of volume. Each venue: discovery (merging), sources (watch set), d
 generations, revisions, fixture tests (reuse `server/src/venues/__tests__/fixtures`;
 record new ones where a venue has none), `verify-venue` run on the live node.
 
+Proven with `mpamm-tools decode-range` against `server/scripts/decode-range.ts` over the
+same blocks of the live chain (`service/tools/compare-fills.py`), plus every TS fixture
+test ported:
+
 - [ ] Hanji (17 CLOBs, wrapped xStocks, FastLane quoters)
-- [ ] Metric (v0 decode-only generation, v1)
-- [ ] WOOFi
+- [x] Metric (v0 decode-only generation, v1, through a reusable generations composer):
+      920 trades over 100,000 blocks identical; v0 by its fixture (older than the node's
+      history)
+- [x] WOOFi: 624 trades over 100,000 blocks identical, 6 crypto-quoted markets bit-exact
 - [ ] ThogAMM (proxy upgrades, unwrapped xStocks still unlisted today)
-- [ ] POE (no fixtures today: record some)
+- [x] POE: 94 trades over 20,000 blocks identical; on the host its 3 live trades matched
+      production's id for id
 - [ ] Capricorn
-- [ ] BTR (executors)
-- [ ] Crystal (vault maker scope)
-- [ ] Uniswap v4 (hooks / pool discovery)
+- [x] BTR (executors): 84 trades over 206,000 blocks identical (crypto-quoted USD within
+      the live-price tolerance)
+- [x] Crystal (vault maker scope): no vault trade in the node's history; 18 fixture tests
+- [ ] Uniswap v4 (quote-only baseline: no trades; ported with its quotes in M10)
 - [ ] Clober (on-chain book classification, subgraph fallback)
 - [ ] Lunarbase (paused; decode only until it resumes)
 - [ ] `tools/verify-venue` (port of `verify-adapter`)
@@ -259,24 +274,35 @@ fills for one full recorded day match today's database id-for-id with exact USD.
 
 ### M6 · Exact gas and attribution
 
-- [ ] Gas destinations and relay rules from each venue's sources (FastLane handler word)
-- [ ] Cost per transaction = gas limit × price paid by type (legacy and access-list:
-      `gasPrice`; EIP-1559 and later: min(max fee, base fee + priority fee))
-- [ ] Gas written with the block's trades and cursor; method flag and cutover date stored
-- [ ] Attribution (router labels, FastLane category) from `TXN_HEADER_START`
-- [ ] Fallback path: exact gas from full blocks over RPC when the ring has a gap
+- [x] Gas rules from each venue: destinations, relays bound to their own targets
+      (FastLane handler word), and emitted logs (today's 'logs' mode)
+- [x] Cost per transaction = gas limit × price paid by type (legacy and access-list:
+      `gasPrice`; EIP-1559 and later: min(max fee, base fee + priority fee)); POE over
+      10,001 blocks equals the receipts recount exactly (`mpamm-tools gas-check`)
+- [x] Gas written with the block's trades and cursor; method flag (exact / estimate /
+      mixed) stored per venue-day
+- [x] Attribution (aggregators, MEV infrastructure, operators) from each transaction's
+      header in the final block: the lookup that could fail today can't
+- [x] Fallback path: a block read over RPC carries every transaction, so gas stays exact
+- [ ] Three sampled days recounted per venue, once every venue is ported
 
 **Done when:** exact gas for three sampled days equals an independent chain recount, and
 sits within today's estimate's error band per venue.
 
 ### M7 · Markouts and analytics
 
-- [ ] Markouts at 0 / 5 / 10 / 30 / 60 s anchored on `proposal_epoch_nanos`, against
-      the pair-terms reference from the exchange update history
-- [ ] Markout curves and the markout model version
-- [ ] Analytics: leaderboard windows (1 / 7 / 30 days), percentiles (exact, in a worker),
-      volume and gas series, quote stats
-- [ ] Flag trades whose time fell back to the block second (repaired over RPC)
+- [x] Markouts at 0 / 5 / 10 / 30 / 60 s at the proposal time, against the pair-terms
+      mid in effect then (every exchange update kept; outages and closures recorded, so no
+      price is carried across them). On the host, POE's markouts sat ~0.5 bp from
+      production's: production's Bybit USDC cross is frozen at its startup snapshot
+      (Bybit's spot ticker stream has no bid/ask); the rebuild reads the top of book.
+- [x] Markout curves (complete curves only, rounded as today)
+- [x] Analytics: leaderboard and markout-curve aggregation, identical to today's on
+      2,518 synthetic fills, every float bit-equal (`crates/analytics`)
+- [x] Trades carry their time source (proposal time, block second over RPC, migrated)
+- [ ] Archived exchange prices (`history/cex.ts`) for markouts of trades decoded after the
+      fact and for closed-day pricing
+- [ ] Quote stats (with the stream, M11)
 
 **Done when:** for a recorded day, markouts match today's within the expected shift from
 the precise anchor, and every analytics endpoint's numbers match today's.
@@ -298,15 +324,15 @@ exact gas matching the recount. *(DevOps: env file with archive URLs.)*
 
 ### M9 · Quote engine
 
-- [ ] One quote job per proposed block, started from the reader's "block executed" signal;
-      venues whose watched contracts changed go first; one job in flight per venue
-- [ ] Pinned reads on the local node with a short retry: a just-announced block's state is
-      readable 3–5 ms later (9 ms worst case, measured 2026-11-27)
-- [ ] Explicit gas ≤ 8.1M per call; JSON-RPC batches for independent calls
-- [ ] Per-venue deadline (150 ms default); late rows greyed for up to 3 blocks, never compared
-- [ ] Reference frame captured per job; CEX comparison columns per venue
+- [x] One quote job per fresh proposed block, started from the reader's "block executed"
+      signal; one job in flight per venue (a timed-out job is cancelled)
+- [x] Reads pinned to the block hash (EIP-1898)
+- [x] Explicit 8M gas on every call; JSON-RPC batches for independent calls
+- [x] Per-venue deadline (150 ms default); each venue published as it finishes
+- [x] Reference frame captured per job; CEX comparison columns per venue
+- [ ] Venues whose watched contracts changed go first
 - [ ] Depth curves at today's cadence
-- [ ] Per-venue timings on the health endpoint
+- [x] Per-venue timings on the health endpoint
 
 **Done when:** with stub venues, jobs start within 1 ms of `BLOCK_END` and the engine keeps
 pace with every block for 24 h without a missed job.
@@ -315,8 +341,10 @@ pace with every block for 24 h without a missed job.
 
 - [ ] Port each venue's quote path (same order as M5); split Hanji's helper call and
       Uniswap v4's 22M / 150M calls under 8.1M gas
-- [ ] `tools/quote-parity`: quote the same pinned block with today's adapter and the Rust
-      module, diff every row (within display precision)
+- [x] Quote parity: `mpamm-tools capture-prices` freezes the reference, `quote-at` and
+      `server/scripts/quote-at.ts` quote the same block with it, `compare-quotes.py` diffs
+      every row (POE: identical)
+- [x] POE quotes
 - [ ] Per-venue timing on the host under live load
 
 **Done when:** every venue's rows match today's at the same block, and per-venue p90 is at
@@ -356,8 +384,12 @@ browser, with proposal → paint p50 at most 200 ms near the host.
 
 ### M13 · Data migration and replication
 
-- [ ] `tools/migrate`: snapshot today's database, transform into the new schema (trades
-      with markouts and curves, daily tables, revision markers), verify against the chain
+- [x] `mpamm-tools migrate`: today's database into the new schema (trades with markouts
+      and curves, daily tables, every meta key under `v1:`, the fills cursor as the commit
+      cursor), verified row for row; rehearsed on a database built from production's
+      public API (`server/scripts/v1-db-from-api.ts`): 50,000 trades in 2 s
+- [ ] Rehearse on a snapshot of production's database (needs a read of the Railway
+      volume), then verify a sample against the chain
 - [ ] Continuous replication of the new database off the host (write-ahead-log copy to
       object storage and a replica on Railway) *(DevOps: bucket)*
 - [ ] Restore drill: rebuild the database from the copy on another machine
