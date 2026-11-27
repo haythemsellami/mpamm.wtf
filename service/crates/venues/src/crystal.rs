@@ -21,26 +21,38 @@
 //!           2026-11-07, since then relayed by FastLane's shared handler to the
 //!           keeper's own (EIP-7702) account, named in calldata word 5.
 //!
+//!   quotes: Crystal.getQuote, the market's own taker walk (maker rebate and
+//!           taker fee applied), so no client-side book model; the vault has
+//!           no quote view of its own. worstPrice bands the walk to
+//!           ±PER_SIDE_BAND_BPS of the pair mid.
+//!
 //! The vault can only trade its market, whose tokens are immutable, and can
 //! only move to a new market for the same pair: a vault leg on any market is
 //! WMON/USDC (verified at discovery, which holds the cursor until it has).
+//!
+//! Deadline: a frame is ONE round trip (every leg in one batch). Today's
+//! adapter, run against a hosted RPC at ~160–280 ms a round trip, missed the
+//! 250 ms quote deadline on some frames; on the service's own node that trip
+//! is local. A leg's walk is cheap: the whole book unbanded measured ~253k
+//! gas (2026-11-27), far under the 8M each read carries.
 
 use std::collections::HashSet;
 
 use alloy_primitives::{address, Address, U256};
 use async_trait::async_trait;
 use mpamm_core::{
-    ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasRelay, GasSources, HistoryRevision, Venue, VenueError,
+    ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasRelay, GasSources, HistoryRevision, QuoteCx, Venue,
+    VenueError,
 };
 use mpamm_registry::Registry;
 use mpamm_ring::{Addr, TopicFilter, WatchSet, B32};
-use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
 use parking_lot::RwLock;
 
 use crate::{
-    chain::{call, At},
-    logs,
-    util::{addr_hex, b32_hex, fill_id, short_hex, to_addr, to_f64},
+    chain::{call, call_many, At},
+    logs, quote_health,
+    util::{addr_hex, b32_hex, fill_id, from_addr, short_hex, to_addr, to_f64, to_units},
 };
 
 pub const ID: &str = "crystal";
@@ -57,6 +69,13 @@ const FASTLANE_TARGET_WORD: usize = 5;
 
 const BASE_TOK: &str = "WMON";
 const QUOTE_TOK: &str = "USDC";
+
+/// Per-side sanity band (bps from the pair mid), passed to getQuote as
+/// worstPrice. The book holds far-tick stub asks above the vault's ladder: at
+/// block 117,079,229 a $10k buy walked into them for a +6,500 bps "full"
+/// fill. With the band, a side whose in-band depth runs out is a PARTIAL
+/// (filledFull = false), and a side with none is absent.
+pub const PER_SIDE_BAND_BPS: f64 = 2_000.0;
 
 pub mod abi {
     alloy_sol_types::sol! {
@@ -77,6 +96,8 @@ pub mod abi {
             bool isAMMEnabled;
         }
         function getMarket(address market) view returns (MarketInfo info);
+        // Nonpayable on chain (it delegatecalls the market) but writes nothing.
+        function getQuote(address market, bool isBuy, bool isExactInput, bool isCompleteFill, uint256 size, uint256 worstPrice) view returns (uint256 amountIn, uint256 amountOut);
         event Fill(address indexed market, address indexed user, uint256 fillInfo, uint256 fillAmount);
         event Trade(address indexed market, address indexed user, bool isBuy, uint256 amountIn, uint256 amountOut, uint256 startPrice, uint256 endPrice);
 
@@ -85,7 +106,7 @@ pub mod abi {
         function baseAsset() view returns (address);
     }
 }
-use abi::{baseAssetCall, getMarketCall, marketCall, quoteAssetCall, MarketInfo, Trade};
+use abi::{baseAssetCall, getMarketCall, getQuoteCall, marketCall, quoteAssetCall, MarketInfo, Trade};
 
 /// The vault's market, as discovery verified it.
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +141,21 @@ pub fn meta() -> VenueMeta {
 /// `10^d` as JavaScript's `10 ** d` (exact for any token's decimals).
 fn pow10(d: u8) -> f64 {
     format!("1e{d}").parse().unwrap_or(f64::NAN)
+}
+
+/// A whole-number book price as the contract's integer: today's
+/// `BigInt(Math.floor(x))`, which throws on a non-finite value.
+fn book_px(x: f64) -> Result<U256, VenueError> {
+    if x.is_finite() && (0.0..2f64.powi(128)).contains(&x) {
+        Ok(U256::from(x as u128))
+    } else {
+        Err(VenueError::Chain(format!("Crystal Vault: worstPrice {x} is not a book price")))
+    }
+}
+
+/// Wall-clock milliseconds, today's `Date.now()`.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
 }
 
 /// Checks the vault's and its market's tokens against the registry (every
@@ -318,6 +354,119 @@ impl Venue for Crystal {
             )));
         }
         Ok(out)
+    }
+
+    /// Crystal.getQuote per size, exact input and banded, pinned to the
+    /// block: a buy spends `size` of USDC (the asks), a sell `size` of WMON
+    /// (the bids). The walk stops at worstPrice, so `amountIn` falls short of
+    /// the request when the in-band book runs out: a partial row.
+    async fn quote(&self, cx: &QuoteCx<'_>, sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        let Some(b) = self.book() else { return Ok(Vec::new()) };
+        let px_mid = cx.pricer.pair_mid(&b.symbol);
+        if px_mid <= 0.0 {
+            return Ok(Vec::new());
+        }
+        let band = PER_SIDE_BAND_BPS / 1e4;
+        let ask_limit = book_px((px_mid * (1.0 + band) * b.px_scale).floor())?;
+        let bid_limit = book_px((px_mid * (1.0 - band) * b.px_scale).ceil())?;
+        let dec = |k: &str| {
+            cx.registry.tokens.get(k).map(|t| t.decimals).ok_or_else(|| VenueError::Chain(format!("no token {k}")))
+        };
+        let (base_dec, quote_dec) = (dec(BASE_TOK)?, dec(QUOTE_TOK)?);
+        // Exact-input legs: a buy spends USDC, a sell spends WMON.
+        let legs: Vec<(f64, U256, U256)> = sizes_usd
+            .iter()
+            .map(|&size| {
+                (
+                    size,
+                    to_units(cx.pricer.token_for_usd(QUOTE_TOK, size), quote_dec),
+                    to_units(cx.pricer.token_for_usd(BASE_TOK, size), base_dec),
+                )
+            })
+            .filter(|(_, buy_in, sell_in)| !buy_in.is_zero() && !sell_in.is_zero())
+            .collect();
+        if legs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let market = from_addr(&b.market);
+        let calls: Vec<(Address, getQuoteCall)> = legs
+            .iter()
+            .flat_map(|&(_, buy_in, sell_in)| {
+                [
+                    (
+                        CRYSTAL,
+                        getQuoteCall {
+                            market,
+                            isBuy: true,
+                            isExactInput: true,
+                            isCompleteFill: false,
+                            size: buy_in,
+                            worstPrice: ask_limit,
+                        },
+                    ),
+                    (
+                        CRYSTAL,
+                        getQuoteCall {
+                            market,
+                            isBuy: false,
+                            isExactInput: true,
+                            isCompleteFill: false,
+                            size: sell_in,
+                            worstPrice: bid_limit,
+                        },
+                    ),
+                ]
+            })
+            .collect();
+        let res = call_many(cx.rpc, &calls, At::Hash(cx.block.hash)).await?;
+        // Every leg failing is the venue's outage. Legs that answer and fill
+        // nothing in band are the vault's state (an empty or far-priced
+        // ladder), not a fault: no row, no error.
+        quote_health::check_outage(&meta().name, &res)?;
+        let ts = now_ms();
+        // Today's `Number(raw) / 10 ** decimals`.
+        let human = |raw: U256, d: u8| to_f64(raw) / pow10(d);
+        let full = |spent: U256, req: U256| {
+            spent.saturating_mul(U256::from(1000u32)) >= req.saturating_mul(U256::from(999u32))
+        };
+        let mut rows = Vec::new();
+        let mut res = res.into_iter();
+        for &(size, buy_in, sell_in) in &legs {
+            let (buy, sell) = (res.next(), res.next());
+            // (amountIn, amountOut): a buy spends USDC for WMON, a sell the reverse.
+            let (buy_q, buy_b) = match buy {
+                Some(Ok(q)) => (q.amountIn, q.amountOut),
+                _ => (U256::ZERO, U256::ZERO),
+            };
+            let (sell_b, sell_q) = match sell {
+                Some(Ok(q)) => (q.amountIn, q.amountOut),
+                _ => (U256::ZERO, U256::ZERO),
+            };
+            let has_ask = !buy_q.is_zero() && !buy_b.is_zero();
+            let has_bid = !sell_b.is_zero() && !sell_q.is_zero();
+            if !has_ask && !has_bid {
+                continue;
+            }
+            let ask_px = if has_ask { human(buy_q, quote_dec) / human(buy_b, base_dec) } else { 0.0 };
+            let bid_px = if has_bid { human(sell_q, quote_dec) / human(sell_b, base_dec) } else { 0.0 };
+            rows.push(QuoteRow {
+                venue_id: ID.into(),
+                market: b.symbol.clone(),
+                size_usd: size,
+                bid_bps: if has_bid { (bid_px / px_mid - 1.0) * 1e4 } else { 0.0 },
+                ask_bps: if has_ask { (ask_px / px_mid - 1.0) * 1e4 } else { 0.0 },
+                bid_px,
+                ask_px,
+                spread_bps: if has_ask && has_bid { ((ask_px - bid_px) / px_mid) * 1e4 } else { 0.0 },
+                filled_full: (!has_ask || full(buy_q, buy_in)) && (!has_bid || full(sell_b, sell_in)),
+                one_sided: if has_ask && has_bid { None } else { Some(true) },
+                fee_bps: b.fee_bps,
+                cex_ask_bps: None,
+                cex_bid_bps: None,
+                ts,
+            });
+        }
+        Ok(rows)
     }
 
     fn markets(&self) -> Vec<String> {
