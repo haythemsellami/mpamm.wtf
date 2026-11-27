@@ -45,7 +45,7 @@ impl Venue for TestVenue {
         if let Some(n) = self.fail.lock().unwrap().get_mut(&b.number) {
             if *n > 0 {
                 *n -= 1;
-                return Err(VenueError::Decode("injected".into()));
+                return Err(VenueError::NotReady("injected".into()));
             }
         }
         cx.state.set("test", "last", &b.number.to_string());
@@ -202,6 +202,7 @@ async fn harness(fail_first: u32) -> Harness {
         watch: Arc::new(ArcSwap::from_pointee(watch)),
         state: Mutex::new(VenueState::default()),
         refetch_through: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        rediscover: Arc::new(tokio::sync::Notify::new()),
         stats: Arc::new(Stats::default()),
         committed: tx,
         retry_min: Duration::from_millis(10),
@@ -313,4 +314,22 @@ async fn blocks_copied_with_an_older_watch_set_are_read_over_rpc() {
     h.pipeline.process(Input::Final(ring_block(31, 1))).await;
     let v = h.pipeline.stats.view();
     assert_eq!((v.from_rpc, v.from_ring), (1, 1));
+}
+
+#[tokio::test]
+async fn a_held_block_is_read_again_once_discovery_grows_the_watch_set() {
+    let h = harness(0).await;
+    h.venue.fail.lock().unwrap().insert(40, 1);
+    // Rediscovery lands while block 40 is held: the watch set is replaced.
+    let watch = h.pipeline.watch.clone();
+    let notify = h.pipeline.rediscover.clone();
+    tokio::spawn(async move {
+        notify.notified().await;
+        let mut w = (*watch.load_full()).clone();
+        w.logs.insert([0xbb; 20], TopicFilter::Any);
+        watch.store(Arc::new(w));
+    });
+    h.pipeline.process(Input::Final(ring_block(40, 1))).await;
+    let v = h.pipeline.stats.view();
+    assert_eq!(v.from_rpc, 1, "the held block was read again over RPC: {v:?}");
 }

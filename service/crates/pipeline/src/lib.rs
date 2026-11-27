@@ -112,6 +112,9 @@ pub struct Pipeline {
     /// with a smaller watch set than the venues now declare: they are read
     /// over RPC with the current one instead.
     pub refetch_through: Arc<AtomicU64>,
+    /// Asks for a rediscovery now: a venue that isn't ready to decode a block
+    /// (a pool announced in it that discovery hasn't read yet) holds it.
+    pub rediscover: Arc<tokio::sync::Notify>,
     pub stats: Arc<Stats>,
     pub committed: broadcast::Sender<Committed>,
     /// Backoff bounds for holds.
@@ -148,11 +151,25 @@ impl Pipeline {
         };
         let number = block.number;
 
+        let mut block = block;
+        let mut watch_used = self.watch.load_full();
         let mut hold = Hold::new(self, format!("decode block {number}"));
         let (fills, state, gas) = loop {
             match self.decode(&block) {
                 Ok(f) => break f,
-                Err(e) => hold.failed(e).await,
+                Err((e, not_ready)) => {
+                    if not_ready {
+                        self.rediscover.notify_one();
+                    }
+                    hold.failed(e).await;
+                    // Discovery grew the watch set while the block was held:
+                    // its copy may lack the new sources' logs, so read it again.
+                    let now = self.watch.load_full();
+                    if !Arc::ptr_eq(&now, &watch_used) {
+                        watch_used = now;
+                        block = self.repair(number, MissingReason::Incomplete).await;
+                    }
+                }
             }
         };
         hold.done();
@@ -192,14 +209,16 @@ impl Pipeline {
 
     /// Every venue's trades in the block (attributed), the state they set,
     /// and each venue's exact quote-update gas.
+    /// An error says whether a venue was only not ready (discovery pending).
     #[allow(clippy::type_complexity)]
     fn decode(
         &self,
         block: &FinalBlock,
-    ) -> Result<(Vec<Fill>, Vec<(String, String, String)>, Vec<GasAccrual>), String> {
+    ) -> Result<(Vec<Fill>, Vec<(String, String, String)>, Vec<GasAccrual>), (String, bool)> {
         // Gas rules first: a venue whose gas destination isn't resolved yet
         // holds the block rather than undercount its gas.
-        let rules = gas::GasRules::of(&self.venues).map_err(|e| format!("gas sources: {e}"))?;
+        let rules = gas::GasRules::of(&self.venues)
+            .map_err(|e| (format!("gas sources: {e}"), matches!(e, VenueError::NotReady(_))))?;
         let pricer = self.prices.at(block.time_ms());
         let state = self.state.lock().unwrap();
         let cx = DecodeCx { registry: self.registry, pricer: &pricer, state: &state };
@@ -210,7 +229,7 @@ impl Pipeline {
                 Err(e) => {
                     // A failed attempt's writes are discarded with it.
                     state.take_pending();
-                    return Err(format!("{}: {e}", v.id()));
+                    return Err((format!("{}: {e}", v.id()), matches!(e, VenueError::NotReady(_))));
                 }
             }
         }

@@ -141,12 +141,14 @@ pub fn run(s: Settings) -> ExitCode {
             watch,
             state: std::sync::Mutex::new(venue_state),
             refetch_through: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            rediscover: Arc::new(tokio::sync::Notify::new()),
             stats: stats.clone(),
             committed,
             retry_min: Duration::from_millis(250),
             retry_max: Duration::from_secs(30),
         };
         let refetch = pipeline.refetch_through.clone();
+        let asked = pipeline.rediscover.clone();
         let rediscover_watch = pipeline.watch.clone();
         let rediscover_venues = pipeline.venues.clone();
         let rediscover_ring = ring_stats.clone();
@@ -227,7 +229,12 @@ pub fn run(s: Settings) -> ExitCode {
             let mut every = tokio::time::interval(Duration::from_secs(600));
             every.tick().await;
             loop {
-                every.tick().await;
+                // Every 10 minutes, or at once when a held block asks (at most
+                // every 5 s, so a stuck venue can't hammer the node).
+                tokio::select! {
+                    _ = every.tick() => {}
+                    _ = asked.notified() => tokio::time::sleep(Duration::from_secs(5)).await,
+                }
                 discover_all(&rediscover_venues, &local, registry, false).await;
                 match watch_of(&rediscover_venues) {
                     Ok(w) if w != **rediscover_watch.load() => {
