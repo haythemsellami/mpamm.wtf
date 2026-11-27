@@ -171,10 +171,11 @@ fn verify(v1: &Connection, store: &Store) -> Result<(), String> {
             return Err(format!("{table} differs after migration"));
         }
     }
-    // Every trade's money fields, row for row.
+    // Every trade's money fields, row for row: (id, usd, base, px, markouts).
+    type MoneyRow = (String, f64, f64, f64, String);
     let sql = "SELECT id, usd, base_amount, exec_px, markouts_bps FROM fills ORDER BY id";
     let new_sql = "SELECT id, usd, base_amount, exec_px, markouts_bps FROM trades ORDER BY id";
-    let read = |c: &Connection, q: &str| -> Result<Vec<(String, f64, f64, f64, String)>, String> {
+    let read = |c: &Connection, q: &str| -> Result<Vec<MoneyRow>, String> {
         let mut s = c.prepare(q).map_err(|e| e.to_string())?;
         let rows = s
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
