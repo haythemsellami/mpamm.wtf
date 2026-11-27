@@ -70,6 +70,11 @@ pub fn check_meta(r: &mut Report, meta: &VenueMeta, history_from: Option<&str>) 
     }
 }
 
+/// Above zero (NaN is not).
+fn positive(x: f64) -> bool {
+    x > 0.0
+}
+
 /// Every trade's own rules.
 pub fn check_fills(r: &mut Report, registry: &Registry, fills: &[Fill]) {
     let mut bad = 0;
@@ -78,11 +83,11 @@ pub fn check_fills(r: &mut Report, registry: &Registry, fills: &[Fill]) {
             r.fail(format!("trade for UNREGISTERED market {}", f.market));
             bad += 1;
         }
-        if !(f.usd > 0.0) || !(f.base_amount > 0.0) {
+        if !positive(f.usd) || !positive(f.base_amount) {
             r.fail(format!("trade {}: non-positive usd/baseAmount", f.id));
             bad += 1;
         }
-        if !f.px_approx && !(f.exec_px > 0.0) {
+        if !f.px_approx && !positive(f.exec_px) {
             r.fail(format!("trade {}: non-positive execPx without pxApprox", f.id));
             bad += 1;
         }
@@ -115,15 +120,15 @@ pub async fn verify(venue_id: &str, rpc_url: &str, span: u64, warm_secs: u64) ->
     prices.spawn(rpc.clone(), Default::default(), stop);
     println!("… warming the exchange feeds ({warm_secs} s)");
     tokio::time::sleep(Duration::from_secs(warm_secs)).await;
-    let reference = prices.reference();
-    let cold: Vec<&str> =
-        registry.pairs.iter().filter(|p| reference.mid_for_pair(&p.symbol) <= 0.0).map(|p| p.symbol.as_str()).collect();
+    let cold: Vec<&str> = {
+        let reference = prices.reference();
+        registry.pairs.iter().filter(|p| reference.mid_for_pair(&p.symbol) <= 0.0).map(|p| p.symbol.as_str()).collect()
+    };
     if cold.is_empty() {
         r.pass("reference mids warm for every pair");
     } else {
         r.warn(format!("no reference yet for {}: those pairs won't be quoted", cold.join(", ")));
     }
-    drop(reference);
 
     match venue.discover(&ChainCx { rpc: &rpc, registry }).await {
         Ok(()) => r.pass("discover() completed"),

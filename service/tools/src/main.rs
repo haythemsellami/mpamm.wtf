@@ -317,7 +317,7 @@ async fn decode_blocks(
                     retries += 1;
                     eprintln!("block {n}: {e}; rediscovering");
                     state.take_pending();
-                    venue.discover(&ChainCx { rpc: &rpc, registry }).await.map_err(|e| e.to_string())?;
+                    venue.discover(&ChainCx { rpc, registry }).await.map_err(|e| e.to_string())?;
                 }
                 Err(e) => return Err(format!("block {n}: {e}")),
             }
