@@ -6,6 +6,7 @@
 pub mod btr;
 pub mod chain;
 pub mod crystal;
+pub mod generations;
 pub mod logs;
 pub mod poe;
 pub mod util;
