@@ -3,6 +3,7 @@
 //! The core never names a venue; adding one is a module here plus a line in
 //! `all()`.
 
+pub mod btr;
 pub mod chain;
 pub mod logs;
 pub mod poe;
@@ -14,5 +15,5 @@ use mpamm_core::Venue;
 
 /// Every venue the service runs, in today's registry order.
 pub fn all() -> Vec<Arc<dyn Venue>> {
-    vec![Arc::new(poe::Poe::default())]
+    vec![Arc::new(poe::Poe::default()), Arc::new(btr::Btr::default())]
 }
