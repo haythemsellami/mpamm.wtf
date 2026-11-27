@@ -374,7 +374,12 @@ pace with every block for 24 h without a missed job.
       every row (POE: identical)
 - [x] POE quotes (identical); Metric and WOOFi (identical at 7 blocks); BTR and Crystal
       (identical at 3 blocks); Uniswap v4 (identical at 3 blocks with one call per leg)
-- [ ] Per-venue timing on the host under live load (POE p90 ~10 ms in the shadow run)
+- [ ] Per-venue timing on the host under live load. 2026-11-27, six quoting venues: at
+      first BTR p90 77 ms and Uniswap v4 130 ms (39 of 199 jobs late); with calls sent as
+      concurrent batches of 25 and Uniswap's failing legs sitting out 25 blocks, every
+      venue's p90 is within 60 ms and none is late (BTR 50, Uniswap 60, WOOFi 47, Crystal 41,
+      POE 40, Metric 32). The fast venues slowed (POE 16 → 40) because every venue now
+      reaches the node's RPC at once and it runs on 4 cores: the CPU set is DevOps'
 
 **Done when:** every venue's rows match today's at the same block, and per-venue p90 is at
 most 60 ms. *(DevOps: CPU set for the service.)*
