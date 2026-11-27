@@ -339,6 +339,23 @@ async fn gas_check(venue_id: &str, from: u64, to: u64, rpc_url: &str) -> Result<
     let rpc = Rpc::new("node", rpc_url, Duration::from_secs(60));
     let venue = mpamm_venues::all().into_iter().find(|v| v.id() == venue_id).ok_or(format!("no venue {venue_id}"))?;
     venue.discover(&ChainCx { rpc: &rpc, registry }).await.map_err(|e| e.to_string())?;
+    // As the pipeline does: a venue may load a gas source in decode (WOOFi's
+    // persisted Wooracles), so one empty block is decoded before the sources
+    // are read, and each block after.
+    let state = VenueState::new(std::collections::HashMap::new());
+    let empty = mpamm_core::FinalBlock {
+        number: from,
+        hash: [0; 32],
+        parent_hash: [0; 32],
+        timestamp: 0,
+        proposal_ns: None,
+        base_fee: 0,
+        txns: vec![],
+        logs: vec![],
+        origin: mpamm_core::Origin::Rpc("warm-up".into()),
+    };
+    let _ = venue.decode(&DecodeCx { registry, pricer: &mpamm_core::NoPrices, state: &state }, &empty);
+    state.take_pending();
     let sources = venue.gas_sources().map_err(|e| e.to_string())?.ok_or("venue has no gas sources")?;
     // The recount reads receipts, independently of the pipeline's rules: a
     // transaction is the venue's when it is sent to a destination, when its
@@ -374,9 +391,6 @@ async fn gas_check(venue_id: &str, from: u64, to: u64, rpc_url: &str) -> Result<
     };
     let watch = venue.watch().map_err(|e| e.to_string())?;
     let venues: Vec<Arc<dyn mpamm_core::Venue>> = vec![venue];
-    // As the pipeline does: each block is decoded first (a venue can load a
-    // gas source there, WOOFi's persisted Wooracles), then the rules read.
-    let state = VenueState::new(std::collections::HashMap::new());
     let (mut a_mon, mut a_txs, mut b_mon, mut b_txs, mut differ) = (0.0f64, 0u64, 0.0f64, 0u64, 0u64);
     let mut n = from;
     while n <= to {
