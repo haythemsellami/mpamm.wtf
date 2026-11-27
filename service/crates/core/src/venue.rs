@@ -130,12 +130,15 @@ pub struct EntryPoint {
 
 /// A shared forwarder some of a venue's quote updates go through: matched on
 /// `to`, the 4-byte selector, and the static calldata word (0-based, after
-/// the selector) that holds one of the venue's own destinations.
+/// the selector) that holds one of `targets`, as today: a relay routes only
+/// to the destinations of the source that declared it. Empty `targets` =
+/// any of the venue's destinations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GasRelay {
     pub address: Addr,
     pub selector: [u8; 4],
     pub target_word: usize,
+    pub targets: Vec<Addr>,
 }
 
 /// How a venue's own quote-update transactions are recognised. With the

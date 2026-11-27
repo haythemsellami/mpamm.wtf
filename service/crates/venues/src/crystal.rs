@@ -340,6 +340,8 @@ impl Venue for Crystal {
                 address: to_addr(FASTLANE_AUCTION_HANDLER),
                 selector: FASTLANE_SELECTOR,
                 target_word: FASTLANE_TARGET_WORD,
+                // Today the relay is declared on the keeper's source alone.
+                targets: vec![to_addr(KEEPER)],
             }],
             ..GasSources::default()
         }))

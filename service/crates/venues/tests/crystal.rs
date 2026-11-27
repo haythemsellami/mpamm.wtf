@@ -360,7 +360,15 @@ fn sources() -> GasSources {
 fn tracks_the_vault_and_the_keeper_and_routes_fastlane_to_the_keeper() {
     let g = sources();
     assert_eq!(g.destinations, [addr(VAULT), addr(KEEPER)]);
-    assert_eq!(g.relays, [GasRelay { address: addr(HANDLER), selector: [0x0c, 0x7a, 0xbd, 0x22], target_word: 5 }]);
+    assert_eq!(
+        g.relays,
+        [GasRelay {
+            address: addr(HANDLER),
+            selector: [0x0c, 0x7a, 0xbd, 0x22],
+            target_word: 5,
+            targets: vec![addr(KEEPER)]
+        }]
+    );
     assert!(g.logs.is_empty());
     // Gas needs no discovery; the watch set copies every destination's and
     // the relay's calldata once it is ready.

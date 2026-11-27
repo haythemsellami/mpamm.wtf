@@ -161,7 +161,8 @@ async fn gas_check(venue_id: &str, from: u64, to: u64, rpc_url: &str) -> Result<
     if !sources.relays.is_empty() || !sources.logs.is_empty() {
         return Err("gas-check compares destination rules only".into());
     }
-    let dests: std::collections::HashSet<String> = sources.destinations.iter().map(|d| format!("0x{}", hex(d))).collect();
+    let dests: std::collections::HashSet<String> =
+        sources.destinations.iter().map(|d| format!("0x{}", hex(d))).collect();
     let venues: Vec<Arc<dyn mpamm_core::Venue>> = vec![venue];
     let rules = mpamm_pipeline::gas::GasRules::of(&venues).map_err(|e| e.to_string())?;
     let watch = mpamm_ring::WatchSet::default();
@@ -170,9 +171,14 @@ async fn gas_check(venue_id: &str, from: u64, to: u64, rpc_url: &str) -> Result<
     while n <= to {
         let end = (n + 24).min(to);
         let nums: Vec<u64> = (n..=end).collect();
-        let blocks: Vec<(&str, Value)> = nums.iter().map(|b| ("eth_getBlockByNumber", json!([quantity(*b), true]))).collect();
-        let receipts: Vec<(&str, Value)> = nums.iter().map(|b| ("eth_getBlockReceipts", json!([quantity(*b)]))).collect();
-        let (bs, rs) = (rpc.batch(&blocks).await.map_err(|e| e.to_string())?, rpc.batch(&receipts).await.map_err(|e| e.to_string())?);
+        let blocks: Vec<(&str, Value)> =
+            nums.iter().map(|b| ("eth_getBlockByNumber", json!([quantity(*b), true]))).collect();
+        let receipts: Vec<(&str, Value)> =
+            nums.iter().map(|b| ("eth_getBlockReceipts", json!([quantity(*b)]))).collect();
+        let (bs, rs) = (
+            rpc.batch(&blocks).await.map_err(|e| e.to_string())?,
+            rpc.batch(&receipts).await.map_err(|e| e.to_string())?,
+        );
         for ((num, b), r) in nums.iter().zip(bs).zip(rs) {
             let b = b.map_err(|e| format!("block {num}: {e}"))?;
             let r = r.map_err(|e| format!("receipts {num}: {e}"))?;

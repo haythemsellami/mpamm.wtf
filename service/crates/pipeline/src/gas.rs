@@ -51,11 +51,13 @@ impl GasRules {
             }
             let targets: HashSet<Addr> = g.destinations.iter().copied().collect();
             for rel in g.relays {
+                let targets =
+                    if rel.targets.is_empty() { targets.clone() } else { rel.targets.iter().copied().collect() };
                 r.relays.push(Relay {
                     to: rel.address,
                     selector: rel.selector,
                     word: rel.target_word,
-                    targets: targets.clone(),
+                    targets,
                     venue: id.clone(),
                 });
             }
@@ -184,7 +186,12 @@ mod tests {
             "b",
             GasSources {
                 destinations: vec![keeper_target],
-                relays: vec![GasRelay { address: relay, selector: [0xaa, 0xbb, 0xcc, 0xdd], target_word: 1 }],
+                relays: vec![GasRelay {
+                    address: relay,
+                    selector: [0xaa, 0xbb, 0xcc, 0xdd],
+                    target_word: 1,
+                    targets: vec![],
+                }],
                 logs: vec![(emitter, topic)],
             },
         );

@@ -43,9 +43,17 @@ fn bybit_book_deltas_tickers_and_crosses() {
     assert!((ex.change_pct("USDCUSDT", T + 2) - 0.01).abs() < 1e-12);
     // The real spot ticker has no bid or ask: the cross's top of book comes
     // from orderbook.1 (as recorded from Bybit), and moves with it.
-    bybit::apply(&ex, r#"{"topic":"tickers.USDCUSDT","type":"snapshot","data":{"symbol":"USDCUSDT","lastPrice":"1.0012","price24hPcnt":"0.0002"}}"#, T + 3);
+    bybit::apply(
+        &ex,
+        r#"{"topic":"tickers.USDCUSDT","type":"snapshot","data":{"symbol":"USDCUSDT","lastPrice":"1.0012","price24hPcnt":"0.0002"}}"#,
+        T + 3,
+    );
     assert!((ex.mid("USDCUSDT", T + 3) - 1.0002).abs() < 1e-12, "a ticker alone doesn't move the cross's book");
-    bybit::apply(&ex, r#"{"topic":"orderbook.1.USDCUSDT","type":"snapshot","data":{"s":"USDCUSDT","b":[["1.0012","11509291.94"]],"a":[["1.0013","6799687.2"]],"u":776389}}"#, T + 4);
+    bybit::apply(
+        &ex,
+        r#"{"topic":"orderbook.1.USDCUSDT","type":"snapshot","data":{"s":"USDCUSDT","b":[["1.0012","11509291.94"]],"a":[["1.0013","6799687.2"]],"u":776389}}"#,
+        T + 4,
+    );
     assert!((ex.mid("USDCUSDT", T + 4) - 1.00125).abs() < 1e-12);
     assert_eq!(ex.mid("MONUSDT", T + 4 + STALE_MS + 1), 0.0, "a silent feed is unavailable");
     assert_eq!(ex.mid_at("MONUSDT", (T + 1) as f64, 1e9), Some(0.03005));
