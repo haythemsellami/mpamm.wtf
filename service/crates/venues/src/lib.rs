@@ -14,6 +14,7 @@ pub mod metric;
 pub mod poe;
 pub mod quote_health;
 pub mod thogamm;
+pub mod uniswap;
 pub mod util;
 pub mod woofi;
 
@@ -32,5 +33,6 @@ pub fn all() -> Vec<Arc<dyn Venue>> {
         Arc::new(crystal::Crystal::default()),
         Arc::new(woofi::Woofi::default()),
         Arc::new(btr::Btr::default()),
+        Arc::new(uniswap::Uniswap::default()),
     ]
 }
