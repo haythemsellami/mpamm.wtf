@@ -16,6 +16,7 @@ pub struct Health {
     pub pipeline: Arc<Stats>,
     pub prices: Arc<Prices>,
     pub quotes: Arc<mpamm_quotes::Engine>,
+    pub depth: Arc<mpamm_quotes::depth::Depth>,
     pub started: Instant,
     pub stall_ms: u64,
 }
@@ -34,6 +35,9 @@ pub struct HealthBody {
     pub quotes: std::collections::BTreeMap<String, mpamm_quotes::VenueTiming>,
     /// What a monitor pages on, active now (empty when all is well).
     pub alerts: Vec<Alert>,
+    /// Depth curves: the watched markets, pass times over the last minute,
+    /// and the venues that missed passes.
+    pub depth: mpamm_quotes::depth::DepthView,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -146,7 +150,8 @@ pub fn body(h: &Health) -> (HealthBody, bool) {
     let feeds = feeds_view(&h.prices, now_ms());
     let quotes = h.quotes.timings().into_iter().collect();
     let alerts = alerts(&ring, &pipeline, &quotes, uptime_ms, now_ms());
-    (HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds, quotes, alerts }, ok)
+    let depth = h.depth.view();
+    (HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds, quotes, alerts, depth }, ok)
 }
 
 #[cfg(test)]

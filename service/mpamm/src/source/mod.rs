@@ -12,6 +12,9 @@
 //!   threads through their own read-only connections (WAL: commits never
 //!   wait on a reader).
 //! - Market state: rebuilt every second.
+//! - Depth curves: the depth engine's latest snapshot per market, computed
+//!   while someone watches it (`mpamm_quotes::depth`); REST reads it, the
+//!   SSE route and stream topic watch it.
 //!
 //! The API calls the in-memory methods under its stream lock, so they only
 //! copy what is here; anything that touches SQLite is one of the async ones.
@@ -35,7 +38,7 @@ use mpamm_api::{ApiSource, SourceError};
 use mpamm_core::Venue;
 use mpamm_pipeline::Committed;
 use mpamm_pricing::Prices;
-use mpamm_quotes::Engine;
+use mpamm_quotes::{depth::Depth, Engine};
 use mpamm_registry::Registry;
 use mpamm_ring::live::now_ms;
 use mpamm_store::Store;
@@ -89,8 +92,7 @@ pub struct ServiceSource {
     notes: Arc<crate::notes::NoteBuffer>,
     live: Mutex<Live>,
     tx: broadcast::Sender<StreamMessage>,
-    /// Depth curves are not computed yet: every market's channel stays empty.
-    depth: watch::Sender<Option<Arc<str>>>,
+    depth: Arc<Depth>,
     ready: AtomicBool,
     leaderboards: Cached<LeaderboardResponse>,
     curves: Cached<MarkoutCurvesResponse>,
@@ -101,12 +103,12 @@ impl ServiceSource {
         registry: &'static Registry,
         venues: Vec<Arc<dyn Venue>>,
         prices: Arc<Prices>,
+        depth: Arc<Depth>,
         health: crate::health::Health,
         db: PathBuf,
         notes: Arc<crate::notes::NoteBuffer>,
     ) -> Arc<Self> {
         let (tx, _) = broadcast::channel(4096);
-        let (depth, _) = watch::channel(None);
         let empty = QuoteSnapshot {
             block_hash: None,
             revision: None,
@@ -192,8 +194,11 @@ impl ServiceSource {
     }
 
     /// Starts the tasks that keep the source current: frames from the
-    /// engine, the tape and volume from commits, the state every second.
+    /// engine, the tape and volume from commits, the state every second,
+    /// and the depth passes for watched markets.
     pub fn start(self: &Arc<Self>, engine: &Arc<Engine>, mut committed: broadcast::Receiver<Committed>) {
+        tokio::spawn(self.depth.clone().run());
+
         let deadline_ms = engine.deadline.as_secs_f64() * 1000.0 + 30.0;
         let mut published = engine.published.subscribe();
         let mut asm = Assembler::new(engine.venue_ids(), deadline_ms);
@@ -441,12 +446,12 @@ impl ApiSource for ServiceSource {
         Ok(out)
     }
 
-    fn depth(&self, _market: &str) -> Option<Arc<str>> {
-        None
+    fn depth(&self, market: &str) -> Option<Arc<str>> {
+        self.depth.latest(market)
     }
 
-    fn watch_depth(&self, _market: &str) -> watch::Receiver<Option<Arc<str>>> {
-        self.depth.subscribe()
+    fn watch_depth(&self, market: &str) -> watch::Receiver<Option<Arc<str>>> {
+        self.depth.watch(market)
     }
 
     fn messages(&self) -> broadcast::Receiver<StreamMessage> {

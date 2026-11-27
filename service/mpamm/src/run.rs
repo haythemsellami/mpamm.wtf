@@ -156,6 +156,7 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
         // A client made on this runtime (the boot one's connections died with it).
         let local = Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10));
         let quote_venues = pipeline.venues.clone();
+        let depth_venues = pipeline.venues.clone();
         let source_venues = pipeline.venues.clone();
         let pipe = tokio::spawn(pipeline.run(rx));
 
@@ -169,16 +170,29 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
             registry,
             Duration::from_millis(s.quote_deadline_ms),
         );
-        // The dashboard's source: frames, tape, volume, state, the store.
+        // Depth curves: the same venues over a 25-size grid, for the markets
+        // someone watches, following the same executed blocks, on a client
+        // of their own (today's depth runs in its own process and connection).
+        let depth = mpamm_quotes::depth::Depth::new(
+            depth_venues,
+            Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(2)),
+            prices.clone(),
+            registry,
+            Duration::from_millis(s.quote_deadline_ms),
+            Duration::from_millis(s.depth_min_interval_ms),
+        );
+        // The dashboard's source: frames, tape, volume, state, depth, the store.
         let source = ServiceSource::new(
             registry,
             source_venues,
             prices.clone(),
+            depth.clone(),
             health::Health {
                 ring: ring_stats.clone(),
                 pipeline: stats.clone(),
                 prices: prices.clone(),
                 quotes: engine.clone(),
+                depth: depth.clone(),
                 started: Instant::now(),
                 stall_ms: s.stall_secs.max(1) * 1000,
             },
@@ -193,6 +207,7 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
                 let age_ms = mpamm_ring::live::now_ms() as f64 - proposal_ns as f64 / 1e6;
                 if age_ms < 2_000.0 {
                     quotes.on_executed(block, proposal_ns);
+                    depth.on_executed(block);
                 }
             }
         });
