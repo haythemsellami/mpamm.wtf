@@ -6,7 +6,7 @@
  * the simulator (SimDataSource); the frontend never knows which.
  */
 
-import registry from '../registry.json';
+import registry from '../registry.json' with { type: 'json' };
 
 // ──────────────────────────────────────────────────────────────────────────
 // Domain vocabulary
