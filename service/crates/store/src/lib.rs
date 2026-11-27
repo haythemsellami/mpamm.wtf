@@ -351,6 +351,45 @@ impl Store {
         Ok(all)
     }
 
+    /// Imports trades as they are (migration): no volume is added, since a
+    /// migrated history brings its own daily totals. Keeps an existing row.
+    pub fn import_trades(&mut self, trades: &[(Fill, String, Option<String>)]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut n = 0;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO trades (id, venue_id, market, side, category, usd, base_amount, exec_px, px_approx,
+                    tx_hash, to_label, router, pool, block_number, ts, time_source, utc_day, markouts_bps, curve_bps)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            )?;
+            for (t, day, curve) in trades {
+                n += stmt.execute(params![
+                    t.id,
+                    t.venue_id,
+                    t.market,
+                    side_str(t.side),
+                    t.category.as_str(),
+                    t.usd,
+                    t.base_amount,
+                    t.exec_px,
+                    t.px_approx as i64,
+                    t.tx_hash,
+                    t.to,
+                    t.router,
+                    t.pool,
+                    t.block_number as i64,
+                    t.ts,
+                    time_source_str(t.time_source),
+                    day,
+                    serde_json::to_string(&t.markouts_bps).expect("markouts serialize"),
+                    curve,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Sets a day's volume for a venue (migration of closed days).
     pub fn set_volume(&self, day: &str, venue: &str, v: VenueDaily) -> Result<()> {
         self.conn.execute(

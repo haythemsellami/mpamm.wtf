@@ -6,7 +6,9 @@
 //! decode parity check; `server/scripts/decode-range.ts` is the other half
 //! and `service/tools/compare-fills.py` diffs the two.
 
-use std::{collections::BTreeMap, time::Duration};
+mod migrate;
+
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use clap::{Parser, Subcommand};
 use mpamm_chain::{parse_b32, parse_quantity, quantity, Rpc};
@@ -47,6 +49,15 @@ enum Cmd {
     /// Cost one venue's quote-update gas over [from, to] two ways: as the
     /// pipeline does (transaction headers, gas limit × price paid) and from
     /// receipts (gasUsed × effectiveGasPrice), and compare.
+    /// Copy today's database into the new schema and verify it.
+    Migrate {
+        /// Today's SQLite database (opened read-only).
+        #[arg(long)]
+        from: PathBuf,
+        /// The new database (must not exist yet, or have no cursor).
+        #[arg(long)]
+        to: PathBuf,
+    },
     GasCheck {
         #[arg(long)]
         venue: String,
@@ -223,6 +234,7 @@ async fn main() {
             decode_range(&venue, from, to, &rpc, chunk, live_prices_secs).await
         }
         Cmd::GasCheck { venue, from, to, rpc } => gas_check(&venue, from, to, &rpc).await,
+        Cmd::Migrate { from, to } => migrate::migrate(&from, &to),
     };
     if let Err(e) = r {
         eprintln!("error: {e}");
