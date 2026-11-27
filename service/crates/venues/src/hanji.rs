@@ -20,24 +20,39 @@
 //! keyed by destination; every direct transaction to a quoter is an update.
 //! From gen8 the keeper also bids through FastLane's shared AuctionHandler,
 //! matched on calldata word 5 (`searcherToAddress`), never on `to` alone.
+//!
+//! Quotes: the book helper's `assembleOrderbooksFromOrders(proxy, 60)` per
+//! book (the proxy view includes the vault's virtual liquidity), walked
+//! within ±2000 bps of the pair mid, the taker fee on top. Today's adapter
+//! reads the books through Multicall3, 15 to an aggregate at viem's 1 KB
+//! chunks: ~11.3M gas for the first 15 and ~12.2M for all 17 in one
+//! (measured 2026-11-27; the spec's 8.72M was an earlier reading). One book
+//! costs 0.22–0.90M (MON/ETH, cbBTC/MON and cbBTC/ETH the heaviest), so here
+//! each book is its own `eth_call` under the 8M every read carries, all of
+//! them in one JSON-RPC batch the node runs in parallel. The answers are the
+//! same state, so the rows are too.
 
 use std::collections::{HashMap, HashSet};
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{
+    aliases::{U24, U72},
+    Address, U256,
+};
 use alloy_sol_types::sol;
 use async_trait::async_trait;
 use mpamm_core::{
-    ChainCx, DecodeCx, EntryPoint, FinalBlock, GasRelay, GasSources, HistoryRevision, RevisionSource, Venue, VenueError,
+    ChainCx, DecodeCx, EntryPoint, FinalBlock, GasRelay, GasSources, HistoryRevision, QuoteCx, RevisionSource, Venue,
+    VenueError,
 };
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::{Addr, TopicFilter, WatchSet};
-use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
 use parking_lot::RwLock;
 
 use crate::{
     chain::{call_many, At},
-    logs,
-    util::{b32_hex, fill_id, short_hex, to_addr, to_f64},
+    logs, quote_health,
+    util::{b32_hex, fill_id, from_addr, short_hex, to_addr, to_f64},
 };
 
 pub const ID: &str = "hanji";
@@ -47,7 +62,21 @@ sol! {
     // factors, token addresses, and the 1e18-scaled taker fee rate at index 9.
     function getConfig() view returns (uint256 scalingX, uint256 scalingY, address tokenX, address tokenY, uint256 f4, uint256 f5, address a6, address a7, uint256 f8, uint256 takerFeeRate, uint256 f10, uint256 f11, uint256 f12);
     event OrderPlaced(address indexed owner, address indexed initiator, uint64 order_id, bool indexed isAsk, uint128 quantity, uint72 price, uint128 passive_shares, uint128 passive_fee, uint128 aggressive_shares, uint128 aggressive_value, uint128 aggressive_fee, bool market_only, bool post_only);
+    // The book helper: each side best level first, raw prices and shares.
+    function assembleOrderbooksFromOrders(address lobAddress, uint24 maxPriceLevels) view returns (uint72[] bidPrices, uint128[] bidShares, uint72[] askPrices, uint128[] askShares);
 }
+
+/// Book depth asked per quote: enough for the largest probed notional.
+pub const BOOK_LEVELS: u32 = 60;
+
+/// Per-side sanity band (bps from the pair mid): a level priced beyond it is
+/// not comparable liquidity, so the walk never reaches it. The books carry
+/// far-tick stub orders below the vault's ladder (MON/USDC bids of 1 MON @
+/// $0.001 and 10,000 MON @ $0.0001, asks @ $10,000 and $24,172; a 1-cbBTC
+/// bid @ 1 MON on cbBTC/MON); walking into them once published "full"
+/// two-sided rows at −9961 and −5728 bps. With the band, a side whose
+/// in-band depth runs out is a partial, and a side with none is absent.
+const PER_SIDE_BAND_BPS: f64 = 2_000.0;
 
 const FAST_QUOTER_HELPER: &str = "0x237dB58fea34A35A8543b44C217d221606cE7788";
 // Each xStock deployment has its own book helper.
@@ -183,6 +212,10 @@ impl From<getConfigReturn> for BookConfig {
 pub struct Market {
     pub market: String,
     pub clob: Addr,
+    /// What quotes read (its book includes the vault's liquidity).
+    pub proxy: Addr,
+    /// The book helper quotes go through.
+    pub helper: Addr,
     /// `lob 0x…`, from the table's spelling of the CLOB.
     pub pool: String,
     pub base_tok: String,
@@ -258,6 +291,8 @@ pub fn admit(registry: &Registry, answers: Vec<Result<BookConfig, VenueError>>) 
         found.push(Market {
             market: k.market.into(),
             clob: addr(k.clob),
+            proxy: addr(k.proxy),
+            helper: addr(k.helper),
             pool: format!("lob {}", &k.clob[..8]),
             base_tok: k.base_tok.into(),
             quote_tok: k.quote_tok.into(),
@@ -309,6 +344,52 @@ fn gas() -> GasSources {
         }],
         ..GasSources::default()
     }
+}
+
+impl Hanji {
+    /// The discovered books in the registry's pair order (today's order:
+    /// the table follows it).
+    fn in_order(&self, registry: &Registry) -> Vec<Market> {
+        let inner = self.inner.read();
+        let by_market: HashMap<&str, &Market> = inner.by_clob.values().map(|m| (m.market.as_str(), m)).collect();
+        registry.pairs.iter().filter_map(|p| by_market.get(p.symbol.as_str()).map(|m| (*m).clone())).collect()
+    }
+}
+
+/// One side of a book walked for `base_needed`: the VWAP of what filled
+/// (0 when nothing did) and whether it filled all but 0.1%.
+struct Walk {
+    vwap: f64,
+    filled_full: bool,
+}
+
+/// Best level first, in-band levels only: raw price × px_scale is quote per
+/// base, shares × base_share whole base (today's `Number(raw) * scale`).
+fn walk(prices: &[U72], shares: &[u128], m: &Market, px_mid: f64, base_needed: f64) -> Walk {
+    let (mut remaining, mut cost) = (base_needed, 0.0);
+    for (p, s) in prices.iter().zip(shares) {
+        // Today's `remaining > 0` loop guard and `!(… <= band)` skip: NaN
+        // stops the walk and is never in band.
+        let wanting = remaining > 0.0;
+        if !wanting {
+            break;
+        }
+        let px = to_f64(U256::from(*p)) * m.px_scale;
+        let in_band = (px / px_mid - 1.0).abs() * 1e4 <= PER_SIDE_BAND_BPS;
+        if !in_band {
+            continue;
+        }
+        let take = (*s as f64 * m.base_share).min(remaining);
+        cost += take * px;
+        remaining -= take;
+    }
+    let filled = base_needed - remaining;
+    Walk { vwap: if filled > 0.0 { cost / filled } else { 0.0 }, filled_full: remaining <= base_needed * 0.001 }
+}
+
+/// Wall-clock milliseconds, today's `Date.now()`.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
 }
 
 #[async_trait]
@@ -405,6 +486,80 @@ impl Venue for Hanji {
             });
         }
         Ok(out)
+    }
+
+    /// Each priced book read through its helper (one call per book, all in
+    /// one batch pinned to the block), both sides walked per size: buying
+    /// the base consumes asks, selling it consumes bids. The ladder is raw
+    /// prices, so the taker fee goes on top.
+    async fn quote(&self, cx: &QuoteCx<'_>, sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        // The bps anchor is the pair-terms reference mid; a book with no mid,
+        // or whose base has no USD to size with, can't make a row: not read.
+        let books: Vec<(Market, f64)> = self
+            .in_order(cx.registry)
+            .into_iter()
+            .filter_map(|m| {
+                let mid = cx.pricer.pair_mid(&m.market);
+                let sized = sizes_usd.iter().any(|&s| cx.pricer.token_for_usd(&m.base_tok, s) > 0.0);
+                (mid > 0.0 && sized).then_some((m, mid))
+            })
+            .collect();
+        if books.is_empty() {
+            return Ok(Vec::new());
+        }
+        let calls: Vec<(Address, assembleOrderbooksFromOrdersCall)> = books
+            .iter()
+            .map(|(m, _)| {
+                (
+                    from_addr(&m.helper),
+                    assembleOrderbooksFromOrdersCall {
+                        lobAddress: from_addr(&m.proxy),
+                        maxPriceLevels: U24::from(BOOK_LEVELS),
+                    },
+                )
+            })
+            .collect();
+        let res = call_many(cx.rpc, &calls, At::Hash(cx.block.hash)).await?;
+        // Every book failing is venue-wide (paused, ABI drift), not a thin
+        // market: name it instead of vanishing.
+        quote_health::check_outage(&meta().name, &res)?;
+        let ts = now_ms();
+        let mut rows = Vec::new();
+        for ((m, px_mid), r) in books.iter().zip(res) {
+            let Ok(book) = r else { continue };
+            let fee = m.fee_bps / 1e4;
+            for &size in sizes_usd {
+                let base_needed = cx.pricer.token_for_usd(&m.base_tok, size);
+                if base_needed <= 0.0 {
+                    continue;
+                }
+                let buy = walk(&book.askPrices, &book.askShares, m, *px_mid, base_needed);
+                let sell = walk(&book.bidPrices, &book.bidShares, m, *px_mid, base_needed);
+                let (has_ask, has_bid) = (buy.vwap > 0.0, sell.vwap > 0.0);
+                if !has_ask && !has_bid {
+                    continue;
+                }
+                let ask_px = if has_ask { buy.vwap * (1.0 + fee) } else { 0.0 };
+                let bid_px = if has_bid { sell.vwap * (1.0 - fee) } else { 0.0 };
+                rows.push(QuoteRow {
+                    venue_id: ID.into(),
+                    market: m.market.clone(),
+                    size_usd: size,
+                    bid_bps: if has_bid { (bid_px / px_mid - 1.0) * 1e4 } else { 0.0 },
+                    ask_bps: if has_ask { (ask_px / px_mid - 1.0) * 1e4 } else { 0.0 },
+                    bid_px,
+                    ask_px,
+                    spread_bps: if has_ask && has_bid { ((ask_px - bid_px) / px_mid) * 1e4 } else { 0.0 },
+                    filled_full: (!has_ask || buy.filled_full) && (!has_bid || sell.filled_full),
+                    one_sided: if has_ask && has_bid { None } else { Some(true) },
+                    fee_bps: m.fee_bps,
+                    cex_ask_bps: None,
+                    cex_bid_bps: None,
+                    ts,
+                });
+            }
+        }
+        Ok(rows)
     }
 
     fn markets(&self) -> Vec<String> {
