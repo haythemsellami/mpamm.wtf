@@ -205,3 +205,34 @@ fn curves_and_aging_queries() {
     assert_eq!(with, [("a".to_string(), None), ("done".to_string(), Some(14))], "ordered by time, then id");
     assert!(s.trades_with_curves(0.0, 0.5).unwrap().is_empty());
 }
+
+#[test]
+fn archive_marks_fill_only_the_nulls_and_settle_once() {
+    let mut s = Store::memory().unwrap();
+    let mut live = fill("live", "metric", 1.0, 1);
+    live.markouts_bps = vec![Some(1.5), Some(2.5), None, None, None];
+    let mut approx = fill("approx", "metric", 1.0, 1);
+    approx.px_approx = true;
+    let mut full = fill("full", "metric", 1.0, 1);
+    full.markouts_bps = vec![Some(1.0); 5];
+    s.commit_block(&block(1, DAY1, vec![fill("none", "metric", 1.0, 1), live, approx, full])).unwrap();
+    let ids = |s: &Store| -> Vec<String> {
+        s.trades_unmarked(0.0, f64::MAX, 10).unwrap().into_iter().map(|f| f.id).collect()
+    };
+    assert_eq!(ids(&s), ["live", "none"], "a null mark, an exact price, not settled");
+    assert!(s.trades_unmarked(0.0, 1.0, 10).unwrap().is_empty(), "outside the window");
+    assert_eq!(s.trades_unmarked(0.0, f64::MAX, 1).unwrap().len(), 1);
+    // The archive's marks fill the nulls; the live ones stay.
+    let marks = |id: &str, m: Vec<Option<f64>>| vec![(id.to_string(), m)];
+    let got =
+        s.settle_archive_marks(&marks("live", vec![Some(9.0), Some(9.0), Some(3.5), None, Some(5.5)]), 7).unwrap();
+    let want = vec![Some(1.5), Some(2.5), Some(3.5), None, Some(5.5)];
+    assert_eq!(got, marks("live", want.clone()));
+    assert_eq!(s.trade("live").unwrap().unwrap().markouts_bps, want);
+    assert_eq!(ids(&s), ["none"], "settled, though one mark is still null");
+    // Settled with nothing to give: unchanged, never offered again.
+    let both = [marks("none", vec![None; 5]), marks("gone", vec![Some(1.0)])].concat();
+    assert!(s.settle_archive_marks(&both, 8).unwrap().is_empty(), "an unknown id changes nothing");
+    assert!(ids(&s).is_empty());
+    assert_eq!(s.trade("none").unwrap().unwrap().markouts_bps, vec![None; 5]);
+}

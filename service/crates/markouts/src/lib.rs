@@ -12,6 +12,8 @@
 //! can't give (before it starts, during an outage) stays null, never 0.
 //! Approximate-price trades are never marked.
 
+pub mod archive;
+
 use mpamm_registry::Registry;
 use mpamm_types::{Fill, Side, TimeSource, CURVE_OFFSETS_S, CURVE_SECOND_MID_MS, MARKOUT_HORIZONS_S};
 

@@ -212,6 +212,22 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
             }
         });
 
+        // Markouts after the fact: the marks the live history couldn't give
+        // (trades repaired after an outage, from before a restart), from the
+        // exchanges' archives once they're published.
+        let archives = mpamm_pricing::archives::Archives::new(
+            registry,
+            mpamm_pricing::archives::ArchiveConfig::new(s.archive_cache.clone()),
+        );
+        let marks_source = source.clone();
+        tokio::spawn(crate::marks::run(
+            archives,
+            writer.clone(),
+            Duration::from_secs(120),
+            || mpamm_ring::live::now_ms() as f64,
+            move |changed| marks_source.on_markouts(changed),
+        ));
+
         // Markouts: every committed trade is aged against the reference
         // history; a restart resumes the trades still within their horizons.
         let aging_prices = prices.clone();

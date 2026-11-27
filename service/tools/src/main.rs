@@ -6,6 +6,9 @@
 //! decode parity check; `server/scripts/decode-range.ts` is the other half
 //! and `service/tools/compare-fills.py` diffs the two.
 //!
+//! `archive-marks`: trades marked from the exchanges' archives, the Rust half
+//! of the archive parity check against today's `history/cex.ts`.
+//!
 //! `parity`: the shadow run's check, the service's database against
 //! production's public `/api/fills` (see `parity.rs`).
 //!
@@ -177,6 +180,44 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         venues: Vec<String>,
     },
+    /// Mark trades from the exchanges' archives, as markouts after the fact
+    /// do (every horizon, whatever the trades already carry), and print
+    /// `[{id, markoutsBps, verdict}]` as JSON: the Rust half of the archive
+    /// parity check against today's history/cex.ts.
+    ArchiveMarks {
+        /// Trades as `/api/fills` returns them.
+        #[arg(long)]
+        fills: PathBuf,
+        /// The archives' cache directory.
+        #[arg(long)]
+        cache: PathBuf,
+    },
+}
+
+/// Marks `fills` from the archives and prints the result.
+async fn archive_marks(fills: &std::path::Path, cache: &std::path::Path) -> Result<(), String> {
+    let mut trades: Vec<mpamm_types::Fill> =
+        serde_json::from_slice(&std::fs::read(fills).map_err(|e| format!("{}: {e}", fills.display()))?)
+            .map_err(|e| format!("{}: {e}", fills.display()))?;
+    for f in &mut trades {
+        f.markouts_bps = vec![None; mpamm_types::MARKOUT_HORIZONS_S.len()];
+    }
+    let archives =
+        mpamm_pricing::archives::Archives::new(Registry::get(), mpamm_pricing::archives::ArchiveConfig::new(cache));
+    let t0 = std::time::Instant::now();
+    let now = mpamm_ring::live::now_ms() as f64;
+    let verdicts = mpamm_markouts::archive::mark_from_archives(&archives, &trades, now).await;
+    eprintln!("marked {} trade(s) in {:.1}s", verdicts.len(), t0.elapsed().as_secs_f64());
+    let out: Vec<Value> = verdicts
+        .into_iter()
+        .map(|(id, v)| match v {
+            mpamm_markouts::archive::Verdict::Marked(m) => json!({ "id": id, "markoutsBps": m, "verdict": "marked" }),
+            mpamm_markouts::archive::Verdict::Never(why) => json!({ "id": id, "verdict": "never", "why": why }),
+            mpamm_markouts::archive::Verdict::Later(why) => json!({ "id": id, "verdict": "later", "why": why }),
+        })
+        .collect();
+    println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -620,6 +661,7 @@ async fn main() {
             parity_cmd(&db, &prod, prod_file.as_deref(), hours, from_block, margin, usd_tolerance, drift_max, venues)
                 .await
         }
+        Cmd::ArchiveMarks { fills, cache } => archive_marks(&fills, &cache).await,
     };
     if let Err(e) = r {
         eprintln!("error: {e}");

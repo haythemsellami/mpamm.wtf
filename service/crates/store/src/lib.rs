@@ -200,6 +200,12 @@ CREATE TABLE IF NOT EXISTS venue_state (
   value    TEXT NOT NULL,
   PRIMARY KEY (venue_id, key)
 ) WITHOUT ROWID;
+-- Trades the exchanges' archives have answered for (markouts after the
+-- fact), whatever marks they gave: never offered to them again.
+CREATE TABLE IF NOT EXISTS archive_marks (
+  id         TEXT PRIMARY KEY,
+  settled_ms INTEGER NOT NULL
+) WITHOUT ROWID;
 "#;
 
 fn side_str(s: Side) -> &'static str {
@@ -539,6 +545,64 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![since_ms], row_to_fill)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Trades with `ts` in [from_ms, to_ms) still missing a markout that the
+    /// archives haven't settled: what markouts after the fact work on, oldest
+    /// first, at most `limit`.
+    pub fn trades_unmarked(&self, from_ms: f64, to_ms: f64, limit: usize) -> Result<Vec<Fill>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label,
+                    router, pool, block_number, ts, time_source, markouts_bps
+             FROM trades t WHERE ts >= ?1 AND ts < ?2 AND px_approx = 0 AND markouts_bps LIKE '%null%'
+               AND NOT EXISTS (SELECT 1 FROM archive_marks a WHERE a.id = t.id)
+             ORDER BY ts, id LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![from_ms, to_ms, limit as i64], row_to_fill)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Settles trades with the archives, in one transaction: each null
+    /// markout takes the archive's value at its horizon (a mark the live
+    /// history gave is never replaced), and the trade is not offered again.
+    /// `archived` is (trade id, the archive's mark per horizon). Returns the
+    /// markouts of every trade whose marks changed.
+    pub fn settle_archive_marks(
+        &mut self,
+        archived: &[(String, Vec<Option<f64>>)],
+        now_ms: i64,
+    ) -> Result<Vec<(String, Vec<Option<f64>>)>> {
+        let tx = self.conn.transaction()?;
+        let mut changed = Vec::new();
+        {
+            let mut read = tx.prepare_cached("SELECT markouts_bps FROM trades WHERE id = ?1")?;
+            let mut write = tx.prepare_cached("UPDATE trades SET markouts_bps = ?1 WHERE id = ?2")?;
+            let mut settle = tx.prepare_cached(
+                "INSERT INTO archive_marks (id, settled_ms) VALUES (?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET settled_ms = excluded.settled_ms",
+            )?;
+            for (id, archive) in archived {
+                let current: Option<String> = read.query_row([id], |r| r.get(0)).optional()?;
+                if let Some(current) = current {
+                    let mut marks: Vec<Option<f64>> = serde_json::from_str(&current).unwrap_or_default();
+                    marks.resize(marks.len().max(archive.len()), None);
+                    let mut any = false;
+                    for (m, a) in marks.iter_mut().zip(archive) {
+                        if m.is_none() && a.is_some() {
+                            *m = *a;
+                            any = true;
+                        }
+                    }
+                    if any {
+                        write.execute(params![serde_json::to_string(&marks).expect("markouts serialize"), id])?;
+                        changed.push((id.clone(), marks));
+                    }
+                }
+                settle.execute(params![id, now_ms])?;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     pub fn venue_state(&self, venue: &str, key: &str) -> Result<Option<String>> {

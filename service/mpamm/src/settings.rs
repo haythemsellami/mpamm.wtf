@@ -48,6 +48,9 @@ pub struct Cli {
     /// Least time between two depth passes (ms); 0 follows every block.
     #[arg(long)]
     pub depth_min_interval_ms: Option<u64>,
+    /// Where the exchanges' archives are cached (markouts after the fact).
+    #[arg(long)]
+    pub archive_cache: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -64,6 +67,7 @@ pub struct ServiceFile {
     pub stall_secs: Option<u64>,
     pub quote_deadline_ms: Option<u64>,
     pub depth_min_interval_ms: Option<u64>,
+    pub archive_cache: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -87,6 +91,7 @@ pub struct Settings {
     pub stall_secs: u64,
     pub quote_deadline_ms: u64,
     pub depth_min_interval_ms: u64,
+    pub archive_cache: PathBuf,
 }
 
 pub const DEFAULT_RING: &str = "/var/lib/hugetlbfs/user/monad/pagesize-2MB/event-rings/monad-exec-events";
@@ -117,6 +122,7 @@ impl Settings {
             stall_secs: cli.stall_secs.or(f.stall_secs).unwrap_or(5),
             quote_deadline_ms: cli.quote_deadline_ms.or(f.quote_deadline_ms).unwrap_or(150),
             depth_min_interval_ms: cli.depth_min_interval_ms.or(f.depth_min_interval_ms).unwrap_or(0),
+            archive_cache: cli.archive_cache.or(f.archive_cache).unwrap_or_else(|| "/var/lib/mpamm/archives".into()),
         })
     }
 }
@@ -144,6 +150,7 @@ mod tests {
         assert_eq!(s.rpc_url, "http://127.0.0.1:8080");
         assert_eq!(s.web_dist, None);
         assert_eq!(s.depth_min_interval_ms, 0, "depth follows every block by default");
+        assert_eq!(s.archive_cache, PathBuf::from("/var/lib/mpamm/archives"));
 
         std::fs::write(&p, "[service]\nreader_cpus = 3\n").unwrap();
         assert!(Settings::load(cli(&["--config", p.to_str().unwrap()]), |_| None).unwrap_err().contains("reader_cpus"));
