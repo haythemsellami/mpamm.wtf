@@ -118,12 +118,14 @@ pub fn run(s: Settings) -> ExitCode {
         if let Some(c) = &cursor {
             stats.cursor.store(c.block, Ordering::Relaxed);
         }
-        let (committed, _) = broadcast::channel(1024);
+        let (committed, _) = broadcast::channel(4096);
+        let mut committed_rx = committed.subscribe();
+        let writer = Writer::spawn(store);
         let (stop_feeds, feeds_stop) = tokio::sync::watch::channel(false);
         let prices = Prices::new(registry, Fees::default());
         prices.spawn(Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10)), Endpoints::default(), feeds_stop);
         let pipeline = Pipeline {
-            writer: Writer::spawn(store),
+            writer: writer.clone(),
             venues,
             fetcher: Fetcher {
                 local: Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10)),
@@ -146,6 +148,52 @@ pub fn run(s: Settings) -> ExitCode {
         // A client made on this runtime (the boot one's connections died with it).
         let local = Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10));
         let pipe = tokio::spawn(pipeline.run(rx));
+
+        // Markouts: every committed trade is aged against the reference
+        // history; a restart resumes the trades still within their horizons.
+        let aging_prices = prices.clone();
+        tokio::spawn(async move {
+            let mut aging = mpamm_markouts::Aging::default();
+            let since = mpamm_ring::live::now_ms() as f64 - 90_000.0;
+            if let Ok(recent) = writer.run(move |st| st.trades_aging(since)).await {
+                for f in &recent {
+                    aging.add(registry, f);
+                }
+            }
+            let mut tick = tokio::time::interval(Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    c = committed_rx.recv() => match c {
+                        Ok(c) => c.trades.iter().for_each(|f| aging.add(registry, f)),
+                        Err(broadcast::error::RecvError::Lagged(n)) => tracing::warn!("markouts missed {n} committed block(s)"),
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    },
+                    _ = tick.tick() => {
+                        let now = mpamm_ring::live::now_ms() as f64;
+                        let updates = aging.tick(now, |m, t| aging_prices.pair_mid_at(m, t));
+                        if updates.is_empty() {
+                            continue;
+                        }
+                        let r = writer
+                            .run(move |st| {
+                                for u in &updates {
+                                    if let Some(mk) = &u.markouts {
+                                        st.set_markouts(&u.id, mk)?;
+                                    }
+                                    if let Some(c) = &u.curve {
+                                        st.set_curve(&u.id, c)?;
+                                    }
+                                }
+                                Ok(())
+                            })
+                            .await;
+                        if let Err(e) = r {
+                            tracing::warn!("write markouts: {e}");
+                        }
+                    }
+                }
+            }
+        });
         // Rediscovery every 10 minutes, merge-only. A grown watch set applies
         // from the reader's next event; blocks up to just past the newest one
         // seen are read over RPC with the new set.

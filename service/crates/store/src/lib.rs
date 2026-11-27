@@ -465,6 +465,25 @@ impl Store {
         Ok(self.conn.execute("UPDATE trades SET markouts_bps = ?1 WHERE id = ?2", params![json, id])? == 1)
     }
 
+    /// Writes a trade's complete markout curve (taken once).
+    pub fn set_curve(&self, id: &str, curve: &[f64]) -> Result<bool> {
+        let json = serde_json::to_string(curve).expect("curve serializes");
+        Ok(self.conn.execute("UPDATE trades SET curve_bps = ?1 WHERE id = ?2", params![json, id])? == 1)
+    }
+
+    /// Trades from `since_ms` on whose markouts aren't all set: what a
+    /// restart resumes aging.
+    pub fn trades_aging(&self, since_ms: f64) -> Result<Vec<Fill>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label,
+                    router, pool, block_number, ts, time_source, markouts_bps
+             FROM trades WHERE ts >= ?1 AND px_approx = 0 AND (markouts_bps LIKE '%null%' OR curve_bps IS NULL)
+             ORDER BY ts",
+        )?;
+        let rows = stmt.query_map(params![since_ms], row_to_fill)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn venue_state(&self, venue: &str, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn

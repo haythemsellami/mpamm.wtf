@@ -189,3 +189,15 @@ async fn the_writer_thread_commits_in_order() {
     assert_eq!(vol, VenueDaily { usd: 50.0, swaps: 50 });
     assert!(matches!(w.commit(block(52, DAY1, vec![])).await, Err(StoreError::OutOfOrder { .. })));
 }
+
+#[test]
+fn curves_and_aging_queries() {
+    let mut s = Store::memory().unwrap();
+    let mut done = fill("done", "metric", 1.0, 1);
+    done.markouts_bps = vec![Some(1.0); 5];
+    s.commit_block(&block(1, DAY1, vec![fill("a", "metric", 1.0, 1), done])).unwrap();
+    assert!(s.set_curve("done", &[0.5; 14]).unwrap());
+    let aging: Vec<String> = s.trades_aging(0.0).unwrap().into_iter().map(|f| f.id).collect();
+    assert_eq!(aging, ["a"]);
+    assert!(s.trades_aging(f64::MAX).unwrap().is_empty());
+}

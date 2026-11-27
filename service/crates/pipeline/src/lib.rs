@@ -25,7 +25,7 @@ use mpamm_pricing::Prices;
 use mpamm_registry::Registry;
 use mpamm_ring::{Block, MissingReason, WatchSet};
 use mpamm_store::{writer::Writer, BlockCommit, GasAccrual, StoreError};
-use mpamm_types::Fill;
+use mpamm_types::{Fill, TimeSource};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
 
@@ -213,6 +213,13 @@ impl Pipeline {
                     return Err(format!("{}: {e}", v.id()));
                 }
             }
+        }
+        // Where every trade's time came from: the ring's proposal time, or
+        // the block second when the block was read over RPC.
+        let source = if block.proposal_ns.is_some() { TimeSource::Proposal } else { TimeSource::Block };
+        for f in &mut all {
+            f.ts = block.time_ms();
+            f.time_source = Some(source);
         }
         static ATTRIBUTOR: std::sync::OnceLock<attribution::Attributor> = std::sync::OnceLock::new();
         ATTRIBUTOR.get_or_init(attribution::Attributor::default).attribute(
