@@ -1,7 +1,7 @@
 //! Capricorn pAMM, ported from server/src/venues/__tests__/capricorn.decode.test.ts
 //! and capricorn.gas.test.ts: the same real logs and fixture, the same
-//! expected numbers. Quoting is not ported yet, so the quote-aggregation
-//! cases keep only what they assert about discovery and the catalog.
+//! expected numbers. The quote-aggregation cases keep here what they assert
+//! about discovery and the catalog; their quotes are in capricorn_quote.rs.
 
 use alloy_primitives::{address, b256, Address, I256, U256};
 use alloy_sol_types::SolEvent;

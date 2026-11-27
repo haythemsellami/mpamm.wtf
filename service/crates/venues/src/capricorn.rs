@@ -17,22 +17,30 @@
 //! OracleRegistry → the feed, one hop further than either receives update
 //! transactions). The keeper's pushes emit one event each; the contract is
 //! unverified, so that event is known only by its topic0.
+//!
+//! Quotes: `quoteExactIn` per quotable pool × size × side, the executable
+//! fee-inclusive output, one `eth_call` per leg (~0.2M gas, measured
+//! 2026-11-27) in one batch pinned to the block. It SATURATES rather than
+//! reverting: asked for more than the pool holds, it returns the remaining
+//! reserve (a $100k bid on a $2.1k pool quoted ~68,000 bps out), so a leg
+//! beyond ±2000 bps of the pair mid is an exhausted reserve, not depth, and
+//! is dropped.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use alloy_primitives::{address, b256, Address, U256};
 use alloy_sol_types::sol;
 use async_trait::async_trait;
-use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, Venue, VenueError, VenueState};
+use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, QuoteCx, Venue, VenueError, VenueState};
 use mpamm_registry::Registry;
 use mpamm_ring::{Addr, TopicFilter, WatchSet, B32};
-use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
 use parking_lot::RwLock;
 
 use crate::{
     chain::{call_many, At},
-    logs,
-    util::{addr_hex, b32_hex, fill_id, from_units, short_hex, to_addr, to_f64, to_units},
+    logs, quote_health,
+    util::{addr_hex, b32_hex, fill_id, from_addr, from_units, short_hex, to_addr, to_f64, to_units},
 };
 
 pub const ID: &str = "capricorn";
@@ -51,6 +59,8 @@ pub const SEED_POOLS: [Address; 2] = [
 ];
 /// Probe notional for the discovery-time quotability gate (stable units).
 const QUOTE_PROBE_USD: f64 = 100.0;
+/// Per-side sanity band against the pair reference (see the header).
+const PER_SIDE_BAND_BPS: f64 = 2_000.0;
 /// Venue-state key: the factory's pools seen in decode, with their layout.
 const STATE_CREATED: &str = "created";
 
@@ -223,6 +233,11 @@ impl Inner {
 
 pub struct Capricorn {
     inner: RwLock<Inner>,
+}
+
+/// Wall-clock milliseconds, today's `Date.now()`.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
 }
 
 impl Default for Capricorn {
@@ -477,6 +492,130 @@ impl Venue for Capricorn {
             });
         }
         Ok(out)
+    }
+
+    /// quoteExactIn per quotable pool × size × side, pinned to the block:
+    /// buying the base spends `size` of the stable, selling spends the base
+    /// worth `size`. Price = stable per base, all-in. Several pools on one
+    /// market (the factory keys pools on token pair AND fee) make one row
+    /// with the best price per side.
+    async fn quote(&self, cx: &QuoteCx<'_>, sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        let pools: Vec<Pool> = {
+            let inner = self.inner.read();
+            inner.quotable.iter().filter_map(|a| inner.by_addr.get(a).cloned()).collect()
+        };
+        struct Leg {
+            pool: usize,
+            size: f64,
+            buy: bool,
+            in_raw: U256,
+            mid: f64,
+        }
+        let mut legs = Vec::new();
+        let mut calls = Vec::new();
+        for (i, p) in pools.iter().enumerate() {
+            // The bps anchor is the pair-terms reference mid (wrap basis and
+            // stable cross), not a raw USDT price.
+            let mid = cx.pricer.pair_mid(&p.market);
+            if mid <= 0.0 {
+                continue;
+            }
+            for &size in sizes_usd {
+                let buy_in = to_units(size, p.stable_dec);
+                let sell_in = to_units(cx.pricer.token_for_usd(&p.base_token, size), p.base_dec);
+                for (buy, token_in, in_raw) in [(true, p.stable_addr, buy_in), (false, p.base_addr, sell_in)] {
+                    // An unsized leg can't make a row: not asked.
+                    if in_raw.is_zero() {
+                        continue;
+                    }
+                    calls.push((
+                        from_addr(&p.pool),
+                        quoteExactInCall { tokenIn: from_addr(&token_in), amountIn: in_raw },
+                    ));
+                    legs.push(Leg { pool: i, size, buy, in_raw, mid });
+                }
+            }
+        }
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+        let res = call_many(cx.rpc, &calls, At::Hash(cx.block.hash)).await?;
+        // Every leg failing is venue-wide (paused, oracle down, ABI drift),
+        // not a per-pair gap: name it instead of vanishing.
+        quote_health::check_outage(&meta().name, &res)?;
+        let ts = now_ms();
+        let mut rows: Vec<QuoteRow> = Vec::new();
+        for (l, r) in legs.iter().zip(res) {
+            let Ok(out) = r else { continue };
+            if out.is_zero() {
+                continue;
+            }
+            let p = &pools[l.pool];
+            let (in_dec, out_dec) = if l.buy { (p.stable_dec, p.base_dec) } else { (p.base_dec, p.stable_dec) };
+            let (in_h, out_h) = (from_units(l.in_raw, in_dec), from_units(out, out_dec));
+            if in_h <= 0.0 || out_h <= 0.0 {
+                continue;
+            }
+            let px = if l.buy { in_h / out_h } else { out_h / in_h };
+            let bps = (px / l.mid - 1.0) * 1e4;
+            // A saturated leg (the pool handed back its whole reserve) is not
+            // a comparable execution.
+            if !bps.is_finite() || bps.abs() > PER_SIDE_BAND_BPS {
+                continue;
+            }
+            let idx = match rows.iter().position(|x| x.market == p.market && x.size_usd == l.size) {
+                Some(i) => i,
+                None => {
+                    rows.push(QuoteRow {
+                        venue_id: ID.into(),
+                        market: p.market.clone(),
+                        size_usd: l.size,
+                        bid_bps: 0.0,
+                        ask_bps: 0.0,
+                        bid_px: 0.0,
+                        ask_px: 0.0,
+                        spread_bps: 0.0,
+                        // A leg inside the band consumed only part of the
+                        // reserve: it is the full requested notional.
+                        filled_full: true,
+                        one_sided: None,
+                        fee_bps: 0.0,
+                        cex_ask_bps: None,
+                        cex_bid_bps: None,
+                        ts,
+                    });
+                    rows.len() - 1
+                }
+            };
+            let row = &mut rows[idx];
+            // Cheapest ask and richest bid across the market's pools: a taker
+            // routes to the best, and the row must not depend on call order.
+            if l.buy {
+                if row.ask_px == 0.0 || px < row.ask_px {
+                    row.ask_bps = bps;
+                    row.ask_px = px;
+                }
+            } else if px > row.bid_px {
+                row.bid_bps = bps;
+                row.bid_px = px;
+            }
+            // One fee for a row from two pools can only be the worse one.
+            row.fee_bps = row.fee_bps.max(p.fee_bps);
+        }
+        for row in &mut rows {
+            if row.ask_px > 0.0 && row.bid_px > 0.0 {
+                row.spread_bps = row.ask_bps - row.bid_bps;
+            } else {
+                // One real leg and one exhausted: a genuine half-market.
+                row.one_sided = Some(true);
+            }
+        }
+        // The registry's pair order, then size (today's follows the pools,
+        // which list the same way).
+        let pair_at = |m: &str| cx.registry.pairs.iter().position(|p| p.symbol == m);
+        let size_at = |s: f64| sizes_usd.iter().position(|x| *x == s);
+        rows.sort_by_key(|r| (pair_at(&r.market), size_at(r.size_usd)));
+        Ok(rows)
     }
 
     fn markets(&self) -> Vec<String> {
