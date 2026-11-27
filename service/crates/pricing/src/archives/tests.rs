@@ -99,6 +99,8 @@ struct Host {
     klines: PlMutex<KlineRows>,
     flaky: PlMutex<Vec<String>>,
     log: PlMutex<Vec<String>>,
+    /// Kline pages served gzipped.
+    gzipped: std::sync::atomic::AtomicUsize,
 }
 
 impl Host {
@@ -156,9 +158,21 @@ async fn serve(host: Arc<Host>) -> String {
                 let head = String::from_utf8_lossy(&buf).to_string();
                 let mut first = head.lines().next().unwrap_or("").split(' ');
                 let (method, target) = (first.next().unwrap_or("").to_string(), first.next().unwrap_or("").to_string());
-                let (status, body) = host.answer(&method, &target);
-                let head =
-                    format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let (status, mut body) = host.answer(&method, &target);
+                // Kline pages are gzipped when asked, as the data mirror does.
+                let mut encoding = "";
+                if target.starts_with("/api/v3/klines") && head.to_ascii_lowercase().contains("accept-encoding: gzip") {
+                    use std::io::Write;
+                    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                    gz.write_all(&body).unwrap();
+                    body = gz.finish().unwrap();
+                    encoding = "Content-Encoding: gzip\r\n";
+                    host.gzipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\n{encoding}Connection: close\r\n\r\n",
+                    body.len()
+                );
                 let _ = sock.write_all(head.as_bytes()).await;
                 if method != "HEAD" {
                     let _ = sock.write_all(&body).await;
@@ -277,8 +291,17 @@ async fn a_binance_day_pages_klines_and_caches_once_final() {
     assert!((px.at((D + 86_400_000 - 1) as f64) - 2_543.9).abs() < 1e-9, "never the next day's close");
     assert_eq!(px.at(D as f64), 2_400.0, "before the first close: the first price");
     let g = gets(&host);
-    assert_eq!(g.len(), 3, "a 500 retried, then 1,440 rows at 1,000 a page: {g:?}");
-    assert!(g[1].contains(&format!("startTime={D}&endTime={}", D + 86_400_000 - 1)), "{}", g[1]);
+    assert_eq!(g.len(), 3, "1,440 rows as two slices of a page, and a 500 retried: {g:?}");
+    let mut ranges: Vec<String> = g.iter().map(|r| r.split("startTime=").nth(1).unwrap().to_string()).collect();
+    ranges.sort();
+    ranges.dedup();
+    assert_eq!(
+        ranges,
+        [
+            format!("{D}&endTime={}&limit=1000", D + 1_000 * MIN - 1),
+            format!("{}&endTime={}&limit=1000", D + 1_000 * MIN, D + 86_400_000 - 1)
+        ]
+    );
     assert!(dir.join("binance_ETHUSDT_1m_2026-09-29.csv").exists());
     let again = archives(&base, &dir);
     again.asset_usd_day("ETH", "2026-09-29", D + 2 * 86_400_000).await.unwrap().unwrap();
@@ -326,4 +349,29 @@ async fn a_binance_pair_reads_1s_base_and_1m_legs() {
     assert_eq!(std::fs::read_dir(&today_dir).unwrap().count(), 0);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&today_dir);
+}
+
+#[tokio::test]
+async fn slices_fetched_side_by_side_are_the_pages_fetched_in_turn() {
+    let host = Arc::new(Host::default());
+    // Two hours of 1-second klines with seconds missing (no trade) and a
+    // 20-minute hole: pages and slices cover different open times.
+    let rows: Vec<(i64, f64)> = (0..7_200)
+        .filter(|i| i % 7 != 3 && !(2_000..3_200).contains(i))
+        .map(|i| (D + i * 1_000, 60_000.0 + i as f64))
+        .collect();
+    host.klines.lock().insert(("BTCUSDT".into(), "1s".into()), rows.clone());
+    let base = serve(host.clone()).await;
+    let http = Http::new(1, Duration::ZERO);
+    let r = binance::Range { symbol: "BTCUSDT", interval: Interval::S1, from: D, to: D + 7_200_000 - 1 };
+    let now = D + 86_400_000;
+    let one = binance::closes(&http, &base, r, now, Duration::ZERO).await.unwrap();
+    let pages = gets(&host).len();
+    let many = binance::closes_sliced(&http, &base, r, now, Duration::ZERO, 4).await.unwrap();
+    assert_eq!(one, many);
+    assert_eq!(one.len(), rows.len());
+    assert_eq!(one.ts[0], (D + 999) as f64, "stamped at the close time");
+    assert_eq!(gets(&host).len() - pages, 8, "one page per 1,000 seconds");
+    let gzipped = host.gzipped.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(gzipped, gets(&host).len(), "every page asked for, and inflated from, gzip");
 }

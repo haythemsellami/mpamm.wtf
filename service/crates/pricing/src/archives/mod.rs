@@ -98,8 +98,11 @@ pub struct ArchiveConfig {
     pub cache_dir: PathBuf,
     pub bybit_url: String,
     pub binance_url: String,
-    /// Between two kline pages.
+    /// Between two kline pages of one range.
     pub pace: Duration,
+    /// Kline pages in flight when a whole day is fetched (a day of 1-second
+    /// klines is 87 pages; the data mirror allows ~3,000 a minute).
+    pub lanes: usize,
     /// Tries per request (a 404 is an answer, never retried).
     pub attempts: u32,
     /// Between tries: this, times the try number.
@@ -113,6 +116,7 @@ impl ArchiveConfig {
             bybit_url: bybit::DEFAULT_URL.into(),
             binance_url: binance::DEFAULT_URL.into(),
             pace: Duration::from_millis(40),
+            lanes: 16,
             attempts: 5,
             backoff: Duration::from_millis(500),
         }
@@ -132,28 +136,44 @@ enum Got {
     NotFound,
 }
 
+/// A kline page or a probe: a stalled answer is retried, not waited on.
+const SHORT: Duration = Duration::from_secs(15);
+/// A day's book archive (several MB).
+const LONG: Duration = Duration::from_secs(600);
+
 impl Http {
     fn new(attempts: u32, backoff: Duration) -> Self {
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(600))
-            .build()
-            .expect("http client");
+        let client = reqwest::Client::builder().connect_timeout(SHORT).build().expect("http client");
         Self { client, attempts: attempts.max(1), backoff }
     }
 
-    async fn get(&self, url: &str, what: &str) -> Result<Got, ArchiveError> {
+    /// A GET, retried. Asks for gzip and inflates it here: a day of 1-second
+    /// klines is ~14 MB of JSON, ~3 MB gzipped (the workspace's HTTP client
+    /// decompresses nothing, and the RPC paths that share it shouldn't).
+    async fn get(&self, url: &str, what: &str, timeout: Duration) -> Result<Got, ArchiveError> {
+        use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING};
         let mut last = String::new();
         for i in 0..self.attempts {
             if i > 0 {
                 tokio::time::sleep(self.backoff * i).await;
             }
-            match self.client.get(url).send().await {
+            match self.client.get(url).header(ACCEPT_ENCODING, "gzip").timeout(timeout).send().await {
                 Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => return Ok(Got::NotFound),
-                Ok(r) if r.status().is_success() => match r.bytes().await {
-                    Ok(b) => return Ok(Got::Body(b.to_vec())),
-                    Err(e) => last = format!("body: {}", e.without_url()),
-                },
+                Ok(r) if r.status().is_success() => {
+                    let gzip =
+                        r.headers().get(CONTENT_ENCODING).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
+                    match r.bytes().await {
+                        Ok(b) if !gzip => return Ok(Got::Body(b.to_vec())),
+                        Ok(b) => {
+                            let mut out = Vec::with_capacity(b.len() * 5);
+                            match std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&b[..]), &mut out) {
+                                Ok(_) => return Ok(Got::Body(out)),
+                                Err(e) => last = format!("gzip body: {e}"),
+                            }
+                        }
+                        Err(e) => last = format!("body: {}", e.without_url()),
+                    }
+                }
                 Ok(r) => last = format!("status {}", r.status().as_u16()),
                 Err(e) => last = e.without_url().to_string(),
             }
@@ -162,7 +182,7 @@ impl Http {
     }
 
     async fn get_text(&self, url: &str, what: &str) -> Result<String, ArchiveError> {
-        match self.get(url, what).await? {
+        match self.get(url, what, SHORT).await? {
             Got::Body(b) => String::from_utf8(b).map_err(|_| ArchiveError::Corrupt(format!("{what}: not text"))),
             Got::NotFound => Err(ArchiveError::Http(format!("{what}: status 404"))),
         }
@@ -172,7 +192,7 @@ impl Http {
     /// yes: the GET decides, and a flaky probe must not invent an
     /// "unpublished" verdict.
     async fn exists(&self, url: &str) -> bool {
-        match self.client.head(url).timeout(Duration::from_secs(15)).send().await {
+        match self.client.head(url).timeout(SHORT).send().await {
             Ok(r) => r.status() != reqwest::StatusCode::NOT_FOUND,
             Err(_) => true,
         }
@@ -381,7 +401,7 @@ impl Archives {
         let Some(start) = day_start(day) else { return Err(ArchiveError::Corrupt(format!("bad day {day}"))) };
         let what = format!("bybit book archive {symbol} {day}");
         let t0 = Instant::now();
-        let zip = match self.http.get(&bybit::url(&self.cfg.bybit_url, symbol, day), &what).await? {
+        let zip = match self.http.get(&bybit::url(&self.cfg.bybit_url, symbol, day), &what, LONG).await? {
             Got::NotFound => return Ok(None),
             Got::Body(b) => b,
         };
@@ -454,7 +474,8 @@ impl Archives {
         }
         let t0 = Instant::now();
         let r = binance::Range { symbol, interval, from: start, to: end - 1 };
-        let p = binance::closes(&self.http, &self.cfg.binance_url, r, now_ms, self.cfg.pace).await?;
+        let p =
+            binance::closes_sliced(&self.http, &self.cfg.binance_url, r, now_ms, self.cfg.pace, self.cfg.lanes).await?;
         cache::write(&path, &p)?;
         tracing::info!(
             "archives: binance {symbol} {} {day}: {} closes in {:.1}s",

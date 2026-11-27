@@ -124,6 +124,43 @@ pub async fn closes(
     Ok(out)
 }
 
+/// Every kline in `r`, fetched as independent slices of one page each,
+/// `lanes` at a time: a day of 1-second klines is 87 pages, and one after
+/// another they take 87 round trips to the exchange. The klines are the
+/// same as `closes`' (each slice is its own range of open times).
+pub async fn closes_sliced(
+    http: &Http,
+    base: &str,
+    r: Range<'_>,
+    now_ms: i64,
+    pace: Duration,
+    lanes: usize,
+) -> Result<Points, ArchiveError> {
+    use futures_util::StreamExt;
+    let span = PAGE as i64 * r.interval.ms();
+    let mut slices = Vec::new();
+    let mut s = r.from;
+    while s <= r.to {
+        slices.push(Range { from: s, to: (s + span - 1).min(r.to), ..r });
+        s += span;
+    }
+    // The futures are made up front: a stream that maps with a closure over
+    // `Range<'_>` would not be `Send` for every lifetime the caller needs.
+    let fetches: Vec<_> = slices.into_iter().map(|sl| closes(http, base, sl, now_ms, pace)).collect();
+    let parts: Vec<Result<Points, ArchiveError>> =
+        futures_util::stream::iter(fetches).buffered(lanes.max(1)).collect().await;
+    let mut out = Points::default();
+    for p in parts {
+        let p = p?;
+        for (t, px) in p.ts.iter().zip(&p.px) {
+            if out.ts.last().is_none_or(|l| t > l) {
+                out.push(*t, *px);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

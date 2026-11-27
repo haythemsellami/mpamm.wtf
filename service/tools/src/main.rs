@@ -625,7 +625,8 @@ async fn quote_at(venue_id: &str, block: u64, prices: &std::path::Path, rpc_url:
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().with_env_filter("warn").with_writer(std::io::stderr).init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into());
+    tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
     let r = match Cli::parse().cmd {
         Cmd::DecodeRange { venue, from, to, rpc, chunk, live_prices_secs, skip_gas_only } => {
             decode_range(&venue, from, to, &rpc, chunk, live_prices_secs, skip_gas_only).await
