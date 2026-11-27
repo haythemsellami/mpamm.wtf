@@ -6,3 +6,8 @@
 [reader]
 # The one core no node daemon is pinned to on the first node host.
 cpu = 0
+
+[service]
+# The ring reader thread's core (the rest of the service runs unpinned until
+# DevOps sets a CPU set for it).
+reader_cpu = 0
