@@ -14,9 +14,22 @@ use mpamm_core::VenueError;
 
 /// A failed leg's reason: its error without the variant's prefix.
 pub fn leg_reason(e: &VenueError) -> String {
+    message(e).to_string()
+}
+
+fn message(e: &VenueError) -> &str {
     match e {
-        VenueError::NotReady(m) | VenueError::Decode(m) | VenueError::Chain(m) => m.clone(),
+        VenueError::NotReady(m) | VenueError::Decode(m) | VenueError::Chain(m) => m,
     }
+}
+
+/// A reverted leg's `Error(string)` text (today's `revertReason`), as the
+/// chain client renders it at the end of the error: `… (reverted: <text>)`.
+pub fn revert_text(e: &VenueError) -> Option<&str> {
+    const MARK: &str = "(reverted: ";
+    let m = message(e);
+    let at = m.rfind(MARK)?;
+    m[at + MARK.len()..].strip_suffix(')').map(str::trim)
 }
 
 /// The venue-wide outage reason, or `None` while ANY leg still answers (or
@@ -113,6 +126,19 @@ mod tests {
             )
         );
         assert!(check_outage("X", &[Ok(()), fail("a")]).is_ok());
+    }
+
+    /// The node's own message may repeat the reason; the decoded one closes
+    /// the chain client's rendering.
+    #[test]
+    fn a_reverted_legs_text_is_the_decoded_error_string() {
+        let leg = |m: &str| VenueError::Chain(m.into());
+        assert_eq!(
+            revert_text(&leg("f(): rpc error 3: execution reverted: maker: balance (reverted: maker: balance)")),
+            Some("maker: balance")
+        );
+        assert_eq!(revert_text(&leg("f(): rpc error 3: execution reverted (custom error 0x19abf40e)")), None);
+        assert_eq!(revert_text(&leg("f() batch: transport: timed out")), None);
     }
 
     #[test]

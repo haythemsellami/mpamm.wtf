@@ -18,27 +18,38 @@
 //! checks against ERC-20 `decimals()` every 10 minutes. An upgrade is logged
 //! as the cue to re-verify the ABIs; a token set it changed without events
 //! is picked up by the next discovery.
+//!
+//! Quotes: `makerQuoteExactInput` is the contract's read-only baseline
+//! (spread, inventory, age and conservative capacity included; execution-
+//! context friction such as gas price, basefee, FastLane warmth and
+//! same-block treatment not). It is not a guaranteed executable output, and
+//! no guessed fee is added to approximate that mechanism. One `eth_call` per
+//! leg (0.37–0.42M gas each, measured 2026-11-27), all in one batch pinned to
+//! the block. The view REVERTS rather than answering zero when the maker is
+//! off ("maker: paused") or holds none of the output token ("maker:
+//! balance").
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     sync::OnceLock,
 };
 
-use alloy_primitives::{address, Address, B256};
+use alloy_primitives::{address, Address, B256, U256};
 use alloy_sol_types::sol;
 use async_trait::async_trait;
 use mpamm_core::{
-    ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasSources, HistoryRevision, RevisionSource, Venue, VenueError,
+    ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasSources, HistoryRevision, QuoteCx, RevisionSource, Venue,
+    VenueError,
 };
 use mpamm_registry::{Pair, Registry};
 use mpamm_ring::{Addr, TopicFilter, WatchSet};
-use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
-use parking_lot::RwLock;
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
+use parking_lot::{Mutex, RwLock};
 
 use crate::{
     chain::{call, call_many, At},
-    logs,
-    util::{b32_hex, fill_id, from_units, short_hex, to_addr},
+    logs, quote_health,
+    util::{b32_hex, fill_id, from_addr, from_units, short_hex, to_addr, to_units},
 };
 
 pub const ID: &str = "thogamm";
@@ -50,11 +61,15 @@ const POOL_LABEL: &str = "thogamm 0x80c74517";
 /// 'xstocks-usd-references' history revision, frozen.
 const XSTOCKS_2026_10: [&str; 5] = ["SPYx", "QQQx", "EWYx", "NVDAx", "TSLAx"];
 
+/// Blocks a "maker: balance" leg sits out before it is probed again (~10 s).
+pub const DRAINED_REPROBE_BLOCKS: u64 = 25;
+
 sol! {
     function getPoolIds() view returns (bytes32[]);
     // ERC-7815 declares this nonpayable; discovery invokes it through eth_call.
     function getTokens(bytes32 poolId) view returns (address[]);
     function decimals() view returns (uint8);
+    function makerQuoteExactInput(address tokenIn, address tokenOut, uint256 amountIn) view returns (uint256 amountOut, uint256 lastPostedBlock);
     event MakerSwapExecuted(address indexed tokenIn, address indexed tokenOut, address indexed sender, address recipient, uint256 amountIn, uint256 amountOut, uint256 quoteAgeBlocks, uint256 inventoryPenaltyUsdWad);
     event MakerPricesPushed(uint16 seq, uint32 indexed postedBlock, uint16 sideEnableBits);
     event MakerRiskParamsPushed(uint8 indexed fields);
@@ -227,9 +242,31 @@ impl Inner {
     }
 }
 
+/// A quote leg: (market, size bits, sells the base).
+type LegKey = (String, u64, bool);
+
 #[derive(Default)]
 pub struct Thogamm {
     inner: RwLock<Inner>,
+    /// Legs the maker answered "maker: balance" (it holds none of the output
+    /// token: every buy of an xStock while the pool holds none), with the
+    /// block they are probed again at. ~75 markets × sizes × 2 sides is ~600
+    /// calls a block and these would revert on every one; only the
+    /// contract's own answer drops a leg, and the re-probe brings it back
+    /// once inventory arrives.
+    drained: Mutex<HashMap<LegKey, u64>>,
+}
+
+/// "maker: balance", as today's `/^maker: balance\b/` matches it.
+fn is_balance_revert(e: &VenueError) -> bool {
+    quote_health::revert_text(e)
+        .and_then(|t| t.strip_prefix("maker: balance"))
+        .is_some_and(|rest| !rest.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// Wall-clock milliseconds, today's `Date.now()`.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
 }
 
 /// What discovery read from the proxy at one block.
@@ -443,6 +480,144 @@ impl Venue for Thogamm {
             });
         }
         Ok(out)
+    }
+
+    /// makerQuoteExactInput(tokenIn, tokenOut, amountIn) per listed market ×
+    /// size × side, pinned to the block: selling spends the base worth
+    /// `size`, buying the quote token worth `size`. Price = quote per base;
+    /// no fee is added (see the header).
+    async fn quote(&self, cx: &QuoteCx<'_>, sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        // The listed markets in the registry's order (today's: discovery's).
+        let markets: Vec<Market> = {
+            let inner = self.inner.read();
+            if !inner.discovered {
+                return Ok(Vec::new());
+            }
+            let active = cx.registry.pairs.iter().filter(|p| inner.active.contains(&p.symbol));
+            active.filter_map(|p| inner.by_market.get(&p.symbol).cloned()).collect()
+        };
+        let block = cx.block.number;
+        struct Leg {
+            market: usize,
+            size: f64,
+            sell: bool,
+            amount_in: U256,
+            mid: f64,
+        }
+        let mut legs = Vec::new();
+        let mut calls = Vec::new();
+        {
+            let drained = self.drained.lock();
+            for (i, m) in markets.iter().enumerate() {
+                // The bps anchor is the pair-terms reference mid.
+                let mid = cx.pricer.pair_mid(&m.market);
+                let base_usd = cx.pricer.usd_per_token(&m.base_key);
+                let quote_usd = cx.pricer.usd_per_token(&m.quote_key);
+                if mid <= 0.0 || base_usd <= 0.0 || quote_usd <= 0.0 {
+                    continue;
+                }
+                for &size in sizes_usd {
+                    for sell in [true, false] {
+                        let key = (m.market.clone(), size.to_bits(), sell);
+                        if drained.get(&key).is_some_and(|until| *until > block) {
+                            continue;
+                        }
+                        let (input, in_dec, in_usd, output) = if sell {
+                            (m.base, m.base_dec, base_usd, m.quote)
+                        } else {
+                            (m.quote, m.quote_dec, quote_usd, m.base)
+                        };
+                        let amount_in = to_units(size / in_usd, in_dec);
+                        if amount_in.is_zero() {
+                            continue;
+                        }
+                        calls.push((
+                            PROXY,
+                            makerQuoteExactInputCall {
+                                tokenIn: from_addr(&input),
+                                tokenOut: from_addr(&output),
+                                amountIn: amount_in,
+                            },
+                        ));
+                        legs.push(Leg { market: i, size, sell, amount_in, mid });
+                    }
+                }
+            }
+        }
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+        let res = call_many(cx.rpc, &calls, At::Hash(cx.block.hash)).await?;
+        // The maker switched off reverts every leg "maker: paused" (block
+        // 92,998,939): name it instead of vanishing.
+        quote_health::check_outage(&meta().name, &res)?;
+        // (market, size, mid, bid, ask) in the order of each one's first
+        // answered leg.
+        let mut partials: Vec<(usize, f64, f64, f64, f64)> = Vec::new();
+        {
+            let mut drained = self.drained.lock();
+            for (leg, r) in legs.iter().zip(res) {
+                let m = &markets[leg.market];
+                let key = (m.market.clone(), leg.size.to_bits(), leg.sell);
+                let q = match r {
+                    Ok(q) => q,
+                    Err(e) => {
+                        if is_balance_revert(&e) {
+                            drained.insert(key, block + DRAINED_REPROBE_BLOCKS);
+                        }
+                        continue;
+                    }
+                };
+                drained.remove(&key);
+                if q.amountOut.is_zero() {
+                    continue;
+                }
+                let (in_dec, out_dec) = if leg.sell { (m.base_dec, m.quote_dec) } else { (m.quote_dec, m.base_dec) };
+                let (input, output) = (from_units(leg.amount_in, in_dec), from_units(q.amountOut, out_dec));
+                if input <= 0.0 || output <= 0.0 {
+                    continue;
+                }
+                let idx = match partials.iter().position(|p| p.0 == leg.market && p.1 == leg.size) {
+                    Some(i) => i,
+                    None => {
+                        partials.push((leg.market, leg.size, leg.mid, 0.0, 0.0));
+                        partials.len() - 1
+                    }
+                };
+                if leg.sell {
+                    partials[idx].3 = output / input;
+                } else {
+                    partials[idx].4 = input / output;
+                }
+            }
+        }
+        let ts = now_ms();
+        Ok(partials
+            .into_iter()
+            .filter(|p| p.3 > 0.0 || p.4 > 0.0)
+            .map(|(i, size, mid, bid_px, ask_px)| {
+                let one_sided = bid_px <= 0.0 || ask_px <= 0.0;
+                QuoteRow {
+                    venue_id: ID.into(),
+                    market: markets[i].market.clone(),
+                    size_usd: size,
+                    bid_bps: if bid_px > 0.0 { (bid_px / mid - 1.0) * 1e4 } else { 0.0 },
+                    ask_bps: if ask_px > 0.0 { (ask_px / mid - 1.0) * 1e4 } else { 0.0 },
+                    bid_px,
+                    ask_px,
+                    spread_bps: if one_sided { 0.0 } else { ((ask_px - bid_px) / mid) * 1e4 },
+                    filled_full: true,
+                    // Today states it either way.
+                    one_sided: Some(one_sided),
+                    // No additive LP fee: the view includes spread, age and
+                    // inventory, and excludes execution friction.
+                    fee_bps: 0.0,
+                    cex_ask_bps: None,
+                    cex_bid_bps: None,
+                    ts,
+                }
+            })
+            .collect())
     }
 
     fn markets(&self) -> Vec<String> {
