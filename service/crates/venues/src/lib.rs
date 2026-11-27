@@ -12,6 +12,7 @@ pub mod hanji;
 pub mod logs;
 pub mod metric;
 pub mod poe;
+pub mod quote_health;
 pub mod thogamm;
 pub mod util;
 pub mod woofi;
