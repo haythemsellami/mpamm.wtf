@@ -1,0 +1,11 @@
+[package]
+name = "mpamm-markouts"
+version = "0.1.0"
+description = "Markouts and markout curves, aged live against the pair-terms reference history"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mpamm-registry = { path = "../registry" }
+mpamm-types = { path = "../types" }

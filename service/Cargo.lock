@@ -2150,6 +2150,7 @@ dependencies = [
  "libc",
  "mpamm-chain",
  "mpamm-core",
+ "mpamm-markouts",
  "mpamm-pipeline",
  "mpamm-pricing",
  "mpamm-registry",
@@ -2186,6 +2187,14 @@ dependencies = [
  "mpamm-types",
  "parking_lot",
  "serde_json",
+]
+
+[[package]]
+name = "mpamm-markouts"
+version = "0.1.0"
+dependencies = [
+ "mpamm-registry",
+ "mpamm-types",
 ]
 
 [[package]]
