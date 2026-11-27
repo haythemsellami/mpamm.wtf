@@ -12,6 +12,7 @@ mpamm-core = { path = "../crates/core" }
 mpamm-markouts = { path = "../crates/markouts" }
 mpamm-pipeline = { path = "../crates/pipeline" }
 mpamm-pricing = { path = "../crates/pricing" }
+mpamm-quotes = { path = "../crates/quotes" }
 mpamm-registry = { path = "../crates/registry" }
 mpamm-ring = { path = "../crates/ring" }
 mpamm-store = { path = "../crates/store" }

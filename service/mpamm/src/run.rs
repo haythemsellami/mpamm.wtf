@@ -84,6 +84,7 @@ pub fn run(s: Settings) -> ExitCode {
     };
     tracing::info!("{} venue(s); watching {} log address(es)", venues.len(), watch.load().logs.len());
     let (tx, rx) = mpsc::unbounded_channel::<Input>();
+    let (exec_tx, mut exec_rx) = mpsc::unbounded_channel::<(mpamm_core::BlockRef, u128)>();
     let stop = Arc::new(AtomicBool::new(false));
     let ring_stats = Arc::new(FollowStats::default());
 
@@ -105,6 +106,10 @@ pub fn run(s: Settings) -> ExitCode {
                 follow(&cfg, tracker, &watch, &ring_stats, &stop, |o| match o {
                     Output::Final(b) => tx.send(Input::Final(b)).is_ok(),
                     Output::Missing { number, reason } => tx.send(Input::Missing { number, reason }).is_ok(),
+                    Output::Executed { id, number, hash, proposal_ns, .. } => {
+                        let _ = exec_tx.send((mpamm_core::BlockRef { number, id, hash }, proposal_ns));
+                        true
+                    }
                     _ => true,
                 });
                 tracing::info!(target: "ring", "reader stopped");
@@ -147,7 +152,28 @@ pub fn run(s: Settings) -> ExitCode {
         let rediscover_ring = ring_stats.clone();
         // A client made on this runtime (the boot one's connections died with it).
         let local = Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10));
+        let quote_venues = pipeline.venues.clone();
         let pipe = tokio::spawn(pipeline.run(rx));
+
+        // Quotes: every proposed block that finished executing is quoted by
+        // every venue, pinned to its hash. Blocks replayed from the ring after
+        // a restart are history, not news: only fresh ones are quoted.
+        let engine = mpamm_quotes::Engine::new(
+            quote_venues,
+            Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(2)),
+            prices.clone(),
+            registry,
+            Duration::from_millis(s.quote_deadline_ms),
+        );
+        let quotes = engine.clone();
+        tokio::spawn(async move {
+            while let Some((block, proposal_ns)) = exec_rx.recv().await {
+                let age_ms = mpamm_ring::live::now_ms() as f64 - proposal_ns as f64 / 1e6;
+                if age_ms < 2_000.0 {
+                    quotes.on_executed(block, proposal_ns);
+                }
+            }
+        });
 
         // Markouts: every committed trade is aged against the reference
         // history; a restart resumes the trades still within their horizons.
@@ -224,6 +250,7 @@ pub fn run(s: Settings) -> ExitCode {
             ring: ring_stats,
             pipeline: stats,
             prices: prices.clone(),
+            quotes: engine.clone(),
             started: Instant::now(),
             stall_ms: s.stall_secs.max(1) * 1000,
         });

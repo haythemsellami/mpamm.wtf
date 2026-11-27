@@ -15,6 +15,7 @@ pub struct Health {
     pub ring: Arc<FollowStats>,
     pub pipeline: Arc<Stats>,
     pub prices: Arc<Prices>,
+    pub quotes: Arc<mpamm_quotes::Engine>,
     pub started: Instant,
     pub stall_ms: u64,
 }
@@ -29,6 +30,8 @@ pub struct HealthBody {
     pub ring: FollowView,
     pub pipeline: StatsView,
     pub feeds: FeedsView,
+    /// Each venue's quote time over the last minute, and its misses.
+    pub quotes: std::collections::BTreeMap<String, mpamm_quotes::VenueTiming>,
 }
 
 /// Each exchange's last message age, and how many registered pairs have a
@@ -88,7 +91,8 @@ async fn health(State(h): State<Health>) -> (StatusCode, Json<HealthBody>) {
     let (status, ok) = status(&ring, &pipeline, uptime_ms, h.stall_ms, now_ms());
     let lag = (pipeline.cursor > 0 && ring.newest_block > 0).then(|| ring.newest_block.saturating_sub(pipeline.cursor));
     let feeds = feeds_view(&h.prices, now_ms());
-    let body = HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds };
+    let quotes = h.quotes.timings().into_iter().collect();
+    let body = HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds, quotes };
     (if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, Json(body))
 }
 

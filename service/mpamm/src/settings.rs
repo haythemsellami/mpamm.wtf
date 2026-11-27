@@ -39,6 +39,9 @@ pub struct Cli {
     pub finalize_wait_ms: Option<u64>,
     #[arg(long)]
     pub stall_secs: Option<u64>,
+    /// Each venue's deadline per block (ms).
+    #[arg(long)]
+    pub quote_deadline_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -52,6 +55,7 @@ pub struct ServiceFile {
     pub http: Option<SocketAddr>,
     pub finalize_wait_ms: Option<u64>,
     pub stall_secs: Option<u64>,
+    pub quote_deadline_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -72,6 +76,7 @@ pub struct Settings {
     pub http: SocketAddr,
     pub finalize_wait_ms: u64,
     pub stall_secs: u64,
+    pub quote_deadline_ms: u64,
 }
 
 pub const DEFAULT_RING: &str = "/var/lib/hugetlbfs/user/monad/pagesize-2MB/event-rings/monad-exec-events";
@@ -99,6 +104,7 @@ impl Settings {
             http: cli.http.or(f.http).unwrap_or_else(|| "127.0.0.1:8787".parse().unwrap()),
             finalize_wait_ms: cli.finalize_wait_ms.or(f.finalize_wait_ms).unwrap_or(2000),
             stall_secs: cli.stall_secs.or(f.stall_secs).unwrap_or(5),
+            quote_deadline_ms: cli.quote_deadline_ms.or(f.quote_deadline_ms).unwrap_or(150),
         })
     }
 }
