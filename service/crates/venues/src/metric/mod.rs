@@ -6,7 +6,7 @@
 //! router, quoter and Swap ABI), so the venue is two contract generations
 //! behind ONE venue id (`generations`):
 //!   v0  2026-03-30 → 2026-09-27 · retired: decode-only, bounded at the last v0 swap.
-//!   v1  2026-10-04 →            · live: discovery, fills, gas.
+//!   v1  2026-10-04 →            · live: discovery, quotes, fills, gas.
 
 pub mod shared;
 pub mod v0;

@@ -1,8 +1,7 @@
 //! Metric, both generations, ported from server/src/venues/__tests__/
 //! metric.decode.test.ts and metric.discovery.test.ts: real recorded logs
 //! (fixtures/metric.json) decode to the same trades, and discovery admits,
-//! holds and merges as today against a stubbed chain. Quote tests wait for
-//! the quote milestone.
+//! holds, merges and quotes as today against a stubbed chain.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -12,10 +11,10 @@ use std::{
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::SolEvent;
 use async_trait::async_trait;
-use mpamm_core::{DecodeCx, FinalBlock, FinalLog, NoPrices, Origin, Venue, VenueError, VenueState};
+use mpamm_core::{DecodeCx, FinalBlock, FinalLog, NoPrices, Origin, Pricer, Venue, VenueError, VenueState};
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::{Addr, TopicFilter};
-use mpamm_types::{Fill, FillCategory, Side};
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side};
 use mpamm_venues::{
     generations::{Generation, Generations},
     metric::{
@@ -23,7 +22,7 @@ use mpamm_venues::{
         shared::{admit_pool, pool_liveness, Liveness, PoolTokens, Reject},
         v0::{MetricV0, V0_LAST_SWAP_BLOCK, V0_POOLS, V0_PUSH_ORACLE},
         v1::{
-            announced_pool, unpack_amount_deltas, MetricV1, PoolImmutables, Swap, V1Reads, V1_FACTORY,
+            announced_pool, unpack_amount_deltas, MetricV1, PoolImmutables, QuoteCall, Swap, V1Reads, V1_FACTORY,
             V1_FACTORY_BLOCK, V1_SIMPLE_ROUTER,
         },
     },
@@ -116,6 +115,8 @@ fn prov_of(pool: Addr) -> Addr {
 }
 
 type PoolFn<T> = Box<dyn Fn(Addr) -> T + Send + Sync>;
+/// The quoter: (amount in used, amount out) or the leg's failure.
+type QuoteFn = Box<dyn Fn(&QuoteCall) -> Result<(U256, U256), VenueError> + Send + Sync>;
 
 struct Stub {
     pools: Vec<Addr>,
@@ -126,7 +127,11 @@ struct Stub {
     provider_fails: HashSet<Addr>,
     current_provider: PoolFn<Addr>,
     oracle_of: PoolFn<Option<Addr>>,
+    /// Default: a full fill at 1:1.
+    quote: QuoteFn,
     calls: Mutex<Vec<(&'static str, String)>>,
+    /// Every quoter leg asked, with the block hash it was pinned to.
+    legs: Mutex<Vec<(QuoteCall, [u8; 32])>>,
 }
 
 impl Stub {
@@ -146,7 +151,9 @@ impl Stub {
             provider_fails: HashSet::new(),
             current_provider: Box::new(prov_of),
             oracle_of: Box::new(|_| Some(addr(ORACLE))),
+            quote: Box::new(|c| Ok((c.amount_in, c.amount_in))),
             calls: Mutex::new(Vec::new()),
+            legs: Mutex::new(Vec::new()),
         }
     }
 
@@ -237,6 +244,50 @@ impl V1Reads for Stub {
             })
             .collect())
     }
+    async fn quote_live(
+        &self,
+        legs: &[QuoteCall],
+        block_hash: [u8; 32],
+    ) -> Result<Vec<Result<(U256, U256), VenueError>>, VenueError> {
+        self.legs.lock().unwrap().extend(legs.iter().map(|l| (*l, block_hash)));
+        Ok(legs.iter().map(|l| (self.quote)(l)).collect())
+    }
+}
+
+/// Today's stub pricer: every pair mid `mid` unless named, every token $1
+/// (so every sell leg spends one whole base token).
+struct Frame {
+    mid: f64,
+    mids: HashMap<&'static str, f64>,
+}
+
+impl Frame {
+    fn mid(mid: f64) -> Self {
+        Self { mid, mids: HashMap::new() }
+    }
+}
+
+impl Pricer for Frame {
+    fn usd_per_token(&self, _: &str) -> f64 {
+        1.0
+    }
+    fn usd_for_token(&self, _: &str, _: f64) -> f64 {
+        1.0
+    }
+    fn pair_mid(&self, market: &str) -> f64 {
+        self.mids.get(market).copied().unwrap_or(self.mid)
+    }
+    fn token_for_usd(&self, _: &str, _: f64) -> f64 {
+        1.0
+    }
+}
+
+fn hash(n: u8) -> [u8; 32] {
+    [n; 32]
+}
+
+async fn quote(v1: &MetricV1, stub: &Stub, frame: &Frame, sizes: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+    v1.quote_with(stub, frame, hash(7), sizes).await
 }
 
 fn venue() -> (Generations, Arc<MetricV1>) {
@@ -615,10 +666,13 @@ async fn bounds_v1_at_the_factory_creation_block() {
 
 #[tokio::test]
 async fn keeps_watching_a_funded_pool_whose_oracle_stopped_answering_but_does_not_quote_it() {
-    let (_, v1) = discovered(&Stub { price_fails: true, ..Stub::default_pools() }).await;
+    let stub = Stub { price_fails: true, ..Stub::default_pools() };
+    let (_, v1) = discovered(&stub).await;
     assert!(swap_pools(&v1).contains(&WMON_POOL.to_string()));
     assert!(v1.live_markets().is_empty());
     assert!(v1.no_price_warning().unwrap().contains("funded pool(s) have no oracle price"));
+    assert_eq!(quote(&v1, &stub, &Frame::mid(1.0), &[100.0]).await.unwrap(), []);
+    assert!(stub.legs.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -687,6 +741,248 @@ async fn gas_destinations_never_shrink() {
     for a in [addr(ORACLE), addr(ORACLE_B), to_addr(V0_PUSH_ORACLE)] {
         assert!(dest.contains(&a));
     }
+}
+
+// ── v1 quotes ───────────────────────────────────────────────────────────────
+
+/// Only the WMON pool funded: the one live pool.
+fn wmon_funded() -> Stub {
+    Stub { balances: Box::new(|p| if p == addr(WMON_POOL) { (1_000, 1_000) } else { (0, 0) }), ..Stub::default_pools() }
+}
+
+fn markets_of(rows: &[QuoteRow]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in rows {
+        if !out.contains(&r.market) {
+            out.push(r.market.clone());
+        }
+    }
+    out
+}
+
+fn e12() -> U256 {
+    U256::from(10u64).pow(U256::from(12))
+}
+
+#[tokio::test]
+async fn quotes_both_sides_of_every_live_pool_at_the_pinned_block_sized_in_pair_terms() {
+    // buy: 100 USDC in → 98 WMON out (ask 1/0.98); sell: 1 WMON in → 0.99 USDC out (bid 0.99).
+    let stub = Stub {
+        // WMON is token0: zeroForOne = selling WMON.
+        quote: Box::new(|c| {
+            let pct = |n: u64| c.amount_in * U256::from(n) / U256::from(100u64);
+            Ok(if c.zero_for_one { (c.amount_in, pct(99) / e12()) } else { (c.amount_in, pct(98) * e12()) })
+        }),
+        ..wmon_funded()
+    };
+    let (_, v1) = discovered(&stub).await;
+    let rows = quote(&v1, &stub, &Frame::mid(1.0), &[100.0]).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    assert_eq!(
+        (r.venue_id.as_str(), r.market.as_str(), r.size_usd, r.filled_full, r.one_sided, r.fee_bps),
+        ("metric", "MON/USDC", 100.0, true, None, 0.0)
+    );
+    close(r.ask_px, 1.0 / 0.98, 9);
+    close(r.bid_px, 0.99, 9);
+    assert_eq!(r.spread_bps, r.ask_bps - r.bid_bps);
+    assert!(r.ts > 0.0);
+    let legs = stub.legs.lock().unwrap();
+    // Every leg pinned to the frame's block.
+    assert!(legs.iter().all(|(_, h)| *h == hash(7)));
+    // Buy: USDC (token1) in, zeroForOne=false, no upper bound; sell: WMON in,
+    // zeroForOne=true, floor 0. $100 of USDC; the base worth $100 (one WMON
+    // at the stub's price).
+    let got: Vec<(String, bool, U256, u128)> =
+        legs.iter().map(|(c, _)| (hex(&c.pool), c.zero_for_one, c.amount_in, c.price_limit_x64)).collect();
+    assert_eq!(
+        got,
+        [
+            (WMON_POOL.to_string(), false, U256::from(100_000_000u64), u128::MAX),
+            (WMON_POOL.to_string(), true, U256::from(10u64).pow(U256::from(18)), 0)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn marks_a_size_the_pool_cannot_absorb_as_not_filled_full() {
+    let half = |c: &QuoteCall| Ok((c.amount_in / U256::from(2u8), c.amount_in / U256::from(2u8)));
+    let stub = Stub { quote: Box::new(half), ..wmon_funded() };
+    let (_, v1) = discovered(&stub).await;
+    let rows = quote(&v1, &stub, &Frame::mid(1.0), &[100.0]).await.unwrap();
+    assert!(!rows[0].filled_full);
+}
+
+/// Today the venue goes dark with a note naming the failure; here it is
+/// missing for the block with that reason.
+#[tokio::test]
+async fn every_leg_failing_is_an_error_naming_the_failure() {
+    let stub = Stub { quote: Box::new(|_| Err(VenueError::Chain("oracle: not attributed".into()))), ..wmon_funded() };
+    let (_, v1) = discovered(&stub).await;
+    let err = quote(&v1, &stub, &Frame::mid(1.0), &[100.0]).await.unwrap_err();
+    assert_eq!(
+        err,
+        VenueError::Chain(
+            "Metric quotes unavailable — all 2 legs failed with \"oracle: not attributed\" (venue disabled, or the ABI drifted from the contract)"
+                .into()
+        )
+    );
+}
+
+// The reference registry handles share conversion: the venue sees a missing
+// rate as a missing mid.
+#[tokio::test]
+async fn quotes_the_wantx_pool_like_any_other_while_its_pair_has_a_reference() {
+    let stub = Stub::new(&[WANTX_POOL]);
+    let (_, v1) = discovered(&stub).await;
+    assert_eq!(markets_of(&quote(&v1, &stub, &Frame::mid(1.0), &[100.0]).await.unwrap()), ["wANTx/USDC"]);
+}
+
+#[tokio::test]
+async fn asks_the_quoter_nothing_for_wantx_while_its_reference_is_withheld() {
+    let stub = Stub::new(&[WMON_POOL, WANTX_POOL]);
+    let (_, v1) = discovered(&stub).await;
+    let frame = Frame { mid: 1.0, mids: HashMap::from([("wANTx/USDC", 0.0)]) };
+    assert_eq!(markets_of(&quote(&v1, &stub, &frame, &[100.0]).await.unwrap()), ["MON/USDC"]);
+    let asked: Vec<String> = stub.legs.lock().unwrap().iter().map(|(c, _)| hex(&c.pool)).collect();
+    assert_eq!(asked, [WMON_POOL, WMON_POOL]);
+    // The pool stays watched.
+    assert_eq!(swap_pools(&v1), sorted(vec![WANTX_POOL, WMON_POOL]));
+}
+
+// Metric's one live pool is an xStock: its market closes every weekend, and
+// a wrapper can leave parity. Either way the venue returns nothing, and only
+// it can say why.
+
+#[derive(Clone, Copy)]
+enum Legs {
+    Fill,
+    Fail,
+    Empty,
+}
+
+fn wantx(legs: Legs) -> Stub {
+    Stub {
+        quote: Box::new(move |c| match legs {
+            Legs::Fill => Ok((c.amount_in, c.amount_in)),
+            Legs::Fail => Err(VenueError::Chain("execution reverted".into())),
+            Legs::Empty => Ok((U256::ZERO, U256::ZERO)),
+        }),
+        ..Stub::new(&[WANTX_POOL])
+    }
+}
+
+async fn wantx_live() -> Arc<MetricV1> {
+    discovered(&wantx(Legs::Fill)).await.1
+}
+
+/// `n` frames against one reference mid; the rows they published.
+async fn frames(v1: &MetricV1, legs: Legs, mid: f64, n: usize) -> usize {
+    let stub = wantx(legs);
+    let mut rows = 0;
+    for i in 0..n {
+        rows += v1.quote_with(&stub, &Frame::mid(mid), hash(i as u8), &[100.0]).await.map_or(0, |r| r.len());
+    }
+    rows
+}
+
+const NO_REFERENCE: &str = "no reference for wANTx/USDC";
+
+#[tokio::test]
+async fn says_why_it_is_silent_once_the_gap_outlasts_a_cold_start_once_for_the_episode() {
+    let v1 = wantx_live().await;
+    let n = metric::v1::NO_REFERENCE_FRAMES as usize;
+    assert_eq!(frames(&v1, Legs::Fill, 0.0, n - 1).await, 0);
+    assert_eq!(v1.no_reference_outage(), None);
+    frames(&v1, Legs::Fill, 0.0, 1).await;
+    assert_eq!(v1.no_reference_outage().as_deref(), Some(NO_REFERENCE));
+    frames(&v1, Legs::Fill, 0.0, 50).await;
+    assert_eq!(v1.no_reference_outage().as_deref(), Some(NO_REFERENCE));
+}
+
+#[tokio::test]
+async fn says_nothing_about_a_gap_shorter_than_that() {
+    let v1 = wantx_live().await;
+    let n = metric::v1::NO_REFERENCE_FRAMES as usize;
+    frames(&v1, Legs::Fill, 0.0, 3).await;
+    assert_eq!(frames(&v1, Legs::Fill, 97.0, 2).await, 2);
+    // The counter restarts: a later short gap is not added to the first one.
+    frames(&v1, Legs::Fill, 0.0, n - 1).await;
+    assert_eq!(v1.no_reference_outage(), None);
+}
+
+#[tokio::test]
+async fn clears_it_when_the_reference_is_back_and_it_quotes() {
+    let v1 = wantx_live().await;
+    frames(&v1, Legs::Fill, 0.0, metric::v1::NO_REFERENCE_FRAMES as usize).await;
+    assert_eq!(frames(&v1, Legs::Fill, 97.0, 3).await, 3);
+    assert_eq!(v1.no_reference_outage(), None);
+}
+
+#[tokio::test]
+async fn keeps_it_while_another_cause_blocks_it_every_leg_failing() {
+    let v1 = wantx_live().await;
+    frames(&v1, Legs::Fill, 0.0, metric::v1::NO_REFERENCE_FRAMES as usize).await;
+    assert_eq!(frames(&v1, Legs::Fail, 97.0, 3).await, 0);
+    let err = v1.quote_with(&wantx(Legs::Fail), &Frame::mid(97.0), hash(1), &[100.0]).await.unwrap_err();
+    assert!(err.to_string().contains("Metric quotes unavailable — all 2 legs failed"), "{err}");
+    assert_eq!(v1.no_reference_outage().as_deref(), Some(NO_REFERENCE));
+    assert_eq!(frames(&v1, Legs::Fill, 97.0, 1).await, 1);
+    assert_eq!(v1.no_reference_outage(), None);
+}
+
+/// Legs that answered are not a quote: every one answering zero builds no row.
+#[tokio::test]
+async fn keeps_it_while_every_leg_answers_with_nothing() {
+    let v1 = wantx_live().await;
+    frames(&v1, Legs::Fill, 0.0, metric::v1::NO_REFERENCE_FRAMES as usize).await;
+    assert_eq!(frames(&v1, Legs::Empty, 97.0, 3).await, 0);
+    assert_eq!(v1.no_reference_outage().as_deref(), Some(NO_REFERENCE));
+    assert_eq!(frames(&v1, Legs::Fill, 97.0, 1).await, 1);
+    assert_eq!(v1.no_reference_outage(), None);
+}
+
+// A pool refusing one direction (the stop-loss window of 2026-10-12).
+
+const REVERTED: &str = "quoteLiveExactInSingle(address,address,bool,uint128,uint128): rpc error 3: execution reverted";
+
+/// Buy legs are USDC (token1) in: zeroForOne false.
+fn buys_blocked() -> Stub {
+    Stub {
+        quote: Box::new(|c| {
+            if c.zero_for_one {
+                Ok((c.amount_in, c.amount_in / e12()))
+            } else {
+                Err(VenueError::Chain(REVERTED.into()))
+            }
+        }),
+        ..wmon_funded()
+    }
+}
+
+#[tokio::test]
+async fn keeps_the_real_side_one_sided_while_the_other_is_refused() {
+    let stub = buys_blocked();
+    let (_, v1) = discovered(&stub).await;
+    let rows = quote(&v1, &stub, &Frame::mid(1.0), &[100.0, 1000.0]).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        assert_eq!((r.market.as_str(), r.one_sided, r.ask_px, r.spread_bps), ("MON/USDC", Some(true), 0.0, 0.0));
+        assert!(r.bid_px > 0.0);
+    }
+}
+
+#[tokio::test]
+async fn names_the_refused_side_once_then_clears_it_when_it_quotes_again() {
+    let blocked = buys_blocked();
+    let (_, v1) = discovered(&blocked).await;
+    quote(&v1, &blocked, &Frame::mid(1.0), &[100.0]).await.unwrap();
+    let want = vec![("MON/USDC|buy".to_string(), REVERTED.to_string())];
+    assert_eq!(v1.side_outages(), want);
+    quote(&v1, &blocked, &Frame::mid(1.0), &[100.0]).await.unwrap();
+    assert_eq!(v1.side_outages(), want);
+    quote(&v1, &wmon_funded(), &Frame::mid(1.0), &[100.0]).await.unwrap();
+    assert!(v1.side_outages().is_empty());
 }
 
 // ── v0 (retired generation) ─────────────────────────────────────────────────
