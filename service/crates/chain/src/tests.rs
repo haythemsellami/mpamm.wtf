@@ -74,14 +74,17 @@ async fn batch_results_follow_call_order() {
 
     let mixed = rpc.batch(&[("eth_blockNumber", json!([])), ("nope", json!([]))]).await.unwrap();
     assert_eq!(mixed[0], Ok(json!("0x64")));
-    assert_eq!(mixed[1], Err(RpcError::Rpc { code: -32601, message: "boom".into() }));
+    assert_eq!(mixed[1], Err(RpcError::Rpc { code: -32601, message: "boom".into(), data: None }));
     assert!(rpc.batch(&[]).await.unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn errors_are_typed() {
     let rpc = client(serve().await, "/");
-    assert_eq!(rpc.call("nope", json!([])).await, Err(RpcError::Rpc { code: -32601, message: "boom".into() }));
+    assert_eq!(
+        rpc.call("nope", json!([])).await,
+        Err(RpcError::Rpc { code: -32601, message: "boom".into(), data: None })
+    );
     assert_eq!(rpc.call("http500", json!([])).await, Err(RpcError::Http(500)));
     let typed: Result<u64, _> = rpc.call_as("eth_blockNumber", json!([])).await;
     assert!(matches!(typed, Err(RpcError::Decode(_))), "a hex string is not a u64: {typed:?}");
@@ -113,4 +116,22 @@ fn hex_helpers() {
     assert_eq!(parse_b32(&json!("0xab")), None);
     assert_eq!(BlockHeader::from_json(&Value::Null), Ok(None));
     assert!(BlockHeader::from_json(&json!({ "number": "0x1" })).is_err());
+}
+
+#[test]
+fn a_revert_names_its_reason() {
+    // Error("paused")
+    let err = "0x08c379a0\
+               0000000000000000000000000000000000000000000000000000000000000020\
+               0000000000000000000000000000000000000000000000000000000000000006\
+               7061757365640000000000000000000000000000000000000000000000000000";
+    assert_eq!(revert_reason(err).as_deref(), Some("reverted: paused"));
+    // Panic(0x11): arithmetic overflow.
+    let panic = "0x4e487b710000000000000000000000000000000000000000000000000000000000000011";
+    assert_eq!(revert_reason(panic).as_deref(), Some("panic 0x11"));
+    assert_eq!(revert_reason("0xdeadbeef").as_deref(), Some("custom error 0xdeadbeef"));
+    assert_eq!(revert_reason("0x"), None);
+    assert_eq!(revert_reason("0x08c379a0"), None, "a truncated Error(string) is not guessed at");
+    let e = RpcError::Rpc { code: 3, message: "execution reverted".into(), data: Some("0xdeadbeef".into()) };
+    assert_eq!(e.to_string(), "rpc error 3: execution reverted (custom error 0xdeadbeef)");
 }
