@@ -70,6 +70,9 @@ against production, per venue over the blocks both have finished:
 ssh <node-host> 'sudo -u mpamm /var/lib/mpamm/bin/mpamm-tools parity --db /var/lib/mpamm/data-shadow/mpamm.db --hours 2'
 ```
 
+Health statuses, alerts and what to do about each are in
+[docs/rebuild-runbooks.md](../docs/rebuild-runbooks.md).
+
 The dashboard's browser suite runs against the Rust API without a chain (the API's fake
 example serves the built app): `npm -w web run test:e2e:rust`.
 

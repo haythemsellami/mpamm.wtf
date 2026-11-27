@@ -439,9 +439,12 @@ drill completes.
       DevOps; environment and secrets layout
 - [ ] Fallback mode: heads, quotes and final-block reads from the hosted hot node when the
       local node is down *(DevOps: hot node WebSocket with `monadNewHeads`)*
-- [ ] Alerts: node behind, ring lag, unrepaired gap, no final commit for 3 s, venue outages
+- [x] Alerts: node behind, ring lag, unrepaired gap, no final commit for 3 s, venue outages
+      (`alerts` on `/api/health`, for whatever monitor DevOps attaches); `state.notes` on
+      `/api/markets` keeps every warning, URLs removed
 - [ ] Runbooks: node upgrade (rebuild against the new SDK tag), node resets, host loss,
-      rollback to the standby
+      rollback to the standby (written: [rebuild-runbooks.md](rebuild-runbooks.md); restart
+      run twice on the shadow run, the rest not yet run)
 - [ ] Load test at peak traffic (replay or synthetic) with the node under load
 - [ ] Public endpoint: TLS hostname, firewall *(DevOps)*
 - [ ] Rewrite `AGENTS.md` and `docs/deploy.md` for the Rust service
