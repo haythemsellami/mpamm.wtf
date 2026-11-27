@@ -241,10 +241,6 @@ impl Pipeline {
         &self,
         block: &FinalBlock,
     ) -> Result<(Vec<Fill>, Vec<(String, String, String)>, Vec<GasAccrual>), (String, bool)> {
-        // Gas rules first: a venue whose gas destination isn't resolved yet
-        // holds the block rather than undercount its gas.
-        let rules = gas::GasRules::of(&self.venues)
-            .map_err(|e| (format!("gas sources: {e}"), matches!(e, VenueError::NotReady(_))))?;
         let pricer = self.prices.at(block.time_ms());
         let state = self.state.lock().unwrap();
         let cx = DecodeCx { registry: self.registry, pricer: &pricer, state: &state };
@@ -259,6 +255,17 @@ impl Pipeline {
                 }
             }
         }
+        // Gas rules after the decode, as of this block: a venue's decode can
+        // load or persist a gas source (WOOFi's rotated-in Wooracle), and a
+        // venue whose source still isn't resolved holds the block rather
+        // than undercount its gas.
+        let rules = match gas::GasRules::of(&self.venues) {
+            Ok(r) => r,
+            Err(e) => {
+                state.take_pending();
+                return Err((format!("gas sources: {e}"), matches!(e, VenueError::NotReady(_))));
+            }
+        };
         // Where every trade's time came from: the ring's proposal time, or
         // the block second when the block was read over RPC.
         let source = if block.proposal_ns.is_some() { TimeSource::Proposal } else { TimeSource::Block };

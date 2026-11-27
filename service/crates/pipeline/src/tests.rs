@@ -26,6 +26,10 @@ struct TestVenue {
     fail: StdMutex<HashMap<u64, u32>>,
     grow_at: StdMutex<Option<u64>>,
     grown: std::sync::atomic::AtomicBool,
+    /// Gas sources not ready until a decode has run (WOOFi loads its
+    /// persisted oracles in decode).
+    gas_waits_for_decode: std::sync::atomic::AtomicBool,
+    decoded: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -47,6 +51,12 @@ impl Venue for TestVenue {
         }
         Ok(w)
     }
+    fn gas_sources(&self) -> Result<Option<mpamm_core::GasSources>, VenueError> {
+        if self.gas_waits_for_decode.load(Ordering::Relaxed) && !self.decoded.load(Ordering::Relaxed) {
+            return Err(VenueError::NotReady("gas source loaded by decode".into()));
+        }
+        Ok(None)
+    }
     fn decode(&self, cx: &DecodeCx<'_>, b: &FinalBlock) -> Result<Vec<Fill>, VenueError> {
         if let Some(n) = self.fail.lock().unwrap().get_mut(&b.number) {
             if *n > 0 {
@@ -55,6 +65,7 @@ impl Venue for TestVenue {
             }
         }
         cx.state.set("test", "last", &b.number.to_string());
+        self.decoded.store(true, Ordering::Relaxed);
         if *self.grow_at.lock().unwrap() == Some(b.number) {
             self.grown.store(true, Ordering::Relaxed);
         }
@@ -202,6 +213,8 @@ async fn harness(fail_first: u32) -> Harness {
         fail: StdMutex::new(HashMap::new()),
         grow_at: StdMutex::new(None),
         grown: std::sync::atomic::AtomicBool::new(false),
+        gas_waits_for_decode: std::sync::atomic::AtomicBool::new(false),
+        decoded: std::sync::atomic::AtomicBool::new(false),
     });
     let venues: Vec<Arc<dyn Venue>> = vec![venue.clone()];
     let watch = watch_of(&venues).unwrap();
@@ -357,4 +370,13 @@ async fn a_source_learned_while_decoding_grows_the_watch_set_at_once() {
     assert!(h.pipeline.watch.load().logs.contains_key(&[0xcc; 20]), "published to the reader");
     assert_eq!(v.from_rpc, 2, "the block itself and the next one are read again with the new set: {v:?}");
     assert!(h.pipeline.refetch_through.load(Ordering::Relaxed) >= 60 + 64);
+}
+
+#[tokio::test]
+async fn a_gas_source_the_decode_loads_does_not_hold_the_first_block() {
+    let h = harness(0).await;
+    h.venue.gas_waits_for_decode.store(true, Ordering::Relaxed);
+    h.pipeline.process(Input::Final(ring_block(70, 1))).await;
+    let v = h.pipeline.stats.view();
+    assert_eq!((v.cursor, v.holds, v.held.as_deref()), (70, 0, None), "gas rules are read after the decode");
 }
