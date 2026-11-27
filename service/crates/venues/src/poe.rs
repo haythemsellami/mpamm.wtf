@@ -244,7 +244,7 @@ impl Venue for Poe {
 
     fn gas_sources(&self) -> Result<Option<GasSources>, VenueError> {
         match self.inner.read().oracle {
-            Some(o) => Ok(Some(GasSources { destinations: vec![o], relays: Vec::new() })),
+            Some(o) => Ok(Some(GasSources { destinations: vec![o], ..GasSources::default() })),
             None => Err(VenueError::NotReady("POE oracle not resolved yet".into())),
         }
     }

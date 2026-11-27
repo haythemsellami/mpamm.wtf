@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use mpamm_chain::Rpc;
 use mpamm_registry::Registry;
-use mpamm_ring::{Addr, WatchSet};
+use mpamm_ring::{Addr, WatchSet, B32};
 use mpamm_types::{Fill, VenueMeta};
 use parking_lot::Mutex;
 
@@ -138,15 +138,20 @@ pub struct GasRelay {
     pub target_word: usize,
 }
 
-/// Where a venue's own quote-update transactions go. With the ring every
-/// such transaction is seen, so gas is exact; how today's sampler found them
-/// (logs or blocks) no longer matters.
+/// How a venue's own quote-update transactions are recognised. With the
+/// ring every transaction of a final block is seen, so the cost of each is
+/// exact (gas limit × price paid); these rules only say which ones count.
+/// A transaction counts once even if several rules match it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GasSources {
-    /// Transactions sent straight to one of these.
+    /// Transactions sent straight to one of these (today's 'blocks' mode).
     pub destinations: Vec<Addr>,
     /// Transactions through a shared relay naming one of `destinations`.
     pub relays: Vec<GasRelay>,
+    /// Transactions that emitted a log from this address with this topic0,
+    /// whatever their `to` (today's 'logs' mode). The venue's watch set must
+    /// copy these logs.
+    pub logs: Vec<(Addr, B32)>,
 }
 
 /// A one-shot, dated replay of a venue's history shipped with the decode
