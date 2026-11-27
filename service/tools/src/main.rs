@@ -44,6 +44,19 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         live_prices_secs: u64,
     },
+    /// Cost one venue's quote-update gas over [from, to] two ways: as the
+    /// pipeline does (transaction headers, gas limit × price paid) and from
+    /// receipts (gasUsed × effectiveGasPrice), and compare.
+    GasCheck {
+        #[arg(long)]
+        venue: String,
+        #[arg(long)]
+        from: u64,
+        #[arg(long)]
+        to: u64,
+        #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
+        rpc: String,
+    },
 }
 
 fn parse_log(l: &Value) -> Option<(u64, [u8; 32], FinalLog)> {
@@ -138,6 +151,64 @@ async fn decode_range(
     Ok(())
 }
 
+async fn gas_check(venue_id: &str, from: u64, to: u64, rpc_url: &str) -> Result<(), String> {
+    use std::sync::Arc;
+    let registry = Registry::get();
+    let rpc = Rpc::new("node", rpc_url, Duration::from_secs(60));
+    let venue = mpamm_venues::all().into_iter().find(|v| v.id() == venue_id).ok_or(format!("no venue {venue_id}"))?;
+    venue.discover(&ChainCx { rpc: &rpc, registry }).await.map_err(|e| e.to_string())?;
+    let sources = venue.gas_sources().map_err(|e| e.to_string())?.ok_or("venue has no gas sources")?;
+    if !sources.relays.is_empty() || !sources.logs.is_empty() {
+        return Err("gas-check compares destination rules only".into());
+    }
+    let dests: std::collections::HashSet<String> = sources.destinations.iter().map(|d| format!("0x{}", hex(d))).collect();
+    let venues: Vec<Arc<dyn mpamm_core::Venue>> = vec![venue];
+    let rules = mpamm_pipeline::gas::GasRules::of(&venues).map_err(|e| e.to_string())?;
+    let watch = mpamm_ring::WatchSet::default();
+    let (mut a_mon, mut a_txs, mut b_mon, mut b_txs, mut differ) = (0.0f64, 0u64, 0.0f64, 0u64, 0u64);
+    let mut n = from;
+    while n <= to {
+        let end = (n + 24).min(to);
+        let nums: Vec<u64> = (n..=end).collect();
+        let blocks: Vec<(&str, Value)> = nums.iter().map(|b| ("eth_getBlockByNumber", json!([quantity(*b), true]))).collect();
+        let receipts: Vec<(&str, Value)> = nums.iter().map(|b| ("eth_getBlockReceipts", json!([quantity(*b)]))).collect();
+        let (bs, rs) = (rpc.batch(&blocks).await.map_err(|e| e.to_string())?, rpc.batch(&receipts).await.map_err(|e| e.to_string())?);
+        for ((num, b), r) in nums.iter().zip(bs).zip(rs) {
+            let b = b.map_err(|e| format!("block {num}: {e}"))?;
+            let r = r.map_err(|e| format!("receipts {num}: {e}"))?;
+            let block = mpamm_core::FinalBlock::from_rpc(&b, &json!([]), &watch, "node").map_err(|e| e.to_string())?;
+            let acc = rules.accrue(&block);
+            let (am, at) = acc.first().map_or((0.0, 0), |g| (g.mon, g.txs));
+            let (mut bm, mut bt) = (0.0, 0u64);
+            for rc in r.as_array().ok_or("receipts")? {
+                let to = rc["to"].as_str().unwrap_or("").to_ascii_lowercase();
+                if dests.contains(&to) {
+                    let used = mpamm_chain::parse_quantity_u128(&rc["gasUsed"]).unwrap_or(0);
+                    let price = mpamm_chain::parse_quantity_u128(&rc["effectiveGasPrice"]).unwrap_or(0);
+                    bm += (used * price) as f64 / 1e18;
+                    bt += 1;
+                }
+            }
+            if at != bt || (am - bm).abs() > 1e-15 * am.abs().max(1.0) {
+                differ += 1;
+                if differ <= 5 {
+                    eprintln!("block {num}: headers {at} txs {am} MON; receipts {bt} txs {bm} MON");
+                }
+            }
+            a_mon += am;
+            a_txs += at;
+            b_mon += bm;
+            b_txs += bt;
+        }
+        n = end + 1;
+    }
+    println!("{venue_id} {from}..={to}: pipeline {a_txs} txs {a_mon:.12} MON; receipts {b_txs} txs {b_mon:.12} MON; blocks differing {differ}");
+    if differ > 0 {
+        return Err("gas differs".into());
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("warn").with_writer(std::io::stderr).init();
@@ -145,6 +216,7 @@ async fn main() {
         Cmd::DecodeRange { venue, from, to, rpc, chunk, live_prices_secs } => {
             decode_range(&venue, from, to, &rpc, chunk, live_prices_secs).await
         }
+        Cmd::GasCheck { venue, from, to, rpc } => gas_check(&venue, from, to, &rpc).await,
     };
     if let Err(e) = r {
         eprintln!("error: {e}");

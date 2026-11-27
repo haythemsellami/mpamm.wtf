@@ -4,7 +4,7 @@
 # to dist/. Never build on the node host: a release build takes its cores.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-bins=(mpamm mpamm-reader)
+bins=(mpamm mpamm-reader mpamm-tools)
 scripts/cargo-linux.sh build --release "${bins[@]/#/--bin=}"
 mkdir -p dist
 docker run --rm --platform linux/amd64 -v "$PWD":/src -v mpamm-cargo-target:/target ubuntu:24.04 \
