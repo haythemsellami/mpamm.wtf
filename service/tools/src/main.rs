@@ -45,6 +45,10 @@ enum Cmd {
         /// crypto-quoted trades get live USD (0 = no feeds).
         #[arg(long, default_value_t = 0)]
         live_prices_secs: u64,
+        /// Skip blocks whose watched logs are all the venue's gas-event logs
+        /// (a keeper pushing every block makes nearly every block one).
+        #[arg(long)]
+        skip_gas_only: bool,
     },
     /// Cost one venue's quote-update gas over [from, to] two ways: as the
     /// pipeline does (transaction headers, gas limit × price paid) and from
@@ -114,6 +118,7 @@ async fn decode_range(
     rpc_url: &str,
     chunk: u64,
     live_secs: u64,
+    skip_gas_only: bool,
 ) -> Result<(), String> {
     let registry = Registry::get();
     let rpc = Rpc::new("node", rpc_url, Duration::from_secs(60));
@@ -159,7 +164,19 @@ async fn decode_range(
     let fetcher = mpamm_pipeline::Fetcher { local: rpc.clone(), archive: None };
     let mut state = VenueState::default();
     let mut fills = Vec::new();
-    for n in blocks.keys().copied().collect::<Vec<_>>() {
+    let gas_logs: std::collections::HashSet<([u8; 20], [u8; 32])> =
+        venue.gas_sources().ok().flatten().map(|g| g.logs.into_iter().collect()).unwrap_or_default();
+    let wanted: Vec<u64> = blocks
+        .iter()
+        .filter(|(_, (_, logs))| {
+            !skip_gas_only || logs.iter().any(|l| l.topic0().is_none_or(|t| !gas_logs.contains(&(l.address, *t))))
+        })
+        .map(|(n, _)| *n)
+        .collect();
+    if skip_gas_only {
+        eprintln!("{venue_id}: {} of {} blocks hold more than gas-event logs", wanted.len(), blocks.len());
+    }
+    for n in wanted {
         let block = fetcher.block(n, &watch).await.map_err(|e| format!("block {n}: {e}"))?;
         let pricer = prices.at(block.time_ms());
         let cx = DecodeCx { registry, pricer: &pricer as &dyn Pricer, state: &state };
@@ -302,8 +319,8 @@ async fn quote_at(venue_id: &str, block: u64, prices: &std::path::Path, rpc_url:
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("warn").with_writer(std::io::stderr).init();
     let r = match Cli::parse().cmd {
-        Cmd::DecodeRange { venue, from, to, rpc, chunk, live_prices_secs } => {
-            decode_range(&venue, from, to, &rpc, chunk, live_prices_secs).await
+        Cmd::DecodeRange { venue, from, to, rpc, chunk, live_prices_secs, skip_gas_only } => {
+            decode_range(&venue, from, to, &rpc, chunk, live_prices_secs, skip_gas_only).await
         }
         Cmd::GasCheck { venue, from, to, rpc } => gas_check(&venue, from, to, &rpc).await,
         Cmd::Migrate { from, to } => migrate::migrate(&from, &to),
