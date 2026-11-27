@@ -56,3 +56,33 @@ Follow **[docs/adapters.md](docs/adapters.md)** exactly — interface, correctne
 ## Verification bar
 
 "Done" means demonstrated: typecheck + tests green, the change exercised end-to-end (sim preview for UI; live RPC for chain paths), and — for anything touching money math — one real example hand-verified against the chain/explorer. Follow `docs/adapters.md` → *Verifying your adapter* for the venue checklist.
+
+## The Rust rebuild (`service/`, branch `v2`)
+
+The next version runs as one Rust service beside its own Monad node, reading the node's
+Execution Events ring ([docs/rebuild-spec.md](docs/rebuild-spec.md), plan in
+[docs/rebuild-plan.md](docs/rebuild-plan.md)). Today's TypeScript service above stays
+production until the switch-over (M15); everything here lives on the `v2` branch / PR #176.
+
+```bash
+cd service && cargo test --workspace                     # macOS or Linux, everything but the ring adapter
+service/scripts/cargo-linux.sh fmt --all --check         # fmt and clippy in the Linux container: run both,
+service/scripts/cargo-linux.sh clippy --workspace --all-targets -- -D warnings   # and commit only when clean
+service/scripts/build-linux.sh                           # release binaries → service/dist/ (never build on the node host)
+npm -w web run test:e2e:rust                             # today's dashboard suite against the Rust API
+```
+
+- **Venue modules** follow [docs/rebuild-venues.md](docs/rebuild-venues.md): one module in
+  `service/crates/venues/src/`, one line in `all()`; decode is pure (no chain reads),
+  `NotReady` holds the block, discovery merges, every quote read is pinned to the
+  block hash with explicit gas. Prove parity with today's adapter on live blocks
+  (`mpamm-tools decode-range` / `quote-at` / `gas-check` / `verify-venue`).
+- **The dashboard is unchanged**: the service serves today's REST routes and v2 stream
+  (`service/crates/api`, sourced by `service/mpamm/src/source`); a field added to a
+  stream frame still costs every open tab several times a second.
+- **The node host** (reached through the operator's ssh config; never name it, its
+  IPs, RPC URLs or keys in the repo): commands run as `mpamm`, the unit is
+  `mpamm.service`, `/var/lib/mpamm/mpamm.env` holds secrets and is never read or copied.
+  Operations are in [docs/rebuild-runbooks.md](docs/rebuild-runbooks.md).
+- **Shadow run**: the service runs beside production with its own database;
+  `mpamm-tools parity` diffs its trades and volume against production's public API.
