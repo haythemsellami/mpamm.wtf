@@ -265,10 +265,26 @@ impl Venue for Poe {
             }
             for &size in sizes_usd {
                 let buy_in = to_units(size, p.stable_dec);
-                legs.push(Leg { market: p.market.clone(), size, buy: true, req_in: buy_in, in_dec: p.stable_dec, out_dec: p.base_dec, base_px });
+                legs.push(Leg {
+                    market: p.market.clone(),
+                    size,
+                    buy: true,
+                    req_in: buy_in,
+                    in_dec: p.stable_dec,
+                    out_dec: p.base_dec,
+                    base_px,
+                });
                 calls.push((Address::from(p.pool), getQuoteCall { swapXtoY: !p.base_is_x, amountIn: buy_in }));
                 let sell_in = to_units(cx.pricer.token_for_usd(&p.base_token, size), p.base_dec);
-                legs.push(Leg { market: p.market.clone(), size, buy: false, req_in: sell_in, in_dec: p.base_dec, out_dec: p.stable_dec, base_px });
+                legs.push(Leg {
+                    market: p.market.clone(),
+                    size,
+                    buy: false,
+                    req_in: sell_in,
+                    in_dec: p.base_dec,
+                    out_dec: p.stable_dec,
+                    base_px,
+                });
                 calls.push((Address::from(p.pool), getQuoteCall { swapXtoY: p.base_is_x, amountIn: sell_in }));
             }
         }
@@ -292,7 +308,8 @@ impl Venue for Poe {
             }
             let px = if l.buy { in_h / out_h } else { out_h / in_h };
             let bps = (px / l.base_px - 1.0) * 1e4;
-            let full = q.actualAmountIn >= l.req_in * alloy_primitives::U256::from(999u32) / alloy_primitives::U256::from(1000u32);
+            let full = q.actualAmountIn
+                >= l.req_in * alloy_primitives::U256::from(999u32) / alloy_primitives::U256::from(1000u32);
             let fee_bps = (to_f64(q.feeIn) / to_f64(q.actualAmountIn) + to_f64(q.feeOut) / to_f64(q.amountOut)) * 1e4;
             let idx = match rows.iter().position(|x| x.market == l.market && x.size_usd == l.size) {
                 Some(i) => i,
@@ -327,7 +344,10 @@ impl Venue for Poe {
             row.fee_bps = row.fee_bps.max(fee_bps);
             row.filled_full &= full;
         }
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as f64)
+            .unwrap_or(0.0);
         for r in &mut rows {
             r.spread_bps = r.ask_bps - r.bid_bps;
             r.ts = ts;
