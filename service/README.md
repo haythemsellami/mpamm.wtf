@@ -11,7 +11,7 @@ workspace.
 | `crates/ring` (`mpamm-ring`) | The event model, the watch set (what to copy out of the ring), and the block tracker: block assembly, block-level log indexes, commit states, abandoned proposals, and heights the ring lost (`Missing`), reported strictly in order. `sdk.rs` reads the node's ring and `follow.rs` is the reader thread's loop (Linux only); everything else builds and tests anywhere. |
 | `crates/core` (`mpamm-core`) | `FinalBlock`, identical whether read from the ring or over RPC, and the `Venue` trait. |
 | `crates/pipeline` (`mpamm-pipeline`) | Final blocks in strict order: RPC repair (local node, then archive), venue decode, exact gas and attribution, one commit per block; holds instead of skipping. |
-| `crates/venues` (`mpamm-venues`) | The 11 venue modules (discovery, watch set, decode, gas sources, quotes), each checked against today's adapter on live blocks. |
+| `crates/venues` (`mpamm-venues`) | The 11 venue modules (discovery, watch set, decode, gas sources, quotes), each checked against today's adapter on live blocks. How to write one: [docs/rebuild-venues.md](../docs/rebuild-venues.md). |
 | `crates/pricing` (`mpamm-pricing`) | Bybit, Binance and Kraken feeds, the pair-terms reference, the price history marks and late decodes read, wrapper rates. |
 | `crates/quotes` (`mpamm-quotes`) | One quote job per proposed block, every read pinned to its hash, a deadline per venue; each answer announced as it finishes. |
 | `crates/markouts` (`mpamm-markouts`) | Markouts at each horizon and the −5…+15 s curve, marked at the proposal time from the price history. |

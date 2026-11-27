@@ -278,7 +278,8 @@ test ported:
 - [x] Lunarbase (paused; decode only until it resumes): 42 trades over 20,000 blocks of
       2026-08 identical
 - [ ] `tools/verify-venue` (port of `verify-adapter`)
-- [ ] Rewrite `docs/adapters.md` for Rust venue modules
+- [x] The Rust venue guide: [rebuild-venues.md](rebuild-venues.md) (`adapters.md` stays
+      for today's TypeScript adapters until the switch-over) venue modules
 
 **Done when:** every fixture decodes to the same fills as today's adapters; each venue's
 fills for one full recorded day match today's database id-for-id with exact USD.
