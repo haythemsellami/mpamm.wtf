@@ -233,3 +233,18 @@ async fn the_dashboard_reads_the_service_through_every_route() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_tail_shows_only_past_two_minutes_and_is_held_only_without_progress() {
+    // Finality's ~3 blocks: live, no tail on the state.
+    let t = tail_status(1_000, 1_003, 0, 1);
+    assert_eq!((t.lag_blocks, t.lag_ms, t.held), (3, 1_200.0, false));
+    assert!(t.lag_ms <= TAIL_LAG_SHOWN_MS);
+    // Catching up after an outage: shown, not held while commits flow.
+    let now = 10_000_000;
+    let t = tail_status(1_000, 1_400, now - 1_000, now);
+    assert!(t.lag_ms > TAIL_LAG_SHOWN_MS && !t.held);
+    // Nothing committed for over two minutes while behind: held.
+    let t = tail_status(1_000, 1_400, now - 130_000, now);
+    assert!(t.held);
+}

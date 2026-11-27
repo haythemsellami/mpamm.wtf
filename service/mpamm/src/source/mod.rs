@@ -54,6 +54,13 @@ mod tests;
 
 /// Trades the tape keeps (today's `/api/markets` carries 400).
 const TAPE: usize = 400;
+/// Chain time the committed tip may trail the newest proposal and still
+/// read as live (today's): finality is ~3 blocks, a restart's catch-up is
+/// seconds. Only past it does the state carry `tail` (the stream's budget).
+const TAIL_LAG_SHOWN_MS: f64 = 120_000.0;
+/// Behind by that much and nothing committed for this long is held: the
+/// state that needs a human, as opposed to catching up.
+const TAIL_HELD_MS: u64 = 120_000;
 /// Monad's block time: one quote frame per block.
 const QUOTE_CADENCE_MS: f64 = 400.0;
 /// How long an aggregation is reused (today's publication cache).
@@ -167,12 +174,9 @@ impl ServiceSource {
             })
             .collect();
         let newest = ring.newest_block.max(pipeline.cursor);
-        let tail = (pipeline.cursor > 0).then(|| TailStatus {
-            block: pipeline.cursor,
-            lag_blocks: newest.saturating_sub(pipeline.cursor),
-            lag_ms: now_ms().saturating_sub(pipeline.last_commit_unix_ms) as f64,
-            held: pipeline.held.is_some(),
-        });
+        let tail = (pipeline.cursor > 0)
+            .then(|| tail_status(pipeline.cursor, newest, pipeline.last_commit_unix_ms, now_ms()))
+            .filter(|t| t.lag_ms > TAIL_LAG_SHOWN_MS);
         let mut live = self.live.lock();
         let st = &mut live.state;
         st.block = newest;
@@ -325,6 +329,19 @@ impl ServiceSource {
 
     fn cached<T>(cache: &Cached<T>, days: u32, ttl: Duration) -> Option<Arc<T>> {
         cache.lock().get(&days).filter(|(at, _)| at.elapsed() < ttl).map(|(_, v)| v.clone())
+    }
+}
+
+/// The committed tip against the newest proposal, in chain time (blocks ×
+/// the block time), as today's `tailStatusOf`.
+fn tail_status(cursor: u64, newest: u64, last_commit_ms: u64, now: u64) -> TailStatus {
+    let lag_blocks = newest.saturating_sub(cursor);
+    let lag_ms = lag_blocks as f64 * QUOTE_CADENCE_MS;
+    TailStatus {
+        block: cursor,
+        lag_blocks,
+        lag_ms,
+        held: lag_ms > TAIL_LAG_SHOWN_MS && now.saturating_sub(last_commit_ms) > TAIL_HELD_MS,
     }
 }
 
