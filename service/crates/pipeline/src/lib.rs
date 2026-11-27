@@ -7,7 +7,9 @@
 //! ready or can't decode, or a commit that fails holds the pipeline on that
 //! height and retries it. Nothing above a held height is ever committed.
 
+pub mod attribution;
 pub mod fetch;
+pub mod gas;
 
 use std::{
     sync::{
@@ -22,7 +24,7 @@ use mpamm_core::{DecodeCx, FinalBlock, Venue, VenueError, VenueState};
 use mpamm_pricing::Prices;
 use mpamm_registry::Registry;
 use mpamm_ring::{Block, MissingReason, WatchSet};
-use mpamm_store::{writer::Writer, BlockCommit, StoreError};
+use mpamm_store::{writer::Writer, BlockCommit, GasAccrual, StoreError};
 use mpamm_types::Fill;
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
@@ -147,7 +149,7 @@ impl Pipeline {
         let number = block.number;
 
         let mut hold = Hold::new(self, format!("decode block {number}"));
-        let (fills, state) = loop {
+        let (fills, state, gas) = loop {
             match self.decode(&block) {
                 Ok(f) => break f,
                 Err(e) => hold.failed(e).await,
@@ -160,7 +162,7 @@ impl Pipeline {
             hash: format!("0x{}", mpamm_ring::hex(&block.hash)),
             timestamp: block.timestamp,
             trades: fills.clone(),
-            gas: Vec::new(),
+            gas,
             state: state.clone(),
         };
         let mut hold = Hold::new(self, format!("commit block {number}"));
@@ -188,9 +190,16 @@ impl Pipeline {
         let _ = self.committed.send(Committed { number, time_ms: block.time_ms(), trades: Arc::new(trades) });
     }
 
-    /// Every venue's trades in the block, and the state they set.
+    /// Every venue's trades in the block (attributed), the state they set,
+    /// and each venue's exact quote-update gas.
     #[allow(clippy::type_complexity)]
-    fn decode(&self, block: &FinalBlock) -> Result<(Vec<Fill>, Vec<(String, String, String)>), String> {
+    fn decode(
+        &self,
+        block: &FinalBlock,
+    ) -> Result<(Vec<Fill>, Vec<(String, String, String)>, Vec<GasAccrual>), String> {
+        // Gas rules first: a venue whose gas destination isn't resolved yet
+        // holds the block rather than undercount its gas.
+        let rules = gas::GasRules::of(&self.venues).map_err(|e| format!("gas sources: {e}"))?;
         let pricer = self.prices.at(block.time_ms());
         let state = self.state.lock().unwrap();
         let cx = DecodeCx { registry: self.registry, pricer: &pricer, state: &state };
@@ -205,7 +214,13 @@ impl Pipeline {
                 }
             }
         }
-        Ok((all, state.take_pending()))
+        static ATTRIBUTOR: std::sync::OnceLock<attribution::Attributor> = std::sync::OnceLock::new();
+        ATTRIBUTOR.get_or_init(attribution::Attributor::default).attribute(
+            &mut all,
+            block,
+            &attribution::entries(&self.venues),
+        );
+        Ok((all, state.take_pending(), rules.accrue(block)))
     }
 
     async fn repair(&self, number: u64, reason: MissingReason) -> FinalBlock {
