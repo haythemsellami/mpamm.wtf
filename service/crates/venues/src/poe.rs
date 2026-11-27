@@ -292,8 +292,8 @@ impl Venue for Poe {
             return Ok(Vec::new());
         }
         let res = call_many(cx.rpc, &calls, At::Hash(cx.block.hash)).await?;
-        if res.iter().all(|r| r.is_err()) {
-            return Err(VenueError::Chain("POE: every getQuote failed".into()));
+        if let Some(Err(first)) = res.first().filter(|_| res.iter().all(Result::is_err)) {
+            return Err(VenueError::Chain(format!("POE: every getQuote failed (first: {first})")));
         }
         let mut rows: Vec<QuoteRow> = Vec::new();
         for (l, r) in legs.iter().zip(res) {
