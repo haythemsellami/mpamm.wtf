@@ -10,6 +10,7 @@ pub mod crystal;
 pub mod generations;
 pub mod hanji;
 pub mod logs;
+pub mod lunarbase;
 pub mod metric;
 pub mod poe;
 pub mod quote_health;
@@ -28,6 +29,7 @@ pub fn all() -> Vec<Arc<dyn Venue>> {
         Arc::new(poe::Poe::default()),
         Arc::new(metric::venue()),
         Arc::new(hanji::Hanji::default()),
+        Arc::new(lunarbase::Lunarbase::default()),
         Arc::new(thogamm::Thogamm::default()),
         Arc::new(capricorn::Capricorn::default()),
         Arc::new(crystal::Crystal::default()),
