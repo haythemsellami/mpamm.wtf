@@ -535,8 +535,6 @@ async fn forward_depth(
     mut rx: watch::Receiver<Option<Arc<str>>>,
     mut stop: oneshot::Receiver<()>,
 ) {
-    // The subscriber's snapshot already holds the current one.
-    rx.borrow_and_update();
     loop {
         tokio::select! {
             _ = &mut stop => return,
@@ -639,7 +637,11 @@ impl Core {
         let id = self.next_id();
         let mut stop = None;
         if let StreamTopic::Depth { market } = &topic {
-            let rx = self.source.watch_depth(market);
+            let mut rx = self.source.watch_depth(market);
+            // The subscriber's snapshot holds the current curve. Marked here,
+            // under the lock, not when the task first runs: a curve published
+            // in between would otherwise be marked seen and never sent.
+            rx.borrow_and_update();
             let (tx, stop_rx) = oneshot::channel();
             stop = Some(tx);
             tokio::spawn(forward_depth(self.weak.clone(), key.clone(), id, rx, stop_rx));
@@ -1180,5 +1182,213 @@ mod tests {
         assert_eq!((&mut peer.writer).await.unwrap(), End::Closed, "the 21st change within a second");
         assert_eq!(peer.closes(), [1008]);
         assert_eq!((gw.metrics().connections, gw.metrics().topics), (0, 0));
+    }
+
+    /// A gateway whose clock the test moves (today's tests mock `Date.now`).
+    fn clocked(source: &Arc<FakeSource>) -> (Gateway, Arc<AtomicU64>) {
+        let now = Arc::new(AtomicU64::new(1_800_000_000_000));
+        let n = now.clone();
+        (Gateway::new(source.clone(), Arc::new(move || n.load(Ordering::SeqCst) as f64)), now)
+    }
+
+    fn state_message(source: &FakeSource, block: u64) -> StreamMessage {
+        let mut state = StreamState::hello(&source.state());
+        state.block = block;
+        StreamMessage::State(Box::new(state))
+    }
+
+    fn catalog(entries: &[(&str, &[&str])]) -> IndexMap<String, Vec<String>> {
+        entries.iter().map(|(v, m)| (v.to_string(), m.iter().map(|s| s.to_string()).collect())).collect()
+    }
+
+    #[tokio::test]
+    async fn state_goes_out_at_most_once_a_second() {
+        let source = source();
+        let (gw, now) = clocked(&source);
+        let peer = LocalPeer::new(&gw, false);
+        peer.subscribe(json!([{ "channel": "state" }]));
+        gw.on_message(state_message(&source, 2));
+        gw.on_message(state_message(&source, 3));
+        now.fetch_add(999, Ordering::SeqCst);
+        gw.on_message(state_message(&source, 4));
+        now.fetch_add(1, Ordering::SeqCst);
+        gw.on_message(state_message(&source, 5));
+        wait_for(|| peer.frames().len() == 3).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(blocks(&peer.frames()), [1, 2, 5], "the snapshot, then one tick per second");
+    }
+
+    #[tokio::test]
+    async fn sends_the_catalog_on_subscription_then_only_when_it_changes() {
+        let source = source();
+        source.with(|d| d.state.quote_markets = Some(catalog(&[("poe", &["MON/USDC"])])));
+        let (gw, now) = clocked(&source);
+        let peer = LocalPeer::new(&gw, false);
+        peer.subscribe(json!([{ "channel": "state" }]));
+        for block in [2, 3, 4] {
+            if block == 3 {
+                source.with(|d| d.state.quote_markets = Some(catalog(&[("poe", &["MON/USDC", "BTC/USDC"])])));
+            }
+            now.fetch_add(1_001, Ordering::SeqCst);
+            gw.on_message(state_message(&source, block));
+        }
+        wait_for(|| peer.frames().len() == 4).await;
+        let f = peer.frames();
+        assert_eq!(f[0]["message"]["data"]["quoteMarkets"], json!({ "poe": ["MON/USDC"] }));
+        assert!(f[1]["message"]["data"].get("quoteMarkets").is_none());
+        assert_eq!(f[2]["message"]["data"]["quoteMarkets"], json!({ "poe": ["MON/USDC", "BTC/USDC"] }));
+        assert!(f[3]["message"]["data"].get("quoteMarkets").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_new_subscriber_does_not_hide_a_catalog_update_from_existing_ones() {
+        let source = source();
+        source.with(|d| d.state.quote_markets = Some(catalog(&[("poe", &["MON/USDC"])])));
+        let (gw, _) = clocked(&source);
+        let existing = LocalPeer::new(&gw, false);
+        existing.subscribe(json!([{ "channel": "state" }]));
+        source.with(|d| d.state.quote_markets = Some(catalog(&[("poe", &["BTC/USDC"])])));
+        let joining = LocalPeer::new(&gw, false);
+        joining.subscribe(json!([{ "channel": "state" }]));
+        wait_for(|| joining.frames().len() == 1).await;
+        assert_eq!(joining.frames()[0]["message"]["data"]["quoteMarkets"], json!({ "poe": ["BTC/USDC"] }));
+        gw.on_message(state_message(&source, 2));
+        wait_for(|| existing.frames().len() == 2).await;
+        assert_eq!(existing.frames()[1]["message"]["data"]["quoteMarkets"], json!({ "poe": ["BTC/USDC"] }));
+    }
+
+    #[tokio::test]
+    async fn a_catalog_change_survives_newer_state_replacing_a_pending_compressed_frame() {
+        let source = source();
+        source.with(|d| {
+            // today's test state: small enough that only the large catalog crosses the threshold
+            d.state.markets = vec!["MON/USDC".into(), "BTC/USDC".into()];
+            d.state.quote_markets = Some(catalog(&[("poe", &["MON/USDC"])]));
+        });
+        let (gw, now) = clocked(&source);
+        let peer = LocalPeer::new(&gw, true);
+        peer.subscribe(json!([{ "channel": "state" }]));
+        wait_for(|| peer.frames().len() == 1).await;
+        let initial_binaries = peer.binaries();
+        let names: Vec<String> = (0..40).map(|i| format!("venue-{i}")).collect();
+        let large: IndexMap<String, Vec<String>> =
+            names.iter().map(|n| (n.clone(), vec!["MON/USDC".to_string(), "BTC/USDC".to_string()])).collect();
+        for block in [2, 3, 4] {
+            source.with(|d| {
+                d.state.quote_markets =
+                    Some(if block == 2 { large.clone() } else { catalog(&[("poe", &["BTC/USDC"])]) })
+            });
+            now.fetch_add(1_001, Ordering::SeqCst);
+            gw.on_message(state_message(&source, block));
+        }
+        wait_for(|| peer.frames().len() == 3).await;
+        let f = peer.frames();
+        assert_eq!(peer.binaries(), initial_binaries + 1);
+        assert_eq!(
+            (f[1]["message"]["data"]["block"].clone(), f[1]["message"]["data"]["quoteMarkets"].clone()),
+            (json!(2), serde_json::to_value(&large).unwrap())
+        );
+        assert_eq!(f[2]["message"]["data"]["block"], 4);
+        assert_eq!(f[2]["message"]["data"]["quoteMarkets"], json!({ "poe": ["BTC/USDC"] }));
+        assert_eq!(f.iter().map(|f| f["seq"].as_u64().unwrap()).collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn keeps_only_the_latest_pending_snapshot_during_a_burst() {
+        let source = source();
+        let gw = gateway(&source);
+        let peer = LocalPeer::new(&gw, true);
+        peer.subscribe(json!([topic("MON/USDC")]));
+        for block in [2, 3, 4] {
+            source.with(|d| d.quotes.block = block);
+            gw.on_message(StreamMessage::Quotes(Box::new(source.quotes())));
+        }
+        wait_for(|| peer.frames().len() == 3).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(blocks(&peer.frames()), [1, 2, 4]);
+        assert_eq!(peer.frames().iter().map(|f| f["seq"].as_u64().unwrap()).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(gw.metrics().coalesced, 2, "blocks 3 and 4 waited while block 2 compressed; 4 replaced 3");
+    }
+
+    #[tokio::test]
+    async fn a_topic_keeps_counting_after_it_empties_and_returns() {
+        let source = source();
+        let gw = gateway(&source);
+        let peer = LocalPeer::new(&gw, false);
+        peer.subscribe(json!([{ "channel": "fill" }]));
+        gw.on_message(StreamMessage::Fill(Box::new(fill())));
+        // (an unsent frame of a topic the peer leaves is dropped, so let it go out first)
+        wait_for(|| peer.frames().len() == 1).await;
+        peer.subscribe(json!([]));
+        assert_eq!(gw.metrics().topics, 0);
+        peer.subscribe(json!([{ "channel": "fill" }]));
+        gw.on_message(StreamMessage::Fill(Box::new(fill())));
+        wait_for(|| peer.frames().len() == 2).await;
+        // a returning topic must not restart at 1: the client would drop it as a replay
+        assert_eq!(peer.frames().iter().map(|f| f["seq"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    #[tokio::test]
+    async fn fills_are_never_compressed_and_keep_their_order() {
+        let source = source();
+        let gw = gateway(&source);
+        let peer = LocalPeer::new(&gw, true);
+        peer.subscribe(json!([{ "channel": "fill" }]));
+        for i in 0..50 {
+            let mut f = fill();
+            f.id = format!("fill-{i}");
+            f.to = "x".repeat(600); // well past the compression threshold
+            gw.on_message(StreamMessage::Fill(Box::new(f)));
+        }
+        wait_for(|| peer.frames().len() == 50).await;
+        assert_eq!(peer.binaries(), 0);
+        let f = peer.frames();
+        assert!(f
+            .iter()
+            .enumerate()
+            .all(|(i, f)| f["seq"] == i + 1 && f["message"]["data"]["id"] == format!("fill-{i}")));
+    }
+
+    #[tokio::test]
+    async fn a_lagging_pump_tells_the_tape_to_reload() {
+        let source = source();
+        let gw = gateway(&source);
+        let peer = LocalPeer::new(&gw, false);
+        peer.subscribe(json!([{ "channel": "fill" }]));
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        for _ in 0..5 {
+            tx.send(StreamMessage::Fill(Box::new(fill()))).unwrap();
+        }
+        drop(tx);
+        pump(gw.clone(), rx).await;
+        wait_for(|| peer.frames().len() == 3).await;
+        let f = peer.frames();
+        assert_eq!(f[0]["message"], json!({ "ch": "fill", "resync": true }), "three fills were lost");
+        assert_eq!(f.len(), 3, "the resync, then the two fills still held");
+    }
+
+    #[tokio::test]
+    async fn a_depth_topic_holds_the_source_demand_while_subscribed() {
+        let source = source();
+        let gw = gateway(&source);
+        let peer = LocalPeer::new(&gw, false);
+        peer.subscribe(json!([{ "channel": "depth", "market": "MON/USDC" }]));
+        assert_eq!(source.depth_watchers("MON/USDC"), 1);
+        assert!(peer.frames().is_empty(), "no curve yet, no snapshot");
+        let depth = r#"{"market":"MON/USDC","asOfBlock":1,"refMid":0.024,"ts":100,"venues":[]}"#;
+        source.publish_depth("MON/USDC", depth);
+        wait_for(|| peer.frames().len() == 1).await;
+        let f = &peer.frames()[0];
+        assert_eq!((f["topic"].clone(), f["seq"].clone()), (json!("depth:MON/USDC"), json!(1)));
+        assert_eq!(f["message"], json!({ "ch": "depth", "data": serde_json::from_str::<Value>(depth).unwrap() }));
+        // a second viewer gets the latest curve as its snapshot, and shares the demand
+        let other = LocalPeer::new(&gw, false);
+        other.subscribe(json!([{ "channel": "depth", "market": "MON/USDC" }]));
+        wait_for(|| other.frames().len() == 1).await;
+        assert_eq!((other.frames()[0]["snapshot"].clone(), other.frames()[0]["seq"].clone()), (json!(true), json!(1)));
+        assert_eq!(source.depth_watchers("MON/USDC"), 1);
+        peer.subscribe(json!([]));
+        other.subscribe(json!([]));
+        wait_for(|| source.depth_watchers("MON/USDC") == 0).await;
     }
 }

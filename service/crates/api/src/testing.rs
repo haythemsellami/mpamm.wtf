@@ -39,6 +39,9 @@ pub struct FakeData {
     pub curves: HashMap<u32, MarkoutCurvesResponse>,
     /// The aggregations, fills and gas fail while set.
     pub fail: bool,
+    /// Runs after every `quotes()` read, outside the fake's lock: lets a
+    /// test land an update exactly while a quote snapshot is being taken.
+    pub on_quotes: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Reads the tests count.
@@ -48,6 +51,8 @@ pub struct Calls {
     pub venues: AtomicUsize,
     pub leaderboard: AtomicUsize,
     pub quotes: AtomicUsize,
+    /// The last `fills(since_ms, limit)` query.
+    pub last_fills: Mutex<Option<(Option<f64>, usize)>>,
 }
 
 pub struct FakeSource {
@@ -143,6 +148,7 @@ impl FakeSource {
             leaderboards: HashMap::new(),
             curves: HashMap::new(),
             fail: false,
+            on_quotes: None,
         };
         let (tx, _) = broadcast::channel(4096);
         Arc::new(FakeSource { data: Mutex::new(data), tx, depth: Mutex::new(HashMap::new()), calls: Calls::default() })
@@ -190,7 +196,14 @@ impl ApiSource for FakeSource {
 
     fn quotes(&self) -> QuoteSnapshot {
         self.calls.quotes.fetch_add(1, Ordering::Relaxed);
-        self.data.lock().quotes.clone()
+        let (quotes, hook) = {
+            let d = self.data.lock();
+            (d.quotes.clone(), d.on_quotes.clone())
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+        quotes
     }
 
     async fn full_quotes(&self) -> Result<QuoteSnapshot, SourceError> {
@@ -231,6 +244,7 @@ impl ApiSource for FakeSource {
     }
 
     async fn fills(&self, since_ms: Option<f64>, limit: usize) -> Result<Vec<Fill>, SourceError> {
+        *self.calls.last_fills.lock() = Some((since_ms, limit));
         let d = self.data.lock();
         if d.fail {
             return Err(fail());

@@ -30,6 +30,10 @@ uuid = { version = "1", features = ["v4"] }
 mpamm-analytics = { path = "../analytics" }
 brotli = "8"
 http-body-util = "0.1"
+indexmap = { workspace = true }
+# Tests compare parsed frames with the rows they were built from; without
+# this serde_json may parse a long float an ulp off (a browser doesn't).
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 tokio-tungstenite = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
