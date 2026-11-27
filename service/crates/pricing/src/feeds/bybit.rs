@@ -1,6 +1,12 @@
 //! Bybit V5 spot: the MONUSDT order book (`orderbook.50`, snapshot then
-//! deltas) and tickers for MONUSDT and the stable crosses (USDCUSDT,
-//! USD1USDT), which only need their best bid and ask.
+//! deltas), the top of book of the stable crosses (USDCUSDT, USD1USDT:
+//! `orderbook.1`), and tickers for the last price and 24 h change.
+//!
+//! The crosses need the top-of-book stream: Bybit's spot ticker stream
+//! carries no bid or ask, so a cross fed by tickers alone keeps the best bid
+//! and ask of its REST snapshot until the next reconnect. Today's system does
+//! exactly that, and its MON/USDC and MON/USD1 references sit up to a tick
+//! (about 0.5 bp) off the live cross.
 
 use std::sync::Arc;
 
@@ -94,6 +100,9 @@ pub fn apply(ex: &Exchange, raw: &str, now: u64) {
     let Some(topic) = m.topic else { return };
     if let Some(sym) = topic.strip_prefix("orderbook.50.") {
         apply_book(ex, sym, &m.data["b"], &m.data["a"], m.kind.as_deref() == Some("snapshot"), now);
+    } else if let Some(sym) = topic.strip_prefix("orderbook.1.") {
+        // Top of book only: every message is the whole (one-level) book.
+        apply_book(ex, sym, &m.data["b"], &m.data["a"], true, now);
     } else if let Some(sym) = topic.strip_prefix("tickers.") {
         apply_ticker(ex, sym, &m.data, now);
     }
@@ -144,6 +153,7 @@ impl ws::Session for Bybit {
 pub async fn run(ex: Arc<Exchange>, ep: Endpoints, stop: tokio::sync::watch::Receiver<bool>) {
     let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8)).build().expect("http client");
     let mut args = vec![format!("orderbook.50.{BOOK_SYMBOL}")];
+    args.extend(ex.symbols().iter().filter(|s| *s != BOOK_SYMBOL).map(|s| format!("orderbook.1.{s}")));
     args.extend(ex.symbols().iter().map(|s| format!("tickers.{s}")));
     let session = Bybit { subscribe: json!({ "op": "subscribe", "args": args }).to_string() };
     let prepare = || async {
