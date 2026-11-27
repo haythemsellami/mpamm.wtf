@@ -444,13 +444,17 @@ fn the_fastlane_relay_and_its_calldata_are_watched() {
     assert_eq!(g.relays[0].address, parse_address(HANDLER).unwrap());
     assert_eq!(g.relays[0].selector, [0x0c, 0x7a, 0xbd, 0x22]);
     assert_eq!(g.relays[0].target_word, 5);
+    let targets: HashSet<[u8; 20]> = g.relays[0].targets.iter().copied().collect();
+    let want: HashSet<[u8; 20]> =
+        [GENERATIONS[8], XAUT, STOCKS, STOCKS_2].iter().map(|s| parse_address(s).unwrap()).collect();
+    assert_eq!(targets, want, "only gen8+ quoters carry fastLaneCall");
     let w = discovered().watch().unwrap();
     assert!(w.txn_input.contains(&parse_address(HANDLER).unwrap()));
     assert!(g.destinations.iter().all(|d| w.txn_input.contains(d)));
 }
 
 /// A relay rule as the core applies it: `to`, the selector, and the static
-/// word naming one of the destinations.
+/// word naming one of the relay's targets.
 fn relayed(tx: &Value, g: &GasSources) -> bool {
     let to = parse_address(tx["to"].as_str().unwrap()).unwrap();
     let input = hex_bytes(tx["input"].as_str().unwrap()).unwrap();
@@ -460,7 +464,7 @@ fn relayed(tx: &Value, g: &GasSources) -> bool {
             && input.len() >= at + 32
             && input[..4] == r.selector
             && input[at..at + 12].iter().all(|b| *b == 0)
-            && g.destinations.iter().any(|d| d[..] == input[at + 12..at + 32])
+            && r.targets.iter().any(|d| d[..] == input[at + 12..at + 32])
     })
 }
 

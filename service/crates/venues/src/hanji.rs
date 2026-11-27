@@ -296,12 +296,14 @@ impl Hanji {
 fn gas() -> GasSources {
     let fast_lane: HashSet<Addr> = FASTLANE_QUOTERS.iter().map(|q| addr(q)).collect();
     let direct_only = FAST_QUOTERS.iter().map(|q| addr(q)).filter(|q| !fast_lane.contains(q));
+    let destinations = direct_only.chain(FASTLANE_QUOTERS.iter().map(|q| addr(q))).collect();
     GasSources {
-        destinations: direct_only.chain(FASTLANE_QUOTERS.iter().map(|q| addr(q))).collect(),
+        destinations,
         relays: vec![GasRelay {
             address: addr(FASTLANE_AUCTION_HANDLER),
             selector: FASTLANE_SELECTOR,
             target_word: FASTLANE_TARGET_WORD,
+            targets: fast_lane.into_iter().collect(),
         }],
         ..GasSources::default()
     }
