@@ -8,8 +8,8 @@ and *why*; this file says *how* and *in what order*. Tick a box when its work is
 Status as of 2026-11-27 (evening): M1's 7-day gate run is under way on the node host
 (started 07:17 UTC, by hand until the unit edit lands). M2–M4 and M6 are in place; M5 has
 5 of 9 decoding venues ported and identical to today's on real blocks (the other 4 are
-being ported); M7's markouts, curves and analytics, M9's engine and M13's migration tool
-are built; M10 and M11 are under way.
+being ported); M7's markouts, curves, analytics and archives, M9's engine and M13's migration
+tool are built; M10 and M11 are under way.
 
 **The node keeps about 17 hours of history** (it served blocks from 125,604,242 when the
 head was 125,811,220). Repairs beyond that, a catch-up after a long outage, and history
@@ -42,7 +42,7 @@ path for M8.
 | M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | Done (archives → M7; USD parity checked in M8) |
 | M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | All 11 ported; verify-venue and adapters.md left |
 | M6 | Exact gas and attribution | 2 | M5 | — | Built; 3-day recount pending |
-| M7 | Markouts and analytics | 2 | M4, M5 | — | Built; archives pending |
+| M7 | Markouts and analytics | 2 | M4, M5 | — | Built, archives included |
 | M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Shadow run with all 11 venues under way; parity hourly |
 | M9 | Quote engine | 3 | M3, M4 | — | Built, with depth curves |
 | M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | All 11 ported and identical; p90 gate blocked on RPC cores |
@@ -229,8 +229,9 @@ registry and types round-trip into the web build.
       trades) when nearer than now, else live
 - [x] Market-hours handling: Kraken closures withhold the reference and keep the last
       good price for settled trades
-- [ ] Archived exchange prices for closed days (`closed-day-prices.ts`, `history/cex.ts`):
-      moved to M7, where markout onboarding needs the same archives
+- [x] Archived exchange prices for closed days (`closed-day-prices.ts`, `history/cex.ts`):
+      built in M7 with the archives markouts need (`archives::ClosedDayPrices`, a `Pricer`
+      as of a time; wired when history replays land)
 - [ ] Reference starvation notes: with the notes model in M14 (`/api/health` already
       reports each feed's age and how many pairs have a reference)
 
@@ -312,8 +313,17 @@ sits within today's estimate's error band per venue.
 - [x] Analytics: leaderboard and markout-curve aggregation, identical to today's on
       2,518 synthetic fills, every float bit-equal (`crates/analytics`)
 - [x] Trades carry their time source (proposal time, block second over RPC, migrated)
-- [ ] Archived exchange prices (`history/cex.ts`) for markouts of trades decoded after the
-      fact and for closed-day pricing
+- [x] Archived exchange prices (`history/cex.ts`) for markouts of trades decoded after the
+      fact and for closed-day pricing (`pricing::archives`, `markouts::archive`, the
+      service's sweep every 10 minutes): Bybit book dumps replayed to BBO mids, Binance
+      1 s / 1 m klines, today's staleness caps, the pair's mid built by the live
+      reference's own pair-terms code; ~7 MB of cache a day. Parity with today's TypeScript:
+      every registered pair over synthetic windows with outages and gaps (2,219 marks
+      priced, 329 null, all equal), and production's 7,375 trades of 2026-11-26 on every
+      archived market marked as today marks them (at most 4.4e-12 bp apart at every
+      horizon; `mpamm-tools archive-marks` against `server/scripts/archive-marks.ts`). Four
+      real Bybit days (MONUSDT, USDCUSDT) replay byte-identical to today's cache files. A
+      closed day takes ~1.5 min to fetch (1-second klines dominate: 8–23 s a symbol-day)
 - [ ] Quote stats (with the stream, M11)
 
 **Done when:** for a recorded day, markouts match today's within the expected shift from

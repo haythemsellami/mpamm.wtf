@@ -5,7 +5,7 @@ each side gave, where one gave a mark and the other none, and the max and
 median absolute difference where both did. With --fills (the /api/fills
 input), the same against the live marks production stored, for context.
 
-  compare-marks.py rust.json ts.json [--fills fills.json]
+  compare-marks.py rust.json ts.ndjson [--fills fills.json]
 """
 import json
 import statistics
@@ -14,8 +14,16 @@ import sys
 HORIZONS = [0, 5, 10, 30, 60]
 
 
+def rows(path):
+    """A JSON array, or one JSON object per line."""
+    text = open(path).read()
+    if text.lstrip().startswith("["):
+        return json.loads(text)
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
 def marks(path):
-    return {r["id"]: r.get("markoutsBps") for r in json.load(open(path))}
+    return {r["id"]: r.get("markoutsBps") for r in rows(path)}
 
 
 def compare(a, b, label_a, label_b):
