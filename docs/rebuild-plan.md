@@ -45,7 +45,7 @@ path for M8.
 | M7 | Markouts and analytics | 2 | M4, M5 | — | Built; archives pending |
 | M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Shadow run with all 11 venues under way; parity hourly |
 | M9 | Quote engine | 3 | M3, M4 | — | Built, with depth curves |
-| M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | 9 of 11 quote ports done |
+| M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | All 11 ported and identical; p90 gate blocked on RPC cores |
 | M11 | Stream and REST | 4 | M8, M10 | — | Today's REST and v2 stream ported; compact protocol left |
 | M12 | Frontend on the new stream | 4 | M11 | — | Today's dashboard runs unchanged on the Rust API |
 | M13 | Data migration and replication | 4 | M8 | object storage bucket | Migration tool built |
@@ -375,7 +375,9 @@ pace with every block for 24 h without a missed job.
       Uniswap v4 (one leg per call; it also quotes WBTC/cbBTC, which today's 12-leg
       multicalls lose to out-of-gas walkers), Hanji (one book per call, 0.22–0.90M gas
       each), ThogAMM (drained legs sit out, as today), Capricorn (best price per side
-      across pools). Left: Clober, Lunarbase
+      across pools), Clober (the vault's books read from its adoption table, so it quotes
+      even while the subgraph today's discovery depends on is down), Lunarbase (paused:
+      hidden, as today; a quote never changes what decode watches)
 - [x] Every leg failing is the venue missing for that block, with the commonest reason;
       a revert's reason travels with the error (`Error(string)`, `Panic`, custom selector)
 - [x] Reads pinned to a just-proposed block retry while its state is not yet readable
@@ -384,7 +386,9 @@ pace with every block for 24 h without a missed job.
       every row (POE: identical)
 - [x] POE quotes (identical); Metric and WOOFi (identical at 7 blocks); BTR and Crystal
       (identical at 3 blocks); Uniswap v4 (identical at 3 blocks with one call per leg);
-      Hanji, ThogAMM and Capricorn (identical at 6 blocks each: 68, 162 and 1 rows)
+      Hanji, ThogAMM and Capricorn (identical at 6 blocks each: 68, 162 and 1 rows); Clober
+      (identical at 5 blocks of 2026-10 with rows, and its dark verdict at 3 live ones) and
+      Lunarbase (identical at 3 blocks of 2026-07/08 with rows, and paused at 3 live ones)
 - [ ] Per-venue timing on the host under live load. 2026-11-27, six quoting venues: at
       first BTR p90 77 ms and Uniswap v4 130 ms (39 of 199 jobs late); with calls sent as
       concurrent batches of 25 and Uniswap's failing legs sitting out 25 blocks, every
