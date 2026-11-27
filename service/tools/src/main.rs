@@ -11,6 +11,7 @@
 
 mod migrate;
 mod parity;
+mod verify;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -101,6 +102,21 @@ enum Cmd {
         to: u64,
         #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
         rpc: String,
+    },
+    /// The live checklist for a venue module's PR (today's verify-adapter):
+    /// registry entry, discovery, quotes, watch set, a recent window decoded,
+    /// gas rules; exits 1 on any failure.
+    VerifyVenue {
+        #[arg(long)]
+        venue: String,
+        #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
+        rpc: String,
+        /// Blocks decoded back from the head.
+        #[arg(long, default_value_t = 3000)]
+        span: u64,
+        /// Seconds the exchange feeds warm before quoting.
+        #[arg(long, default_value_t = 20)]
+        warm_secs: u64,
     },
     /// Diff the service's trades against production's over a block window;
     /// exits 1 on any difference.
@@ -227,33 +243,27 @@ fn parse_log(l: &Value) -> Option<(u64, [u8; 32], FinalLog)> {
     ))
 }
 
-async fn decode_range(
-    venue_id: &str,
+/// The watched logs of `from..=to`, by block (number → hash, logs).
+type BlockLogs = BTreeMap<u64, ([u8; 32], Vec<FinalLog>)>;
+
+/// Decodes every block of `from..=to` holding one of the venue's watched
+/// logs, read as the pipeline's RPC repair reads it, with venue state kept
+/// across blocks as the service commits it. Returns the trades and the
+/// watched logs by block.
+async fn decode_blocks(
+    venue: &std::sync::Arc<dyn mpamm_core::Venue>,
+    rpc: &Rpc,
+    prices: &Prices,
     from: u64,
     to: u64,
-    rpc_url: &str,
     chunk: u64,
-    live_secs: u64,
     skip_gas_only: bool,
-) -> Result<(), String> {
+) -> Result<(Vec<mpamm_types::Fill>, BlockLogs), String> {
     let registry = Registry::get();
-    let rpc = Rpc::new("node", rpc_url, Duration::from_secs(60));
-    let venue = mpamm_venues::all().into_iter().find(|v| v.id() == venue_id).ok_or(format!("no venue {venue_id}"))?;
-    venue.discover(&ChainCx { rpc: &rpc, registry }).await.map_err(|e| e.to_string())?;
+    let venue_id = venue.id().to_string();
     let watch = venue.watch().map_err(|e| e.to_string())?;
     let addresses: Vec<String> = watch.logs.keys().map(|a| format!("0x{}", hex(a))).collect();
-    eprintln!("{venue_id}: watching {} address(es) over {from}..={to}", addresses.len());
-
-    let prices = Prices::new(registry, Fees::default());
-    if live_secs > 0 {
-        let (_stop_tx, stop) = tokio::sync::watch::channel(false);
-        prices.spawn(rpc.clone(), Default::default(), stop);
-        tokio::time::sleep(Duration::from_secs(live_secs)).await;
-        std::mem::forget(_stop_tx);
-    }
-
-    // Watched logs, grouped by block.
-    let mut blocks: BTreeMap<u64, ([u8; 32], Vec<FinalLog>)> = BTreeMap::new();
+    let mut blocks: BlockLogs = BTreeMap::new();
     let mut start = from;
     while start <= to && !addresses.is_empty() {
         let end = (start + chunk - 1).min(to);
@@ -317,6 +327,35 @@ async fn decode_range(
         let writes = state.take_pending();
         state.apply(&writes);
     }
+    Ok((fills, blocks))
+}
+
+async fn decode_range(
+    venue_id: &str,
+    from: u64,
+    to: u64,
+    rpc_url: &str,
+    chunk: u64,
+    live_secs: u64,
+    skip_gas_only: bool,
+) -> Result<(), String> {
+    let registry = Registry::get();
+    let rpc = Rpc::new("node", rpc_url, Duration::from_secs(60));
+    let venue = mpamm_venues::all().into_iter().find(|v| v.id() == venue_id).ok_or(format!("no venue {venue_id}"))?;
+    venue.discover(&ChainCx { rpc: &rpc, registry }).await.map_err(|e| e.to_string())?;
+    let watch = venue.watch().map_err(|e| e.to_string())?;
+    let addresses: Vec<String> = watch.logs.keys().map(|a| format!("0x{}", hex(a))).collect();
+    eprintln!("{venue_id}: watching {} address(es) over {from}..={to}", addresses.len());
+
+    let prices = Prices::new(registry, Fees::default());
+    if live_secs > 0 {
+        let (_stop_tx, stop) = tokio::sync::watch::channel(false);
+        prices.spawn(rpc.clone(), Default::default(), stop);
+        tokio::time::sleep(Duration::from_secs(live_secs)).await;
+        std::mem::forget(_stop_tx);
+    }
+
+    let (mut fills, _) = decode_blocks(&venue, &rpc, &prices, from, to, chunk, skip_gas_only).await?;
     fills.sort_by(|a, b| a.id.cmp(&b.id));
     let out: Vec<Value> = fills
         .iter()
@@ -527,6 +566,17 @@ async fn main() {
         Cmd::Migrate { from, to } => migrate::migrate(&from, &to),
         Cmd::CapturePrices { secs, rpc, out } => capture_prices(secs, &rpc, &out).await,
         Cmd::QuoteAt { venue, block, prices, rpc } => quote_at(&venue, block, &prices, &rpc).await,
+        Cmd::VerifyVenue { venue, rpc, span, warm_secs } => match verify::verify(&venue, &rpc, span, warm_secs).await {
+            Ok(r) => {
+                verify::print(&r);
+                if r.failures() > 0 {
+                    Err(format!("{} check(s) failed", r.failures()))
+                } else {
+                    Ok(())
+                }
+            }
+            Err(e) => Err(e),
+        },
         Cmd::Parity { db, prod, prod_file, hours, from_block, margin, usd_tolerance, drift_max, venues } => {
             parity_cmd(&db, &prod, prod_file.as_deref(), hours, from_block, margin, usd_tolerance, drift_max, venues)
                 .await
