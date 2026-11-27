@@ -12,6 +12,7 @@ mod health;
 #[cfg(target_os = "linux")]
 mod run;
 mod settings;
+mod source;
 
 use std::process::ExitCode;
 

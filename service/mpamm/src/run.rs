@@ -22,7 +22,7 @@ use mpamm_ring::{
 use mpamm_store::{writer::Writer, Store, FINAL_CURSOR};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::{health, settings::Settings};
+use crate::{health, settings::Settings, source::ServiceSource};
 
 fn pin_to(cpu: usize) -> Result<(), String> {
     // SAFETY: a zeroed cpu_set_t is a valid empty set; this pins the calling thread.
@@ -125,6 +125,7 @@ pub fn run(s: Settings) -> ExitCode {
         }
         let (committed, _) = broadcast::channel(4096);
         let mut committed_rx = committed.subscribe();
+        let source_rx = committed.subscribe();
         let writer = Writer::spawn(store);
         let (stop_feeds, feeds_stop) = tokio::sync::watch::channel(false);
         let prices = Prices::new(registry, Fees::default());
@@ -155,6 +156,7 @@ pub fn run(s: Settings) -> ExitCode {
         // A client made on this runtime (the boot one's connections died with it).
         let local = Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10));
         let quote_venues = pipeline.venues.clone();
+        let source_venues = pipeline.venues.clone();
         let pipe = tokio::spawn(pipeline.run(rx));
 
         // Quotes: every proposed block that finished executing is quoted by
@@ -167,6 +169,23 @@ pub fn run(s: Settings) -> ExitCode {
             registry,
             Duration::from_millis(s.quote_deadline_ms),
         );
+        // The dashboard's source: frames, tape, volume, state, the store.
+        let source = ServiceSource::new(
+            registry,
+            source_venues,
+            prices.clone(),
+            health::Health {
+                ring: ring_stats.clone(),
+                pipeline: stats.clone(),
+                prices: prices.clone(),
+                quotes: engine.clone(),
+                started: Instant::now(),
+                stall_ms: s.stall_secs.max(1) * 1000,
+            },
+            s.db.clone(),
+        );
+        source.start(&engine, source_rx);
+
         let quotes = engine.clone();
         tokio::spawn(async move {
             while let Some((block, proposal_ns)) = exec_rx.recv().await {
@@ -180,6 +199,7 @@ pub fn run(s: Settings) -> ExitCode {
         // Markouts: every committed trade is aged against the reference
         // history; a restart resumes the trades still within their horizons.
         let aging_prices = prices.clone();
+        let aging_source = source.clone();
         tokio::spawn(async move {
             let mut aging = mpamm_markouts::Aging::default();
             let since = mpamm_ring::live::now_ms() as f64 - 90_000.0;
@@ -202,6 +222,8 @@ pub fn run(s: Settings) -> ExitCode {
                         if updates.is_empty() {
                             continue;
                         }
+                        let marked: Vec<(String, Vec<Option<f64>>)> =
+                            updates.iter().filter_map(|u| u.markouts.clone().map(|m| (u.id.clone(), m))).collect();
                         let r = writer
                             .run(move |st| {
                                 for u in &updates {
@@ -215,8 +237,9 @@ pub fn run(s: Settings) -> ExitCode {
                                 Ok(())
                             })
                             .await;
-                        if let Err(e) = r {
-                            tracing::warn!("write markouts: {e}");
+                        match r {
+                            Ok(()) => aging_source.on_markouts(&marked),
+                            Err(e) => tracing::warn!("write markouts: {e}"),
                         }
                     }
                 }
@@ -253,14 +276,15 @@ pub fn run(s: Settings) -> ExitCode {
             }
         });
 
-        let app = health::router(health::Health {
-            ring: ring_stats,
-            pipeline: stats,
-            prices: prices.clone(),
-            quotes: engine.clone(),
-            started: Instant::now(),
-            stall_ms: s.stall_secs.max(1) * 1000,
-        });
+        let mut app = mpamm_api::router(source.clone());
+        if let Some(dist) = &s.web_dist {
+            // The dashboard, same-origin with its API (unknown paths are the
+            // app's own routes).
+            let files = tower_http::services::ServeDir::new(dist)
+                .fallback(tower_http::services::ServeFile::new(dist.join("index.html")));
+            app = app.fallback_service(files).layer(tower_http::compression::CompressionLayer::new());
+            tracing::info!("serving the dashboard from {}", dist.display());
+        }
         let listener = match tokio::net::TcpListener::bind(s.http).await {
             Ok(l) => l,
             Err(e) => {
@@ -269,7 +293,7 @@ pub fn run(s: Settings) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        tracing::info!("health on http://{}/api/health", s.http);
+        tracing::info!("API on http://{}/api (health: /api/health)", s.http);
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
         shutdown_signal().await;

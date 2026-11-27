@@ -32,9 +32,12 @@ pub struct Cli {
     /// Pin the ring reader thread to this CPU.
     #[arg(long)]
     pub reader_cpu: Option<usize>,
-    /// Address the health endpoint (and later the API) listens on.
+    /// Address the API (REST, stream, health) listens on.
     #[arg(long)]
     pub http: Option<SocketAddr>,
+    /// The built dashboard (`web/dist`), served beside the API.
+    #[arg(long, env = "WEB_DIST")]
+    pub web_dist: Option<PathBuf>,
     #[arg(long)]
     pub finalize_wait_ms: Option<u64>,
     #[arg(long)]
@@ -53,6 +56,7 @@ pub struct ServiceFile {
     pub archive_url_env: Option<String>,
     pub reader_cpu: Option<usize>,
     pub http: Option<SocketAddr>,
+    pub web_dist: Option<PathBuf>,
     pub finalize_wait_ms: Option<u64>,
     pub stall_secs: Option<u64>,
     pub quote_deadline_ms: Option<u64>,
@@ -74,6 +78,7 @@ pub struct Settings {
     pub archive_url: Option<String>,
     pub reader_cpu: Option<usize>,
     pub http: SocketAddr,
+    pub web_dist: Option<PathBuf>,
     pub finalize_wait_ms: u64,
     pub stall_secs: u64,
     pub quote_deadline_ms: u64,
@@ -102,6 +107,7 @@ impl Settings {
             archive_url_env,
             reader_cpu: cli.reader_cpu.or(f.reader_cpu),
             http: cli.http.or(f.http).unwrap_or_else(|| "127.0.0.1:8787".parse().unwrap()),
+            web_dist: cli.web_dist.or(f.web_dist),
             finalize_wait_ms: cli.finalize_wait_ms.or(f.finalize_wait_ms).unwrap_or(2000),
             stall_secs: cli.stall_secs.or(f.stall_secs).unwrap_or(5),
             quote_deadline_ms: cli.quote_deadline_ms.or(f.quote_deadline_ms).unwrap_or(150),
@@ -130,6 +136,7 @@ mod tests {
         assert_eq!(s.archive_url.as_deref(), Some("https://key.example/"));
         assert_eq!(s.db, PathBuf::from("/var/lib/mpamm/data/mpamm.db"));
         assert_eq!(s.rpc_url, "http://127.0.0.1:8080");
+        assert_eq!(s.web_dist, None);
 
         std::fs::write(&p, "[service]\nreader_cpus = 3\n").unwrap();
         assert!(Settings::load(cli(&["--config", p.to_str().unwrap()]), |_| None).unwrap_err().contains("reader_cpus"));
