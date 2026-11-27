@@ -4,6 +4,7 @@
 //! `all()`.
 
 pub mod btr;
+pub mod capricorn;
 pub mod chain;
 pub mod crystal;
 pub mod generations;
@@ -24,6 +25,7 @@ pub fn all() -> Vec<Arc<dyn Venue>> {
         Arc::new(poe::Poe::default()),
         Arc::new(metric::venue()),
         Arc::new(thogamm::Thogamm::default()),
+        Arc::new(capricorn::Capricorn::default()),
         Arc::new(crystal::Crystal::default()),
         Arc::new(woofi::Woofi::default()),
         Arc::new(btr::Btr::default()),
