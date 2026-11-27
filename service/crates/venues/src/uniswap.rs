@@ -233,11 +233,23 @@ impl UniswapReads for RpcReads<'_> {
     }
 }
 
+/// Blocks a failed leg sits out before it is tried again (today's ThogAMM
+/// re-probe of a drained market). About 19 of the 168 legs fail on every
+/// block (4M-gas walks that revert, 8M-gas walks out of gas) and were most
+/// of the venue's time on the node; cooled, a pool that refills is back in
+/// its rows within ~10 s.
+pub const REPROBE_BLOCKS: u32 = 25;
+
+/// (market, size bits, buy side).
+type LegId = (String, u64, bool);
+
 #[derive(Default)]
 pub struct Uniswap {
     /// One pool per market, merged across discoveries (a later pass may
     /// re-pick a deeper tier; it never drops a market).
     markets: RwLock<Vec<UniMarket>>,
+    /// Failed legs and the quotes they still sit out.
+    cold: parking_lot::Mutex<HashMap<LegId, u32>>,
 }
 
 impl Uniswap {
@@ -291,35 +303,65 @@ impl Uniswap {
         }
         let mut legs = Vec::new();
         let mut reads_in = Vec::new();
-        for m in &markets {
-            // Reference not warm: no comparable row.
-            if pricer.pair_mid(&m.market) <= 0.0 {
-                continue;
-            }
-            for &size in sizes_usd {
-                let quote_in = pricer.token_for_usd(&m.quote_tok, size);
-                let base_in = pricer.token_for_usd(&m.base_tok, size);
-                if quote_in <= 0.0 || base_in <= 0.0 {
+        let mut cooling = 0usize;
+        {
+            let mut cold = self.cold.lock();
+            let mut sits_out = |id: LegId| match cold.get_mut(&id) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    cooling += 1;
+                    true
+                }
+                _ => false,
+            };
+            for m in &markets {
+                // Reference not warm: no comparable row.
+                if pricer.pair_mid(&m.market) <= 0.0 {
                     continue;
                 }
-                legs.push(Leg { m, size, buy: true, in_human: quote_in });
-                reads_in.push(LegRead {
-                    key: m.key,
-                    zero_for_one: !m.base_is_currency0,
-                    exact_amount: raw_amount(quote_in, m.quote_dec),
-                });
-                legs.push(Leg { m, size, buy: false, in_human: base_in });
-                reads_in.push(LegRead {
-                    key: m.key,
-                    zero_for_one: m.base_is_currency0,
-                    exact_amount: raw_amount(base_in, m.base_dec),
-                });
+                for &size in sizes_usd {
+                    let quote_in = pricer.token_for_usd(&m.quote_tok, size);
+                    let base_in = pricer.token_for_usd(&m.base_tok, size);
+                    if quote_in <= 0.0 || base_in <= 0.0 {
+                        continue;
+                    }
+                    if !sits_out((m.market.clone(), size.to_bits(), true)) {
+                        legs.push(Leg { m, size, buy: true, in_human: quote_in });
+                        reads_in.push(LegRead {
+                            key: m.key,
+                            zero_for_one: !m.base_is_currency0,
+                            exact_amount: raw_amount(quote_in, m.quote_dec),
+                        });
+                    }
+                    if !sits_out((m.market.clone(), size.to_bits(), false)) {
+                        legs.push(Leg { m, size, buy: false, in_human: base_in });
+                        reads_in.push(LegRead {
+                            key: m.key,
+                            zero_for_one: m.base_is_currency0,
+                            exact_amount: raw_amount(base_in, m.base_dec),
+                        });
+                    }
+                }
             }
         }
         if reads_in.is_empty() {
+            if cooling > 0 {
+                return Err(VenueError::Chain(format!("Uniswap v4: all {cooling} quote legs failed and are cooling")));
+            }
             return Ok(Vec::new());
         }
         let res = reads.quote_legs(&reads_in, at).await?;
+        {
+            let mut cold = self.cold.lock();
+            for (l, r) in legs.iter().zip(&res) {
+                let id = (l.m.market.clone(), l.size.to_bits(), l.buy);
+                if r.is_some() {
+                    cold.remove(&id);
+                } else {
+                    cold.insert(id, REPROBE_BLOCKS);
+                }
+            }
+        }
         if res.iter().all(Option::is_none) {
             return Err(VenueError::Chain(format!("Uniswap v4: all {} quote legs failed", res.len())));
         }
@@ -619,7 +661,10 @@ mod tests {
     fn three_markets() -> Uniswap {
         let c = candidates(reg());
         let pick = |m: &str, fee: u32| c.iter().find(|x| x.market == m && x.key.fee == fee).unwrap().clone();
-        Uniswap { markets: RwLock::new(vec![pick("MON/USDC", 500), pick("ETH/USDC", 3000), pick("XAUt/USDC", 100)]) }
+        Uniswap {
+            markets: RwLock::new(vec![pick("MON/USDC", 500), pick("ETH/USDC", 3000), pick("XAUt/USDC", 100)]),
+            ..Uniswap::default()
+        }
     }
 
     #[tokio::test]
@@ -684,6 +729,35 @@ mod tests {
         let reads = Stub::new(|_| None, |_| None);
         let err = three_markets().quote_with(&reads, &prices, At::Hash([0; 32]), &[100.0]).await.unwrap_err();
         assert_eq!(err, VenueError::Chain("Uniswap v4: all 2 quote legs failed".into()));
+    }
+
+    #[tokio::test]
+    async fn a_failed_leg_sits_out_then_is_tried_again() {
+        let prices = Prices(HashMap::from([("USDC", 1.0), ("MON", 0.02)]), HashMap::from([("MON/USDC", 0.02)]));
+        // MON/USDC's buy side fails; its sell side answers.
+        let reads = Stub::new(|_| None, |l| (l.zero_for_one).then(|| U256::from(99_500_000u64)));
+        let venue = three_markets();
+        let at = At::Hash([1; 32]);
+        let sent = |r: &Stub| std::mem::take(&mut *r.legs.lock()).len();
+        venue.quote_with(&reads, &prices, at, &[100.0]).await.unwrap();
+        assert_eq!(sent(&reads), 2, "both MON/USDC legs (the others have no reference)");
+        for _ in 0..REPROBE_BLOCKS {
+            let rows = venue.quote_with(&reads, &prices, at, &[100.0]).await.unwrap();
+            assert_eq!(sent(&reads), 1, "the failed buy leg sits out");
+            assert_eq!(rows[0].one_sided, Some(true), "the row shows the side that answers");
+        }
+        venue.quote_with(&reads, &prices, at, &[100.0]).await.unwrap();
+        assert_eq!(sent(&reads), 2, "re-probed after {REPROBE_BLOCKS} blocks");
+    }
+
+    #[tokio::test]
+    async fn an_outage_stays_reported_while_its_legs_cool() {
+        let prices = Prices(HashMap::from([("USDC", 1.0), ("MON", 0.02)]), HashMap::from([("MON/USDC", 0.02)]));
+        let reads = Stub::new(|_| None, |_| None);
+        let venue = three_markets();
+        assert!(venue.quote_with(&reads, &prices, At::Hash([0; 32]), &[100.0]).await.is_err());
+        let err = venue.quote_with(&reads, &prices, At::Hash([0; 32]), &[100.0]).await.unwrap_err();
+        assert_eq!(err, VenueError::Chain("Uniswap v4: all 2 quote legs failed and are cooling".into()));
     }
 
     #[test]
