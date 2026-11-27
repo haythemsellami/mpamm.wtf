@@ -1,0 +1,82 @@
+name: Service (Rust)
+
+# The Rust rebuild under service/ (docs/rebuild-plan.md → M2). Runs on every
+# push and PR that touches it: format, lints, tests, and an x86-64-v3 release
+# build of the node-host binaries, kept as a workflow artifact named after the
+# commit and the node tag the SDK is pinned to.
+on:
+  push:
+    paths:
+      - 'service/**'
+      - '.github/workflows/service.yml'
+  pull_request:
+    paths:
+      - 'service/**'
+      - '.github/workflows/service.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: service-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+  CC: clang-19
+  CXX: clang++-19
+  LLVM_CONFIG_PATH: /usr/lib/llvm-19/bin/llvm-config
+  LIBCLANG_PATH: /usr/lib/llvm-19/lib
+
+jobs:
+  service:
+    name: fmt · clippy · test · release build
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: service
+    steps:
+      - uses: actions/checkout@v7
+
+      # What the execution-event SDK needs to build (service/build/Dockerfile).
+      - name: SDK toolchain
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            clang-19 libclang-19-dev llvm-19-dev cmake libzstd-dev libhugetlbfs-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: service
+          cache-directories: ~/.cargo/git/checkouts
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      - name: Release build (x86-64-v3, node host)
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: |
+          cargo build --release --locked --bin mpamm-reader
+          mkdir -p dist && cp target/release/mpamm-reader dist/
+          node_tag=$(grep -oP 'monad-event-ring.*tag = "\K[^"]+' Cargo.toml)
+          echo "NODE_TAG=$node_tag" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mpamm-service-${{ github.sha }}-node-${{ env.NODE_TAG }}
+          path: service/dist/
+          if-no-files-found: error
+          retention-days: 30

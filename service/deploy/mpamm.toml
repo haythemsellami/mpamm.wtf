@@ -1,0 +1,8 @@
+# Settings for the binaries mpamm.service runs on the node host, installed as
+# /var/lib/mpamm/mpamm.toml by service/scripts/deploy.sh. Flags on the command
+# line override these. No secrets here: hosted RPC URLs come from the unit's
+# environment file, which DevOps owns.
+
+[reader]
+# The one core no node daemon is pinned to on the first node host.
+cpu = 0
