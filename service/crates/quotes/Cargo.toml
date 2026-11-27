@@ -1,0 +1,23 @@
+[package]
+name = "mpamm-quotes"
+version = "0.1.0"
+description = "The quote engine: every venue quoted at every proposed block, published as each finishes"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mpamm-chain = { path = "../chain" }
+mpamm-core = { path = "../core" }
+mpamm-pricing = { path = "../pricing" }
+mpamm-registry = { path = "../registry" }
+mpamm-types = { path = "../types" }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+mpamm-ring = { path = "../ring" }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

@@ -2153,6 +2153,7 @@ dependencies = [
  "mpamm-markouts",
  "mpamm-pipeline",
  "mpamm-pricing",
+ "mpamm-quotes",
  "mpamm-registry",
  "mpamm-ring",
  "mpamm-store",
@@ -2235,6 +2236,23 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "mpamm-quotes"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mpamm-chain",
+ "mpamm-core",
+ "mpamm-pricing",
+ "mpamm-registry",
+ "mpamm-ring",
+ "mpamm-types",
+ "parking_lot",
+ "serde",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
