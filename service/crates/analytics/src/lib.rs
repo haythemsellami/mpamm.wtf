@@ -17,7 +17,9 @@
 //! a full stable sort here: pruning only ever drops an entry that `cap`
 //! better-or-earlier entries already beat, so both keep the same top `cap`.
 
+pub mod curves;
 pub mod js;
 pub mod leaderboard;
 
+pub use curves::{compute_markout_curves, curve_complete, curve_mark_ms, curve_points, route_of, CurveRow, RouteLeg};
 pub use leaderboard::{compute_leaderboard, LbRow};

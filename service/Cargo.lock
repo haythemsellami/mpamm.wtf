@@ -2171,6 +2171,7 @@ name = "mpamm-analytics"
 version = "0.1.0"
 dependencies = [
  "indexmap 2.14.2",
+ "mpamm-registry",
  "mpamm-types",
  "serde",
  "serde_json",
