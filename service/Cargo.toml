@@ -3,7 +3,7 @@
 # because the event ring's schema hash ties a reader build to a node version.
 [workspace]
 resolver = "2"
-members = ["reader", "crates/ring", "crates/chain", "crates/registry", "crates/types", "crates/store", "crates/core", "crates/pipeline", "crates/pricing", "crates/venues", "crates/markouts", "crates/quotes", "crates/analytics", "mpamm", "tools"]
+members = ["reader", "crates/ring", "crates/chain", "crates/registry", "crates/types", "crates/store", "crates/core", "crates/pipeline", "crates/pricing", "crates/venues", "crates/markouts", "crates/quotes", "crates/analytics", "crates/api","mpamm", "tools"]
 
 [workspace.package]
 edition = "2021"
