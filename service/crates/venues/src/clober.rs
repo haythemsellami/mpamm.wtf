@@ -23,8 +23,17 @@
 //! exception: a book first Taken after boot whose key or pairing nothing
 //! seen settles.
 //!
-//! Not ported: the subgraph discovery (only decided what is quoted at boot)
-//! and quoting (M9).
+//! Quotes: BookViewer.getExpectedOutput on each vault book, limit at the
+//! book's lowest price, every leg one eth_call in one batch pinned to the
+//! block. A leg's sweep measured at most ~610k gas (the MON/USDC stable book
+//! at $1k–$100k while the vault was live, 2026-09-27; ~460k on 2026-11-27),
+//! far under the 8M each call carries. What is quoted is every vault book
+//! discovery knows: the adoption table's books get their keys read at
+//! discovery, so quoting never waits on a Take or the subgraph.
+//!
+//! Not ported: the subgraph discovery (today it only decided what is quoted
+//! at boot; Goldsky 404s and Ormi 429s, so today quotes no Clober book until
+//! decode meets one).
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -36,18 +45,20 @@ use alloy_sol_types::{sol, SolEvent};
 use async_trait::async_trait;
 use mpamm_chain::{parse_b32, parse_quantity, quantity, Rpc};
 use mpamm_core::{
-    ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasSources, HistoryRevision, RevisionSource, Venue, VenueError,
+    ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasSources, HistoryRevision, Pricer, QuoteCx, RevisionSource,
+    Venue, VenueError,
 };
 use mpamm_registry::{parse_address, Pair, Registry};
 use mpamm_ring::{hex, Addr, TopicFilter, WatchSet, B32};
-use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
-use parking_lot::RwLock;
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
+use parking_lot::{Mutex, RwLock};
 use serde_json::json;
 
 use crate::{
     chain::{call_many, At},
     logs,
-    util::{addr_hex, b32_hex, from_units, short_hex, to_addr},
+    quote_health::{self, OutageLatch},
+    util::{addr_hex, b32_hex, from_units, short_hex, to_addr, to_units},
 };
 
 pub const ID: &str = "clober-vault";
@@ -72,6 +83,12 @@ const SCAN_WINDOWS: u64 = 100;
 /// A later scan resumes where the last one ended unless the gap is wider than
 /// this, in which case it starts a fresh window.
 const MAX_SCAN_GAP: u64 = 200_000;
+/// Clober's lowest book price: every quote leg's limit, so a leg walks the
+/// whole book (today's CLOBER_MIN_PRICE).
+pub const MIN_PRICE: u64 = 1_350_587;
+/// Per-side sanity band (bps from the pair mid): a side priced beyond it is a
+/// far-tick backstop or a mispriced resting order, not executable liquidity.
+pub const PER_SIDE_BAND_BPS: f64 = 2000.0;
 
 sol! {
     struct BookKey { address base; uint64 unitSize; address quote; uint24 makerPolicy; address hooks; uint24 takerPolicy; }
@@ -93,6 +110,12 @@ sol! {
 
     interface SimpleOracleStrategy {
         event UpdatePosition(bytes32 indexed key, uint256 oraclePrice, int24 tickA, int24 tickB, uint256 rate);
+    }
+
+    struct TakeInputParams { uint192 id; uint256 limitPrice; uint256 baseAmount; uint256 minQuoteAmount; bytes hookData; }
+
+    interface BookViewer {
+        function getExpectedOutput(TakeInputParams params) view returns (uint256 takenQuoteAmount, uint256 spentBaseAmount);
     }
 }
 
@@ -834,12 +857,104 @@ impl CloberChain for RpcChain<'_> {
 /// The Clober vault venue.
 pub struct Clober {
     inner: RwLock<Inner>,
+    /// Why the vault quotes nothing although its books answer (today's
+    /// createQuoteOutageLatch): said once per reason, the heal announced.
+    outage: Mutex<OutageLatch>,
 }
 
 impl Default for Clober {
     fn default() -> Self {
-        Self { inner: RwLock::new(Inner::seeded()) }
+        Self { inner: RwLock::new(Inner::seeded()), outage: Mutex::new(OutageLatch::default()) }
     }
+}
+
+/// What one quote frame says about the vault (today's `outage`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// No leg could be priced: cold references say nothing about the books.
+    Unknown,
+    /// Rows came back.
+    Quoting,
+    /// Legs were asked and no row survived.
+    Dark { reason: String, msg: String },
+}
+
+/// The smallest size's leg closest to executable, in a frame that produced
+/// no row (today's CloberBestLeg).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BestLeg {
+    pub market: String,
+    pub sell: bool,
+    pub bps: f64,
+    pub filled_usd: f64,
+    pub full: bool,
+}
+
+/// A full fill beats a partial one; full fills rank by distance from mid,
+/// partials by how much they filled (a dust leg can sit right at mid).
+fn leg_beats(a: &BestLeg, b: &BestLeg) -> bool {
+    if a.full != b.full {
+        return a.full;
+    }
+    if a.full {
+        a.bps.abs() < b.bps.abs()
+    } else {
+        a.filled_usd > b.filled_usd
+    }
+}
+
+/// Why a frame whose legs did not ALL fail produced no row, as `(reason,
+/// message)` (today's cloberOutage; every leg failing is `check_outage`'s
+/// error instead). Some calls failing gets its own reason: those books were
+/// never read, so it is not a depth outage. Otherwise every book answered
+/// and no side is executable. Markets with a cold reference had no legs:
+/// named, not counted. `reason` stays fixed while the vault stays in that
+/// state, so a drifting price in the message never re-raises it.
+pub fn outage<T>(
+    res: &[Result<T, VenueError>],
+    min_usd: f64,
+    best: Option<&BestLeg>,
+    unpriced: &[String],
+) -> (String, String) {
+    let name = meta().name;
+    let cold = if unpriced.is_empty() {
+        String::new()
+    } else {
+        format!("; not priced, reference cold: {}", unpriced.join(", "))
+    };
+    let band = format!("fills ${min_usd} within ±{PER_SIDE_BAND_BPS} bps of mid");
+    let bps = |b: f64| format!("{}{} bps", if b >= 0.0 { '+' } else { '−' }, b.abs().round());
+    let detail = match best {
+        None => format!("every answered ${min_usd} leg returned nothing"),
+        Some(b) => format!(
+            "nearest: {} {} at {}{}",
+            b.market,
+            if b.sell { "sell" } else { "buy" },
+            bps(b.bps),
+            if b.full { String::new() } else { format!(", ~${:.2} of ${min_usd} filled", b.filled_usd) }
+        ),
+    } + &cold;
+    let failed: Vec<Result<(), VenueError>> =
+        res.iter().filter_map(|r| r.as_ref().err()).map(|e| Err(e.clone())).collect();
+    if let Some(why) = quote_health::outage_reason(&failed) {
+        return (
+            format!("some book calls failed with \"{why}\""),
+            format!(
+                "{name} quotes unavailable — {} of {} book calls failed with \"{why}\", and no answered side {band} ({detail}): read the failed books before blaming the vault",
+                failed.len(),
+                res.len()
+            ),
+        );
+    }
+    let reason = format!("no vault book side {band}");
+    let msg = format!(
+        "{name} quotes unavailable — {reason} ({detail}): the vault's books are empty or priced away from mid, not an adapter fault"
+    );
+    (reason, msg)
+}
+
+fn now_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
 }
 
 fn pos_of(block: u64, l: &FinalLog) -> Pos {
@@ -1079,6 +1194,207 @@ impl Clober {
         );
         Ok(())
     }
+
+    /// Quotes every vault market and puts the frame's verdict on the record:
+    /// a dark vault is said once per reason and its heal announced.
+    pub async fn quote_with(
+        &self,
+        rpc: &Rpc,
+        registry: &Registry,
+        pricer: &dyn Pricer,
+        at: At,
+        sizes_usd: &[f64],
+    ) -> Result<Vec<QuoteRow>, VenueError> {
+        let (rows, verdict) = self.quote_frame(rpc, registry, pricer, at, sizes_usd).await?;
+        let mut latch = self.outage.lock();
+        match &verdict {
+            Verdict::Unknown => {}
+            Verdict::Quoting => latch.report(&meta().name, None),
+            Verdict::Dark { reason, msg } => latch.report(&meta().name, Some((reason, msg))),
+        }
+        Ok(rows)
+    }
+
+    /// The reason the vault is dark, while one is on the record.
+    pub fn outage_on_record(&self) -> Option<String> {
+        self.outage.lock().current().map(str::to_string)
+    }
+
+    /// BookViewer.getExpectedOutput per vault book × size, every leg in one
+    /// batch pinned to the block (today's quoteClober). A sell spends the
+    /// base worth `size` on the base book; a buy spends `size` of the stable
+    /// on the stable book. The limit is the book's lowest price, so a thin
+    /// book sweeps to far ticks: a side counts only if it fills the whole
+    /// size (within two quote units of rounding) inside ±PER_SIDE_BAND_BPS
+    /// of the pair mid. Both sides → a two-sided row, one → a one-sided row,
+    /// neither → no row. Every leg failing is the venue's error.
+    pub async fn quote_frame(
+        &self,
+        rpc: &Rpc,
+        registry: &Registry,
+        pricer: &dyn Pricer,
+        at: At,
+        sizes_usd: &[f64],
+    ) -> Result<(Vec<QuoteRow>, Verdict), VenueError> {
+        let markets = self.clober_markets(registry);
+        if markets.is_empty() {
+            return Ok((Vec::new(), Verdict::Unknown));
+        }
+        struct Leg {
+            market: usize,
+            size: f64,
+            sell: bool,
+            unit_size: u64,
+            in_dec: u8,
+            out_dec: u8,
+            req: U256,
+            mid: f64,
+        }
+        let mut legs = Vec::new();
+        let mut calls = Vec::new();
+        // Cold references: no legs, so nothing learned about these books.
+        let mut unpriced = Vec::new();
+        for (i, m) in markets.iter().enumerate() {
+            // The bps anchor is the pair-terms reference mid: book quotes are
+            // in the pair's stable terms, never a raw USDT price.
+            let mid = pricer.pair_mid(&m.market);
+            if mid <= 0.0 {
+                unpriced.push(m.market.clone());
+                continue;
+            }
+            let Some(stable_dec) = registry.tokens.get(&m.stable).map(|t| t.decimals) else { continue };
+            for &size in sizes_usd {
+                let sides = [
+                    // Sell base: spend base, take the stable.
+                    m.base_book.as_ref().map(|b| {
+                        let req = to_units(pricer.token_for_usd(&m.base_token, size), m.base_dec);
+                        (b, true, m.base_dec, stable_dec, req)
+                    }),
+                    // Buy base: spend the stable, take the base asset.
+                    m.stable_book.as_ref().map(|b| (b, false, stable_dec, m.base_dec, to_units(size, stable_dec))),
+                ];
+                for (book, sell, in_dec, out_dec, req) in sides.into_iter().flatten() {
+                    calls.push((
+                        BOOK_VIEWER,
+                        BookViewer::getExpectedOutputCall {
+                            params: TakeInputParams {
+                                id: alloy_primitives::Uint::from(book.book_id),
+                                limitPrice: U256::from(MIN_PRICE),
+                                baseAmount: req,
+                                minQuoteAmount: U256::ZERO,
+                                hookData: Default::default(),
+                            },
+                        },
+                    ));
+                    legs.push(Leg { market: i, size, sell, unit_size: book.unit_size, in_dec, out_dec, req, mid });
+                }
+            }
+        }
+        if legs.is_empty() {
+            // Only cold references: the books said nothing this frame.
+            return Ok((Vec::new(), Verdict::Unknown));
+        }
+        let res = call_many(rpc, &calls, at).await?;
+        quote_health::check_outage(&meta().name, &res)?;
+
+        let ts = now_ms();
+        let min_usd = sizes_usd.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut best: Option<BestLeg> = None;
+        // One row per (market, size) in the order its first answered leg came,
+        // with whether each side filled in full.
+        let mut rows: Vec<(QuoteRow, bool, bool)> = Vec::new();
+        for (l, r) in legs.iter().zip(&res) {
+            let Ok(q) = r else { continue };
+            let (taken, spent) = (q.takenQuoteAmount, q.spentBaseAmount);
+            if taken.is_zero() || spent.is_zero() {
+                continue;
+            }
+            let taken_h = from_units(taken, l.out_dec);
+            let spent_h = from_units(spent, l.in_dec);
+            // Stable per base over the FILLED portion only.
+            let px = if l.sell { taken_h / spent_h } else { spent_h / taken_h };
+            let bps = (px / l.mid - 1.0) * 1e4;
+            let full = leg_filled_full(l.req, spent, taken, U256::from(l.unit_size));
+            let m = &markets[l.market];
+            if l.size == min_usd {
+                let leg = BestLeg {
+                    market: m.market.clone(),
+                    sell: l.sell,
+                    bps,
+                    filled_usd: if l.sell { spent_h * l.mid } else { spent_h },
+                    full,
+                };
+                if best.as_ref().is_none_or(|b| leg_beats(&leg, b)) {
+                    best = Some(leg);
+                }
+            }
+            let idx = match rows.iter().position(|(x, _, _)| x.market == m.market && x.size_usd == l.size) {
+                Some(i) => i,
+                None => {
+                    rows.push((
+                        QuoteRow {
+                            venue_id: ID.into(),
+                            market: m.market.clone(),
+                            size_usd: l.size,
+                            bid_bps: 0.0,
+                            ask_bps: 0.0,
+                            bid_px: 0.0,
+                            ask_px: 0.0,
+                            spread_bps: 0.0,
+                            filled_full: true,
+                            one_sided: None,
+                            fee_bps: 0.0,
+                            cex_ask_bps: None,
+                            cex_bid_bps: None,
+                            ts,
+                        },
+                        false,
+                        false,
+                    ));
+                    rows.len() - 1
+                }
+            };
+            let (row, bid_full, ask_full) = &mut rows[idx];
+            if l.sell {
+                (row.bid_bps, row.bid_px, *bid_full) = (bps, px, full);
+            } else {
+                (row.ask_bps, row.ask_px, *ask_full) = (bps, px, full);
+            }
+        }
+
+        let real = |px: f64, full: bool, bps: f64| px > 0.0 && full && bps.abs() <= PER_SIDE_BAND_BPS;
+        let mut out = Vec::new();
+        for (mut row, bid_full, ask_full) in rows {
+            row.spread_bps = row.ask_bps - row.bid_bps;
+            let bid = real(row.bid_px, bid_full, row.bid_bps);
+            let ask = real(row.ask_px, ask_full, row.ask_bps);
+            if bid && ask {
+                row.one_sided = Some(false);
+                row.filled_full = bid_full && ask_full;
+            } else if bid != ask {
+                // The thin side is zeroed and the row flagged.
+                row.one_sided = Some(true);
+                row.filled_full = if bid { bid_full } else { ask_full };
+                if !bid {
+                    (row.bid_px, row.bid_bps) = (0.0, 0.0);
+                }
+                if !ask {
+                    (row.ask_px, row.ask_bps) = (0.0, 0.0);
+                }
+                row.spread_bps = 0.0;
+            } else {
+                continue;
+            }
+            out.push(row);
+        }
+        let verdict = if out.is_empty() {
+            let (reason, msg) = outage(&res, min_usd, best.as_ref(), &unpriced);
+            Verdict::Dark { reason, msg }
+        } else {
+            Verdict::Quoting
+        };
+        Ok((out, verdict))
+    }
 }
 
 #[async_trait]
@@ -1183,6 +1499,10 @@ impl Venue for Clober {
             out.extend(decode_take(cx.registry, t, &book, block.time_ms(), routes.get(&t.tx_hash)));
         }
         Ok(out)
+    }
+
+    async fn quote(&self, cx: &QuoteCx<'_>, sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        self.quote_with(cx.rpc, cx.registry, cx.pricer, At::Hash(cx.block.hash), sizes_usd).await
     }
 
     fn markets(&self) -> Vec<String> {
