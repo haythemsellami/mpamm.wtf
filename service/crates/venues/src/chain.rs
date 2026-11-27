@@ -27,8 +27,17 @@ impl At {
     }
 }
 
+/// Every read carries an explicit gas limit under 8.1M: the node runs such
+/// calls in its 1,000-slot pool; a call without one can end up in the
+/// 20-slot pool for heavy calls (docs/rebuild-spec.md → `eth_call` pools).
+pub const CALL_GAS: u64 = 8_000_000;
+
 fn request<C: SolCall>(to: Address, call: &C) -> serde_json::Value {
-    json!({ "to": to.to_string(), "data": format!("0x{}", mpamm_ring::hex(&call.abi_encode())) })
+    json!({
+        "to": to.to_string(),
+        "data": format!("0x{}", mpamm_ring::hex(&call.abi_encode())),
+        "gas": mpamm_chain::quantity(CALL_GAS),
+    })
 }
 
 fn decode<C: SolCall>(v: &serde_json::Value) -> Result<C::Return, VenueError> {

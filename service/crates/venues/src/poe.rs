@@ -16,16 +16,16 @@ use std::collections::{HashMap, HashSet};
 use alloy_primitives::{address, Address};
 use alloy_sol_types::sol;
 use async_trait::async_trait;
-use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, Venue, VenueError};
+use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, QuoteCx, Venue, VenueError};
 use mpamm_registry::Registry;
 use mpamm_ring::{Addr, TopicFilter, WatchSet};
-use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
 use parking_lot::RwLock;
 
 use crate::{
     chain::{call, call_many, At},
     logs,
-    util::{addr_hex, fill_id, from_units, short_hex, to_addr},
+    util::{addr_hex, fill_id, from_units, short_hex, to_addr, to_f64, to_units},
 };
 
 pub const ID: &str = "poe";
@@ -35,6 +35,7 @@ sol! {
     function getPool(address tokenX, address tokenY) view returns (address);
     function getTokens() view returns (address tokenX, address tokenY);
     function getOracle() view returns (address);
+    function getQuote(bool swapXtoY, uint256 amountIn) view returns (uint256 amountOut, uint256 actualAmountIn, uint256 feeIn, uint256 feeOut);
     event Swap(address indexed sender, address indexed recipient, bool indexed swapXtoY, uint256 actualAmountIn, uint256 amountOut, uint256 feeIn, uint256 feeOut);
 }
 
@@ -46,6 +47,7 @@ pub struct Pool {
     pub base_is_x: bool,
     pub base_token: String,
     pub base_dec: u8,
+    pub stable_sym: String,
     pub stable_dec: u8,
 }
 
@@ -98,7 +100,8 @@ impl Poe {
 
     /// The (pair, base wrapper, stable) combinations POE could list: every
     /// registered pair whose quote is a stable.
-    fn combos(registry: &Registry) -> Vec<(String, String, Addr, u8, Addr, u8)> {
+    #[allow(clippy::type_complexity)]
+    fn combos(registry: &Registry) -> Vec<(String, String, Addr, u8, Addr, u8, String)> {
         registry
             .pairs
             .iter()
@@ -113,6 +116,7 @@ impl Poe {
                     base.decimals,
                     stable.address_bytes(),
                     stable.decimals,
+                    stable.symbol.clone(),
                 ))
             })
             .collect()
@@ -167,6 +171,7 @@ impl Venue for Poe {
                 base_is_x: to_addr(t.tokenX) == c.2,
                 base_token: c.1.clone(),
                 base_dec: c.3,
+                stable_sym: c.6.clone(),
                 stable_dec: c.5,
             });
         }
@@ -230,6 +235,105 @@ impl Venue for Poe {
             });
         }
         Ok(out)
+    }
+
+    /// getQuote(swapXtoY, amountIn) per pool × size × side, pinned to the
+    /// block: buying the base spends `size` of the stable; selling spends the
+    /// base worth `size`. Price = stable per base, all-in.
+    async fn quote(&self, cx: &QuoteCx<'_>, sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        let pools: Vec<Pool> = {
+            let inner = self.inner.read();
+            let mut v: Vec<Pool> = inner.by_market.values().cloned().collect();
+            v.sort_by(|a, b| a.market.cmp(&b.market));
+            v
+        };
+        struct Leg {
+            market: String,
+            size: f64,
+            buy: bool,
+            req_in: alloy_primitives::U256,
+            in_dec: u8,
+            out_dec: u8,
+            base_px: f64,
+        }
+        let mut legs = Vec::new();
+        let mut calls = Vec::new();
+        for p in &pools {
+            let base_px = cx.pricer.pair_mid(&p.market);
+            if base_px <= 0.0 {
+                continue;
+            }
+            for &size in sizes_usd {
+                let buy_in = to_units(size, p.stable_dec);
+                legs.push(Leg { market: p.market.clone(), size, buy: true, req_in: buy_in, in_dec: p.stable_dec, out_dec: p.base_dec, base_px });
+                calls.push((Address::from(p.pool), getQuoteCall { swapXtoY: !p.base_is_x, amountIn: buy_in }));
+                let sell_in = to_units(cx.pricer.token_for_usd(&p.base_token, size), p.base_dec);
+                legs.push(Leg { market: p.market.clone(), size, buy: false, req_in: sell_in, in_dec: p.base_dec, out_dec: p.stable_dec, base_px });
+                calls.push((Address::from(p.pool), getQuoteCall { swapXtoY: p.base_is_x, amountIn: sell_in }));
+            }
+        }
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+        let res = call_many(cx.rpc, &calls, At::Hash(cx.block.hash)).await?;
+        if res.iter().all(|r| r.is_err()) {
+            return Err(VenueError::Chain("POE: every getQuote failed".into()));
+        }
+        let mut rows: Vec<QuoteRow> = Vec::new();
+        for (l, r) in legs.iter().zip(res) {
+            let Ok(q) = r else { continue };
+            if q.amountOut.is_zero() || q.actualAmountIn.is_zero() {
+                continue;
+            }
+            let in_h = from_units(q.actualAmountIn, l.in_dec);
+            let out_h = from_units(q.amountOut, l.out_dec);
+            if in_h <= 0.0 || out_h <= 0.0 {
+                continue;
+            }
+            let px = if l.buy { in_h / out_h } else { out_h / in_h };
+            let bps = (px / l.base_px - 1.0) * 1e4;
+            let full = q.actualAmountIn >= l.req_in * alloy_primitives::U256::from(999u32) / alloy_primitives::U256::from(1000u32);
+            let fee_bps = (to_f64(q.feeIn) / to_f64(q.actualAmountIn) + to_f64(q.feeOut) / to_f64(q.amountOut)) * 1e4;
+            let idx = match rows.iter().position(|x| x.market == l.market && x.size_usd == l.size) {
+                Some(i) => i,
+                None => {
+                    rows.push(QuoteRow {
+                        venue_id: ID.into(),
+                        market: l.market.clone(),
+                        size_usd: l.size,
+                        bid_bps: 0.0,
+                        ask_bps: 0.0,
+                        bid_px: 0.0,
+                        ask_px: 0.0,
+                        spread_bps: 0.0,
+                        filled_full: true,
+                        one_sided: None,
+                        fee_bps: 0.0,
+                        cex_ask_bps: None,
+                        cex_bid_bps: None,
+                        ts: 0.0,
+                    });
+                    rows.len() - 1
+                }
+            };
+            let row = &mut rows[idx];
+            if l.buy {
+                row.ask_bps = bps;
+                row.ask_px = px;
+            } else {
+                row.bid_bps = bps;
+                row.bid_px = px;
+            }
+            row.fee_bps = row.fee_bps.max(fee_bps);
+            row.filled_full &= full;
+        }
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+        for r in &mut rows {
+            r.spread_bps = r.ask_bps - r.bid_bps;
+            r.ts = ts;
+        }
+        rows.retain(|r| r.ask_px > 0.0 && r.bid_px > 0.0);
+        Ok(rows)
     }
 
     fn markets(&self) -> Vec<String> {
