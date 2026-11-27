@@ -14,6 +14,7 @@ mpamm-pricing = { path = "../crates/pricing" }
 mpamm-registry = { path = "../crates/registry" }
 mpamm-ring = { path = "../crates/ring" }
 mpamm-store = { path = "../crates/store" }
+mpamm-venues = { path = "../crates/venues" }
 arc-swap = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }

@@ -53,6 +53,13 @@ pub fn run(s: Settings) -> ExitCode {
         }
     };
     let resume = cursor.as_ref().map(|c| c.block + 1);
+    let venue_state = match store.all_venue_state() {
+        Ok(m) => mpamm_core::VenueState::new(m),
+        Err(e) => {
+            tracing::error!("read venue state: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     tracing::info!(
         "store {}; {}; {} pairs registered; archive fallback {}",
         s.db.display(),
@@ -61,7 +68,13 @@ pub fn run(s: Settings) -> ExitCode {
         if s.archive_url.is_some() { "configured" } else { "not configured" }
     );
 
-    let venues: Vec<Arc<dyn Venue>> = Vec::new();
+    let venues: Vec<Arc<dyn Venue>> = mpamm_venues::all();
+    let local = Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10));
+    // Discovery comes first: the reader must know what to copy from the
+    // first block. A venue that can't discover holds the start (fail-closed).
+    let boot = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    boot.block_on(discover_all(&venues, &local, registry, true));
+    drop(boot);
     let watch = match watch_of(&venues) {
         Ok(w) => Arc::new(ArcSwap::from_pointee(w)),
         Err(e) => {
@@ -69,6 +82,7 @@ pub fn run(s: Settings) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    tracing::info!("{} venue(s); watching {} log address(es)", venues.len(), watch.load().logs.len());
     let (tx, rx) = mpsc::unbounded_channel::<Input>();
     let stop = Arc::new(AtomicBool::new(false));
     let ring_stats = Arc::new(FollowStats::default());
@@ -118,12 +132,45 @@ pub fn run(s: Settings) -> ExitCode {
             registry,
             prices: prices.clone(),
             watch,
+            state: std::sync::Mutex::new(venue_state),
+            refetch_through: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             stats: stats.clone(),
             committed,
             retry_min: Duration::from_millis(250),
             retry_max: Duration::from_secs(30),
         };
+        let refetch = pipeline.refetch_through.clone();
+        let rediscover_watch = pipeline.watch.clone();
+        let rediscover_venues = pipeline.venues.clone();
+        let rediscover_ring = ring_stats.clone();
+        // A client made on this runtime (the boot one's connections died with it).
+        let local = Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10));
         let pipe = tokio::spawn(pipeline.run(rx));
+        // Rediscovery every 10 minutes, merge-only. A grown watch set applies
+        // from the reader's next event; blocks up to just past the newest one
+        // seen are read over RPC with the new set.
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(600));
+            every.tick().await;
+            loop {
+                every.tick().await;
+                discover_all(&rediscover_venues, &local, registry, false).await;
+                match watch_of(&rediscover_venues) {
+                    Ok(w) if w != **rediscover_watch.load() => {
+                        let newest = rediscover_ring.newest_block.load(Ordering::Relaxed);
+                        refetch.fetch_max(newest + 3, Ordering::Relaxed);
+                        tracing::info!(
+                            "watch set grew to {} log address(es); blocks through {} read over RPC",
+                            w.logs.len(),
+                            newest + 3
+                        );
+                        rediscover_watch.store(Arc::new(w));
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("watch set after rediscovery: {e}; keeping the current one"),
+                }
+            }
+        });
 
         let app = health::router(health::Health {
             ring: ring_stats,
@@ -159,6 +206,29 @@ pub fn run(s: Settings) -> ExitCode {
     });
     tracing::info!("stopped");
     code
+}
+
+/// Discovers every venue. At boot each is retried until it succeeds; later
+/// a failure keeps what the venue already holds (discovery only merges).
+async fn discover_all(venues: &[Arc<dyn Venue>], rpc: &Rpc, registry: &'static Registry, boot: bool) {
+    let cx = mpamm_core::ChainCx { rpc, registry };
+    for v in venues {
+        let mut delay = Duration::from_secs(1);
+        loop {
+            match v.discover(&cx).await {
+                Ok(()) => break,
+                Err(e) if boot => {
+                    tracing::warn!("discover {}: {e}; retrying in {delay:?}", v.id());
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(60));
+                }
+                Err(e) => {
+                    tracing::warn!("rediscover {}: {e}; keeping what it holds", v.id());
+                    break;
+                }
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() {
