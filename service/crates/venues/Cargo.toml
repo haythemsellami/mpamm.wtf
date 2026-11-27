@@ -17,7 +17,9 @@ alloy-sol-types = { workspace = true }
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

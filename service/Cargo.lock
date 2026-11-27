@@ -2353,6 +2353,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
  "async-trait",
+ "axum",
  "mpamm-chain",
  "mpamm-core",
  "mpamm-registry",

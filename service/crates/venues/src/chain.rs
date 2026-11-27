@@ -50,12 +50,40 @@ fn decode<C: SolCall>(v: &serde_json::Value) -> Result<C::Return, VenueError> {
     C::abi_decode_returns(&bytes).map_err(|e| VenueError::Chain(format!("{}: {e}", C::SIGNATURE)))
 }
 
+/// The node's answer for a block whose state it can't read (yet).
+const NOT_READABLE: &str = "Block requested not found";
+
+/// A block announced as Proposed has its state readable a few ms after the
+/// announcement (measured 3–5 ms, at most 9), so a read pinned to its hash
+/// retries that error with these pauses (≈ 40 ms in all) before failing.
+/// Any other block's "not found" is real and fails at once.
+const PROPOSED_RETRY_MS: [u64; 6] = [2, 3, 5, 8, 10, 12];
+
+fn not_readable(e: &str) -> bool {
+    e.contains(NOT_READABLE)
+}
+
 pub async fn call<C: SolCall>(rpc: &Rpc, to: Address, call: &C, at: At) -> Result<C::Return, VenueError> {
-    let v = rpc
-        .call("eth_call", json!([request(to, call), at.tag()]))
-        .await
-        .map_err(|e| VenueError::Chain(format!("{} on {to}: {e}", C::SIGNATURE)))?;
+    let params = json!([request(to, call), at.tag()]);
+    let mut pauses = retry_pauses(at);
+    let v = loop {
+        match rpc.call("eth_call", params.clone()).await {
+            Ok(v) => break v,
+            Err(e) => {
+                let e = e.to_string();
+                match pauses.next().filter(|_| not_readable(&e)) {
+                    Some(ms) => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+                    None => return Err(VenueError::Chain(format!("{} on {to}: {e}", C::SIGNATURE))),
+                }
+            }
+        }
+    };
     decode::<C>(&v)
+}
+
+fn retry_pauses(at: At) -> impl Iterator<Item = u64> {
+    let n = if matches!(at, At::Hash(_)) { PROPOSED_RETRY_MS.len() } else { 0 };
+    PROPOSED_RETRY_MS.into_iter().take(n)
 }
 
 /// Many calls of one kind in one batch; each result separately.
@@ -69,7 +97,19 @@ pub async fn call_many<C: SolCall>(
     }
     let params: Vec<(&str, serde_json::Value)> =
         calls.iter().map(|(to, c)| ("eth_call", json!([request(*to, c), at.tag()]))).collect();
-    let out = rpc.batch(&params).await.map_err(|e| VenueError::Chain(format!("{} batch: {e}", C::SIGNATURE)))?;
+    let mut pauses = retry_pauses(at);
+    let out = loop {
+        let out = rpc.batch(&params).await.map_err(|e| e.to_string());
+        // One block's state is readable for every call or for none.
+        let unreadable = match &out {
+            Ok(items) => items.iter().any(|r| r.as_ref().is_err_and(|e| not_readable(&e.to_string()))),
+            Err(e) => not_readable(e),
+        };
+        match pauses.next().filter(|_| unreadable) {
+            Some(ms) => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
+            None => break out.map_err(|e| VenueError::Chain(format!("{} batch: {e}", C::SIGNATURE)))?,
+        }
+    };
     Ok(out
         .into_iter()
         .map(|r| match r {
