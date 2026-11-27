@@ -1,9 +1,13 @@
 //! The service's data types. Their JSON is the contract the web app already
 //! reads (`shared/src/index.ts`): the same field names (camelCase), the same
 //! enum spellings and the same optional fields, so REST stays compatible
-//! while the frontend moves to the new stream.
+//! while the frontend moves to the new stream. `api` holds the REST and
+//! stream payloads.
 
 use serde::{Deserialize, Serialize};
+
+mod api;
+pub use api::*;
 
 /// Buy or sell of the base asset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
