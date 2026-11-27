@@ -113,15 +113,18 @@ async fn quote_at(
     v.quote(&cx, sizes).await
 }
 
-/// (legs, legs into XAUt0) per round trip, in order.
+/// (legs, legs into XAUt0) per quote, in order: a quote's legs go in
+/// several concurrent batches, all pinned to its block (each quote here pins
+/// a different one).
 fn rounds(stub: &Stub) -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = Vec::new();
     let mut last = None;
     for s in stub.seen() {
         let c = makerQuoteExactInputCall::abi_decode(&s.data()).unwrap();
-        if last != Some(s.request) {
+        let pin = s.params[1].clone();
+        if last.as_ref() != Some(&pin) {
             out.push((0, 0));
-            last = Some(s.request);
+            last = Some(pin);
         }
         let r = out.last_mut().unwrap();
         r.0 += 1;
@@ -131,13 +134,19 @@ fn rounds(stub: &Stub) -> Vec<(usize, usize)> {
 }
 
 #[tokio::test]
-async fn pins_every_leg_to_the_block_hash_in_one_batch_without_a_head_read() {
+async fn pins_every_leg_to_the_block_hash_in_batches_without_a_head_read() {
     let stub = node(|_| answer(U256::from(1u8), BLOCK)).await;
     let rows = quote_at(&stub, &venue(&LIVE), &Flat, &[100.0], 123).await.unwrap();
     assert!(!rows.is_empty());
     let seen = stub.seen();
     assert!(seen.iter().all(|s| s.method == "eth_call"), "no head read of its own");
-    assert!(seen.iter().all(|s| s.request == seen[0].request), "one round trip");
+    let requests: std::collections::HashSet<_> = seen.iter().map(|s| s.request).collect();
+    assert_eq!(
+        requests.len(),
+        seen.len().div_ceil(mpamm_venues::chain::BATCH),
+        "batches of {}",
+        mpamm_venues::chain::BATCH
+    );
     assert!(seen.iter().all(|s| s.params[1] == pinned_to(hash_of(123))));
     // Every read carries the explicit gas limit (under the node's 8.1M heavy-call bar).
     assert!(seen.iter().all(|s| s.params[0]["gas"] == json!("0x7a1200")));
