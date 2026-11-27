@@ -203,6 +203,129 @@ pub struct GasDay {
     pub partial: bool,
 }
 
+/// Markout horizons (seconds), the index order of `Fill::markouts_bps`.
+pub const MARKOUT_HORIZONS_S: [u32; 5] = [0, 5, 10, 30, 60];
+
+/// Markout curve offsets (seconds from the trade), the index order of a
+/// stored curve. Changing it changes the curve model.
+pub const CURVE_OFFSETS_S: [i32; 14] = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 10, 15];
+
+/// A trade stamped with a whole block second happened somewhere in that
+/// second: its curve marks at the middle of it. A trade stamped with its
+/// proposal time marks at that time exactly.
+pub const CURVE_SECOND_MID_MS: f64 = 500.0;
+
+/// Below this move (bps) from −5 s to +1 s a trade's flow counts as quiet.
+pub const CURVE_QUIET_MOVE_BPS: f64 = 1.0;
+
+/// Leaderboard windows (days), horizon indexes and groupings.
+pub const LEADERBOARD_WINDOW_DAYS: [u32; 3] = [1, 7, 30];
+pub const LEADERBOARD_HORIZON_IDX: [usize; 4] = [0, 2, 3, 4];
+pub const LEADERBOARD_GROUPINGS: [&str; 4] = ["protocol", "pool", "to", "category"];
+
+/// One aggregated leaderboard row (TAKER-signed; the client derives MAKER).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaderboardGroupRow {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub venue_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market: Option<String>,
+    pub vol: f64,
+    pub swaps: u64,
+    pub p5: f64,
+    pub p25: f64,
+    pub p50: f64,
+    pub p75: f64,
+    pub p95: f64,
+    pub pnl: f64,
+    pub spark: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TopSwaps {
+    pub winners: Vec<Fill>,
+    pub losers: Vec<Fill>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaderboardResponse {
+    pub days: u32,
+    pub generated_at: f64,
+    pub total_fills: u64,
+    /// grouping → horizon index (as a string) → top rows by volume.
+    pub groups: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<LeaderboardGroupRow>>>,
+    /// horizon index (as a string) → biggest winners and losers.
+    pub top_swaps: std::collections::BTreeMap<String, TopSwaps>,
+    pub outliers: Vec<Fill>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CurveFlow {
+    Quiet,
+    Moving,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CurveRoute {
+    Single,
+    Split,
+    TwoSided,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkoutCurveCell {
+    pub venue_id: String,
+    pub flow: CurveFlow,
+    pub route: CurveRoute,
+    pub category: FillCategory,
+    pub fills: u64,
+    pub usd: f64,
+    /// Σ(usd × taker bps) per curve offset.
+    pub usd_bps: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Coverage {
+    pub fills: u64,
+    pub usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkoutCurvesResponse {
+    pub days: u32,
+    pub generated_at: f64,
+    pub offsets_s: Vec<i32>,
+    pub quiet_move_bps: f64,
+    pub cells: Vec<MarkoutCurveCell>,
+    pub coverage: std::collections::BTreeMap<String, Coverage>,
+}
+
+/// quiet vs moving from a complete taker-signed curve (−5 s and +1 s points).
+pub fn curve_flow(curve: &[Option<f64>]) -> Option<CurveFlow> {
+    let at = |o: i32| CURVE_OFFSETS_S.iter().position(|x| *x == o).and_then(|i| curve.get(i).copied().flatten());
+    let (from, to) = (at(-5)?, at(1)?);
+    Some(if (to - from).abs() < CURVE_QUIET_MOVE_BPS { CurveFlow::Quiet } else { CurveFlow::Moving })
+}
+
+/// Linear-interpolated percentile (p in [0, 1]), today's `percentile`.
+pub fn percentile(values: &[f64], p: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut s = values.to_vec();
+    s.sort_by(|a, b| a.total_cmp(b));
+    let i = (s.len() - 1) as f64 * p;
+    let (lo, hi) = (i.floor() as usize, i.ceil() as usize);
+    s[lo] + (s[hi] - s[lo]) * (i - lo as f64)
+}
+
 /// `YYYY-MM-DD` (UTC) of an epoch time in ms.
 pub fn utc_day(ms: f64) -> String {
     let days = (ms / 86_400_000.0).floor() as i64;
