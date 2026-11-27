@@ -141,6 +141,9 @@ impl Exchange {
             if self.cex == Cex::Kraken {
                 s.last_valid_mid = mid;
             }
+        } else {
+            // A closed or broken market has no price from now on.
+            s.history.mark_unavailable(now as f64);
         }
         true
     }
@@ -152,7 +155,12 @@ impl Exchange {
     /// Drops every book (a reconnect must start from fresh snapshots); keeps
     /// history and the last good prices.
     pub fn reset_books(&self) {
+        // Prices stopped when the feed last spoke plus the silence limit (or
+        // now, if that is sooner): no lookup carries a price across the gap.
+        let last = self.last_msg_ms.load(Ordering::Relaxed);
+        let from = if last == 0 { now_ms() } else { (last + STALE_MS).min(now_ms()) };
         for s in self.syms.write().values_mut() {
+            s.history.mark_unavailable(from as f64);
             s.book.clear();
             s.kbids.clear();
             s.kasks.clear();
@@ -360,9 +368,11 @@ impl Exchanges for Feeds {
     }
 }
 
-/// The base legs move per second; a mid older than this at `t` is not a
-/// price at `t`.
-pub const AT_STALE_BASE_MS: f64 = 120_000.0;
+/// How old the mid in effect at `t` may be. A quiet book can go minutes
+/// without a change and still be the price; outages and closures are
+/// recorded in the history as such (`mark_unavailable`), so no cap is
+/// needed to keep a dead feed's last price from being carried forward.
+pub const AT_STALE_BASE_MS: f64 = f64::INFINITY;
 
 /// The exchanges as of a past time: each mid is the one in effect then. No
 /// books (nothing walks the past).

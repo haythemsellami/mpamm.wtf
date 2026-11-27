@@ -76,6 +76,16 @@ impl Prices {
         self.prints.lock().observe(self.registry, fills);
     }
 
+    /// The pair's reference mid as it was at `t_ms`, from the exchange
+    /// history (`None` before the history starts or during an outage): the
+    /// markout mark.
+    pub fn pair_mid_at(&self, market: &str, t_ms: f64) -> Option<f64> {
+        let past = self.feeds.at(t_ms);
+        let rates = RatesAt { rates: &self.rates, t_ms };
+        let m = Reference { registry: self.registry, ex: &past, rates: &rates }.mid_for_pair(market);
+        (m > 0.0).then_some(m)
+    }
+
     /// The pricer for a block whose trades happened at `at_ms`.
     pub fn at(&self, at_ms: f64) -> AtPricer<'_> {
         AtPricer { p: self, at_ms, now_ms: now_ms() as f64 }

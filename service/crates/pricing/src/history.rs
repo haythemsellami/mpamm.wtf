@@ -16,6 +16,17 @@ impl MidHistory {
         Self { points: VecDeque::new(), keep_ms, max_points }
     }
 
+    /// Records that from `t_ms` there is no price (the feed went silent or
+    /// the market closed): a later lookup must not carry the last price
+    /// across the outage.
+    pub fn mark_unavailable(&mut self, t_ms: f64) {
+        if let Some(&(lt, lm)) = self.points.back() {
+            if t_ms >= lt && lm != 0.0 {
+                self.points.push_back((t_ms, 0.0));
+            }
+        }
+    }
+
     /// Records the mid at `t_ms` (only when it changed, and never backwards
     /// in time).
     pub fn push(&mut self, t_ms: f64, mid: f64) {
@@ -42,7 +53,7 @@ impl MidHistory {
             return None;
         }
         let (t, m) = self.points[i - 1];
-        (t_ms - t <= stale_ms).then_some(m)
+        (t_ms - t <= stale_ms && m > 0.0).then_some(m)
     }
 
     /// Whether the history reaches back to `t_ms`.
@@ -95,5 +106,11 @@ mod tests {
         h.push(10_000.0, 0.0);
         h.push(10_000.0, f64::NAN);
         assert_eq!(h.latest(), Some((3_600.0, 10.0)), "non-positive and NaN mids are ignored");
+        h.mark_unavailable(4_000.0);
+        h.mark_unavailable(4_100.0);
+        assert_eq!(h.at(4_050.0, 1e9), None, "no price across an outage");
+        assert_eq!(h.at(3_900.0, 1e9), Some(10.0));
+        h.push(4_200.0, 11.0);
+        assert_eq!(h.at(4_300.0, 1e9), Some(11.0));
     }
 }
