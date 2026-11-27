@@ -10,6 +10,11 @@
 // splits a heavy multicall into one call per read is compared against this:
 // grouped, a leg can fail because a heavy neighbour spent the aggregate's
 // gas (the node caps eth_call at 30M), not because of its own state.
+//
+// PIN_HEAD=1 makes the chain head the quoted block, so discovery reads the
+// same block the quote does. Lunarbase needs it for any block but the head:
+// its quote discards a frame older than the snapshot discovery cached, so a
+// past block otherwise always quotes nothing.
 import { readFileSync } from 'node:fs';
 import { createPublicClient, http } from 'viem';
 import { SIZES_USD } from '@shared';
@@ -24,9 +29,10 @@ if (!venueId || !blockArg || !pricesFile) throw new Error('usage: quote-at.ts <v
 const frozen = JSON.parse(readFileSync(pricesFile, 'utf8')) as { assetUsd: Record<string, number>; pairMid: Record<string, number> };
 const rpcClient = createPublicClient({ chain: monad, transport: http(process.env.RPC_URL ?? 'http://127.0.0.1:8080', { timeout: 60_000 }) });
 // batchSize 1: viem starts a new chunk whenever one would exceed it.
-const client = process.env.ONE_CALL_PER_MULTICALL === '1'
+const grouped = process.env.ONE_CALL_PER_MULTICALL === '1'
   ? { ...rpcClient, multicall: ((args: any) => rpcClient.multicall({ ...args, batchSize: 1 })) as typeof rpcClient.multicall }
   : rpcClient;
+const client = process.env.PIN_HEAD === '1' ? { ...grouped, getBlockNumber: async () => BigInt(blockArg) } : grouped;
 const adapter = ADAPTERS.find((a) => a.venues().some((v) => v.id === venueId));
 if (!adapter?.quote) throw new Error(`no quoting adapter for ${venueId}`);
 const pricer = new UsdPricer((a) => frozen.assetUsd[a] ?? 0, (m) => frozen.pairMid[m] ?? 0, (a) => frozen.assetUsd[a] ?? 0);
