@@ -28,14 +28,14 @@ host; nothing else is built yet.
 
 | # | Milestone | Phase | Depends on | Waits on DevOps for | Status |
 | --- | --- | --- | --- | --- | --- |
-| M1 | Reader hardening and the 7-day gate run | 1 | — | systemd unit (for the gate run only) | In progress |
+| M1 | Reader hardening and the 7-day gate run | 1 | — | one edit to `mpamm.service` (gate run only) | In progress |
 | M2 | CI, release artifacts, deploy script | 1 | — | registry credentials (publishing only) | Not started |
 | M3 | Service skeleton: crates, config, store, commit pipeline, registry | 2 | M1 | — | Not started |
 | M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | Not started |
 | M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | Not started |
 | M6 | Exact gas and attribution | 2 | M5 | — | Not started |
 | M7 | Markouts and analytics | 2 | M4, M5 | — | Not started |
-| M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | systemd unit, env file | Not started |
+| M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Not started |
 | M9 | Quote engine | 3 | M3, M4 | — | Not started |
 | M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | Not started |
 | M11 | Stream and REST | 4 | M8, M10 | — | Not started |
@@ -124,7 +124,10 @@ measurements the spec needs (proposal delay, execution time, commit timings, rin
 - [ ] **Shutdown:** handle SIGTERM/SIGINT, flush outputs, write a final summary
 - [ ] **Rotation:** daily files for `blocks.jsonl`, retention configurable
 - [ ] **Health:** a small local HTTP endpoint (or file) with the latest summary, for alerts
-- [ ] Run under systemd for 7 days *(DevOps: unit pinned to CPU 0)*
+- [ ] **Core pinning:** `--cpu <n>` pins the process to one core with `sched_setaffinity`
+      (no privilege needed, so the unit sets nothing); CPU 0 on today's host
+- [ ] Run as `mpamm.service` for 7 days, the reader installed at the unit's fixed path
+      `/var/lib/mpamm/bin/mpamm` *(DevOps: the one unit edit in the tracker)*
 
 **Done when:** 7 consecutive days with no unrepaired gap; ring depth, execution-time and
 arrival distributions published in the PR; restart and repair paths exercised at least
@@ -137,8 +140,9 @@ once each on the host.
 - [ ] Cache the cargo registry and the Monad git checkout between runs
 - [ ] Release build for `x86-64-v3`; publish the binary as a workflow artifact (and to the
       registry DevOps chooses, once credentials exist) tagged with the commit SHA and node tag
-- [ ] `service/scripts/deploy.sh`: copy a given build to the host, install as `mpamm`,
-      restart the unit, check health, roll back on failure
+- [ ] `service/scripts/deploy.sh`: copy a given build to the host, install it as `mpamm`
+      at `/var/lib/mpamm/bin/mpamm` (keeping the previous one), `systemctl restart
+      mpamm.service`, check health, put the previous binary back on failure
 - [ ] Ring-snapshot fixture tests: record a short snapshot on the host and replay it in
       CI (the SDK reads zstd snapshot files), so the reader is tested without a node
 
@@ -248,7 +252,7 @@ the precise anchor, and every analytics endpoint's numbers match today's.
 - [ ] Gap and restart drills during the run
 
 **Done when:** 7 consecutive days with identical trade ids, USD and per-venue volume, and
-exact gas matching the recount. *(DevOps: unit, env file with archive URLs.)*
+exact gas matching the recount. *(DevOps: env file with archive URLs.)*
 
 ---
 
@@ -325,7 +329,8 @@ drill completes.
 
 ### M14 · Operations readiness
 
-- [ ] systemd units and CPU sets as agreed with DevOps; environment and secrets layout
+- [ ] One unit, `mpamm.service`; the service pins its threads to the CPU set agreed with
+      DevOps; environment and secrets layout
 - [ ] Fallback mode: heads, quotes and final-block reads from the hosted hot node when the
       local node is down *(DevOps: hot node WebSocket with `monadNewHeads`)*
 - [ ] Alerts: node behind, ring lag, unrepaired gap, no final commit for 3 s, venue outages
@@ -359,11 +364,16 @@ p50 at most 200 ms near the host, and the rollback drill passed.
 
 ## DevOps tracker
 
+The host runs one unit for us, `mpamm.service`, for the reader now and the whole service
+later. It runs as `mpamm`, restarts on failure, stops with SIGTERM and reads the env file.
+We may only start, stop and restart it, so what it runs is set once by DevOps; after that
+a deploy replaces the binary at its path and restarts the unit, with no DevOps step.
+
 | Ask | Needed by | Status |
 | --- | --- | --- |
 | Node host with event ring, local RPC + WS | M1 | Done |
-| systemd unit for the reader (CPU 0) | M1 gate run | Asked |
-| Env file with archive and hot-fallback RPC URLs | M5 backfill, M8 | Asked |
+| One edit to `mpamm.service`: `ExecStart=/var/lib/mpamm/bin/mpamm`, `WorkingDirectory=/var/lib/mpamm`, enabled at boot | M1 gate run | Asked (narrowed 2026-11-27) |
+| Env file with archive and hot-fallback RPC URLs (not on the host yet; the unit starts without it) | M5 backfill, M8 | Asked |
 | CPU set for the service | M10 | Asked |
 | Registry credentials for CI publishing | M2 (publishing) | Asked |
 | Bigger event ring at the next node restart | Not blocking | Asked |
