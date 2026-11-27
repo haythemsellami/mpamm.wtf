@@ -32,8 +32,8 @@ the deploy rehearsal; M3 has started (ring, chain and registry crates).
 | M1 | Reader hardening and the 7-day gate run | 1 | — | one edit to `mpamm.service` (gate run only) | Gate run under way |
 | M2 | CI, release artifacts, deploy script | 1 | — | registry credentials (publishing only); the unit edit (deploy rehearsal) | In progress |
 | M3 | Service skeleton: crates, config, store, commit pipeline, registry | 2 | M1 | — | Done (types' TS export moves to M11) |
-| M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | In progress |
-| M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | Not started |
+| M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | Done (archives → M7; USD parity checked in M8) |
+| M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | In progress |
 | M6 | Exact gas and attribution | 2 | M5 | — | Not started |
 | M7 | Markouts and analytics | 2 | M4, M5 | — | Not started |
 | M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Not started |
@@ -209,19 +209,30 @@ registry and types round-trip into the web build.
 
 ### M4 · Pricing
 
-- [ ] Exchange feeds: Kraken WS v2 (book checksums, per-book repair and resubscribe),
-      Bybit, Binance; every update kept in memory with its timestamp
-- [ ] Pair-terms reference (stable crosses, wrapped/native basis) as in
-      `docs/architecture.md` → *The reference is in the pair's own terms*
-- [ ] ERC-4626 wrapper rates (wrapped xStocks), read from chain on a schedule
-- [ ] Late-decode pricing: exchange history for recent blocks, archived exchange prices
-      for closed days (port `closed-day-prices.ts`), chain prints as the last resort;
-      fix the known outlier weakness (two legs of one off-market transaction)
-- [ ] Market-hours handling (closed assets) and reference starvation detection
+- [x] Exchange feeds: Kraken WS v2 (book checksums on Kraken's exact decimal text,
+      per-book repair and resubscribe, instrument and engine status), Bybit (MONUSDT
+      book + crosses), Binance (data mirror); one connection loop with a 30 s silence
+      watchdog; every mid of the last 3 hours kept per symbol with its time
+- [x] Pair-terms reference (stable crosses, wrapped/native basis, USDT/USD crossing,
+      share rates): all 86 pair mids and all 344 reference rows equal today's TypeScript
+      for the same books (`tests/reference_parity.rs`)
+- [x] ERC-4626 wrapper rates (wrapped xStocks), one batch on the local node every minute
+- [x] Pricing a block as of its own proposal time: exchange history at that time, else
+      chain prints (`fill-time-prices.ts`, median of an asset's newest stable-quoted
+      trades) when nearer than now, else live
+- [x] Market-hours handling: Kraken closures withhold the reference and keep the last
+      good price for settled trades
+- [ ] Archived exchange prices for closed days (`closed-day-prices.ts`, `history/cex.ts`):
+      moved to M7, where markout onboarding needs the same archives
+- [ ] Reference starvation notes: with the notes model in M14 (`/api/health` already
+      reports each feed's age and how many pairs have a reference)
+
+On the node host (2026-11-27): all three feeds live and all 86 of 86 pairs priced,
+wrapped xStocks included.
 
 **Done when:** for a recorded day, USD for every crypto-quoted fill matches today's
-system within its documented tolerance, and late-decode prices beat today's on the
-11-15 outlier cases.
+system within its documented tolerance (checked with M8's daily parity), and late-decode
+prices beat today's on the 11-15 outlier cases.
 
 ### M5 · Venue discovery and decode ports
 
