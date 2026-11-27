@@ -8,6 +8,7 @@ pub mod chain;
 pub mod crystal;
 pub mod generations;
 pub mod logs;
+pub mod metric;
 pub mod poe;
 pub mod util;
 
@@ -17,5 +18,5 @@ use mpamm_core::Venue;
 
 /// Every venue the service runs, in today's registry order.
 pub fn all() -> Vec<Arc<dyn Venue>> {
-    vec![Arc::new(poe::Poe::default()), Arc::new(crystal::Crystal::default()), Arc::new(btr::Btr::default())]
+    vec![Arc::new(poe::Poe::default()), Arc::new(metric::venue()), Arc::new(crystal::Crystal::default()), Arc::new(btr::Btr::default())]
 }
