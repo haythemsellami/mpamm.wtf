@@ -5,7 +5,12 @@
 //!
 //!   pool.quoteToken() / wooracle()      → layout, re-read at every discovery
 //!   pool.tokenInfos(t) / decimalInfo(t) → listing, fee rate, caps, decimals
+//!   pool.query(from, to, amountIn)      → the executable, fee-inclusive quote
 //!   pool.WooSwap(…)                     → the landed fill
+//!
+//! `query` runs the swap's own pricing path AND the reserve check (replayed
+//! at block N−1 it reproduced 56 of 60 sampled fills to the wei); a leg the
+//! pool cannot fill reverts, never a partial amount.
 //!
 //! BASE→BASE (WETH→WMON) is ONE pool swap routed through USDC internally,
 //! with ONE WooSwap whose `swapVol` is the USDC leg: it maps to the
@@ -22,20 +27,21 @@
 
 use std::collections::{HashMap, HashSet};
 
-use alloy_primitives::{address, Address};
+use alloy_primitives::{address, Address, U256};
 use alloy_sol_types::sol;
 use async_trait::async_trait;
 use mpamm_chain::Rpc;
-use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasSources, Venue, VenueError};
+use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasSources, Pricer, QuoteCx, Venue, VenueError};
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::{Addr, TopicFilter, WatchSet};
-use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
 use parking_lot::RwLock;
 
 use crate::{
     chain::{call, call_many, At},
     logs,
-    util::{addr_hex, b32_hex, fill_id, from_addr, from_units, short_hex, to_addr},
+    quote_health::check_outage,
+    util::{addr_hex, b32_hex, fill_id, from_addr, from_units, short_hex, to_addr, to_units},
 };
 
 pub const ID: &str = "woofi";
@@ -71,6 +77,7 @@ sol! {
     function wooracle() view returns (address);
     function tokenInfos(address token) view returns (uint192 reserve, uint16 feeRate, uint128 maxGamma, uint128 maxNotionalSwap, uint192 capBal);
     function decimalInfo(address token) view returns (uint64 priceDec, uint64 quoteDec, uint64 baseDec);
+    function query(address fromToken, address toToken, uint256 fromAmount) view returns (uint256 toAmount);
     event WooSwap(address indexed fromToken, address indexed toToken, uint256 fromAmount, uint256 toAmount, address from, address indexed to, address rebateTo, uint256 swapVol, uint256 swapFee);
     event Upgraded(address indexed implementation);
 }
@@ -259,8 +266,12 @@ pub struct TokenListing {
     pub max_notional_swap: u128,
 }
 
-/// The chain reads discovery makes, all at one block. Per-entry `None` = that
-/// read failed; an `Err` is the transport.
+/// One `query` leg: (from token, to token, amount in).
+pub type QueryCall = (Addr, Addr, U256);
+
+/// The chain reads discovery makes, all at one block, and quoting makes,
+/// all at the block it is pinned to. Per-entry `None` (or `Err`) = that read
+/// failed; an outer `Err` is the transport.
 #[async_trait]
 pub trait WoofiReads: Send + Sync {
     async fn block_number(&self) -> Result<u64, VenueError>;
@@ -269,6 +280,12 @@ pub trait WoofiReads: Send + Sync {
     async fn token_infos(&self, tokens: &[Addr], at: u64) -> Result<Vec<Option<TokenListing>>, VenueError>;
     /// (priceDec, quoteDec, baseDec) per token.
     async fn decimal_infos(&self, tokens: &[Addr], at: u64) -> Result<Vec<Option<(u64, u64, u64)>>, VenueError>;
+    /// `pool.query` per leg (the amount out), pinned to one block hash.
+    async fn query(
+        &self,
+        legs: &[QueryCall],
+        block_hash: [u8; 32],
+    ) -> Result<Vec<Result<U256, VenueError>>, VenueError>;
 }
 
 pub struct RpcReads<'a>(pub &'a Rpc);
@@ -303,6 +320,20 @@ impl WoofiReads for RpcReads<'_> {
             .into_iter()
             .map(|r| r.ok().map(|d| (d.priceDec, d.quoteDec, d.baseDec)))
             .collect())
+    }
+
+    async fn query(
+        &self,
+        legs: &[QueryCall],
+        block_hash: [u8; 32],
+    ) -> Result<Vec<Result<U256, VenueError>>, VenueError> {
+        let calls: Vec<_> = legs
+            .iter()
+            .map(|(from, to, amount)| {
+                (WOOPP, queryCall { fromToken: from_addr(from), toToken: from_addr(to), fromAmount: *amount })
+            })
+            .collect();
+        call_many(self.0, &calls, At::Hash(block_hash)).await
     }
 }
 
@@ -348,6 +379,120 @@ impl Woofi {
 
     pub fn markets_table(&self) -> &WoofiMarkets {
         &self.markets
+    }
+
+    /// `query` per quotable market × size × side, pinned to the block:
+    /// selling spends the base worth `size`, buying the quote worth `size`.
+    /// Prices are quote per base, fee-inclusive, anchored on the pair-terms
+    /// reference mid.
+    pub async fn quote_with(
+        &self,
+        reads: &dyn WoofiReads,
+        pricer: &dyn Pricer,
+        block_hash: [u8; 32],
+        sizes_usd: &[f64],
+    ) -> Result<Vec<QuoteRow>, VenueError> {
+        let quotable = self.inner.read().quotable.clone();
+        struct Leg {
+            market: usize,
+            size: f64,
+            sell: bool,
+            amount_in: U256,
+            mid: f64,
+        }
+        let mut legs = Vec::new();
+        let mut calls = Vec::new();
+        for (i, q) in quotable.iter().enumerate() {
+            let m = &q.market;
+            let mid = pricer.pair_mid(&m.market);
+            if mid <= 0.0 || pricer.usd_per_token(&m.base_key) <= 0.0 || pricer.usd_per_token(&m.quote_key) <= 0.0 {
+                continue;
+            }
+            for &size in sizes_usd {
+                for sell in [true, false] {
+                    let (in_key, input, in_dec, output) = if sell {
+                        (&m.base_key, m.base, m.base_dec, m.quote)
+                    } else {
+                        (&m.quote_key, m.quote, m.quote_dec, m.base)
+                    };
+                    let amount_in = to_units(pricer.token_for_usd(in_key, size), in_dec);
+                    if amount_in.is_zero() {
+                        continue;
+                    }
+                    calls.push((input, output, amount_in));
+                    legs.push(Leg { market: i, size, sell, amount_in, mid });
+                }
+            }
+        }
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+        let res = reads.query(&calls, block_hash).await?;
+        check_outage("WOOFi sPMM", &res)?;
+
+        // A leg the pool cannot fill REVERTS (short reserve, the capBal cap,
+        // the per-token notional/gamma caps) and never answers a partial
+        // amount: a surviving leg is the full size, and a size past the caps
+        // simply has no row.
+        let mut rows: Vec<QuoteRow> = Vec::new();
+        for (l, r) in legs.iter().zip(&res) {
+            let Ok(out) = r else { continue };
+            if out.is_zero() {
+                continue;
+            }
+            let q = &quotable[l.market];
+            let m = &q.market;
+            let (in_dec, out_dec) = if l.sell { (m.base_dec, m.quote_dec) } else { (m.quote_dec, m.base_dec) };
+            let in_h = from_units(l.amount_in, in_dec);
+            let out_h = from_units(*out, out_dec);
+            if in_h <= 0.0 || out_h <= 0.0 {
+                continue;
+            }
+            let idx = match rows.iter().position(|x| x.market == m.market && x.size_usd == l.size) {
+                Some(i) => i,
+                None => {
+                    rows.push(QuoteRow {
+                        venue_id: ID.into(),
+                        market: m.market.clone(),
+                        size_usd: l.size,
+                        bid_bps: 0.0,
+                        ask_bps: 0.0,
+                        bid_px: 0.0,
+                        ask_px: 0.0,
+                        spread_bps: 0.0,
+                        filled_full: true,
+                        one_sided: None,
+                        fee_bps: q.fee_bps,
+                        cex_ask_bps: None,
+                        cex_bid_bps: None,
+                        ts: 0.0,
+                    });
+                    rows.len() - 1
+                }
+            };
+            let row = &mut rows[idx];
+            if l.sell {
+                row.bid_px = out_h / in_h;
+                row.bid_bps = (row.bid_px / l.mid - 1.0) * 1e4;
+            } else {
+                row.ask_px = in_h / out_h;
+                row.ask_bps = (row.ask_px / l.mid - 1.0) * 1e4;
+            }
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as f64)
+            .unwrap_or(0.0);
+        for r in &mut rows {
+            if r.bid_px > 0.0 && r.ask_px > 0.0 {
+                r.spread_bps = r.ask_bps - r.bid_bps;
+            } else {
+                // The pool holds too little of one side, say.
+                r.one_sided = Some(true);
+            }
+            r.ts = ts;
+        }
+        Ok(rows)
     }
 
     /// One discovery pass, every read at one block. Fails loud on a layout
@@ -476,6 +621,10 @@ impl Venue for Woofi {
 
     async fn discover(&self, cx: &ChainCx<'_>) -> Result<(), VenueError> {
         self.refresh(&RpcReads(cx.rpc), cx.registry).await
+    }
+
+    async fn quote(&self, cx: &QuoteCx<'_>, sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        self.quote_with(&RpcReads(cx.rpc), cx.pricer, cx.block.hash, sizes_usd).await
     }
 
     /// One static source: the pool's swaps, and the proxy's Upgraded so an

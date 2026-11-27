@@ -1,26 +1,26 @@
 //! WOOFi sPMM, ported from server/src/venues/__tests__/woofi.decode.test.ts:
 //! REAL WooPPV2 logs recorded on Monad mainnet decode to the same trades,
-//! and discovery lists, checks and persists as today against a stubbed
-//! chain. Quote tests wait for the quote milestone.
+//! and discovery lists, checks and persists, and quotes turn REAL `query`
+//! answers into the same rows, as today against a stubbed chain.
 
 // 18-decimal amounts are written out to the wei, as today's tests write them:
 // the literal is the nearest double, which is what the decode must produce.
 #![allow(clippy::excessive_precision)]
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Mutex};
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::SolEvent;
 use async_trait::async_trait;
-use mpamm_core::{DecodeCx, FinalBlock, FinalLog, NoPrices, Origin, Venue, VenueError, VenueState};
+use mpamm_core::{DecodeCx, FinalBlock, FinalLog, NoPrices, Origin, Pricer, Venue, VenueError, VenueState};
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::{Addr, TopicFilter};
-use mpamm_types::{Fill, FillCategory, Side};
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side};
 use mpamm_venues::{
     util::to_addr,
     woofi::{
-        decode_woofi_swap, read_observed_oracles, TokenListing, Upgraded, WooSwap, Woofi, WoofiMarkets, WoofiReads,
-        KNOWN_WOORACLES, OBSERVED_ORACLES_KEY, WOOPP, WOO_ROUTER,
+        decode_woofi_swap, read_observed_oracles, QueryCall, TokenListing, Upgraded, WooSwap, Woofi, WoofiMarkets,
+        WoofiReads, KNOWN_WOORACLES, OBSERVED_ORACLES_KEY, WOOPP, WOO_ROUTER,
     },
 };
 
@@ -331,10 +331,31 @@ fn listed() -> HashMap<Addr, (u128, u64)> {
     ])
 }
 
+/// Real `query` answers at block 117,080,000 for the legs a $100 quote asks
+/// with the stub prices below (WETH $2,300, cbBTC $80,000), keyed (from, to,
+/// amount in). The $100k legs reverted CapExceeded().
+fn query_at_117080000() -> HashMap<QueryCall, U256> {
+    let u = |s: &str| U256::from_str_radix(s, 10).unwrap();
+    HashMap::from([
+        ((token("WETH"), token("USDC"), u("43478260869565216")), u("101902344")),
+        ((token("USDC"), token("WETH"), u("100000000")), u("42607541765923511")),
+        ((token("CBBTC"), token("WETH"), u("125000")), u("42852485200236352")),
+        ((token("WETH"), token("CBBTC"), u("43478260869565216")), u("126649")),
+    ])
+}
+
+const CAP_EXCEEDED: &str = "query(address,address,uint256): rpc error 3: execution reverted";
+
 struct Stub {
     quote_token: Addr,
     oracle: Addr,
     listed: HashMap<Addr, (u128, u64)>,
+    /// false: every `query` reverts.
+    query_live: bool,
+    /// Every `query` spending this token reverts (the pool cannot pay the other side).
+    query_fails_from: Option<Addr>,
+    /// Every `query` leg asked, with the block hash it was pinned to.
+    queries: Mutex<Vec<(QueryCall, [u8; 32])>>,
 }
 
 impl Default for Stub {
@@ -343,6 +364,9 @@ impl Default for Stub {
             quote_token: token("USDC"),
             oracle: addr("0xf9b0c8Ee13AE2fC0665764ecbdB417685dEa8081"),
             listed: listed(),
+            query_live: true,
+            query_fails_from: None,
+            queries: Mutex::new(Vec::new()),
         }
     }
 }
@@ -370,6 +394,74 @@ impl WoofiReads for Stub {
     async fn decimal_infos(&self, tokens: &[Addr], _: u64) -> Result<Vec<Option<(u64, u64, u64)>>, VenueError> {
         Ok(tokens.iter().map(|t| Some((100_000_000, 1_000_000, self.listed.get(t).map_or(0, |l| l.1)))).collect())
     }
+    async fn query(
+        &self,
+        legs: &[QueryCall],
+        block_hash: [u8; 32],
+    ) -> Result<Vec<Result<U256, VenueError>>, VenueError> {
+        self.queries.lock().unwrap().extend(legs.iter().map(|l| (*l, block_hash)));
+        let recorded = query_at_117080000();
+        Ok(legs
+            .iter()
+            .map(|l| {
+                let answer = recorded.get(l).filter(|_| self.query_live && self.query_fails_from != Some(l.0));
+                answer.copied().ok_or_else(|| VenueError::Chain(CAP_EXCEEDED.into()))
+            })
+            .collect())
+    }
+}
+
+/// Today's stub prices: WETH $2,300, cbBTC and WBTC $80,000, WMON $0.02;
+/// a reference only for ETH/USDC and cbBTC/ETH.
+struct Frame;
+
+impl Pricer for Frame {
+    fn usd_per_token(&self, key: &str) -> f64 {
+        match key {
+            "USDC" => 1.0,
+            "WETH" => 2300.0,
+            "CBBTC" | "WBTC" => 80_000.0,
+            "WMON" => 0.02,
+            _ => 0.0,
+        }
+    }
+    fn usd_for_token(&self, key: &str, amount: f64) -> f64 {
+        amount * self.usd_per_token(key)
+    }
+    fn pair_mid(&self, market: &str) -> f64 {
+        match market {
+            "ETH/USDC" => 2300.0,
+            "cbBTC/ETH" => 80_000.0 / 2300.0,
+            _ => 0.0,
+        }
+    }
+}
+
+/// No reference anywhere: nothing to anchor a quote on.
+struct Cold;
+
+impl Pricer for Cold {
+    fn usd_per_token(&self, key: &str) -> f64 {
+        Frame.usd_per_token(key)
+    }
+    fn usd_for_token(&self, key: &str, amount: f64) -> f64 {
+        Frame.usd_for_token(key, amount)
+    }
+    fn pair_mid(&self, _: &str) -> f64 {
+        0.0
+    }
+}
+
+const FRAME_BLOCK: [u8; 32] = [7; 32];
+
+async fn quote(stub: &Stub, pricer: &dyn Pricer, sizes: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+    let v = Woofi::default();
+    v.refresh(stub, reg()).await.unwrap();
+    v.quote_with(stub, pricer, FRAME_BLOCK, sizes).await
+}
+
+fn close(a: f64, b: f64, digits: i32) {
+    assert!((a - b).abs() < 10f64.powi(-digits) / 2.0, "{a} vs {b} to {digits} digits");
 }
 
 const A: &str = "0x00000000000000000000000000000000000000aa";
@@ -503,6 +595,62 @@ async fn refuses_unreadable_persisted_state_rather_than_shrinking_the_set() {
     let err = decode_commit(&v, &mut state, &block(1, 1, vec![])).unwrap_err();
     assert!(err.to_string().contains("unreadable"), "{err}");
     assert!(matches!(v.gas_sources(), Err(VenueError::NotReady(_))));
+}
+
+// ── quotes (real query answers) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn turns_executable_query_outputs_into_pair_terms_bid_ask_and_drops_sizes_past_the_caps() {
+    let stub = Stub::default();
+    let rows = quote(&stub, &Frame, &[100.0, 100_000.0]).await.unwrap();
+    // Every leg pinned to the frame's block.
+    assert!(stub.queries.lock().unwrap().iter().all(|(_, h)| *h == FRAME_BLOCK));
+    let mut got: Vec<String> = rows.iter().map(|r| format!("{}@{}", r.market, r.size_usd)).collect();
+    got.sort();
+    assert_eq!(got, ["ETH/USDC@100", "cbBTC/ETH@100"]);
+
+    let eth = rows.iter().find(|r| r.market == "ETH/USDC").unwrap();
+    close(eth.bid_px, 101.902344 / 0.043478260869565216, 6); // 2343.754
+    close(eth.ask_px, 100.0 / 0.042607541765923511, 6); // 2347.007
+    close(eth.bid_bps, (eth.bid_px / 2300.0 - 1.0) * 1e4, 9);
+    close(eth.spread_bps, (eth.ask_px - eth.bid_px) / 2300.0 * 1e4, 9);
+    assert_eq!((eth.venue_id.as_str(), eth.filled_full, eth.fee_bps, eth.one_sided), ("woofi", true, 0.0, None));
+
+    let cross = rows.iter().find(|r| r.market == "cbBTC/ETH").unwrap();
+    close(cross.bid_px, 0.042852485200236352 / 0.00125, 9); // ETH per cbBTC
+    close(cross.ask_px, 0.043478260869565216 / 0.00126649, 9);
+    assert!(cross.ask_px > cross.bid_px);
+}
+
+#[tokio::test]
+async fn keeps_a_half_market_as_one_sided() {
+    // The pool runs out of WETH to pay: every buy leg (USDC in) reverts.
+    let stub = Stub { query_fails_from: Some(token("USDC")), ..Stub::default() };
+    let rows = quote(&stub, &Frame, &[100.0]).await.unwrap();
+    let row = rows.iter().find(|r| r.market == "ETH/USDC").unwrap();
+    assert_eq!((row.one_sided, row.ask_px, row.spread_bps), (Some(true), 0.0, 0.0));
+    assert!(row.bid_px > 0.0);
+}
+
+/// Today the venue goes dark with a note naming the failure; here it is
+/// missing for the block with that reason.
+#[tokio::test]
+async fn every_leg_reverting_is_an_error_naming_the_failure() {
+    let stub = Stub { query_live: false, ..Stub::default() };
+    let err = quote(&stub, &Frame, &[100.0]).await.unwrap_err();
+    assert_eq!(
+        err,
+        VenueError::Chain(format!(
+            "WOOFi sPMM quotes unavailable — all 4 legs failed with \"{CAP_EXCEEDED}\" (venue disabled, or the ABI drifted from the contract)"
+        ))
+    );
+}
+
+#[tokio::test]
+async fn asks_nothing_without_a_reference() {
+    let stub = Stub::default();
+    assert_eq!(quote(&stub, &Cold, &[100.0]).await.unwrap(), []);
+    assert!(stub.queries.lock().unwrap().is_empty());
 }
 
 // ── decode and proxy upgrades ───────────────────────────────────────────────
