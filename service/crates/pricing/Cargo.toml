@@ -1,0 +1,24 @@
+[package]
+name = "mpamm-pricing"
+version = "0.1.0"
+description = "Exchange feeds, price history, wrapper rates and the pair-terms reference"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mpamm-chain = { path = "../chain" }
+mpamm-registry = { path = "../registry" }
+mpamm-types = { path = "../types" }
+crc32fast = { workspace = true }
+futures-util = { workspace = true }
+parking_lot = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
