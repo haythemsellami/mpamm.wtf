@@ -132,7 +132,9 @@ export const WMON_ADDRESS = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a';
  *    took POE (and the whole fills tail) offline on 2026-09-16. Tether Gold is
  *    priced DIRECTLY as Binance XAUTUSDT, never as a $1 stable.
  *  - Unwrapped xStocks (SPYX, QQQX, …) are rebasing: event amounts and Kraken
- *    books already use rebased units, so no issuer multiplier is applied.
+ *    books already use rebased units, so no issuer multiplier is applied. The
+ *    unwrapped ANTx's asset key is ANTX: the wrapped share keeps the
+ *    historical key ANTx, under which its prices are stored.
  *  - Wrapped xStocks (WSPYX, …) are ERC-4626 shares of the rebasing xStock
  *    (`underlyingXStock`), each with its own market and price history; ANTx
  *    keeps its original asset key.

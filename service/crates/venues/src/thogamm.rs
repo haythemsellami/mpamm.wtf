@@ -60,6 +60,20 @@ const POOL_LABEL: &str = "thogamm 0x80c74517";
 /// The xStock bases ThogAMM listed on 2026-10-27: the scope of its
 /// 'xstocks-usd-references' history revision, frozen.
 const XSTOCKS_2026_10: [&str; 5] = ["SPYx", "QQQx", "EWYx", "NVDAx", "TSLAx"];
+/// The rebasing xStocks registered 2026-11-27 (their pairs traded since
+/// 2026-11-17, unlisted), the scope of 'november-xstocks'; ANTx (asset key
+/// ANTX: the wrapped share keeps ANTx) has its own revision.
+const XSTOCKS_2026_11: [&str; 4] = ["SMHx", "SPCXx", "MUx", "SKHYx"];
+static NOVEMBER: OnceLock<Vec<&'static str>> = OnceLock::new();
+static ANTHROPIC: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+/// Every registered pair whose base is one of `bases`, in registry order
+/// (today's `PAIRS.filter((p) => bases.includes(p.base))`), frozen once.
+fn markets_of(bases: &[&str], cell: &'static OnceLock<Vec<&'static str>>) -> &'static [&'static str] {
+    cell.get_or_init(|| {
+        Registry::get().pairs.iter().filter(|p| bases.contains(&p.base.as_str())).map(|p| p.symbol.as_str()).collect()
+    })
+}
 
 /// Blocks a "maker: balance" leg sits out before it is probed again (~10 s).
 pub const DRAINED_REPROBE_BLOCKS: u64 = 25;
@@ -660,6 +674,16 @@ impl Venue for Thogamm {
                 id: "xaut-wbtc-quote-basis",
                 from: Some("2026-09-04"),
                 source: RevisionSource::Markets(&["XAUt/BTC"]),
+            },
+            HistoryRevision {
+                id: "november-xstocks",
+                from: Some("2026-11-17"),
+                source: RevisionSource::Markets(markets_of(&XSTOCKS_2026_11, &NOVEMBER)),
+            },
+            HistoryRevision {
+                id: "anthropic-xstock",
+                from: Some("2026-11-27"),
+                source: RevisionSource::Markets(markets_of(&["ANTX"], &ANTHROPIC)),
             },
         ]
     }

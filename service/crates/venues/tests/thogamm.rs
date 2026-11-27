@@ -417,7 +417,7 @@ fn follows_registry_events_stops_quoting_retired_tokens_and_keeps_their_decode_t
 #[test]
 fn replays_only_newly_tracked_markets() {
     let r = Thogamm::default().history_revisions();
-    assert_eq!(r.len(), 2);
+    assert_eq!(r.len(), 4);
     assert_eq!((r[0].id, r[0].from), ("xstocks-usd-references", Some("2026-10-26")));
     // Today's list, in registry order (recorded from the TS adapter).
     let xstocks: Vec<&str> = "SPYx/USDC SPYx/USDT0 SPYx/AUSD SPYx/MON SPYx/ETH SPYx/XAUt SPYx/BTC SPYx/cbBTC \
@@ -435,6 +435,16 @@ fn replays_only_newly_tracked_markets() {
         (r[1].id, r[1].from, r[1].source),
         ("xaut-wbtc-quote-basis", Some("2026-09-04"), RevisionSource::Markets(&["XAUt/BTC"]))
     );
+    // Today's 'november-xstocks' and 'anthropic-xstock': every pair of those bases.
+    let RevisionSource::Markets(nov) = r[2].source else { panic!("{:?}", r[2].source) };
+    assert_eq!((r[2].id, r[2].from), ("november-xstocks", Some("2026-11-17")));
+    // Each base pairs with 3 stables, MON/ETH/XAUt, BTC/cbBTC and every earlier xStock:
+    // SMHx 13, SPCXx 14, MUx 15, SKHYx 16.
+    assert_eq!(nov.len(), 58);
+    assert!(nov.contains(&"SKHYx/USDC") && nov.contains(&"SMHx/SPYx") && !nov.iter().any(|m| m.starts_with("ANTx/")));
+    let RevisionSource::Markets(ant) = r[3].source else { panic!("{:?}", r[3].source) };
+    assert_eq!((r[3].id, r[3].from), ("anthropic-xstock", Some("2026-11-27")));
+    assert!(ant.iter().all(|m| m.starts_with("ANTx/")) && ant.contains(&"ANTx/USDC"));
     assert_eq!(Thogamm::default().history_from_utc(), Some("2026-07-26"));
 }
 

@@ -268,9 +268,12 @@ mod tests {
     fn the_compiled_registry_is_valid() {
         let r = Registry::get();
         assert_eq!(r.chain_id, 143);
-        assert_eq!(r.tokens.len(), 25);
-        assert_eq!(r.assets.len(), 19);
-        assert_eq!(r.pairs.len(), 86);
+        assert_eq!(r.tokens.len(), 30);
+        assert_eq!(r.assets.len(), 24);
+        assert_eq!(r.pairs.len(), 161);
+        // The unwrapped ANTx is asset ANTX: the wrapped share keeps the key ANTx.
+        assert_eq!((r.assets["ANTX"].symbol.as_str(), r.assets["ANTx"].token.as_str()), ("ANTx", "WANTX"));
+        assert_eq!(r.pair_of("ANTx/USDC").map(|p| p.base.as_str()), Some("ANTX"));
         assert_eq!(r.sizes_usd, [100.0, 1000.0, 10000.0, 100000.0]);
         assert_eq!(r.markout_horizons_s, [0, 5, 10, 30, 60]);
         assert_eq!(r.tokens["XAUT0"].address, "0x01bFF41798a0BcF287b996046Ca68b395DbC1071", "checksum case kept");

@@ -33,9 +33,9 @@ keeper-gas methodology; the tracker deduplicates by transaction.
 
 ## xStock references
 
-The October 27 registry has 13 tokens. The dashboard tracks all 75 unordered
-non-stable/stable or non-stable/non-stable pairs (150 directions), including
-50 xStock pairs and XAUt/WBTC. The three stable/stable pairs remain outside the
+The November 27 registry has 18 tokens. The dashboard tracks all 150 unordered
+non-stable/stable or non-stable/non-stable pairs (300 directions), including
+125 xStock pairs and XAUt/WBTC. The three stable/stable pairs remain outside the
 base-asset benchmark model.
 
 | Token | Monad ERC-20 (18 decimals) | Kraken v2 book |
@@ -45,6 +45,11 @@ base-asset benchmark model.
 | EWYx | `0x299c95eb52bfd5bc98d924bce17197b64864589b` | `EWYx/USD` |
 | NVDAx | `0xc845b2894dbddd03858fd2d643b4ef725fe0849d` | `NVDAx/USD` |
 | TSLAx | `0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0` | `TSLAx/USD` |
+| SMHx | `0x8d512a03600981b8e86556fd5c0fbdd726fe1821` | `SMHx/USD` |
+| SPCXx | `0x68fa48b1c2fe52b3d776e1953e0e782b5044ce28` | `SPCXx/USD` |
+| MUx | `0xf6a873bae4ba1b304e45df52a4b7d176e1c6a8c4` | `MUx/USD` |
+| SKHYx | `0x58100046a4afcd4ee4fadbd4244f3f895a341c56` | `SKHYx/USD` |
+| ANTx | `0x909369940f22dc1c143ac78753a33f41597138b1` | `ANTx/USD` |
 
 These are the actual unwrapped xStock token books, not underlying equities or
 perpetual-futures proxies. The Kraken instrument subscription enables tokenized
@@ -73,9 +78,8 @@ xStock BBO archive is configured, so historical xStock marks remain null. The
 remark worker reports `markout.archive.unsupported` for affected historical
 fills; it does not query Bybit using a Kraken symbol or substitute stock candles.
 Persisted live marks remain available. Automatic market-only revisions replay
-xStock fills from October 26 and XAUt/WBTC from September 4 (its first on-chain
-swap), without repricing existing markets or requiring a deployment
-environment-variable change.
+the October xStocks from October 26, the four November 17 listings from November 17,
+and ANTx from November 27 (UTC). XAUt/WBTC retains its September 4 start.
 
 ## Verification evidence
 

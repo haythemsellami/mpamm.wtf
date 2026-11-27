@@ -21,6 +21,7 @@ import { buildDepthSnapshot } from '../depth.js';
 
 /** Rough synthetic USD prices per base asset (dev only; the live source uses the CEX feeds). */
 const ASSET_PX: Record<string, number> = { MON: 0.01928, BTC: 98000, ETH: 3500, XAUt: 4350, SPYx: 770, QQQx: 724, EWYx: 163, NVDAx: 218, TSLAx: 408, ANTx: 91,
+  SMHx: 442, SPCXx: 133, MUx: 639, SKHYx: 118, ANTX: 89,
   wTSLAx: 390, wNVDAx: 167, wSPYx: 730, wQQQx: 655, wEWYx: 137, wSPCXx: 137, wMUx: 710, wSKHYx: 126, wSMHx: 461,
 };
 const BASE_MON = ASSET_PX.MON;
