@@ -200,4 +200,8 @@ fn curves_and_aging_queries() {
     let aging: Vec<String> = s.trades_aging(0.0).unwrap().into_iter().map(|f| f.id).collect();
     assert_eq!(aging, ["a"]);
     assert!(s.trades_aging(f64::MAX).unwrap().is_empty());
+    let with: Vec<(String, Option<usize>)> =
+        s.trades_with_curves(0.0, f64::MAX).unwrap().into_iter().map(|(f, c)| (f.id, c.map(|c| c.len()))).collect();
+    assert_eq!(with, [("a".to_string(), None), ("done".to_string(), Some(14))], "ordered by time, then id");
+    assert!(s.trades_with_curves(0.0, 0.5).unwrap().is_empty());
 }

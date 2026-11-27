@@ -486,6 +486,21 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Trades with `ts` in [from_ms, to_ms), each with its stored curve
+    /// (TAKER-signed bps at each offset; `None` until taken).
+    pub fn trades_with_curves(&self, from_ms: f64, to_ms: f64) -> Result<Vec<(Fill, Option<Vec<Option<f64>>>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label,
+                    router, pool, block_number, ts, time_source, markouts_bps, curve_bps
+             FROM trades WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
+        )?;
+        let rows = stmt.query_map(params![from_ms, to_ms], |r| {
+            let curve: Option<String> = r.get(17)?;
+            Ok((row_to_fill(r)?, curve.and_then(|c| serde_json::from_str(&c).ok())))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn trade(&self, id: &str) -> Result<Option<Fill>> {
         Ok(self
             .conn
