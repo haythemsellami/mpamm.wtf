@@ -5,6 +5,7 @@
 //! cargo run -p mpamm-api --example fake            # 127.0.0.1:8787
 //! cargo run -p mpamm-api --example fake -- 8890    # another port
 //! npm -w web run dev                               # proxies /api and /stream to 8787
+//! WEB_DIST=../web/dist cargo run -p mpamm-api --example fake   # serves the built app too
 //! ```
 //!
 //! Quotes every 300 ms for a handful of markets, state each second, depth
@@ -72,23 +73,32 @@ const MODELS: &[Model] = &[
         cap: 100_000.0,
         markets: &["MON/USDC", "BTC/USDC", "ETH/USDC"],
     },
-    Model { id: "clober", half: 6.0, impact: 6.0, fee: 0.0, cap: 10_000.0, markets: &["MON/USDC", "MON/USDT0"] },
+    Model { id: "clober-vault", half: 6.0, impact: 6.0, fee: 0.0, cap: 10_000.0, markets: &["MON/USDC", "MON/USDT0"] },
     Model {
         id: "metric",
         half: 3.0,
         impact: 4.0,
         fee: 1.5,
         cap: 100_000.0,
-        markets: &["MON/USDC", "BTC/USDC", "XAUt/USDC"],
+        markets: &["MON/USDC", "BTC/USDC", "XAUt/USDC", "SPYx/USDC"],
     },
-    Model { id: "uniswap", half: 5.0, impact: 9.0, fee: 5.0, cap: 100_000.0, markets: &["MON/USDC", "ETH/USDC"] },
+    Model {
+        id: "uniswap-v4",
+        half: 5.0,
+        impact: 9.0,
+        fee: 5.0,
+        cap: 100_000.0,
+        markets: &["MON/USDC", "ETH/USDC", "BTC/USDC"],
+    },
 ];
-const MARKETS: &[&str] = &["MON/USDC", "BTC/USDC", "ETH/USDC", "MON/USDT0", "XAUt/USDC"];
+const MARKETS: &[&str] = &["MON/USDC", "BTC/USDC", "ETH/USDC", "MON/USDT0", "XAUt/USDC", "SPYx/USDC"];
 const TRADERS: &[&str] = &["Relay", "KyberSwap", "0x", "0x12…34ab", "0x9f…01cd", "FastLane"];
 
 fn reference_for(market: &str) -> &'static str {
     if market.starts_with("MON/") {
         "bybit"
+    } else if market.starts_with("SPYx/") {
+        "kraken"
     } else {
         "binance"
     }
@@ -103,21 +113,28 @@ fn colored(mut v: VenueMeta, light: &str, dark: &str) -> VenueMeta {
     v
 }
 
+/// Ids, names and fees as the service's registry has them (the dashboard
+/// keys some copy on them: the baseline, Kraken's xStock notes).
 fn venues() -> Vec<VenueMeta> {
-    let mut bybit = colored(venue("bybit", "Bybit", VenueKind::Cex, VenueRole::Reference), "#b45309", "#fbbf24");
-    bybit.taker_bps = Some(10.0);
-    let mut binance = colored(venue("binance", "Binance", VenueKind::Cex, VenueRole::Reference), "#a16207", "#facc15");
-    binance.taker_bps = Some(10.0);
+    let reference = |id: &str, name: &str, light: &str, dark: &str, taker_bps: f64| {
+        let mut v = colored(venue(id, name, VenueKind::Cex, VenueRole::Reference), light, dark);
+        v.taker_bps = Some(taker_bps);
+        v
+    };
+    let bybit = reference("bybit", "Bybit (Supreme VIP)", "#8A8375", "#B9BCC6", 4.5);
+    let binance = reference("binance", "Binance (VIP9)", "#B58A1B", "#F0B90B", 2.25);
+    let kraken = reference("kraken", "Kraken Pro xStocks ($1B+)", "#503714", "#FFD0AC", 2.5);
     let mut uniswap =
-        colored(venue("uniswap", "Uniswap v4", VenueKind::Amm, VenueRole::Baseline), "#be185d", "#f472b6");
+        colored(venue("uniswap-v4", "Uniswap v4", VenueKind::Amm, VenueRole::Baseline), "#3F6212", "#4D7C0F");
     uniswap.quote_note = Some("0.05% fee tier".into());
     vec![
         colored(venue("poe", "LFJ POE", VenueKind::Amm, VenueRole::Venue), "#1d4ed8", "#60a5fa"),
-        colored(venue("clober", "Clober", VenueKind::Clob, VenueRole::Venue), "#047857", "#34d399"),
+        colored(venue("clober-vault", "Clober", VenueKind::Clob, VenueRole::Venue), "#047857", "#34d399"),
         colored(venue("metric", "Metric", VenueKind::Amm, VenueRole::Venue), "#7c3aed", "#c4b5fd"),
         uniswap,
         bybit,
         binance,
+        kraken,
     ]
 }
 
@@ -189,7 +206,7 @@ fn depth(rng: &mut Rng, market: &str, mid: f64, block: u64, now: f64) -> DepthSn
     let grid: Vec<f64> = (0..25).map(|i| (100.0 * 10f64.powf(4.0 * i as f64 / 24.0)).round()).collect();
     let venues = MODELS
         .iter()
-        .filter(|m| m.markets.contains(&market) && m.id != "uniswap")
+        .filter(|m| m.markets.contains(&market) && m.id != "uniswap-v4")
         .map(|m| {
             let skew = rng.normal() * 0.5;
             let points: Vec<DepthPoint> = grid
@@ -297,7 +314,8 @@ async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     let port: u16 = std::env::args().nth(1).and_then(|p| p.parse().ok()).unwrap_or(8787);
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ now_ms() as u64);
-    let mut mids: BTreeMap<&str, f64> = [("MON", 0.024), ("BTC", 95_000.0), ("ETH", 3_500.0), ("XAUt", 2_650.0)].into();
+    let mut mids: BTreeMap<&str, f64> =
+        [("MON", 0.024), ("BTC", 95_000.0), ("ETH", 3_500.0), ("XAUt", 2_650.0), ("SPYx", 590.0)].into();
     let now = now_ms();
     let mut block: u64 = 40_000_000;
 
@@ -346,7 +364,7 @@ async fn main() -> std::io::Result<()> {
     let first = quotes_frame(&mut rng, &mids, block, now, &sizes);
     source.with(|d| {
         d.volume = volume;
-        d.gas = GasResponse { days: gas, approx: vec!["clober".into()] };
+        d.gas = GasResponse { days: gas, approx: vec!["clober-vault".into()] };
         d.fills = fills;
         d.quotes = first;
     });
@@ -404,5 +422,13 @@ async fn main() -> std::io::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!("fake mpamm API on http://127.0.0.1:{port} (stream ws://127.0.0.1:{port}/stream)");
-    axum::serve(listener, mpamm_api::router(source)).await
+    let mut app = mpamm_api::router(source);
+    // WEB_DIST serves the built dashboard same-origin, as the service does:
+    // the dashboard's Playwright suite runs against this (web/playwright.rust.config.ts).
+    if let Some(dist) = std::env::var_os("WEB_DIST").map(std::path::PathBuf::from) {
+        let files = tower_http::services::ServeDir::new(&dist)
+            .fallback(tower_http::services::ServeFile::new(dist.join("index.html")));
+        app = app.fallback_service(files);
+    }
+    axum::serve(listener, app).await
 }
