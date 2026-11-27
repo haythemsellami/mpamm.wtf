@@ -151,7 +151,20 @@ pub fn body(h: &Health) -> (HealthBody, bool) {
     let quotes = h.quotes.timings().into_iter().collect();
     let alerts = alerts(&ring, &pipeline, &quotes, uptime_ms, now_ms());
     let depth = h.depth.view();
-    (HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds, quotes, alerts, depth }, ok)
+    (
+        HealthBody {
+            status,
+            uptime_s: uptime_ms / 1000,
+            lag_blocks: lag,
+            ring,
+            pipeline,
+            feeds,
+            quotes,
+            alerts,
+            depth,
+        },
+        ok,
+    )
 }
 
 #[cfg(test)]

@@ -11,3 +11,9 @@ cpu = 0
 # The ring reader thread's core (the rest of the service runs unpinned until
 # DevOps sets a CPU set for it).
 reader_cpu = 0
+# The dashboard served beside the API (web/dist, copied to the host).
+web_dist = "/var/lib/mpamm/web/dist"
+# One depth pass a second at most, as today's production runs it: the node's
+# RPC has 4 cores, and with every venue quoting each block they are the
+# bottleneck (realtime quotes come first).
+depth_min_interval_ms = 1000

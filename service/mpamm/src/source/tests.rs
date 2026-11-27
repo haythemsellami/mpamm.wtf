@@ -342,7 +342,15 @@ async fn depth_curves_follow_a_viewer_through_the_router() {
     let depth =
         Depth::new(venues.clone(), none(), prices.clone(), registry, Duration::from_millis(150), Duration::ZERO);
     let health = health(&prices, &engine, &depth);
-    let source = ServiceSource::new(registry, venues, prices.clone(), depth.clone(), health, db, crate::notes::NoteBuffer::new());
+    let source = ServiceSource::new(
+        registry,
+        venues,
+        prices.clone(),
+        depth.clone(),
+        health,
+        db,
+        crate::notes::NoteBuffer::new(),
+    );
     let (committed, _) = broadcast::channel(16);
     source.start(&engine, committed.subscribe());
     let router = mpamm_api::router(source.clone());
