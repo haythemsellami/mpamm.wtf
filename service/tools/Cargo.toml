@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 mpamm-chain = { path = "../crates/chain" }
 mpamm-core = { path = "../crates/core" }
+mpamm-pipeline = { path = "../crates/pipeline" }
 mpamm-pricing = { path = "../crates/pricing" }
 mpamm-registry = { path = "../crates/registry" }
 mpamm-ring = { path = "../crates/ring" }

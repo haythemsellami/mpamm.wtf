@@ -10,7 +10,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use clap::{Parser, Subcommand};
 use mpamm_chain::{parse_b32, parse_quantity, quantity, Rpc};
-use mpamm_core::{ChainCx, DecodeCx, FinalBlock, FinalLog, Origin, Pricer, VenueState};
+use mpamm_core::{ChainCx, DecodeCx, FinalLog, Pricer, VenueState};
 use mpamm_pricing::{Fees, Prices};
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::hex;
@@ -107,26 +107,20 @@ async fn decode_range(
         start = end + 1;
     }
 
-    let state = VenueState::default();
+    // Each block with watched logs is read exactly as the pipeline's RPC
+    // repair reads it (full transactions, the watched logs), so decode sees
+    // what it would see in the service.
+    let fetcher = mpamm_pipeline::Fetcher { local: rpc.clone(), archive: None };
+    let mut state = VenueState::default();
     let mut fills = Vec::new();
-    for (n, (hash, mut logs)) in blocks {
-        logs.sort_by_key(|l| l.log_index);
-        let header = rpc.block_header(n).await.map_err(|e| e.to_string())?.ok_or(format!("no block {n}"))?;
-        let block = FinalBlock {
-            number: n,
-            hash,
-            parent_hash: header.parent_hash,
-            timestamp: header.timestamp,
-            proposal_ns: None,
-            base_fee: header.base_fee,
-            txns: Vec::new(),
-            logs,
-            origin: Origin::Rpc("node".into()),
-        };
+    for n in blocks.keys().copied().collect::<Vec<_>>() {
+        let block = fetcher.block(n, &watch).await.map_err(|e| format!("block {n}: {e}"))?;
         let pricer = prices.at(block.time_ms());
         let cx = DecodeCx { registry, pricer: &pricer as &dyn Pricer, state: &state };
         fills.extend(venue.decode(&cx, &block).map_err(|e| format!("block {n}: {e}"))?);
-        let _ = state.take_pending();
+        // Venue state persists across blocks, as committed in the service.
+        let writes = state.take_pending();
+        state.apply(&writes);
     }
     fills.sort_by(|a, b| a.id.cmp(&b.id));
     let out: Vec<Value> = fills
