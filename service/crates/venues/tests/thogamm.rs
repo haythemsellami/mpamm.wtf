@@ -417,8 +417,17 @@ fn replays_only_newly_tracked_markets() {
     let r = Thogamm::default().history_revisions();
     assert_eq!(r.len(), 2);
     assert_eq!((r[0].id, r[0].from), ("xstocks-usd-references", Some("2026-10-26")));
+    // Today's list, in registry order (recorded from the TS adapter).
+    let xstocks: Vec<&str> = "SPYx/USDC SPYx/USDT0 SPYx/AUSD SPYx/MON SPYx/ETH SPYx/XAUt SPYx/BTC SPYx/cbBTC \
+         QQQx/USDC QQQx/USDT0 QQQx/AUSD QQQx/MON QQQx/ETH QQQx/XAUt QQQx/SPYx QQQx/BTC QQQx/cbBTC \
+         EWYx/USDC EWYx/USDT0 EWYx/AUSD EWYx/MON EWYx/ETH EWYx/XAUt EWYx/SPYx EWYx/QQQx EWYx/BTC EWYx/cbBTC \
+         NVDAx/USDC NVDAx/USDT0 NVDAx/AUSD NVDAx/MON NVDAx/ETH NVDAx/XAUt NVDAx/SPYx NVDAx/QQQx NVDAx/EWYx NVDAx/BTC \
+         NVDAx/cbBTC TSLAx/USDC TSLAx/USDT0 TSLAx/AUSD TSLAx/MON TSLAx/ETH TSLAx/XAUt TSLAx/SPYx TSLAx/QQQx \
+         TSLAx/EWYx TSLAx/NVDAx TSLAx/BTC TSLAx/cbBTC"
+        .split_whitespace()
+        .collect();
+    assert_eq!(r[0].markets, &xstocks[..]);
     assert_eq!(r[0].markets.len(), 50);
-    assert!(r[0].markets.contains(&"SPYx/USDC") && r[0].markets.contains(&"QQQx/SPYx"));
     assert_eq!((r[1].id, r[1].from, r[1].markets), ("xaut-wbtc-quote-basis", Some("2026-09-04"), &["XAUt/BTC"][..]));
     assert_eq!(Thogamm::default().history_from_utc(), Some("2026-07-26"));
 }
