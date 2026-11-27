@@ -13,7 +13,7 @@
 //! and the price history at a past time.
 
 use mpamm_registry::{Cex, Pair, Registry};
-use mpamm_types::QuoteRow;
+use mpamm_types::{QuoteRow, ThemeColor, VenueKind, VenueMeta, VenueRole};
 
 use crate::book::{Side, Walk};
 
@@ -43,6 +43,27 @@ pub trait Exchanges {
 /// token; 0 when the wrapper's rate is missing or stale).
 pub trait Rates {
     fn rate(&self, token_key: &str) -> f64;
+}
+
+/// The three exchanges as the dashboard lists them (today's reference
+/// registry), each with the taker fee its rows include.
+pub fn reference_venues(fees: &Fees) -> Vec<VenueMeta> {
+    let meta = |id: &str, name: &str, light: &str, dark: &str, taker_bps: f64| VenueMeta {
+        id: id.into(),
+        name: name.into(),
+        color: ThemeColor { light: light.into(), dark: dark.into() },
+        kind: VenueKind::Cex,
+        role: VenueRole::Reference,
+        taker: Some(true),
+        taker_bps: Some(taker_bps),
+        since_utc: None,
+        quote_note: None,
+    };
+    vec![
+        meta("bybit", "Bybit (Supreme VIP)", "#8A8375", "#B9BCC6", fees.bybit),
+        meta("binance", "Binance (VIP9)", "#B58A1B", "#F0B90B", fees.binance),
+        meta("kraken", "Kraken Pro xStocks ($1B+)", "#503714", "#FFD0AC", fees.kraken),
+    ]
 }
 
 /// Taker fees the reference rows add, in bps.

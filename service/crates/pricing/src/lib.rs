@@ -14,4 +14,4 @@ pub mod wrapper;
 pub use book::{Book, Side, Walk};
 pub use history::MidHistory;
 pub use prices::{AtPricer, Endpoints, Prices};
-pub use reference::{Exchanges, Fees, Rates, Reference};
+pub use reference::{reference_venues, Exchanges, Fees, Rates, Reference};
