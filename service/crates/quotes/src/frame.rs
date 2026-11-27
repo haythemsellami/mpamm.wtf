@@ -35,6 +35,15 @@ impl FramePricer {
         Self { registry, pair_mids, settled_usd: asset_usd.clone(), asset_usd }
     }
 
+    /// Only these markets keep a reference mid (today's depth frame). A
+    /// venue skips a market it has no mid for, so a job given this frame
+    /// builds calls for these markets and nothing else; asset prices (sizing)
+    /// are kept for every asset.
+    pub fn only_markets(mut self, markets: &[String]) -> Self {
+        self.pair_mids.retain(|m, _| markets.contains(m));
+        self
+    }
+
     fn asset_of(&self, token_key: &str) -> Option<String> {
         let t = self.registry.tokens.get(token_key)?;
         self.registry.asset_for_token(&t.address).map(|a| a.key.clone())

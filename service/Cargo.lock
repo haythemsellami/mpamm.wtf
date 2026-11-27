@@ -2449,6 +2449,7 @@ dependencies = [
  "mpamm-types",
  "parking_lot",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

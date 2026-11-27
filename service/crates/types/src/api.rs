@@ -169,11 +169,23 @@ pub struct QuoteStatsResponse {
     pub rows: Vec<QuoteStatsRow>,
 }
 
+/// A whole number as today's JSON writes it (`100`, not `100.0`): a depth
+/// snapshot goes to every viewer of its market every block, and its
+/// notionals and time are whole dollars and milliseconds.
+fn whole<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+    if v.fract() == 0.0 && v.abs() < 9_007_199_254_740_992.0 {
+        s.serialize_i64(*v as i64)
+    } else {
+        s.serialize_f64(*v)
+    }
+}
+
 /// One sampled notional of a depth curve. A side is absent (not 0) where the
 /// venue has no executable price.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DepthPoint {
+    #[serde(serialize_with = "whole")]
     pub notional: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bid_bps: Option<f64>,
@@ -186,6 +198,7 @@ pub struct DepthPoint {
 pub struct DepthCurve {
     pub venue_id: String,
     pub points: Vec<DepthPoint>,
+    #[serde(serialize_with = "whole")]
     pub max_notional: f64,
 }
 
@@ -202,6 +215,7 @@ pub struct DepthSnapshot {
     pub market: String,
     pub as_of_block: u64,
     pub ref_mid: f64,
+    #[serde(serialize_with = "whole")]
     pub ts: f64,
     pub venues: Vec<DepthCurve>,
 }
@@ -524,6 +538,9 @@ mod tests {
                 "points": [{ "notional": 100, "bidBps": -3, "askBps": 4 }, { "notional": 1000, "askBps": 9 }] }]
         }));
         assert_eq!(d.venues[0].points[1].bid_bps, None, "a missing side stays absent, not 0");
+        let text = serde_json::to_string(&d).unwrap();
+        assert!(text.contains(r#""notional":100,"#) && text.contains(r#""maxNotional":10000}"#), "{text}");
+        assert!(text.contains(r#""ts":100,"#) && text.contains(r#""refMid":0.024,"#), "whole numbers as today: {text}");
         round_trip::<DepthSnapshot>(
             json!({ "market": "BTC/USDC", "asOfBlock": 1, "refMid": 1, "ts": 1, "venues": [] }),
         );

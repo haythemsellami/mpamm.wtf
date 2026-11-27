@@ -3,8 +3,11 @@
 //! to that block's hash, against a reference frozen at the job's start. Each
 //! venue is published the moment it finishes; a venue gets a deadline per
 //! block and at most one job in flight, so a slow venue is late only for
-//! itself. The exchange benchmark rows are taken at the job's start.
+//! itself. The exchange benchmark rows are taken at the job's start. Depth
+//! curves (`depth`) are the same job over a 25-point size grid, for the
+//! markets someone watches.
 
+pub mod depth;
 pub mod frame;
 
 use std::{
@@ -24,7 +27,7 @@ use tokio::sync::broadcast;
 
 pub use frame::FramePricer;
 
-fn now_ms() -> f64 {
+pub(crate) fn now_ms() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
 }
 
