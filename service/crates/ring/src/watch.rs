@@ -18,6 +18,8 @@ pub enum TopicFilter {
 pub struct WatchSet {
     /// Logs to copy, by emitting address.
     pub logs: HashMap<Addr, TopicFilter>,
+    /// Copy every log (capture tools and tests; never the live service).
+    pub all_logs: bool,
     /// Copy every transaction's header (hash, sender, `to`, fees). Needed by
     /// anything that names a transaction: trade ids, gas, attribution.
     pub txn_headers: bool,
@@ -27,6 +29,9 @@ pub struct WatchSet {
 
 impl WatchSet {
     pub fn wants_log(&self, address: &Addr, topic0: Option<&B32>) -> bool {
+        if self.all_logs {
+            return true;
+        }
         match self.logs.get(address) {
             None => false,
             Some(TopicFilter::Any) => true,
@@ -51,6 +56,7 @@ impl WatchSet {
                 (Some(TopicFilter::Topics(mine)), TopicFilter::Topics(theirs)) => mine.extend(theirs.iter().copied()),
             }
         }
+        self.all_logs |= other.all_logs;
         self.txn_headers |= other.txn_headers;
         self.txn_input.extend(other.txn_input.iter().copied());
     }

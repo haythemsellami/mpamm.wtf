@@ -232,6 +232,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02f0e023adb368345ce0ca6cdfc0f24a06554468d0e8503e14a0841de79bfa69"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex 2.0.1",
 ]
 
@@ -744,6 +746,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -890,6 +902,8 @@ version = "0.1.0"
 dependencies = [
  "monad-event-ring",
  "monad-exec-events",
+ "serde_json",
+ "zstd",
 ]
 
 [[package]]
@@ -934,6 +948,12 @@ name = "pin-project-lite"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c938015719552d665fd0553b90d96cd7ff58e83e4c061ca99e6bb78865a72752"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "potential_utf"
@@ -1918,3 +1938,31 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zstd"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b04655dc7bf4abd8ebe23dac6bef20fceea52a29ad19e37a4101b3951d7e8b45"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df2575690b2a3eccad509fe7898cdde32a5afca06a06449ff4dcfb318c7b7281"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.2.0+zstd.1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3f4089cda6dda4dc43c43dd9f8964140064fd2f752f3da46c3a483c3c175160"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

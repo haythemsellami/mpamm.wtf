@@ -12,3 +12,7 @@ publish.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 monad-event-ring = { workspace = true }
 monad-exec-events = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+serde_json = { workspace = true }
+zstd = "0.13"
