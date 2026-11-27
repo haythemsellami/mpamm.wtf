@@ -12,7 +12,11 @@
 mod migrate;
 mod parity;
 
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    time::Duration,
+};
 
 use clap::{Parser, Subcommand};
 use mpamm_chain::{parse_b32, parse_quantity, quantity, Rpc};
@@ -162,7 +166,7 @@ async fn parity_cmd(
     }
     let store = mpamm_store::Store::open_readonly(db).map_err(|e| format!("{}: {e}", db.display()))?;
     let local = store.trades_between(since_ms, f64::MAX, usize::MAX >> 1).map_err(|e| e.to_string())?;
-    let venues: std::collections::BTreeSet<String> = if venues.is_empty() {
+    let venues: BTreeSet<String> = if venues.is_empty() {
         mpamm_venues::all().iter().flat_map(|v| v.meta()).map(|m| m.id).collect()
     } else {
         venues.into_iter().collect()
@@ -170,7 +174,33 @@ async fn parity_cmd(
     let window = parity::Window::common(&prod_fills, &local, from_block, margin)
         .ok_or("no common block window (one side has no trades yet)")?;
     let reports = parity::compare(&prod_fills, &local, window, &venues, usd_tolerance);
-    if parity::print(window, &reports) {
+    let trades_ok = parity::print(window, &reports);
+    // Whole UTC days: per venue-day volume against production's /api/volume.
+    let today = mpamm_types::utc_day(mpamm_ring::live::now_ms() as f64);
+    let all_local = store.trades_between(0.0, f64::MAX, usize::MAX >> 1).map_err(|e| e.to_string())?;
+    let days = parity::full_days(&all_local, &today);
+    let volume_ok = match (days.first(), days.last(), prod_file) {
+        (Some(first), Some(last), None) => {
+            let url = format!("{}/api/volume?from={first}&to={last}", prod.trim_end_matches('/'));
+            let prod_volume: Vec<mpamm_types::DailyVolume> = reqwest::Client::new()
+                .get(&url)
+                .timeout(Duration::from_secs(60))
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                .map_err(|e| format!("{url}: {e}"))?
+                .json()
+                .await
+                .map_err(|e| format!("{url}: {e}"))?;
+            let local_volume = store.volume_days(&today).map_err(|e| e.to_string())?;
+            parity::print_volume(
+                &days,
+                &parity::compare_volume(&prod_volume, &local_volume, &days, &venues, usd_tolerance),
+            )
+        }
+        _ => parity::print_volume(&BTreeSet::new(), &[]),
+    };
+    if trades_ok && volume_ok {
         Ok(())
     } else {
         Err("the service and production differ".into())

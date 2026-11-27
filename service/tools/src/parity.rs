@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use mpamm_types::Fill;
+use mpamm_types::{DailyVolume, Fill, VenueDaily};
 
 /// Markets quoted in a dollar stable: their USD is the quote amount itself.
 const STABLES: [&str; 4] = ["USDC", "USDT0", "AUSD", "USD1"];
@@ -153,6 +153,73 @@ pub fn compare(
     out
 }
 
+/// UTC days the service holds whole: after the day of its first trade and
+/// before today.
+pub fn full_days(local: &[Fill], today: &str) -> BTreeSet<String> {
+    let Some(first) = local.iter().map(|f| f.ts).reduce(f64::min) else { return BTreeSet::new() };
+    let start = mpamm_types::utc_day(first);
+    let mut out = BTreeSet::new();
+    let mut t = first;
+    loop {
+        t += 86_400_000.0;
+        let d = mpamm_types::utc_day(t);
+        if d.as_str() >= today {
+            break;
+        }
+        if d != start {
+            out.insert(d);
+        }
+    }
+    out
+}
+
+/// A venue-day whose volume differs: (day, venue, production, service).
+pub type DayDiff = (String, String, Option<VenueDaily>, Option<VenueDaily>);
+
+/// Per venue-day volume on the given days: swap counts exact, USD within
+/// `usd_tolerance` (a day mixes stable- and crypto-quoted trades).
+pub fn compare_volume(
+    prod: &[DailyVolume],
+    local: &[DailyVolume],
+    days: &BTreeSet<String>,
+    venues: &BTreeSet<String>,
+    usd_tolerance: f64,
+) -> Vec<DayDiff> {
+    let get = |rows: &[DailyVolume], day: &str, v: &str| {
+        rows.iter().find(|r| r.utc_day == day).and_then(|r| r.by_venue.get(v).copied())
+    };
+    let mut out = Vec::new();
+    for day in days {
+        for v in venues {
+            let (p, l) = (get(prod, day, v), get(local, day, v));
+            let same = match (p, l) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.swaps == b.swaps && rel(a.usd, b.usd) <= usd_tolerance,
+                _ => false,
+            };
+            if !same {
+                out.push((day.clone(), v.clone(), p, l));
+            }
+        }
+    }
+    out
+}
+
+/// The volume report; `true` when every venue-day matches.
+pub fn print_volume(days: &BTreeSet<String>, diffs: &[DayDiff]) -> bool {
+    if days.is_empty() {
+        println!("volume: no whole UTC day in the service's history yet");
+        return true;
+    }
+    println!("volume: {} whole day(s), {} to {}", days.len(), days.first().unwrap(), days.last().unwrap());
+    let show = |v: &Option<VenueDaily>| v.map_or("-".into(), |v| format!("{} swaps ${:.2}", v.swaps, v.usd));
+    for (day, venue, p, l) in diffs {
+        println!("{day} {venue}: production {}, service {}", show(p), show(l));
+    }
+    println!("{}", if diffs.is_empty() { "VOLUME IDENTICAL" } else { "VOLUME DIFFERS" });
+    diffs.is_empty()
+}
+
 /// The report as the operator reads it; `true` when every venue is clean.
 pub fn print(window: Window, reports: &BTreeMap<String, VenueReport>) -> bool {
     println!("blocks {}..={}", window.from, window.to);
@@ -264,6 +331,34 @@ mod tests {
         // a stable-quoted market's USD is exact.
         assert_eq!(fields, [("far", "usd"), ("stable", "usd")]);
         assert!(!x.clean());
+    }
+
+    #[test]
+    fn whole_days_and_volume_per_venue_day() {
+        // First trade 2026-11-27 09:04 UTC; today 2026-11-30.
+        let mut f = fill("a", "x", "MON/USDC", 1, 1.0);
+        f.ts = 1_795_770_270_000.0;
+        let days = full_days(&[f], "2026-11-30");
+        assert_eq!(days.iter().map(String::as_str).collect::<Vec<_>>(), ["2026-11-28", "2026-11-29"]);
+        assert!(full_days(&[], "2026-11-30").is_empty());
+
+        let day = |d: &str, rows: &[(&str, u64, f64)]| DailyVolume {
+            utc_day: d.into(),
+            by_venue: rows
+                .iter()
+                .map(|(v, swaps, usd)| (v.to_string(), VenueDaily { swaps: *swaps, usd: *usd }))
+                .collect(),
+            partial: false,
+        };
+        let prod = [day("2026-11-28", &[("x", 10, 1000.0), ("y", 5, 50.0)]), day("2026-11-29", &[("x", 3, 30.0)])];
+        let local = [day("2026-11-28", &[("x", 10, 1000.5)]), day("2026-11-29", &[("x", 4, 30.0), ("z", 1, 1.0)])];
+        let diffs = compare_volume(&prod, &local, &days, &venues(&["x", "z"]), 0.002);
+        let got: Vec<(&str, &str)> = diffs.iter().map(|d| (d.0.as_str(), d.1.as_str())).collect();
+        // 0.05% USD drift is within tolerance; a swap count never is; a venue
+        // only one side has differs; y isn't run by the service.
+        assert_eq!(got, [("2026-11-29", "x"), ("2026-11-29", "z")]);
+        assert!(!print_volume(&days, &diffs));
+        assert!(print_volume(&BTreeSet::new(), &[]));
     }
 
     #[test]
