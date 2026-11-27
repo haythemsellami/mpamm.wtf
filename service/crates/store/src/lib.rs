@@ -55,6 +55,9 @@ impl From<rusqlite::Error> for StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// A trade's markout curve: TAKER-signed bps at each offset.
+pub type Curve = Vec<Option<f64>>;
+
 /// How a day's gas figure was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GasMethod {
@@ -488,7 +491,7 @@ impl Store {
 
     /// Trades with `ts` in [from_ms, to_ms), each with its stored curve
     /// (TAKER-signed bps at each offset; `None` until taken).
-    pub fn trades_with_curves(&self, from_ms: f64, to_ms: f64) -> Result<Vec<(Fill, Option<Vec<Option<f64>>>)>> {
+    pub fn trades_with_curves(&self, from_ms: f64, to_ms: f64) -> Result<Vec<(Fill, Option<Curve>)>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, venue_id, market, side, category, usd, base_amount, exec_px, px_approx, tx_hash, to_label,
                     router, pool, block_number, ts, time_source, markouts_bps, curve_bps

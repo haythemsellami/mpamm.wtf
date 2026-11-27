@@ -1,10 +1,10 @@
-//! `GET /api/health`: the service's live numbers, never on the stream.
-//! Answers 503 when something needs a human: the ring can't be opened,
-//! execution has gone quiet, or the pipeline has been held for 30 s.
+//! `GET /api/health`: the service's live numbers, never on the stream
+//! (served by `mpamm-api` through the source). Answers 503 when something
+//! needs a human: the ring can't be opened, execution has gone quiet, or the
+//! pipeline has been held for 30 s.
 
 use std::{sync::Arc, time::Instant};
 
-use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use mpamm_pipeline::{Stats, StatsView};
 use mpamm_pricing::Prices;
 use mpamm_ring::live::{now_ms, FollowStats, FollowView};
@@ -84,7 +84,8 @@ pub fn status(
     ("ok", true)
 }
 
-async fn health(State(h): State<Health>) -> (StatusCode, Json<HealthBody>) {
+/// The body, and whether the service is healthy (false answers 503).
+pub fn body(h: &Health) -> (HealthBody, bool) {
     let ring = h.ring.view();
     let pipeline = h.pipeline.view();
     let uptime_ms = h.started.elapsed().as_millis() as u64;
@@ -92,12 +93,7 @@ async fn health(State(h): State<Health>) -> (StatusCode, Json<HealthBody>) {
     let lag = (pipeline.cursor > 0 && ring.newest_block > 0).then(|| ring.newest_block.saturating_sub(pipeline.cursor));
     let feeds = feeds_view(&h.prices, now_ms());
     let quotes = h.quotes.timings().into_iter().collect();
-    let body = HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds, quotes };
-    (if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, Json(body))
-}
-
-pub fn router(h: Health) -> Router {
-    Router::new().route("/api/health", get(health)).with_state(h)
+    (HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds, quotes }, ok)
 }
 
 #[cfg(test)]
