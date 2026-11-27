@@ -6,6 +6,7 @@
 pub mod btr;
 pub mod capricorn;
 pub mod chain;
+pub mod clober;
 pub mod crystal;
 pub mod generations;
 pub mod hanji;
@@ -27,6 +28,7 @@ use mpamm_core::Venue;
 pub fn all() -> Vec<Arc<dyn Venue>> {
     vec![
         Arc::new(poe::Poe::default()),
+        Arc::new(clober::Clober::default()),
         Arc::new(metric::venue()),
         Arc::new(hanji::Hanji::default()),
         Arc::new(lunarbase::Lunarbase::default()),
