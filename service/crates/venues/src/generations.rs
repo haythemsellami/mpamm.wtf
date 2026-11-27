@@ -204,7 +204,7 @@ impl Venue for Generations {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use mpamm_core::{NoPrices, Origin, VenueState};
+    use mpamm_core::{NoPrices, Origin, RevisionSource, VenueState};
     use mpamm_registry::Registry;
     use mpamm_ring::TopicFilter;
     use mpamm_types::{FillCategory, Side, ThemeColor, VenueKind, VenueRole};
@@ -464,7 +464,7 @@ mod tests {
             meta(),
             VenueHistory {
                 from_utc: Some("2026-01-01"),
-                revisions: vec![HistoryRevision { id: "x", from: Some("2026-02-01"), markets: &[] }],
+                revisions: vec![HistoryRevision { id: "x", from: Some("2026-02-01"), source: RevisionSource::Replay }],
             },
             vec![("old", old as Arc<dyn Generation>), ("new", new as Arc<dyn Generation>)],
         );

@@ -194,8 +194,20 @@ pub struct HistoryRevision {
     pub id: &'static str,
     /// First UTC day whose stored history is wrong; `None` = the lifetime.
     pub from: Option<&'static str>,
-    /// `Markets(..)`: add these newly listed markets' history only.
-    pub markets: &'static [&'static str],
+    pub source: RevisionSource,
+}
+
+/// How a history revision repairs the stored days (today's `source`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionSource {
+    /// Re-decode the chain from `from` and replace the venue's days.
+    Replay,
+    /// Re-sum the venue's stored trades over [`from`, `until`): days booked
+    /// wrong, nothing re-decoded or re-priced.
+    Fills { until: &'static str },
+    /// Add these newly listed markets' history from `from`; nothing else is
+    /// touched or re-priced.
+    Markets(&'static [&'static str]),
 }
 
 #[async_trait]

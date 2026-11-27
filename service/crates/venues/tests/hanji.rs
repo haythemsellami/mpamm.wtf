@@ -9,8 +9,8 @@ use alloy_primitives::{aliases::U72, Address, U256};
 use alloy_sol_types::SolEvent;
 use mpamm_chain::Rpc;
 use mpamm_core::{
-    block::hex_bytes, ChainCx, DecodeCx, FinalBlock, FinalLog, GasSources, NoPrices, Origin, Pricer, Venue, VenueError,
-    VenueState,
+    block::hex_bytes, ChainCx, DecodeCx, FinalBlock, FinalLog, GasSources, NoPrices, Origin, Pricer, RevisionSource,
+    Venue, VenueError, VenueState,
 };
 use mpamm_registry::{parse_address, Registry};
 use mpamm_types::{Fill, FillCategory, Side, VenueKind, VenueRole};
@@ -500,7 +500,12 @@ fn meta_and_history_as_today() {
     let revs = h.history_revisions();
     let ids: Vec<&str> = revs.iter().map(|r| r.id).collect();
     assert_eq!(ids, ["replay-0921-midnight", "xaut-book", "wrapped-xstocks", "wrapped-xstocks-2"]);
-    assert_eq!(revs[1].markets, ["XAUt/USDC"]);
+    assert_eq!(
+        revs[0].source,
+        RevisionSource::Fills { until: "2026-09-20" },
+        "a re-sum of stored trades: never a chain replay (it would re-price every later cross pair)"
+    );
+    assert_eq!(revs[1].source, RevisionSource::Markets(&["XAUt/USDC"]));
     assert_eq!(revs[3].from, Some("2026-11-19"));
     assert!(matches!(h.watch(), Err(VenueError::NotReady(_))));
     assert_eq!(h.entry_points().len(), 17);

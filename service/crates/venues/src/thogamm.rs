@@ -27,7 +27,9 @@ use std::{
 use alloy_primitives::{address, Address, B256};
 use alloy_sol_types::sol;
 use async_trait::async_trait;
-use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasSources, HistoryRevision, Venue, VenueError};
+use mpamm_core::{
+    ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasSources, HistoryRevision, RevisionSource, Venue, VenueError,
+};
 use mpamm_registry::{Pair, Registry};
 use mpamm_ring::{Addr, TopicFilter, WatchSet};
 use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
@@ -474,8 +476,16 @@ impl Venue for Thogamm {
     /// (2026-09-04).
     fn history_revisions(&self) -> Vec<HistoryRevision> {
         vec![
-            HistoryRevision { id: "xstocks-usd-references", from: Some("2026-10-26"), markets: xstock_markets() },
-            HistoryRevision { id: "xaut-wbtc-quote-basis", from: Some("2026-09-04"), markets: &["XAUt/BTC"] },
+            HistoryRevision {
+                id: "xstocks-usd-references",
+                from: Some("2026-10-26"),
+                source: RevisionSource::Markets(xstock_markets()),
+            },
+            HistoryRevision {
+                id: "xaut-wbtc-quote-basis",
+                from: Some("2026-09-04"),
+                source: RevisionSource::Markets(&["XAUt/BTC"]),
+            },
         ]
     }
 

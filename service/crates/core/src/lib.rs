@@ -6,6 +6,6 @@ pub mod venue;
 
 pub use block::{FinalBlock, FinalLog, FinalTxn, Origin};
 pub use venue::{
-    BlockRef, ChainCx, DecodeCx, EntryPoint, GasRelay, GasSources, HistoryRevision, NoPrices, Pricer, QuoteCx, Venue,
-    VenueError, VenueState,
+    BlockRef, ChainCx, DecodeCx, EntryPoint, GasRelay, GasSources, HistoryRevision, NoPrices, Pricer, QuoteCx,
+    RevisionSource, Venue, VenueError, VenueState,
 };

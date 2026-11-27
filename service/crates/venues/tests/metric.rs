@@ -11,7 +11,9 @@ use std::{
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::SolEvent;
 use async_trait::async_trait;
-use mpamm_core::{DecodeCx, FinalBlock, FinalLog, NoPrices, Origin, Pricer, Venue, VenueError, VenueState};
+use mpamm_core::{
+    DecodeCx, FinalBlock, FinalLog, NoPrices, Origin, Pricer, RevisionSource, Venue, VenueError, VenueState,
+};
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::{Addr, TopicFilter};
 use mpamm_types::{Fill, FillCategory, QuoteRow, Side};
@@ -996,7 +998,10 @@ fn anchors_the_lifetime_replay_at_the_first_v0_swap_day() {
     assert_eq!(v.id(), "metric");
     let revs = v.history_revisions();
     assert_eq!(revs.len(), 1);
-    assert_eq!((revs[0].id, revs[0].from, revs[0].markets), ("wantx-usdc", Some("2026-11-19"), &["wANTx/USDC"][..]));
+    assert_eq!(
+        (revs[0].id, revs[0].from, revs[0].source),
+        ("wantx-usdc", Some("2026-11-19"), RevisionSource::Markets(&["wANTx/USDC"]))
+    );
 }
 
 #[test]

@@ -41,8 +41,8 @@ use std::collections::HashSet;
 use alloy_primitives::{address, Address, U256};
 use async_trait::async_trait;
 use mpamm_core::{
-    ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasRelay, GasSources, HistoryRevision, QuoteCx, Venue,
-    VenueError,
+    ChainCx, DecodeCx, EntryPoint, FinalBlock, FinalLog, GasRelay, GasSources, HistoryRevision, QuoteCx,
+    RevisionSource, Venue, VenueError,
 };
 use mpamm_registry::Registry;
 use mpamm_ring::{Addr, TopicFilter, WatchSet, B32};
@@ -500,7 +500,7 @@ impl Venue for Crystal {
         // The replay finished on the adapter's deploy day before the core
         // re-read a new venue's deploy day: that day's earlier hours were
         // never decoded.
-        vec![HistoryRevision { id: "deploy-day", from: Some("2026-10-27"), markets: &[] }]
+        vec![HistoryRevision { id: "deploy-day", from: Some("2026-10-27"), source: RevisionSource::Replay }]
     }
 
     fn history_from_utc(&self) -> Option<&'static str> {

@@ -26,7 +26,9 @@ use std::collections::{HashMap, HashSet};
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::sol;
 use async_trait::async_trait;
-use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasRelay, GasSources, HistoryRevision, Venue, VenueError};
+use mpamm_core::{
+    ChainCx, DecodeCx, EntryPoint, FinalBlock, GasRelay, GasSources, HistoryRevision, RevisionSource, Venue, VenueError,
+};
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::{Addr, TopicFilter, WatchSet};
 use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
@@ -421,24 +423,39 @@ impl Venue for Hanji {
     }
 
     /// Today's `historyRevisions`, same ids (applied once per database).
-    /// `replay-0921-midnight` is a 'fills' re-sum of [2026-09-17, 2026-09-20)
-    /// (fills booked on the wrong day by a chunked replay), not a chain
-    /// replay: `HistoryRevision` has no field for that source or its end
-    /// day yet, and a chain replay from 09-17 was ruled out (it re-prices
-    /// every later cross pair).
     fn history_revisions(&self) -> Vec<HistoryRevision> {
         vec![
-            HistoryRevision { id: "replay-0921-midnight", from: Some("2026-09-17"), markets: &[] },
-            HistoryRevision { id: "xaut-book", from: Some("2026-09-21"), markets: &["XAUt/USDC"] },
+            HistoryRevision {
+                id: "replay-0921-midnight",
+                from: Some("2026-09-17"),
+                source: RevisionSource::Fills { until: "2026-09-20" },
+            },
+            HistoryRevision {
+                id: "xaut-book",
+                from: Some("2026-09-21"),
+                source: RevisionSource::Markets(&["XAUt/USDC"]),
+            },
             HistoryRevision {
                 id: "wrapped-xstocks",
                 from: Some("2026-11-08"),
-                markets: &["wTSLAx/USDC", "wNVDAx/USDC", "wSPYx/USDC", "wQQQx/USDC", "wEWYx/USDC"],
+                source: RevisionSource::Markets(&[
+                    "wTSLAx/USDC",
+                    "wNVDAx/USDC",
+                    "wSPYx/USDC",
+                    "wQQQx/USDC",
+                    "wEWYx/USDC",
+                ]),
             },
             HistoryRevision {
                 id: "wrapped-xstocks-2",
                 from: Some("2026-11-19"),
-                markets: &["wANTx/USDC", "wSPCXx/USDC", "wMUx/USDC", "wSKHYx/USDC", "wSMHx/USDC"],
+                source: RevisionSource::Markets(&[
+                    "wANTx/USDC",
+                    "wSPCXx/USDC",
+                    "wMUx/USDC",
+                    "wSKHYx/USDC",
+                    "wSMHx/USDC",
+                ]),
             },
         ]
     }

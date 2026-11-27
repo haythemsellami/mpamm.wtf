@@ -14,7 +14,7 @@ pub mod v1;
 
 use std::sync::Arc;
 
-use mpamm_core::HistoryRevision;
+use mpamm_core::{HistoryRevision, RevisionSource};
 use mpamm_registry::Registry;
 
 pub use shared::{meta, ID};
@@ -28,7 +28,11 @@ pub const HISTORY_FROM_UTC: &str = "2026-03-30";
 /// created at block 123,564,619 (2026-11-19) and first swapped at block
 /// 123,648,251, so the revision adds the market's whole history.
 pub fn history_revisions() -> Vec<HistoryRevision> {
-    vec![HistoryRevision { id: "wantx-usdc", from: Some("2026-11-19"), markets: &["wANTx/USDC"] }]
+    vec![HistoryRevision {
+        id: "wantx-usdc",
+        from: Some("2026-11-19"),
+        source: RevisionSource::Markets(&["wANTx/USDC"]),
+    }]
 }
 
 /// Metric as the service runs it: v0 then v1 behind one venue.

@@ -10,7 +10,9 @@
 use std::collections::HashSet;
 
 use alloy_primitives::Address;
-use mpamm_core::{block::hex_bytes, DecodeCx, FinalBlock, FinalLog, NoPrices, Origin, Pricer, Venue, VenueState};
+use mpamm_core::{
+    block::hex_bytes, DecodeCx, FinalBlock, FinalLog, NoPrices, Origin, Pricer, RevisionSource, Venue, VenueState,
+};
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::TopicFilter;
 use mpamm_types::{Fill, FillCategory, Side};
@@ -329,6 +331,6 @@ fn meta_and_history_match_today() {
     let rev = b.history_revisions();
     assert_eq!(rev.len(), 1);
     assert_eq!((rev[0].id, rev[0].from), ("fill-time-usd", Some("2026-10-13")));
-    assert!(rev[0].markets.is_empty());
+    assert_eq!(rev[0].source, RevisionSource::Replay);
     assert_eq!(Address::from(to_addr(btr::POOL)), btr::POOL);
 }

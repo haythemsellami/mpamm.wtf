@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 
 use alloy_primitives::{address, b256, Address, U256};
 use alloy_sol_types::SolEvent;
-use mpamm_core::{DecodeCx, FinalBlock, FinalLog, FinalTxn, Origin, Pricer, Venue, VenueError, VenueState};
+use mpamm_core::{
+    DecodeCx, FinalBlock, FinalLog, FinalTxn, Origin, Pricer, RevisionSource, Venue, VenueError, VenueState,
+};
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::{Addr, TopicFilter};
 use mpamm_types::{FillCategory, Side};
@@ -426,9 +428,13 @@ fn replays_only_newly_tracked_markets() {
          TSLAx/EWYx TSLAx/NVDAx TSLAx/BTC TSLAx/cbBTC"
         .split_whitespace()
         .collect();
-    assert_eq!(r[0].markets, &xstocks[..]);
-    assert_eq!(r[0].markets.len(), 50);
-    assert_eq!((r[1].id, r[1].from, r[1].markets), ("xaut-wbtc-quote-basis", Some("2026-09-04"), &["XAUt/BTC"][..]));
+    let RevisionSource::Markets(markets) = r[0].source else { panic!("{:?}", r[0].source) };
+    assert_eq!(markets, &xstocks[..]);
+    assert_eq!(markets.len(), 50);
+    assert_eq!(
+        (r[1].id, r[1].from, r[1].source),
+        ("xaut-wbtc-quote-basis", Some("2026-09-04"), RevisionSource::Markets(&["XAUt/BTC"]))
+    );
     assert_eq!(Thogamm::default().history_from_utc(), Some("2026-07-26"));
 }
 

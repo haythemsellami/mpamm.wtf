@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use alloy_primitives::{Address, U256};
 use mpamm_core::{
     block::hex_bytes, DecodeCx, EntryPoint, FinalBlock, FinalLog, FinalTxn, GasRelay, GasSources, NoPrices, Origin,
-    Pricer, Venue, VenueError, VenueState,
+    Pricer, RevisionSource, Venue, VenueError, VenueState,
 };
 use mpamm_registry::{parse_address, Registry};
 use mpamm_ring::TopicFilter;
@@ -305,7 +305,7 @@ fn replays_from_the_deploy_day() {
     let rev = v.history_revisions();
     assert_eq!(rev.len(), 1);
     assert_eq!((rev[0].id, rev[0].from), ("deploy-day", Some("2026-10-27")));
-    assert!(rev[0].markets.is_empty());
+    assert_eq!(rev[0].source, RevisionSource::Replay);
     assert_eq!(v.history_from_utc(), Some("2026-09-20"));
     let m = &v.meta()[0];
     assert_eq!(

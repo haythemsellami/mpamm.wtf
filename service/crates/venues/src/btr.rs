@@ -41,7 +41,9 @@ use std::{
 
 use alloy_primitives::{address, Address, U256};
 use async_trait::async_trait;
-use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, HistoryRevision, QuoteCx, Venue, VenueError};
+use mpamm_core::{
+    ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, HistoryRevision, QuoteCx, RevisionSource, Venue, VenueError,
+};
 use mpamm_registry::{parse_address, Pair, Registry};
 use mpamm_ring::{Addr, TopicFilter, WatchSet};
 use mpamm_types::{Fill, FillCategory, QuoteRow, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
@@ -598,7 +600,7 @@ impl Venue for Btr {
         // The lifetime backfill valued the crypto-quoted trades (the first on
         // 10-13) at its own day's prices; replays now price each closed day
         // as of its own blocks.
-        vec![HistoryRevision { id: "fill-time-usd", from: Some("2026-10-13"), markets: &[] }]
+        vec![HistoryRevision { id: "fill-time-usd", from: Some("2026-10-13"), source: RevisionSource::Replay }]
     }
 
     fn history_from_utc(&self) -> Option<&'static str> {
