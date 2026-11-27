@@ -3,9 +3,12 @@
 //! commit states (`tracker`). `sdk` reads the node's ring on Linux.
 
 pub mod event;
+pub mod live;
 pub mod tracker;
 pub mod watch;
 
+#[cfg(target_os = "linux")]
+pub mod follow;
 #[cfg(target_os = "linux")]
 pub mod sdk;
 

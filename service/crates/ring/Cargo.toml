@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dependencies]
+arc-swap = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
 # The SDK reads a Linux shared-memory ring (hugetlbfs) and builds only there.
 # Everything else in this crate is plain Rust, so block assembly and its
 # consumers build and test on any platform.
