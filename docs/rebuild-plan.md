@@ -49,7 +49,7 @@ path for M8.
 | M11 | Stream and REST | 4 | M8, M10 | — | Today's REST and v2 stream ported; compact protocol left |
 | M12 | Frontend on the new stream | 4 | M11 | — | Today's dashboard runs unchanged on the Rust API |
 | M13 | Data migration and replication | 4 | M8 | object storage bucket | Migration tool built |
-| M14 | Operations readiness | 4 | M11, M13 | hot fallback WS, TLS hostname, on-call | Not started |
+| M14 | Operations readiness | 4 | M11, M13 | hot fallback WS, TLS hostname, on-call | Alerts, notes, runbooks written; fallback mode left |
 | M15 | Switch-over and merge (phase-4 gate) | 4 | M12–M14 | DNS change | Not started |
 | M16 | Edge relays (optional) | 5 | M15 | relay hosting | Only if chosen |
 | M17 | In-process EVM (optional) | 6 | M10 | — | Only if needed |
@@ -447,7 +447,9 @@ drill completes.
       run twice on the shadow run, the rest not yet run)
 - [ ] Load test at peak traffic (replay or synthetic) with the node under load
 - [ ] Public endpoint: TLS hostname, firewall *(DevOps)*
-- [ ] Rewrite `AGENTS.md` and `docs/deploy.md` for the Rust service
+- [ ] Rewrite `AGENTS.md` and `docs/deploy.md` for the Rust service (AGENTS.md has a rebuild
+      section; the full rewrite and deploy.md wait for the switch-over, while today's
+      system is production)
 
 **Done when:** each runbook has been executed once on the host, and fallback mode has
 served live traffic during a planned node restart.
