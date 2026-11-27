@@ -226,7 +226,7 @@ The quote engine quotes every venue at every block, pinned to that block, readin
 ### Reads
 
 - Venue modules read through an `alloy` provider pointed at the node's RPC on localhost. Every state read is pinned to the block hash, so all reads in a job see one proposal.
-- Every quote `eth_call` carries an explicit gas limit of at most 8,100,000. A read that needs more fails loudly instead of being retried in the 20-slot pool. The heavy reads found today are split during the port: Hanji's helper call (8.72M) and Uniswap v4's 22M and 150M calls.
+- Every quote `eth_call` carries an explicit gas limit of at most 8,100,000. A read that needs more fails loudly instead of being retried in the 20-slot pool. The heavy reads found today are split during the port: Hanji's helper call (today's first Multicall3 aggregate of 15 books measured 11.3M on 2026-11-27; one book per call is 0.22–0.90M) and Uniswap v4's 22M and 150M calls (one leg per call is 38k–2.8M; legs that walk past 8M fail and sit out).
 - Independent calls go out as one JSON-RPC batch, which the node runs in parallel; the local node has no provider batch limits.
 - The pair-terms reference (exchange mid, wrapper rate, stablecoin cross) is captured once at the start of each job.
 
