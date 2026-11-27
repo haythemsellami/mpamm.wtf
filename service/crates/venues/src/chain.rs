@@ -12,6 +12,9 @@ use serde_json::json;
 pub enum At {
     Latest,
     Number(u64),
+    /// Pinned to a block hash (EIP-1898): every read of a quote job sees the
+    /// same proposal, even before it is final.
+    Hash([u8; 32]),
 }
 
 impl At {
@@ -19,6 +22,7 @@ impl At {
         match self {
             At::Latest => json!("latest"),
             At::Number(n) => json!(mpamm_chain::quantity(n)),
+            At::Hash(h) => json!({ "blockHash": format!("0x{}", mpamm_ring::hex(&h)), "requireCanonical": false }),
         }
     }
 }

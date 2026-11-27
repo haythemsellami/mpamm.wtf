@@ -49,6 +49,35 @@ pub trait Pricer: Send + Sync {
     /// The pair's reference mid in its own terms (the bps anchor); 0 when
     /// unavailable.
     fn pair_mid(&self, market: &str) -> f64;
+
+    /// Token amount (whole units) worth `usd`: quote sizing. 0 when unpriced.
+    fn token_for_usd(&self, token_key: &str, usd: f64) -> f64 {
+        let px = self.usd_per_token(token_key);
+        if px > 0.0 {
+            usd / px
+        } else {
+            0.0
+        }
+    }
+}
+
+/// A proposed block, as the quote engine pins reads to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockRef {
+    pub number: u64,
+    /// Consensus block id (keys a proposal before it is final).
+    pub id: [u8; 32],
+    /// Ethereum block hash: every read of a quote job is pinned to it.
+    pub hash: [u8; 32],
+}
+
+/// What a quote job can use: the local node, reads pinned to `block`, and a
+/// pricer frozen at the job's start (one reference for every row of it).
+pub struct QuoteCx<'a> {
+    pub rpc: &'a Rpc,
+    pub registry: &'a Registry,
+    pub pricer: &'a dyn Pricer,
+    pub block: BlockRef,
 }
 
 /// Prices nothing: for tests and for blocks with no venue to decode.
@@ -188,6 +217,13 @@ pub trait Venue: Send + Sync {
     /// The trades in one final block. Called once per block, strictly in
     /// block order, so a venue may keep state between blocks.
     fn decode(&self, cx: &DecodeCx<'_>, block: &FinalBlock) -> Result<Vec<Fill>, VenueError>;
+
+    /// Bid and ask for every market and size this venue quotes, with every
+    /// read pinned to `cx.block`. An error makes the venue missing for this
+    /// block only.
+    async fn quote(&self, _cx: &QuoteCx<'_>, _sizes_usd: &[f64]) -> Result<Vec<mpamm_types::QuoteRow>, VenueError> {
+        Ok(Vec::new())
+    }
 
     /// Markets discovery found (what the quote engine will quote).
     fn markets(&self) -> Vec<String> {
