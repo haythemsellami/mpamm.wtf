@@ -119,6 +119,23 @@ export interface TokenInfo {
 export const NATIVE_MON = '0x0000000000000000000000000000000000000000';
 export const WMON_ADDRESS = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a';
 
+// ANTx is the historical asset key for the wrapped share. Keep it for stored prices.
+const xStocks = [
+  ['SPYx', '0x90a2a4c76b5d8c0bc892a69ea28aa775a8f2dd48'],
+  ['QQQx', '0xa753a7395cae905cd615da0b82a53e0560f250af'],
+  ['EWYx', '0x299c95eb52bfd5bc98d924bce17197b64864589b'],
+  ['NVDAx', '0xc845b2894dbddd03858fd2d643b4ef725fe0849d'],
+  ['TSLAx', '0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0'],
+  ['SMHx', '0x8d512a03600981b8e86556fd5c0fbdd726fe1821'],
+  ['SPCXx', '0x68fa48b1c2fe52b3d776e1953e0e782b5044ce28'],
+  ['MUx', '0xf6a873bae4ba1b304e45df52a4b7d176e1c6a8c4'],
+  ['SKHYx', '0x58100046a4afcd4ee4fadbd4244f3f895a341c56'],
+  ['ANTx', '0x909369940f22dc1c143ac78753a33f41597138b1'],
+] as const;
+const stockAssets = xStocks.map(([symbol, address]) => ({
+  key: symbol === 'ANTx' ? 'ANTX' : symbol, symbol, token: symbol.toUpperCase(), address,
+}));
+
 // Each wrapped unit has its own market and price history. Keep ANTx's existing asset key.
 const wrappedXStocks = [
   ['TSLAx', '0xc3fdbe3a68ee5de461d30415a8165cf9aefe1171'],
@@ -163,11 +180,8 @@ export const TOKENS: Record<string, TokenInfo> = {
   },
   // Unwrapped, rebasing xStocks. Event amounts and Kraken books already use
   // rebased token units; applying an issuer multiplier again double-counts it.
-  SPYX: { symbol: 'SPYx', address: '0x90a2a4c76b5d8c0bc892a69ea28aa775a8f2dd48', decimals: 18, stable: false },
-  QQQX: { symbol: 'QQQx', address: '0xa753a7395cae905cd615da0b82a53e0560f250af', decimals: 18, stable: false },
-  EWYX: { symbol: 'EWYx', address: '0x299c95eb52bfd5bc98d924bce17197b64864589b', decimals: 18, stable: false },
-  NVDAX: { symbol: 'NVDAx', address: '0xc845b2894dbddd03858fd2d643b4ef725fe0849d', decimals: 18, stable: false },
-  TSLAX: { symbol: 'TSLAx', address: '0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0', decimals: 18, stable: false },
+  ...Object.fromEntries(stockAssets.map(({ token, symbol, address }) =>
+    [token, { symbol, address, decimals: 18, stable: false }])),
   ...Object.fromEntries(shareAssets.map(({ token, symbol, address, underlying }) =>
     [token, { symbol, address, decimals: 18, stable: false, underlyingXStock: underlying }])),
   // Coinbase wrapped BTC (Hanji's BTC representation). NO CEX lists a cbBTC/BTC
@@ -226,11 +240,8 @@ export const ASSETS: Record<string, AssetSpec> = {
   // the on-chain token redeems for, not a proxy for it (PAXG exists but would
   // introduce an untraded XAUt/PAXG basis; the direct symbol avoids it).
   XAUt: { key: 'XAUt', symbol: 'XAUt', token: 'XAUT0', cex: 'binance', cexSymbol: 'XAUTUSDT' },
-  SPYx: { key: 'SPYx', symbol: 'SPYx', token: 'SPYX', cex: 'kraken', cexSymbol: 'SPYx/USD' },
-  QQQx: { key: 'QQQx', symbol: 'QQQx', token: 'QQQX', cex: 'kraken', cexSymbol: 'QQQx/USD' },
-  EWYx: { key: 'EWYx', symbol: 'EWYx', token: 'EWYX', cex: 'kraken', cexSymbol: 'EWYx/USD' },
-  NVDAx: { key: 'NVDAx', symbol: 'NVDAx', token: 'NVDAX', cex: 'kraken', cexSymbol: 'NVDAx/USD' },
-  TSLAx: { key: 'TSLAx', symbol: 'TSLAx', token: 'TSLAX', cex: 'kraken', cexSymbol: 'TSLAx/USD' },
+  ...Object.fromEntries(stockAssets.map(({ key, symbol, token }): [string, AssetSpec] =>
+    [key, { key, symbol, token, cex: 'kraken', cexSymbol: `${symbol}/USD` }])),
   ...Object.fromEntries(shareAssets.map(({ key, symbol, token, underlying }): [string, AssetSpec] =>
     [key, { key, symbol, token, cex: 'kraken', cexSymbol: `${underlying}/USD` }])),
 };
@@ -301,11 +312,11 @@ export const PAIRS: Pair[] = [
   // first match, and the cbBTC cross is referenced by its symbol.
   { symbol: 'XAUt/BTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset', quoteWrapBasisSymbol: 'WBTCBTC' },
   { symbol: 'XAUt/cbBTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset' },
-  ...['SPYx', 'QQQx', 'EWYx', 'NVDAx', 'TSLAx'].flatMap((base, i, stocks): Pair[] => [
-    ...['USDC', 'USDT0', 'AUSD'].map((quote) => ({ symbol: `${base}/${quote}`, base, quote })),
-    ...['MON', 'ETH', 'XAUt', ...stocks.slice(0, i)].map((quote): Pair => ({ symbol: `${base}/${quote}`, base, quote, quoteKind: 'asset' })),
-    { symbol: `${base}/BTC`, base, quote: 'BTC', quoteKind: 'asset', quoteWrapBasisSymbol: 'WBTCBTC' },
-    { symbol: `${base}/cbBTC`, base, quote: 'BTC', quoteKind: 'asset' },
+  ...stockAssets.flatMap(({ key: base, symbol }, i, stocks): Pair[] => [
+    ...['USDC', 'USDT0', 'AUSD'].map((quote) => ({ symbol: `${symbol}/${quote}`, base, quote })),
+    ...['MON', 'ETH', 'XAUt', ...stocks.slice(0, i).map((a) => a.key)].map((quote): Pair => ({ symbol: `${symbol}/${ASSETS[quote].symbol}`, base, quote, quoteKind: 'asset' })),
+    { symbol: `${symbol}/BTC`, base, quote: 'BTC', quoteKind: 'asset', quoteWrapBasisSymbol: 'WBTCBTC' },
+    { symbol: `${symbol}/cbBTC`, base, quote: 'BTC', quoteKind: 'asset' },
   ]),
   ...shareAssets.map(({ key, symbol }) => ({ symbol: `${symbol}/USDC`, base: key, quote: 'USDC' })),
 ];

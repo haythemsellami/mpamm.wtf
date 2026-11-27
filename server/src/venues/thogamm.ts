@@ -294,6 +294,8 @@ export function createThogammAdapter(): VenueAdapter {
     historyRevisions: [
       { id: 'xstocks-usd-references', source: 'markets', from: '2026-10-26', markets: PAIRS.filter((p) => THOG_XSTOCKS_2026_10.includes(p.base)).map((p) => p.symbol) },
       { id: 'xaut-wbtc-quote-basis', source: 'markets', from: '2026-09-04', markets: ['XAUt/BTC'] },
+      { id: 'november-xstocks', source: 'markets', from: '2026-11-17', markets: PAIRS.filter((p) => ['SMHx', 'SPCXx', 'MUx', 'SKHYx'].includes(p.base)).map((p) => p.symbol) },
+      { id: 'anthropic-xstock', source: 'markets', from: '2026-11-27', markets: PAIRS.filter((p) => p.base === 'ANTX').map((p) => p.symbol) },
     ],
 
     discover: refresh,

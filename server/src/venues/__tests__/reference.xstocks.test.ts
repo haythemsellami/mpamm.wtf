@@ -109,7 +109,9 @@ describe('xStock pair terms', () => {
     mids.set('ANTx/USD', 91.5);
     const r = createReferenceRegistry();
     expect(r.midForPair('wANTx/USDC')).toBe(0);
-    expect(r.assetUsd('ANTx')).toBe(0);
+    expect(r.assetUsd('ANTx')).toBe(0);  // historical wrapped-share asset key
+    expect(r.midForPair('ANTx/USDC')).toBeCloseTo(91.5 / 1.002, 10);
+    expect(r.quote([100], new Set(['ANTx/USDC']))).toHaveLength(1);
     expect(r.quote([100], new Set(['wANTx/USDC']))).toEqual([]);
     expect(r.midForPair('SPYx/USDC')).toBeGreaterThan(0);
   });
