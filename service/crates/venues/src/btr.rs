@@ -2,8 +2,11 @@
 //! pool (BTR's "AIMM"). Every listed asset sits in one book; any two of them
 //! swap in one call and emit one `Swapped`, a spoke-to-spoke swap included.
 //!
-//!   pool.getAsset(t) / getRiskFlags(t) → listing, decimals, swap-enabled bit
-//!   pool.Swapped(…)                    → the trade (amounts = in | out << 128)
+//!   pool.getSwapQuote(in, out, amountIn) → the executable, fee-inclusive
+//!                                          exact-in quote (`amountOut` is what
+//!                                          a swap pays)
+//!   pool.getAsset(t) / getRiskFlags(t)   → listing, decimals, swap-enabled bit
+//!   pool.Swapped(…)                      → the trade (amounts = in | out << 128)
 //!
 //! Two pools, one venue: pool v2 (2026-11-13) replaced a proxy from the same
 //! deployer that emitted the same `Swapped` (2026-10-02 → 11-10). Both sit in
@@ -13,6 +16,14 @@
 //! first registered pair of those two tokens (either way round) whatever the
 //! pool lists. A pair that is not registered maps to nothing and is dropped.
 //! Discovery only decides what is quotable.
+//!
+//! Quotes: pool v2 only (the retired pool's quotes revert), every leg in one
+//! batch at ~120k gas each. `getSwapQuote` does not depend on the sender, but
+//! while a leg is SWAP_GATED only senders on the pool's swap gate can execute
+//! it: the price is executable through them. A quote the pool cannot honour
+//! (past a coverage cap, a halted leg, a stale mark) REVERTS rather than
+//! filling partly, so a surviving side is the full size and a size past the
+//! caps has no row.
 //!
 //! USD: a stable-quoted pair's stable leg; a crypto-quoted pair is valued off
 //! the pricer's quote leg, else its base leg, else the block holds (no
@@ -30,16 +41,16 @@ use std::{
 
 use alloy_primitives::{address, Address, U256};
 use async_trait::async_trait;
-use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, HistoryRevision, Venue, VenueError};
+use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, HistoryRevision, QuoteCx, Venue, VenueError};
 use mpamm_registry::{parse_address, Pair, Registry};
 use mpamm_ring::{Addr, TopicFilter, WatchSet};
-use mpamm_types::{Fill, FillCategory, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
+use mpamm_types::{Fill, FillCategory, QuoteRow, Side, ThemeColor, VenueKind, VenueMeta, VenueRole};
 use parking_lot::RwLock;
 
 use crate::{
     chain::{call_many, At},
-    logs,
-    util::{addr_hex, b32_hex, fill_id, from_units, short_hex, to_addr},
+    logs, quote_health,
+    util::{addr_hex, b32_hex, fill_id, from_addr, from_units, short_hex, to_addr, to_f64, to_units},
 };
 
 pub const ID: &str = "btr";
@@ -93,12 +104,28 @@ pub mod abi {
         }
         function getAsset(address tk) view returns (Asset);
         function getRiskFlags(address tk) view returns (uint16);
+        struct SwapQuote {
+            uint256 amountOut;
+            uint256 amountIn;
+            uint16 spreadPbps;
+            uint256 protoFee;
+            uint256 lpFee;
+            int8 skewIn;
+            int8 skewOut;
+            uint256 markPrice;
+            uint256 midPrice;
+            uint256 covToll;
+            address[] routeHops;
+            uint256[] hopAmounts;
+            uint256[] hopPrices;
+        }
+        function getSwapQuote(address tokenIn, address tokenOut, uint256 amountIn) view returns (SwapQuote);
         // amounts = amountIn | amountOut << 128 (raw token units).
         event Swapped(address indexed sender, address indexed recipient, address indexed tokenIn, address tokenOut, uint256 amounts, uint256 fees, uint256 prices, uint256 outBook, uint256 outState);
         event Upgraded(address indexed implementation);
     }
 }
-use abi::{getAssetCall, getRiskFlagsCall, Swapped, Upgraded};
+use abi::{getAssetCall, getRiskFlagsCall, getSwapQuoteCall, Swapped, Upgraded};
 
 /// A registered pair two pool assets can trade as.
 #[derive(Debug, Clone, PartialEq)]
@@ -252,6 +279,13 @@ impl Btr {
         }
     }
 
+    /// The quotable markets in the registry's pair order (today's map keeps
+    /// discovery's insertion order, which is the registry's).
+    fn quotable_in_order(&self, registry: &Registry) -> Vec<BtrMarket> {
+        let q = self.quotable.read();
+        registry.pairs.iter().filter_map(|p| q.get(&p.symbol).cloned()).collect()
+    }
+
     fn table(&self, registry: &Registry) -> &HashMap<(Addr, Addr), BtrMarket> {
         self.table.get_or_init(|| btr_markets(registry))
     }
@@ -314,6 +348,11 @@ impl Btr {
 /// `x > 0`, false for NaN (today's `!(x > 0)` guards).
 fn positive(x: f64) -> bool {
     x > 0.0
+}
+
+/// Wall-clock milliseconds, today's `Date.now()`.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
 }
 
 fn is_pool(a: &Addr) -> bool {
@@ -403,6 +442,133 @@ impl Venue for Btr {
             }
         }
         Ok(out)
+    }
+
+    /// getSwapQuote(tokenIn, tokenOut, amountIn) on pool v2 per quotable
+    /// market × size × side, pinned to the block: selling spends the base
+    /// worth `size`, buying the quote token worth `size`, each in its own
+    /// units. Price = quote per base, all-in.
+    async fn quote(&self, cx: &QuoteCx<'_>, sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        let markets = self.quotable_in_order(cx.registry);
+        struct Leg {
+            market: usize,
+            size: f64,
+            sell: bool,
+            amount_in: U256,
+            mid: f64,
+        }
+        let mut legs = Vec::new();
+        let mut calls = Vec::new();
+        for (i, m) in markets.iter().enumerate() {
+            // The bps anchor is the pair-terms reference mid, not a raw USDT price.
+            let mid = cx.pricer.pair_mid(&m.market);
+            if mid <= 0.0 || cx.pricer.usd_per_token(&m.base_key) <= 0.0 || cx.pricer.usd_per_token(&m.quote_key) <= 0.0
+            {
+                continue;
+            }
+            for &size in sizes_usd {
+                for sell in [true, false] {
+                    let (in_key, input, in_dec, output) = if sell {
+                        (&m.base_key, m.base, m.base_dec, m.quote)
+                    } else {
+                        (&m.quote_key, m.quote, m.quote_dec, m.base)
+                    };
+                    let amount_in = to_units(cx.pricer.token_for_usd(in_key, size), in_dec);
+                    if amount_in.is_zero() {
+                        continue;
+                    }
+                    calls.push((
+                        POOL,
+                        getSwapQuoteCall {
+                            tokenIn: from_addr(&input),
+                            tokenOut: from_addr(&output),
+                            amountIn: amount_in,
+                        },
+                    ));
+                    legs.push(Leg { market: i, size, sell, amount_in, mid });
+                }
+            }
+        }
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
+        let res = call_many(cx.rpc, &calls, At::Hash(cx.block.hash)).await?;
+        // Every leg failing is venue-wide (halted, feed gate, ABI drift), not
+        // a thin market: name it instead of vanishing.
+        quote_health::check_outage(&meta().name, &res)?;
+        let ts = now_ms();
+        // One row per (market, size) in the order its first answered leg
+        // came, with each answered leg's fee.
+        let mut rows: Vec<(QuoteRow, Vec<f64>)> = Vec::new();
+        for (leg, r) in legs.iter().zip(res) {
+            let Ok(q) = r else { continue };
+            if q.amountOut.is_zero() {
+                continue;
+            }
+            let m = &markets[leg.market];
+            let (in_dec, out_dec) = if leg.sell { (m.base_dec, m.quote_dec) } else { (m.quote_dec, m.base_dec) };
+            let in_h = from_units(leg.amount_in, in_dec);
+            let out_h = from_units(q.amountOut, out_dec);
+            if in_h <= 0.0 || out_h <= 0.0 {
+                continue;
+            }
+            let idx = match rows.iter().position(|(x, _)| x.market == m.market && x.size_usd == leg.size) {
+                Some(i) => i,
+                None => {
+                    rows.push((
+                        QuoteRow {
+                            venue_id: ID.into(),
+                            market: m.market.clone(),
+                            size_usd: leg.size,
+                            bid_bps: 0.0,
+                            ask_bps: 0.0,
+                            bid_px: 0.0,
+                            ask_px: 0.0,
+                            spread_bps: 0.0,
+                            // A leg past the pool's caps reverts: an answer is the full size.
+                            filled_full: true,
+                            one_sided: None,
+                            fee_bps: 0.0,
+                            cex_ask_bps: None,
+                            cex_bid_bps: None,
+                            ts,
+                        },
+                        Vec::new(),
+                    ));
+                    rows.len() - 1
+                }
+            };
+            let (row, fees) = &mut rows[idx];
+            // The fee as the pool charges it: (protocol + LP fee) over the
+            // GROSS output, both in tokenOut units, to 0.001 bp.
+            let fee = q.protoFee.saturating_add(q.lpFee);
+            let gross = q.amountOut.saturating_add(fee);
+            if !gross.is_zero() {
+                fees.push(to_f64(fee.saturating_mul(U256::from(10_000_000u64)) / gross) / 1000.0);
+            }
+            if leg.sell {
+                row.bid_px = out_h / in_h;
+                row.bid_bps = (row.bid_px / leg.mid - 1.0) * 1e4;
+            } else {
+                row.ask_px = in_h / out_h;
+                row.ask_bps = (row.ask_px / leg.mid - 1.0) * 1e4;
+            }
+        }
+        Ok(rows
+            .into_iter()
+            .map(|(mut row, fees)| {
+                if !fees.is_empty() {
+                    row.fee_bps = fees.iter().fold(0.0, |a, b| a + b) / fees.len() as f64;
+                }
+                if row.bid_px > 0.0 && row.ask_px > 0.0 {
+                    row.spread_bps = row.ask_bps - row.bid_bps;
+                } else {
+                    // E.g. the pool holds too little of one side.
+                    row.one_sided = Some(true);
+                }
+                row
+            })
+            .collect())
     }
 
     fn markets(&self) -> Vec<String> {
