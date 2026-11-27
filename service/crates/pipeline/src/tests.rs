@@ -25,9 +25,13 @@ struct TestVenue {
     fail: StdMutex<HashMap<u64, u32>>,
 }
 
+#[async_trait::async_trait]
 impl Venue for TestVenue {
     fn id(&self) -> &str {
         "test"
+    }
+    async fn discover(&self, _cx: &mpamm_core::ChainCx<'_>) -> Result<(), VenueError> {
+        Ok(())
     }
     fn meta(&self) -> Vec<VenueMeta> {
         vec![]
@@ -37,13 +41,14 @@ impl Venue for TestVenue {
         w.logs.insert(VENUE, TopicFilter::Topics([SWAP].into()));
         Ok(w)
     }
-    fn decode(&self, _cx: &DecodeCx<'_>, b: &FinalBlock) -> Result<Vec<Fill>, VenueError> {
+    fn decode(&self, cx: &DecodeCx<'_>, b: &FinalBlock) -> Result<Vec<Fill>, VenueError> {
         if let Some(n) = self.fail.lock().unwrap().get_mut(&b.number) {
             if *n > 0 {
                 *n -= 1;
                 return Err(VenueError::Decode("injected".into()));
             }
         }
+        cx.state.set("test", "last", &b.number.to_string());
         Ok(b.logs
             .iter()
             .map(|l| Fill {
@@ -195,6 +200,8 @@ async fn harness(fail_first: u32) -> Harness {
         registry: Registry::get(),
         prices: mpamm_pricing::Prices::new(Registry::get(), mpamm_pricing::Fees::default()),
         watch: Arc::new(ArcSwap::from_pointee(watch)),
+        state: Mutex::new(VenueState::default()),
+        refetch_through: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         stats: Arc::new(Stats::default()),
         committed: tx,
         retry_min: Duration::from_millis(10),
@@ -284,4 +291,26 @@ async fn run_drains_the_channel_in_order() {
     h.pipeline.run(rx).await;
     assert_eq!(stats.view().cursor, 20);
     assert_eq!(stats.view().trades, 20);
+}
+
+#[tokio::test]
+async fn venue_state_commits_with_its_block() {
+    let h = harness(0).await;
+    h.venue.fail.lock().unwrap().insert(2, 1);
+    h.pipeline.process(Input::Final(ring_block(1, 1))).await;
+    h.pipeline.process(Input::Final(ring_block(2, 1))).await;
+    let stored = h.pipeline.writer.run(|s| s.venue_state("test", "last")).await.unwrap();
+    assert_eq!(stored.as_deref(), Some("2"));
+    assert_eq!(h.pipeline.state.lock().unwrap().get("test", "last").as_deref(), Some("2"));
+    assert!(h.pipeline.state.lock().unwrap().take_pending().is_empty(), "the failed attempt's write was discarded");
+}
+
+#[tokio::test]
+async fn blocks_copied_with_an_older_watch_set_are_read_over_rpc() {
+    let h = harness(0).await;
+    h.pipeline.refetch_through.store(30, Ordering::Relaxed);
+    h.pipeline.process(Input::Final(ring_block(30, 1))).await;
+    h.pipeline.process(Input::Final(ring_block(31, 1))).await;
+    let v = h.pipeline.stats.view();
+    assert_eq!((v.from_rpc, v.from_ring), (1, 1));
 }

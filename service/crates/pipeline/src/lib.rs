@@ -18,7 +18,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use mpamm_core::{DecodeCx, FinalBlock, Venue, VenueError};
+use mpamm_core::{DecodeCx, FinalBlock, Venue, VenueError, VenueState};
 use mpamm_pricing::Prices;
 use mpamm_registry::Registry;
 use mpamm_ring::{Block, MissingReason, WatchSet};
@@ -104,6 +104,12 @@ pub struct Pipeline {
     /// The set the reader copies with; the pipeline grows it as venues
     /// discover sources.
     pub watch: Arc<ArcSwap<WatchSet>>,
+    /// Venue state: what is committed plus the block being decoded.
+    pub state: Mutex<VenueState>,
+    /// Blocks at or below this height may have been copied from the ring
+    /// with a smaller watch set than the venues now declare: they are read
+    /// over RPC with the current one instead.
+    pub refetch_through: Arc<AtomicU64>,
     pub stats: Arc<Stats>,
     pub committed: broadcast::Sender<Committed>,
     /// Backoff bounds for holds.
@@ -127,6 +133,9 @@ impl Pipeline {
     /// One height, start to commit.
     pub async fn process(&self, input: Input) {
         let block = match input {
+            Input::Final(b) if b.start.number <= self.refetch_through.load(Ordering::Relaxed) => {
+                self.repair(b.start.number, MissingReason::Incomplete).await
+            }
             Input::Final(b) => match FinalBlock::from_ring(&b) {
                 Some(fb) => fb,
                 // A Final block always has its headers when the tracker
@@ -138,7 +147,7 @@ impl Pipeline {
         let number = block.number;
 
         let mut hold = Hold::new(self, format!("decode block {number}"));
-        let fills = loop {
+        let (fills, state) = loop {
             match self.decode(&block) {
                 Ok(f) => break f,
                 Err(e) => hold.failed(e).await,
@@ -152,7 +161,7 @@ impl Pipeline {
             timestamp: block.timestamp,
             trades: fills.clone(),
             gas: Vec::new(),
-            state: Vec::new(),
+            state: state.clone(),
         };
         let mut hold = Hold::new(self, format!("commit block {number}"));
         let inserted = loop {
@@ -165,6 +174,7 @@ impl Pipeline {
         };
         hold.done();
         let Some(inserted) = inserted else { return };
+        self.state.lock().unwrap().apply(&state);
 
         match block.origin {
             mpamm_core::Origin::Ring => self.stats.from_ring.fetch_add(1, Ordering::Relaxed),
@@ -178,14 +188,24 @@ impl Pipeline {
         let _ = self.committed.send(Committed { number, time_ms: block.time_ms(), trades: Arc::new(trades) });
     }
 
-    fn decode(&self, block: &FinalBlock) -> Result<Vec<Fill>, String> {
+    /// Every venue's trades in the block, and the state they set.
+    #[allow(clippy::type_complexity)]
+    fn decode(&self, block: &FinalBlock) -> Result<(Vec<Fill>, Vec<(String, String, String)>), String> {
         let pricer = self.prices.at(block.time_ms());
-        let cx = DecodeCx { registry: self.registry, pricer: &pricer };
+        let state = self.state.lock().unwrap();
+        let cx = DecodeCx { registry: self.registry, pricer: &pricer, state: &state };
         let mut all = Vec::new();
         for v in &self.venues {
-            all.extend(v.decode(&cx, block).map_err(|e| format!("{}: {e}", v.id()))?);
+            match v.decode(&cx, block) {
+                Ok(f) => all.extend(f),
+                Err(e) => {
+                    // A failed attempt's writes are discarded with it.
+                    state.take_pending();
+                    return Err(format!("{}: {e}", v.id()));
+                }
+            }
         }
-        Ok(all)
+        Ok((all, state.take_pending()))
     }
 
     async fn repair(&self, number: u64, reason: MissingReason) -> FinalBlock {

@@ -1,10 +1,16 @@
-//! The venue trait (docs/rebuild-spec.md → The venue trait). It grows with
-//! the port: discovery and quoting arrive with the first venue modules
-//! (M5, M9); this is the part the commit pipeline drives.
+//! The venue trait (docs/rebuild-spec.md → The venue trait). Everything a
+//! protocol needs lives in its module: discovery, what to watch, decoding
+//! final blocks, gas destinations, entry points and dated history repairs.
+//! The core names no venue. Quoting joins with the quote engine (M9).
 
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use mpamm_chain::Rpc;
 use mpamm_registry::Registry;
-use mpamm_ring::WatchSet;
+use mpamm_ring::{Addr, WatchSet};
 use mpamm_types::{Fill, VenueMeta};
+use parking_lot::Mutex;
 
 use crate::FinalBlock;
 
@@ -16,6 +22,8 @@ pub enum VenueError {
     /// Decoding a block failed as a whole: the cursor holds and the block is
     /// retried. A single malformed log is skipped by the venue instead.
     Decode(String),
+    /// A chain read failed (discovery).
+    Chain(String),
 }
 
 impl std::fmt::Display for VenueError {
@@ -23,6 +31,7 @@ impl std::fmt::Display for VenueError {
         match self {
             VenueError::NotReady(m) => write!(f, "not ready: {m}"),
             VenueError::Decode(m) => write!(f, "decode: {m}"),
+            VenueError::Chain(m) => write!(f, "chain: {m}"),
         }
     }
 }
@@ -57,12 +66,102 @@ impl Pricer for NoPrices {
     }
 }
 
+/// A venue's small durable key/value state (a pool a factory announced
+/// once). Reads see what is committed plus this block's writes; writes are
+/// committed with the block, so the cursor can never pass state that was not
+/// stored.
+#[derive(Debug, Default)]
+pub struct VenueState {
+    committed: HashMap<(String, String), String>,
+    pending: Mutex<Vec<(String, String, String)>>,
+}
+
+impl VenueState {
+    pub fn new(committed: HashMap<(String, String), String>) -> Self {
+        Self { committed, pending: Mutex::new(Vec::new()) }
+    }
+
+    pub fn get(&self, venue: &str, key: &str) -> Option<String> {
+        let pending = self.pending.lock();
+        if let Some((_, _, v)) = pending.iter().rev().find(|(ve, k, _)| ve == venue && k == key) {
+            return Some(v.clone());
+        }
+        self.committed.get(&(venue.to_string(), key.to_string())).cloned()
+    }
+
+    pub fn set(&self, venue: &str, key: &str, value: &str) {
+        self.pending.lock().push((venue.to_string(), key.to_string(), value.to_string()));
+    }
+
+    /// This block's writes, for the commit.
+    pub fn take_pending(&self) -> Vec<(String, String, String)> {
+        std::mem::take(&mut *self.pending.lock())
+    }
+
+    /// After the commit: the writes are now committed.
+    pub fn apply(&mut self, writes: &[(String, String, String)]) {
+        for (v, k, val) in writes {
+            self.committed.insert((v.clone(), k.clone()), val.clone());
+        }
+    }
+}
+
 /// What decoding a block can use.
 pub struct DecodeCx<'a> {
     pub registry: &'a Registry,
     pub pricer: &'a dyn Pricer,
+    pub state: &'a VenueState,
 }
 
+/// What discovery can use: the local node and the registry.
+pub struct ChainCx<'a> {
+    pub rpc: &'a Rpc,
+    pub registry: &'a Registry,
+}
+
+/// A contract takers enter a venue through (compared with a transaction's
+/// `to` by the core's attribution). No `router` = the venue itself (a direct
+/// trade); a `router` name = the venue's own periphery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryPoint {
+    pub address: Addr,
+    pub router: Option<String>,
+}
+
+/// A shared forwarder some of a venue's quote updates go through: matched on
+/// `to`, the 4-byte selector, and the static calldata word (0-based, after
+/// the selector) that holds one of the venue's own destinations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GasRelay {
+    pub address: Addr,
+    pub selector: [u8; 4],
+    pub target_word: usize,
+}
+
+/// Where a venue's own quote-update transactions go. With the ring every
+/// such transaction is seen, so gas is exact; how today's sampler found them
+/// (logs or blocks) no longer matters.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GasSources {
+    /// Transactions sent straight to one of these.
+    pub destinations: Vec<Addr>,
+    /// Transactions through a shared relay naming one of `destinations`.
+    pub relays: Vec<GasRelay>,
+}
+
+/// A one-shot, dated replay of a venue's history shipped with the decode
+/// change that needs it (today's `historyRevisions`). Applied once per
+/// database, keyed by `id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRevision {
+    pub id: &'static str,
+    /// First UTC day whose stored history is wrong; `None` = the lifetime.
+    pub from: Option<&'static str>,
+    /// `Markets(..)`: add these newly listed markets' history only.
+    pub markets: &'static [&'static str],
+}
+
+#[async_trait]
 pub trait Venue: Send + Sync {
     /// The venue id its trades carry.
     fn id(&self) -> &str;
@@ -70,12 +169,40 @@ pub trait Venue: Send + Sync {
     /// Static metadata for the web app.
     fn meta(&self) -> Vec<VenueMeta>;
 
-    /// What the reader must copy out of the ring for this venue: trade,
-    /// state and attribution logs, gas destinations. Discovery only ever
-    /// grows it.
+    /// Finds the venue's markets on chain. Re-runs every 10 minutes and must
+    /// merge into what it holds, never replace it.
+    async fn discover(&self, cx: &ChainCx<'_>) -> Result<(), VenueError>;
+
+    /// What the reader must copy out of the ring for this venue. `NotReady`
+    /// holds the cursor until discovery has resolved it.
     fn watch(&self) -> Result<WatchSet, VenueError>;
 
     /// The trades in one final block. Called once per block, strictly in
     /// block order, so a venue may keep state between blocks.
     fn decode(&self, cx: &DecodeCx<'_>, block: &FinalBlock) -> Result<Vec<Fill>, VenueError>;
+
+    /// Markets discovery found (what the quote engine will quote).
+    fn markets(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Contracts takers enter through, for attribution.
+    fn entry_points(&self) -> Vec<EntryPoint> {
+        Vec::new()
+    }
+
+    /// Where the venue's own quote updates go. `None` = it doesn't fund its
+    /// own quoting; `NotReady` holds until discovery resolves it.
+    fn gas_sources(&self) -> Result<Option<GasSources>, VenueError> {
+        Ok(None)
+    }
+
+    fn history_revisions(&self) -> Vec<HistoryRevision> {
+        Vec::new()
+    }
+
+    /// The first UTC day of on-chain history, for lifetime replays.
+    fn history_from_utc(&self) -> Option<&'static str> {
+        None
+    }
 }

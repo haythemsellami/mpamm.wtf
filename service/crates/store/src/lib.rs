@@ -474,6 +474,14 @@ impl Store {
             .optional()?)
     }
 
+    /// Every venue's stored state, for the pipeline to start from.
+    pub fn all_venue_state(&self) -> Result<std::collections::HashMap<(String, String), String>> {
+        let mut stmt = self.conn.prepare("SELECT venue_id, key, value FROM venue_state")?;
+        let rows =
+            stmt.query_map([], |r| Ok(((r.get::<_, String>(0)?, r.get::<_, String>(1)?), r.get::<_, String>(2)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn revision_applied(&self, venue: &str, kind: &str, id: &str) -> Result<bool> {
         Ok(self
             .conn
