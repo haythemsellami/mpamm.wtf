@@ -1,6 +1,7 @@
 //! Ported from server/src/venues/__tests__/lunarbase.decode.test.ts: real
 //! Monad SwapExecuted fixtures, the monotonic state cache, and discovery's
-//! read-failure vs misconfiguration rules (the quoting cases join with M9).
+//! read-failure vs misconfiguration rules (the quoting cases are in
+//! lunarbase_quote.rs).
 //! Expected numbers are today's adapter's own outputs, bit for bit.
 
 use std::collections::HashMap;
