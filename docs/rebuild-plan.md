@@ -360,7 +360,9 @@ exact gas matching the recount. *(DevOps: env file with archive URLs.)*
       that prices only the requested markets; served on `/api/depth`, its SSE stream and the
       `depth` topic. Curves identical to today's at the same block (`mpamm-tools depth-at`,
       `server/scripts/depth-at.ts`, `compare-depth.py`): POE, Crystal, WOOFi, BTR, Metric, and
-      Uniswap v4 against today's one-call-per-leg reads
+      Uniswap v4 against today's one-call-per-leg reads. Live on the host 2026-11-27 (one pass
+      a second, as production): the dashboard's depth panel draws every quoting venue; a
+      pass takes p50 63 ms, p90 110 ms, and realtime quote timings are unchanged
 - [x] Per-venue timings on the health endpoint
 
 **Done when:** with stub venues, jobs start within 1 ms of `BLOCK_END` and the engine keeps
