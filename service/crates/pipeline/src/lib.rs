@@ -121,32 +121,6 @@ impl Pipeline {
         }
     }
 
-    async fn hold<T>(&self, what: &str, mut attempt: impl AsyncFnMut() -> Result<T, String>) -> T {
-        let mut delay = self.retry_min;
-        let mut since: Option<Instant> = None;
-        loop {
-            match attempt().await {
-                Ok(v) => {
-                    if let Some(t) = since {
-                        tracing::info!(target: "pipeline", "{what}: recovered after {:.1}s", t.elapsed().as_secs_f64());
-                        *self.stats.held.lock().unwrap() = None;
-                    }
-                    return v;
-                }
-                Err(e) => {
-                    if since.is_none() {
-                        since = Some(Instant::now());
-                        self.stats.holds.fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!(target: "pipeline", "{what}: {e}; holding and retrying");
-                    }
-                    *self.stats.held.lock().unwrap() = Some(format!("{what}: {e}"));
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(self.retry_max);
-                }
-            }
-        }
-    }
-
     /// One height, start to commit.
     pub async fn process(&self, input: Input) {
         let block = match input {
@@ -159,16 +133,16 @@ impl Pipeline {
             Input::Missing { number, reason } => self.repair(number, reason).await,
         };
         let number = block.number;
-        let fills = self
-            .hold(&format!("decode block {number}"), async || {
-                let cx = DecodeCx { registry: self.registry };
-                let mut all = Vec::new();
-                for v in &self.venues {
-                    all.extend(v.decode(&cx, &block).map_err(|e| format!("{}: {e}", v.id()))?);
-                }
-                Ok(all)
-            })
-            .await;
+
+        let mut hold = Hold::new(self, format!("decode block {number}"));
+        let fills = loop {
+            match self.decode(&block) {
+                Ok(f) => break f,
+                Err(e) => hold.failed(e).await,
+            }
+        };
+        hold.done();
+
         let commit = BlockCommit {
             number,
             hash: format!("0x{}", mpamm_ring::hex(&block.hash)),
@@ -177,15 +151,18 @@ impl Pipeline {
             gas: Vec::new(),
             state: Vec::new(),
         };
-        let inserted = self
-            .hold(&format!("commit block {number}"), async || match self.writer.commit(commit.clone()).await {
-                Ok(c) => Ok(Some(c)),
+        let mut hold = Hold::new(self, format!("commit block {number}"));
+        let inserted = loop {
+            match self.writer.commit(commit.clone()).await {
+                Ok(c) => break Some(c),
                 // Already stored (a resume replays from just below the cursor).
-                Err(StoreError::OutOfOrder { cursor, got }) if got <= cursor => Ok(None),
-                Err(e) => Err(e.to_string()),
-            })
-            .await;
+                Err(StoreError::OutOfOrder { cursor, got }) if got <= cursor => break None,
+                Err(e) => hold.failed(e.to_string()).await,
+            }
+        };
+        hold.done();
         let Some(inserted) = inserted else { return };
+
         match block.origin {
             mpamm_core::Origin::Ring => self.stats.from_ring.fetch_add(1, Ordering::Relaxed),
             mpamm_core::Origin::Rpc(_) => self.stats.from_rpc.fetch_add(1, Ordering::Relaxed),
@@ -197,12 +174,59 @@ impl Pipeline {
         let _ = self.committed.send(Committed { number, time_ms: block.time_ms(), trades: Arc::new(trades) });
     }
 
+    fn decode(&self, block: &FinalBlock) -> Result<Vec<Fill>, String> {
+        let cx = DecodeCx { registry: self.registry };
+        let mut all = Vec::new();
+        for v in &self.venues {
+            all.extend(v.decode(&cx, block).map_err(|e| format!("{}: {e}", v.id()))?);
+        }
+        Ok(all)
+    }
+
     async fn repair(&self, number: u64, reason: MissingReason) -> FinalBlock {
         let watch = self.watch.load_full();
-        self.hold(&format!("read block {number} over RPC ({reason:?})"), async || {
-            self.fetcher.block(number, &watch).await.map_err(|e| e.to_string())
-        })
-        .await
+        let mut hold = Hold::new(self, format!("read block {number} over RPC ({reason:?})"));
+        let block = loop {
+            match self.fetcher.block(number, &watch).await {
+                Ok(b) => break b,
+                Err(e) => hold.failed(e.to_string()).await,
+            }
+        };
+        hold.done();
+        block
+    }
+}
+
+/// A retried step: the first failure logs and counts a hold, each failure
+/// backs off, success clears the held reason.
+struct Hold<'a> {
+    p: &'a Pipeline,
+    what: String,
+    delay: Duration,
+    since: Option<Instant>,
+}
+
+impl<'a> Hold<'a> {
+    fn new(p: &'a Pipeline, what: String) -> Self {
+        Self { p, what, delay: p.retry_min, since: None }
+    }
+
+    async fn failed(&mut self, e: String) {
+        if self.since.is_none() {
+            self.since = Some(Instant::now());
+            self.p.stats.holds.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(target: "pipeline", "{}: {e}; holding and retrying", self.what);
+        }
+        *self.p.stats.held.lock().unwrap() = Some(format!("{}: {e}", self.what));
+        tokio::time::sleep(self.delay).await;
+        self.delay = (self.delay * 2).min(self.p.retry_max);
+    }
+
+    fn done(self) {
+        if let Some(t) = self.since {
+            tracing::info!(target: "pipeline", "{}: recovered after {:.1}s", self.what, t.elapsed().as_secs_f64());
+            *self.p.stats.held.lock().unwrap() = None;
+        }
     }
 }
 
