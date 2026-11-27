@@ -36,7 +36,7 @@ fn pin_to(cpu: usize) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run(s: Settings) -> ExitCode {
+pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
     let registry = Registry::get();
     let store = match Store::open(&s.db) {
         Ok(st) => st,
@@ -183,6 +183,7 @@ pub fn run(s: Settings) -> ExitCode {
                 stall_ms: s.stall_secs.max(1) * 1000,
             },
             s.db.clone(),
+            notes,
         );
         source.start(&engine, source_rx);
 

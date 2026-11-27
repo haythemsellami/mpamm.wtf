@@ -132,7 +132,9 @@ async fn the_dashboard_reads_the_service_through_every_route() {
         started: Instant::now(),
         stall_ms: 5_000,
     };
-    let source = ServiceSource::new(registry, venues, prices, health, db.clone());
+    let notes = crate::notes::NoteBuffer::new();
+    notes.note(1.0, mpamm_types::NoteLevel::Warn, "feeds.warn", None, "kraken: book checksum mismatch");
+    let source = ServiceSource::new(registry, venues, prices, health, db.clone(), notes);
     let (committed, _) = broadcast::channel(16);
     let mut rx = source.messages();
     source.start(&engine, committed.subscribe());
@@ -197,6 +199,7 @@ async fn the_dashboard_reads_the_service_through_every_route() {
         markets["state"]["venues"].as_array().unwrap().iter().map(|v| v["id"].as_str().unwrap()).collect();
     assert_eq!(venues, ["poe", "bybit", "binance", "kraken"]);
     assert_eq!(markets["state"]["source"], "live");
+    assert_eq!(markets["state"]["notes"][0]["code"], "feeds.warn", "notes are served on REST");
     assert_eq!(markets["quotes"]["block"], 20);
     assert_eq!(markets["fills"].as_array().unwrap().len(), 2);
     assert_eq!(markets["fills"][0]["markoutsBps"][1], 2.0, "the tape holds the aged markouts");

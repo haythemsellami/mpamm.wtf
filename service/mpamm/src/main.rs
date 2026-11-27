@@ -9,6 +9,7 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 mod health;
+mod notes;
 #[cfg(target_os = "linux")]
 mod run;
 mod settings;
@@ -17,12 +18,19 @@ mod source;
 use std::process::ExitCode;
 
 use clap::Parser;
+use tracing_subscriber::prelude::*;
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-        .with_writer(std::io::stderr)
+    // The log, and the notes window `/api/markets` serves (every warning).
+    let notes = notes::NoteBuffer::new();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+                .with_writer(std::io::stderr),
+        )
+        .with(notes.layer())
         .init();
     let cli = settings::Cli::parse();
     let settings = match settings::Settings::load(cli, |k| std::env::var(k).ok()) {
@@ -34,11 +42,11 @@ fn main() -> ExitCode {
     };
     #[cfg(target_os = "linux")]
     {
-        run::run(settings)
+        run::run(settings, notes)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = settings;
+        let _ = (settings, notes);
         tracing::error!("mpamm maps the node's event ring and runs on Linux only (see service/README.md)");
         ExitCode::from(2)
     }

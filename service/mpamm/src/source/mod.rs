@@ -86,6 +86,7 @@ pub struct ServiceSource {
     prices: Arc<Prices>,
     health: crate::health::Health,
     db: PathBuf,
+    notes: Arc<crate::notes::NoteBuffer>,
     live: Mutex<Live>,
     tx: broadcast::Sender<StreamMessage>,
     /// Depth curves are not computed yet: every market's channel stays empty.
@@ -102,6 +103,7 @@ impl ServiceSource {
         prices: Arc<Prices>,
         health: crate::health::Health,
         db: PathBuf,
+        notes: Arc<crate::notes::NoteBuffer>,
     ) -> Arc<Self> {
         let (tx, _) = broadcast::channel(4096);
         let (depth, _) = watch::channel(None);
@@ -119,6 +121,7 @@ impl ServiceSource {
             prices,
             health,
             db,
+            notes,
             live: Mutex::new(Live {
                 state: MarketState {
                     chain_id: registry.chain_id,
@@ -347,8 +350,10 @@ fn tail_status(cursor: u64, newest: u64, last_commit_ms: u64, now: u64) -> TailS
 
 #[async_trait]
 impl ApiSource for ServiceSource {
+    /// With the notes window: REST only (the stream's hello and ticks are
+    /// built without it).
     fn state(&self) -> MarketState {
-        self.live.lock().state.clone()
+        MarketState { notes: Some(self.notes.list()), ..self.live.lock().state.clone() }
     }
 
     fn ready(&self) -> bool {
