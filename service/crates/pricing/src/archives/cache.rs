@@ -71,6 +71,30 @@ pub fn write(path: &Path, p: &Points) -> Result<(), ArchiveError> {
     std::fs::rename(&part, path).map_err(|e| io_err(path, e))
 }
 
+/// The UTC day a cache file holds, from its name.
+fn day_of(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".bbo-mid.csv").or_else(|| name.strip_suffix(".csv"))?;
+    let day = stem.rsplit('_').next()?;
+    let b = day.as_bytes();
+    (b.len() == 10 && b[4] == b'-' && b[7] == b'-' && day.bytes().filter(u8::is_ascii_digit).count() == 8)
+        .then_some(day)
+}
+
+/// Deletes the cached days before `day` (`YYYY-MM-DD`), and nothing else in
+/// `dir`: a day of every leg is a few MB, and the markouts only reach back a
+/// week. Returns how many files went.
+pub fn prune(dir: &Path, day: &str) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut n = 0;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if day_of(&name).is_some_and(|d| d < day) && std::fs::remove_file(e.path()).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Recently parsed days by cache path: a sweep marks every market of a day,
 /// and each reads the same legs.
 pub struct Memo {
@@ -129,6 +153,37 @@ mod tests {
         assert!(!dir.join("MONUSDT_2026-09-29.bbo-mid.csv.part").exists());
         std::fs::write(&path, "1790640001000,zero\n").unwrap();
         assert!(read(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_deletes_only_old_cached_days() {
+        let dir = super::super::tests::temp_dir("cache-prune");
+        let p = Points::default();
+        for path in [
+            bybit_path(&dir, "MONUSDT", "2026-11-18"),
+            bybit_path(&dir, "MONUSDT", "2026-11-20"),
+            binance_path(&dir, "BTCUSDT", Interval::S1, "2026-11-19"),
+            binance_path(&dir, "USDCUSDT", Interval::M1, "2026-11-25"),
+        ] {
+            write(&path, &p).unwrap();
+        }
+        std::fs::write(dir.join("notes.txt"), "keep").unwrap();
+        std::fs::write(dir.join("other_2026-01-01.json"), "keep").unwrap();
+        assert_eq!(prune(&dir, "2026-11-20"), 2);
+        let mut left: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "MONUSDT_2026-11-20.bbo-mid.csv",
+                "binance_USDCUSDT_1m_2026-11-25.csv",
+                "notes.txt",
+                "other_2026-01-01.json"
+            ]
+        );
+        assert_eq!(prune(&dir.join("absent"), "2026-11-20"), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

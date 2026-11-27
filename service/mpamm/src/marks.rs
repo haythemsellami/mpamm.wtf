@@ -13,7 +13,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use mpamm_markouts::archive::{mark_from_archives, Verdict};
 use mpamm_pricing::archives::Archives;
 use mpamm_store::{writer::Writer, StoreError};
-use mpamm_types::MARKOUT_HORIZONS_S;
+use mpamm_types::{utc_day, MARKOUT_HORIZONS_S};
 
 /// Between sweeps.
 pub const EVERY: Duration = Duration::from_secs(600);
@@ -76,7 +76,16 @@ pub async fn run(
     let mut every = tokio::time::interval(EVERY);
     loop {
         every.tick().await;
-        match sweep(&archives, &writer, now_ms()).await {
+        let now = now_ms();
+        // Days no sweep reads any more (the lookback, and the lead-in before it).
+        let pruned = mpamm_pricing::archives::cache::prune(
+            archives.cache_dir(),
+            &utc_day(now - LOOKBACK_MS - 2.0 * 86_400_000.0),
+        );
+        if pruned > 0 {
+            tracing::info!("markouts from archives: {pruned} cached day(s) pruned");
+        }
+        match sweep(&archives, &writer, now).await {
             Ok((report, changed)) => {
                 if !changed.is_empty() {
                     on_marked(&changed);
