@@ -13,3 +13,8 @@ indexmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# The parity test reads TypeScript's shortest round-trip floats; without this
+# serde_json may parse one an ulp off, and the error would surface as a
+# rounding difference that isn't in the port.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
