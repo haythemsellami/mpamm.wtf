@@ -11,6 +11,7 @@ pub mod logs;
 pub mod metric;
 pub mod poe;
 pub mod util;
+pub mod woofi;
 
 use std::sync::Arc;
 
@@ -18,5 +19,11 @@ use mpamm_core::Venue;
 
 /// Every venue the service runs, in today's registry order.
 pub fn all() -> Vec<Arc<dyn Venue>> {
-    vec![Arc::new(poe::Poe::default()), Arc::new(metric::venue()), Arc::new(crystal::Crystal::default()), Arc::new(btr::Btr::default())]
+    vec![
+        Arc::new(poe::Poe::default()),
+        Arc::new(metric::venue()),
+        Arc::new(crystal::Crystal::default()),
+        Arc::new(woofi::Woofi::default()),
+        Arc::new(btr::Btr::default()),
+    ]
 }
