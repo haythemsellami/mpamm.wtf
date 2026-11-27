@@ -10,7 +10,9 @@
 //! - usd on a stable-quoted market is exact (1e-9); on a crypto-quoted one
 //!   each side priced the quote token at its own moment (production when it
 //!   decoded, the service at the block's proposal), so it is compared within
-//!   a tolerance;
+//!   a tolerance, and a gap past it but under `drift_max` is reported as
+//!   drift, not failed (the first shadow hour's three were production's:
+//!   MON/USDC trades in the same second sided with the service's price);
 //! - ts and markouts differ by design (the service stamps the proposal time
 //!   and marks from it), so they are not compared.
 //!
@@ -61,6 +63,9 @@ pub struct VenueReport {
     pub only_local: Vec<String>,
     /// (id, field, production, service)
     pub diffs: Vec<(String, &'static str, String, String)>,
+    /// Crypto-quoted USD priced at different moments: (id, production,
+    /// service). Shown, never a failure.
+    pub drift: Vec<(String, f64, f64)>,
     pub prod_usd: f64,
     pub local_usd: f64,
 }
@@ -118,6 +123,7 @@ pub fn compare(
     window: Window,
     venues: &BTreeSet<String>,
     usd_tolerance: f64,
+    drift_max: f64,
 ) -> BTreeMap<String, VenueReport> {
     let keep = |f: &&Fill| window.contains(f.block_number) && venues.contains(&f.venue_id);
     let p: HashMap<&str, &Fill> = prod.iter().filter(keep).map(|f| (f.id.as_str(), f)).collect();
@@ -130,8 +136,13 @@ pub fn compare(
         match l.get(f.id.as_str()) {
             Some(x) => {
                 r.matched += 1;
+                let crypto_quoted = f.market.split('/').nth(1).is_some_and(|q| !STABLES.contains(&q));
                 for (field, a, b) in field_diffs(f, x, usd_tolerance) {
-                    r.diffs.push((f.id.clone(), field, a, b));
+                    if field == "usd" && crypto_quoted && rel(f.usd, x.usd) <= drift_max {
+                        r.drift.push((f.id.clone(), f.usd, x.usd));
+                    } else {
+                        r.diffs.push((f.id.clone(), field, a, b));
+                    }
                 }
             }
             None => r.only_prod.push(f.id.clone()),
@@ -149,6 +160,7 @@ pub fn compare(
         r.only_prod.sort();
         r.only_local.sort();
         r.diffs.sort();
+        r.drift.sort_by(|a, b| a.0.cmp(&b.0));
     }
     out
 }
@@ -251,6 +263,12 @@ pub fn print(window: Window, reports: &BTreeMap<String, VenueReport>) -> bool {
         for (id, field, a, b) in r.diffs.iter().take(20) {
             println!("{v}: {id} {field}: production {a}, service {b}");
         }
+        for (id, a, b) in r.drift.iter().take(10) {
+            println!(
+                "{v}: {id} usd priced at another moment: production {a}, service {b} ({:+.2}%)",
+                (b / a - 1.0) * 100.0
+            );
+        }
     }
     let ok = reports.values().all(VenueReport::clean);
     println!("{}", if ok { "IDENTICAL" } else { "DIFFERENCES" });
@@ -307,6 +325,7 @@ mod tests {
             fill("gone", "x", "MON/USDC", 11, 5.0),
             fill("drift", "x", "WBTC/MON", 12, 100.0),
             fill("far", "x", "WBTC/MON", 13, 100.0),
+            fill("moved", "x", "WBTC/MON", 17, 100.0),
             fill("stable", "x", "MON/USDC", 14, 5.0),
             fill("other-venue", "y", "MON/USDC", 15, 5.0),
             fill("late", "x", "MON/USDC", 2000, 5.0),
@@ -316,20 +335,23 @@ mod tests {
             fill("extra", "x", "MON/USDC", 16, 5.0),
             fill("drift", "x", "WBTC/MON", 12, 100.1),
             fill("far", "x", "WBTC/MON", 13, 101.0),
+            fill("moved", "x", "WBTC/MON", 17, 100.3),
             fill("stable", "x", "MON/USDC", 14, 5.0001),
         ];
         p[0].pool = "0xPOOL".into(); // case never matters for hex
         l[0].tx_hash = "0xab".into();
-        let r = compare(&p, &l, w, &venues(&["x"]), 0.002);
+        let r = compare(&p, &l, w, &venues(&["x"]), 0.002, 0.005);
         assert_eq!(r.len(), 1, "venue y isn't run by the service");
         let x = &r["x"];
-        assert_eq!((x.prod, x.local, x.matched), (5, 5, 4));
+        assert_eq!((x.prod, x.local, x.matched), (6, 6, 5));
         assert_eq!(x.only_prod, ["gone"]);
         assert_eq!(x.only_local, ["extra"]);
         let fields: Vec<(&str, &str)> = x.diffs.iter().map(|d| (d.0.as_str(), d.1)).collect();
-        // drift: 0.1% on a MON-quoted market is within tolerance; far is 1%;
-        // a stable-quoted market's USD is exact.
+        // drift: 0.1% on a MON-quoted market is within tolerance; moved
+        // 0.3% is drift (shown, not failed); far is 1%; a stable-quoted
+        // market's USD is exact.
         assert_eq!(fields, [("far", "usd"), ("stable", "usd")]);
+        assert_eq!(x.drift.iter().map(|d| d.0.as_str()).collect::<Vec<_>>(), ["moved"]);
         assert!(!x.clean());
     }
 
@@ -365,7 +387,7 @@ mod tests {
     fn identical_sides_are_clean_and_counted() {
         let w = Window { from: 0, to: 100 };
         let p = [fill("a", "x", "MON/USDC", 1, 2.0), fill("b", "x", "MON/AUSD", 2, 3.0)];
-        let r = compare(&p, &p, w, &venues(&["x", "z"]), 0.002);
+        let r = compare(&p, &p, w, &venues(&["x", "z"]), 0.002, 0.01);
         assert!(r.values().all(VenueReport::clean));
         assert_eq!(r["x"].matched, 2);
         assert_eq!(r["x"].prod_usd, 5.0);

@@ -126,6 +126,10 @@ enum Cmd {
         /// Relative USD tolerance on crypto-quoted markets.
         #[arg(long, default_value_t = 0.002)]
         usd_tolerance: f64,
+        /// Crypto-quoted USD past the tolerance but within this is reported
+        /// as pricing drift, not a difference.
+        #[arg(long, default_value_t = 0.01)]
+        drift_max: f64,
         /// Venues compared (default: every venue the service runs).
         #[arg(long, value_delimiter = ',')]
         venues: Vec<String>,
@@ -141,6 +145,7 @@ async fn parity_cmd(
     from_block: Option<u64>,
     margin: u64,
     usd_tolerance: f64,
+    drift_max: f64,
     venues: Vec<String>,
 ) -> Result<(), String> {
     let since_ms = mpamm_ring::live::now_ms() as f64 - hours * 3_600_000.0;
@@ -173,7 +178,7 @@ async fn parity_cmd(
     };
     let window = parity::Window::common(&prod_fills, &local, from_block, margin)
         .ok_or("no common block window (one side has no trades yet)")?;
-    let reports = parity::compare(&prod_fills, &local, window, &venues, usd_tolerance);
+    let reports = parity::compare(&prod_fills, &local, window, &venues, usd_tolerance, drift_max);
     let trades_ok = parity::print(window, &reports);
     // Whole UTC days: per venue-day volume against production's /api/volume.
     let today = mpamm_types::utc_day(mpamm_ring::live::now_ms() as f64);
@@ -458,8 +463,9 @@ async fn main() {
         Cmd::Migrate { from, to } => migrate::migrate(&from, &to),
         Cmd::CapturePrices { secs, rpc, out } => capture_prices(secs, &rpc, &out).await,
         Cmd::QuoteAt { venue, block, prices, rpc } => quote_at(&venue, block, &prices, &rpc).await,
-        Cmd::Parity { db, prod, prod_file, hours, from_block, margin, usd_tolerance, venues } => {
-            parity_cmd(&db, &prod, prod_file.as_deref(), hours, from_block, margin, usd_tolerance, venues).await
+        Cmd::Parity { db, prod, prod_file, hours, from_block, margin, usd_tolerance, drift_max, venues } => {
+            parity_cmd(&db, &prod, prod_file.as_deref(), hours, from_block, margin, usd_tolerance, drift_max, venues)
+                .await
         }
     };
     if let Err(e) = r {
