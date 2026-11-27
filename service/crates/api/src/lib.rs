@@ -119,6 +119,12 @@ pub trait ApiSource: Send + Sync + 'static {
     /// `stream`, the gateway's own counters.
     fn health(&self) -> serde_json::Value;
 
+    /// False answers `/api/health` with 503: the service needs a human
+    /// (a deploy's health gate and the host's monitor read the status).
+    fn healthy(&self) -> bool {
+        true
+    }
+
     /// The venue registry (`/api/venues`). Immutable for the life of the
     /// process.
     fn venues(&self) -> Vec<VenueMeta> {

@@ -44,6 +44,17 @@ async fn health_reports_the_tail_and_the_newest_fill_beside_it() {
 }
 
 #[tokio::test]
+async fn health_answers_503_while_the_source_needs_a_human() {
+    let s = server(FakeSource::new(sample_state()));
+    s.source.with(|d| d.unhealthy = true);
+    let (status, body) = get_json(&s.router, "/api/health").await;
+    assert_eq!(status, 503, "a deploy's health gate fails on it");
+    assert_eq!(body["source"], "sim", "the body still says why");
+    s.source.with(|d| d.unhealthy = false);
+    assert_eq!(get_json(&s.router, "/api/health").await.0, 200);
+}
+
+#[tokio::test]
 async fn health_omits_the_newest_fill_and_the_tail_when_there_is_none() {
     let s = server(FakeSource::new(sample_state()));
     let (_, body) = get_json(&s.router, "/api/health").await;

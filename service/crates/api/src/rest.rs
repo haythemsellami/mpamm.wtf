@@ -149,7 +149,8 @@ async fn health(State(app): State<App>) -> Response {
         stream.as_object_mut().expect("an object").insert("protocol".into(), json!("v2"));
         m.insert("stream".into(), stream);
     }
-    ok(&body)
+    let status = if app.source.healthy() { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    json_response(status, &body)
 }
 
 async fn bootstrap(State(app): State<App>, RawQuery(raw): RawQuery) -> Response {

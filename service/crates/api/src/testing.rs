@@ -39,6 +39,8 @@ pub struct FakeData {
     pub curves: HashMap<u32, MarkoutCurvesResponse>,
     /// The aggregations, fills and gas fail while set.
     pub fail: bool,
+    /// `/api/health` answers 503 while set.
+    pub unhealthy: bool,
     /// Runs after every `quotes()` read, outside the fake's lock: lets a
     /// test land an update exactly while a quote snapshot is being taken.
     pub on_quotes: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -148,6 +150,7 @@ impl FakeSource {
             leaderboards: HashMap::new(),
             curves: HashMap::new(),
             fail: false,
+            unhealthy: false,
             on_quotes: None,
         };
         let (tx, _) = broadcast::channel(4096);
@@ -325,6 +328,10 @@ impl ApiSource for FakeSource {
 
     fn messages(&self) -> broadcast::Receiver<StreamMessage> {
         self.tx.subscribe()
+    }
+
+    fn healthy(&self) -> bool {
+        !self.data.lock().unhealthy
     }
 
     fn health(&self) -> serde_json::Value {
