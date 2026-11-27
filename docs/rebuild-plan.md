@@ -44,7 +44,7 @@ path for M8.
 | M6 | Exact gas and attribution | 2 | M5 | — | Built; 3-day recount pending |
 | M7 | Markouts and analytics | 2 | M4, M5 | — | Built; archives pending |
 | M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Shadow run with all 11 venues under way; parity hourly |
-| M9 | Quote engine | 3 | M3, M4 | — | Built; depth curves pending |
+| M9 | Quote engine | 3 | M3, M4 | — | Built, with depth curves |
 | M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | 9 of 11 quote ports done |
 | M11 | Stream and REST | 4 | M8, M10 | — | Today's REST and v2 stream ported; compact protocol left |
 | M12 | Frontend on the new stream | 4 | M11 | — | Today's dashboard runs unchanged on the Rust API |
@@ -353,7 +353,14 @@ exact gas matching the recount. *(DevOps: env file with archive URLs.)*
 - [x] Per-venue deadline (150 ms default); each venue published as it finishes
 - [x] Reference frame captured per job; CEX comparison columns per venue
 - [ ] Venues whose watched contracts changed go first
-- [ ] Depth curves at today's cadence
+- [x] Depth curves at today's cadence (`quotes/src/depth.rs`): demand-driven (a market is
+      computed while someone watches it), a pass per executed block with blocks coalescing
+      while one runs (`depth_min_interval_ms` caps it, as production's 1 s does today),
+      each venue's own `quote()` over the 25-size grid pinned to the block hash, with a frame
+      that prices only the requested markets; served on `/api/depth`, its SSE stream and the
+      `depth` topic. Curves identical to today's at the same block (`mpamm-tools depth-at`,
+      `server/scripts/depth-at.ts`, `compare-depth.py`): POE, Crystal, WOOFi, BTR, Metric, and
+      Uniswap v4 against today's one-call-per-leg reads
 - [x] Per-venue timings on the health endpoint
 
 **Done when:** with stub venues, jobs start within 1 ms of `BLOCK_END` and the engine keeps

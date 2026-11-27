@@ -13,7 +13,7 @@ workspace.
 | `crates/pipeline` (`mpamm-pipeline`) | Final blocks in strict order: RPC repair (local node, then archive), venue decode, exact gas and attribution, one commit per block; holds instead of skipping. |
 | `crates/venues` (`mpamm-venues`) | The 11 venue modules (discovery, watch set, decode, gas sources, quotes), each checked against today's adapter on live blocks. How to write one: [docs/rebuild-venues.md](../docs/rebuild-venues.md). |
 | `crates/pricing` (`mpamm-pricing`) | Bybit, Binance and Kraken feeds, the pair-terms reference, the price history marks and late decodes read, wrapper rates. |
-| `crates/quotes` (`mpamm-quotes`) | One quote job per proposed block, every read pinned to its hash, a deadline per venue; each answer announced as it finishes. |
+| `crates/quotes` (`mpamm-quotes`) | One quote job per proposed block, every read pinned to its hash, a deadline per venue; each answer announced as it finishes. Depth curves (`depth`): the same quotes over a 25-size grid, for the markets someone watches, a pass per block. |
 | `crates/markouts` (`mpamm-markouts`) | Markouts at each horizon and the −5…+15 s curve, marked at the proposal time from the price history. |
 | `crates/analytics` (`mpamm-analytics`) | The leaderboard and markout-curve aggregations, bit-identical to today's. |
 | `crates/store` (`mpamm-store`) | SQLite: every trade, daily volume and gas, the cursor, revisions, venue state; one transaction per final block. |
@@ -21,7 +21,7 @@ workspace.
 | `crates/types` (`mpamm-types`) | Data types in today's JSON shapes, REST and stream payloads included. |
 | `crates/api` (`mpamm-api`) | Today's HTTP API and `/stream` protocol (`mpamm.v2.gzip` / `mpamm.v2.json`) on axum, behind the `ApiSource` trait, so the web app runs unchanged against the service. `cargo run -p mpamm-api --example fake` serves synthetic live data on 127.0.0.1:8787 for `npm -w web run dev`. |
 | `crates/chain` (`mpamm-chain`) | JSON-RPC over HTTP (calls, batches, block headers). Errors never carry a URL, so hosted keys can't reach a log. |
-| `tools` (`mpamm-tools`) | Verification: `decode-range` and `quote-at` (parity with today's adapters at the same blocks), `gas-check` (a block range's gas against a receipts recount), `parity` (the shadow run against production's API), `migrate` (today's database into the new schema). |
+| `tools` (`mpamm-tools`) | Verification: `decode-range` and `quote-at` (parity with today's adapters at the same blocks), `gas-check` (a block range's gas against a receipts recount), `parity` (the shadow run against production's API), `migrate` (today's database into the new schema), `depth-at` (depth curves at one block, against `server/scripts/depth-at.ts` with `compare-depth.py`; `--follow-secs` measures a pass's cadence and cost). |
 | `reader` (`mpamm-reader`) | The phase-1 tool: follows the ring, records each height's timeline, repairs lost heights over RPC, and writes daily files, a cursor and a health file. Decodes no venue data. |
 
 The execution-event SDK (`monad-event-ring`, `monad-exec-events`) is pinned to the
@@ -78,7 +78,7 @@ example serves the built app): `npm -w web run test:e2e:rust`.
 
 Settings come from flags, then the `[service]` table of `/var/lib/mpamm/mpamm.toml`
 (`db`, `ring`, `rpc_url`, `archive_url_env`, `reader_cpu`, `http`, `web_dist`,
-`finalize_wait_ms`, `stall_secs`, `quote_deadline_ms`), then defaults. The hosted archive URL is read only from the environment
+`finalize_wait_ms`, `stall_secs`, `quote_deadline_ms`, `depth_min_interval_ms`), then defaults. The hosted archive URL is read only from the environment
 variable named by `archive_url_env` (default `MPAMM_ARCHIVE_RPC_URL`). Once the unit
 points at `/var/lib/mpamm/bin/mpamm`, `service/scripts/deploy.sh <node-host>` installs a
 build with `service/deploy/mpamm.toml`, restarts it and checks health
