@@ -398,7 +398,11 @@ most 60 ms. *(DevOps: CPU set for the service.)*
       `/api/quotes/stats`, `/api/fills`, `/api/volume`, `/api/gas`, `/api/venues`,
       `/api/leaderboard`, `/api/leaderboard/publication`, `/api/markout-curves`,
       `/api/analytics/:revision.json`, `/api/depth`, `/api/depth/stream`, `/api/health`)
-- [ ] Byte-budget test on a recorded session (target: ~3.5 KB/s per Execution tab)
+- [ ] Byte-budget test on a recorded session (target: ~3.5 KB/s per Execution tab).
+      Measured live on today's v2 protocol, 2026-11-27, 60 s, one Execution tab (state +
+      MON/USDC $1k quotes, gzip): the Rust service 2.84 KB/s (3.9 frames/s), today's
+      production 3.58 KB/s (4.2 frames/s); the compact protocol is now an optimization,
+      not a requirement
 
 **Done when:** a recorded session replays through the stream within budget, and every
 REST endpoint returns the same data as today's for the same window.
