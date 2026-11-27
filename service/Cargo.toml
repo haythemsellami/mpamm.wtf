@@ -3,7 +3,7 @@
 # because the event ring's schema hash ties a reader build to a node version.
 [workspace]
 resolver = "2"
-members = ["reader", "crates/ring", "crates/chain", "crates/registry", "crates/types", "crates/store", "crates/core", "crates/pipeline", "crates/pricing", "mpamm"]
+members = ["reader", "crates/ring", "crates/chain", "crates/registry", "crates/types", "crates/store", "crates/core", "crates/pipeline", "crates/pricing", "crates/venues", "mpamm", "tools"]
 
 [workspace.package]
 edition = "2021"
@@ -27,6 +27,9 @@ indexmap = { version = "2", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 arc-swap = "1"
 tracing = "0.1"
+alloy-primitives = "1"
+alloy-sol-types = "1"
+async-trait = "0.1"
 crc32fast = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 parking_lot = "0.12"
