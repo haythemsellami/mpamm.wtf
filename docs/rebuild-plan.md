@@ -5,8 +5,9 @@ the tasks in each, what "done" means, and what waits on DevOps. The spec says *w
 and *why*; this file says *how* and *in what order*. Tick a box when its work is on
 `v2` (PR #176); a milestone is done only when its **Done when** checks pass.
 
-Status as of 2026-11-27: phase 1 in progress (M1). The event reader runs on the node
-host; nothing else is built yet.
+Status as of 2026-11-27: M1's code is done and its 7-day gate run is under way on the
+node host (started 07:17 UTC, by hand until the unit edit lands); M2 is in place except
+the deploy rehearsal; M3 has started (ring, chain and registry crates).
 
 ## Ground rules
 
@@ -28,9 +29,9 @@ host; nothing else is built yet.
 
 | # | Milestone | Phase | Depends on | Waits on DevOps for | Status |
 | --- | --- | --- | --- | --- | --- |
-| M1 | Reader hardening and the 7-day gate run | 1 | — | one edit to `mpamm.service` (gate run only) | In progress |
-| M2 | CI, release artifacts, deploy script | 1 | — | registry credentials (publishing only) | Not started |
-| M3 | Service skeleton: crates, config, store, commit pipeline, registry | 2 | M1 | — | Not started |
+| M1 | Reader hardening and the 7-day gate run | 1 | — | one edit to `mpamm.service` (gate run only) | Gate run under way |
+| M2 | CI, release artifacts, deploy script | 1 | — | registry credentials (publishing only); the unit edit (deploy rehearsal) | In progress |
+| M3 | Service skeleton: crates, config, store, commit pipeline, registry | 2 | M1 | — | In progress |
 | M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | Not started |
 | M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | Not started |
 | M6 | Exact gas and attribution | 2 | M5 | — | Not started |
@@ -95,7 +96,9 @@ service/
     api/                stream (compact schema + dictionary) and REST (axum)
   mpamm/                the service binary: config, wiring, threads, health
   tools/                verify-venue, parity diffs, migration, benchmarks
-  registry.toml         the market registry (single source for service and web)
+  deploy/mpamm.toml     settings installed on the host (no secrets)
+  scripts/              cargo-linux.sh, build-linux.sh, deploy.sh
+shared/registry.json    the market registry (single source for service and web)
 ```
 
 ---
@@ -116,18 +119,26 @@ measurements the spec needs (proposal delay, execution time, commit timings, rin
       (by proposer: Europe 37 ms, North America East 73 ms, West 95 ms, Asia-Pacific 122 ms);
       execution p50 7.0 ms / p99 22.7 ms; finalized +573 ms, verified +1,478 ms. Ring depth
       218–407 s as load ranged 4,600–12,800 events/s.
-- [ ] **Gap repair:** on a sequence gap or expired payload, note the block range and
-      fetch it from the local node RPC (`eth_getLogs` by block, `eth_getBlockByNumber`
-      with transactions); fall back to the archive when the node lacks it
-- [ ] **Resume:** persist the last settled block; on start rewind with
-      `block_number_prev`; report a gap when that block left the ring
-- [ ] **Shutdown:** handle SIGTERM/SIGINT, flush outputs, write a final summary
-- [ ] **Rotation:** daily files for `blocks.jsonl`, retention configurable
-- [ ] **Health:** a small local HTTP endpoint (or file) with the latest summary, for alerts
-- [ ] **Core pinning:** `--cpu <n>` pins the process to one core with `sched_setaffinity`
-      (no privilege needed, so the unit sets nothing); CPU 0 on today's host
-- [ ] Run as `mpamm.service` for 7 days, the reader installed at the unit's fixed path
-      `/var/lib/mpamm/bin/mpamm` *(DevOps: the one unit edit in the tracker)*
+- [x] **Gap repair:** heights the ring can't deliver whole (sequence gap, expired
+      payload, record error, lost finalization) are reported `Missing` in order by the
+      ring crate's tracker and read over RPC, local node first, then the archive.
+      On the host, an 8-minute forced pause lost 1,585 heights; all were repaired from
+      the local node within seconds.
+- [x] **Resume:** `cursor.json` holds the first height not yet written; a restart
+      replays from the ring, or from its oldest block with the rest repaired. On the
+      host: a restart after 2 minutes resumed with no repair and no duplicate; one
+      after 7.5 minutes (cursor out of the ring) repaired the 194 heights in between.
+- [x] **Shutdown:** SIGTERM/SIGINT write what is held, the cursor and a last health line
+- [x] **Rotation:** daily `blocks-` and `summary-` files (UTC), `--keep-days` (30)
+- [x] **Health:** `health.json` every second (status, lag, unrepaired heights)
+- [x] **Core pinning:** `--cpu <n>` (or `cpu` in `/var/lib/mpamm/mpamm.toml`, for runs
+      under the unit, which passes no arguments)
+- [x] Ring adapter proven against the SDK's recorded ring (31 blocks, 8,582 logs: block
+      hashes, transaction headers and every log's block-level index match)
+- [ ] Run for 7 days: started 2026-11-27 07:17 UTC by hand (`nohup`, CPU 0, output in
+      `/var/lib/mpamm/reader/`); moves to `mpamm.service` once the unit points at
+      `/var/lib/mpamm/bin/mpamm` *(DevOps: the one unit edit in the tracker)*. A host
+      reboot before then stops it; it resumes from its cursor when restarted.
 
 **Done when:** 7 consecutive days with no unrepaired gap; ring depth, execution-time and
 arrival distributions published in the PR; restart and repair paths exercised at least
@@ -135,16 +146,19 @@ once each on the host.
 
 ### M2 · CI, release artifacts, deploy script
 
-- [ ] GitHub Actions job: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`
-      for `service/` on Ubuntu with clang-19, CMake, libhugetlbfs-dev, libzstd-dev
-- [ ] Cache the cargo registry and the Monad git checkout between runs
-- [ ] Release build for `x86-64-v3`; publish the binary as a workflow artifact (and to the
-      registry DevOps chooses, once credentials exist) tagged with the commit SHA and node tag
-- [ ] `service/scripts/deploy.sh`: copy a given build to the host, install it as `mpamm`
-      at `/var/lib/mpamm/bin/mpamm` (keeping the previous one), `systemctl restart
-      mpamm.service`, check health, put the previous binary back on failure
-- [ ] Ring-snapshot fixture tests: record a short snapshot on the host and replay it in
-      CI (the SDK reads zstd snapshot files), so the reader is tested without a node
+- [x] GitHub Actions job (`.github/workflows/service.yml`): `cargo fmt --check`,
+      `cargo clippy -D warnings`, `cargo test` for `service/` on Ubuntu 24.04 with
+      clang-19, CMake, libhugetlbfs-dev, libzstd-dev
+- [x] Cache the cargo registry and the Monad git checkout between runs
+- [x] Release build for `x86-64-v3` as a workflow artifact named after the commit SHA
+      and node tag (publishing to a registry waits for credentials)
+- [x] `service/scripts/deploy.sh`: installs a build as `/var/lib/mpamm/bin/mpamm` with
+      `service/deploy/mpamm.toml`, keeps the previous binary, restarts `mpamm.service`,
+      checks health and puts the previous binary back on failure; `--rollback`
+- [x] Ring-snapshot fixture tests: the SDK's own recorded ring replayed through the
+      adapter and tracker (`crates/ring/tests/snapshot.rs`), no node needed
+- [x] `service/scripts/cargo-linux.sh`: any cargo command for Linux in the build container
+- [ ] Rehearse a deploy and a rollback with the script *(needs the unit edit)*
 
 **Done when:** every push to `v2` runs the job green; a deploy and a rollback have been
 done with the script.
@@ -158,14 +172,16 @@ done with the script.
 - [ ] Workspace crates per *Target layout*; `mpamm` binary with config (file + env),
       structured logs (`tracing`), and the thread model from the spec (reader on its own
       core, async runtime for the rest, one SQLite writer thread)
-- [ ] `registry`: port `shared/src` (tokens, assets, pairs, markets, sizes, references) to
-      `registry.toml`; loader with the same validation as `validateRegistry`
+- [x] `registry`: tokens, assets and pairs moved from computed TypeScript to
+      `shared/registry.json` (byte-identical values; v1's tests unchanged), read by
+      `shared/src/index.ts` and by `crates/registry`, whose lookups are tested against
+      today's TypeScript answers (`tests/golden.json`, kept fresh by a server test)
 - [ ] `types`: Fill, QuoteRow, BlockRef, stream message types; TypeScript generation
       (ts-rs) into `shared/` so the web build consumes them
-- [ ] `ring`: move the reader's logic into a library: watch set (logs by address+topic0,
-      transactions by `to` / relay rule, state contracts), block assembly at `BLOCK_END`,
-      block-level log index from `log_count` and `txn_count`, commit-state tracking,
-      abandonment at finalization, gap reports
+- [x] `ring`: the reader's logic as a library: watch set (logs by address+topic0,
+      transaction headers, calldata by `to`), block assembly at `BLOCK_END`, block-level
+      log index from `log_count` and `txn_count`, commit-state tracking, abandonment at
+      finalization, lost finalizations recovered from parent hashes, `Missing` heights
 - [ ] `store`: new SQLite schema (trades kept forever, daily volume, daily gas with a
       method flag, cursors, revisions, meta), additive migrations, one transaction per
       final block including the cursor
