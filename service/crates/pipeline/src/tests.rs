@@ -20,9 +20,12 @@ const SWAP: [u8; 32] = [0x77; 32];
 const T0: u64 = 1_795_762_800;
 
 /// A venue that turns every watched log into a $1 trade, and can be told to
-/// fail decoding a block a number of times.
+/// fail decoding a block a number of times, or to start watching another
+/// address when it decodes a given block (a factory announcing a pool).
 struct TestVenue {
     fail: StdMutex<HashMap<u64, u32>>,
+    grow_at: StdMutex<Option<u64>>,
+    grown: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -39,6 +42,9 @@ impl Venue for TestVenue {
     fn watch(&self) -> Result<WatchSet, VenueError> {
         let mut w = WatchSet::default();
         w.logs.insert(VENUE, TopicFilter::Topics([SWAP].into()));
+        if self.grown.load(Ordering::Relaxed) {
+            w.logs.insert([0xcc; 20], TopicFilter::Any);
+        }
         Ok(w)
     }
     fn decode(&self, cx: &DecodeCx<'_>, b: &FinalBlock) -> Result<Vec<Fill>, VenueError> {
@@ -49,6 +55,9 @@ impl Venue for TestVenue {
             }
         }
         cx.state.set("test", "last", &b.number.to_string());
+        if *self.grow_at.lock().unwrap() == Some(b.number) {
+            self.grown.store(true, Ordering::Relaxed);
+        }
         Ok(b.logs
             .iter()
             .map(|l| Fill {
@@ -189,7 +198,11 @@ struct Harness {
 
 async fn harness(fail_first: u32) -> Harness {
     let addr = node(Arc::new(AtomicU32::new(fail_first))).await;
-    let venue = Arc::new(TestVenue { fail: StdMutex::new(HashMap::new()) });
+    let venue = Arc::new(TestVenue {
+        fail: StdMutex::new(HashMap::new()),
+        grow_at: StdMutex::new(None),
+        grown: std::sync::atomic::AtomicBool::new(false),
+    });
     let venues: Vec<Arc<dyn Venue>> = vec![venue.clone()];
     let watch = watch_of(&venues).unwrap();
     let (tx, rx) = broadcast::channel(64);
@@ -332,4 +345,16 @@ async fn a_held_block_is_read_again_once_discovery_grows_the_watch_set() {
     h.pipeline.process(Input::Final(ring_block(40, 1))).await;
     let v = h.pipeline.stats.view();
     assert_eq!(v.from_rpc, 1, "the held block was read again over RPC: {v:?}");
+}
+
+#[tokio::test]
+async fn a_source_learned_while_decoding_grows_the_watch_set_at_once() {
+    let h = harness(0).await;
+    *h.venue.grow_at.lock().unwrap() = Some(60);
+    h.pipeline.process(Input::Final(ring_block(60, 1))).await;
+    h.pipeline.process(Input::Final(ring_block(61, 1))).await;
+    let v = h.pipeline.stats.view();
+    assert!(h.pipeline.watch.load().logs.contains_key(&[0xcc; 20]), "published to the reader");
+    assert_eq!(v.from_rpc, 2, "the block itself and the next one are read again with the new set: {v:?}");
+    assert!(h.pipeline.refetch_through.load(Ordering::Relaxed) >= 60 + 64);
 }

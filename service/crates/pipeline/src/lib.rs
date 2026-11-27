@@ -154,8 +154,20 @@ impl Pipeline {
         let mut block = block;
         let mut watch_used = self.watch.load_full();
         let mut hold = Hold::new(self, format!("decode block {number}"));
+        let mut regrown = 0;
         let (fills, state, gas) = loop {
             match self.decode(&block) {
+                // A venue can learn a new source while decoding (a pool its
+                // factory announced in this very block). The watch set grows
+                // now, not at the next rediscovery: this block is read again
+                // with it (its copy lacks the new source's logs), and so is
+                // every block the reader may already have copied.
+                Ok(f) if regrown < 3 && self.grow_watch(number) => {
+                    let _ = f;
+                    regrown += 1;
+                    watch_used = self.watch.load_full();
+                    block = self.repair(number, MissingReason::Incomplete).await;
+                }
                 Ok(f) => break f,
                 Err((e, not_ready)) => {
                     if not_ready {
@@ -209,6 +221,20 @@ impl Pipeline {
 
     /// Every venue's trades in the block (attributed), the state they set,
     /// and each venue's exact quote-update gas.
+    /// Rebuilds the watch set from the venues; when it grew, publishes it and
+    /// has every block up to well past `number` read over RPC with it (the
+    /// reader runs a few blocks ahead of the pipeline).
+    fn grow_watch(&self, number: u64) -> bool {
+        let Ok(w) = watch_of(&self.venues) else { return false };
+        if w == **self.watch.load() {
+            return false;
+        }
+        tracing::info!(target: "pipeline", "watch set grew to {} log address(es) at block {number}", w.logs.len());
+        self.watch.store(Arc::new(w));
+        self.refetch_through.fetch_max(number + 64, Ordering::Relaxed);
+        true
+    }
+
     /// An error says whether a venue was only not ready (discovery pending).
     #[allow(clippy::type_complexity)]
     fn decode(
