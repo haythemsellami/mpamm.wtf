@@ -396,11 +396,16 @@ async fn capture_prices(secs: u64, rpc_url: &str, out: &std::path::Path) -> Resu
 async fn quote_at(venue_id: &str, block: u64, prices: &std::path::Path, rpc_url: &str) -> Result<(), String> {
     let registry = Registry::get();
     let rpc = Rpc::new("node", rpc_url, Duration::from_secs(30));
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(prices).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    // Each price from its own text: serde_json's float parsing (without
+    // float_roundtrip) can land an ulp off the double JSON.parse gives the
+    // TypeScript half, and a crypto-sized leg then differs in its last bit.
+    type Raw = std::collections::HashMap<String, Box<serde_json::value::RawValue>>;
+    let v: std::collections::HashMap<String, Raw> =
+        serde_json::from_str(&std::fs::read_to_string(prices).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     let map = |k: &str| -> std::collections::HashMap<String, f64> {
-        v[k].as_object()
-            .map(|o| o.iter().map(|(a, b)| (a.clone(), b.as_f64().unwrap_or(0.0))).collect())
+        v.get(k)
+            .map(|o| o.iter().map(|(a, b)| (a.clone(), b.get().parse::<f64>().unwrap_or(0.0))).collect())
             .unwrap_or_default()
     };
     let pricer = mpamm_quotes::FramePricer::fixed(registry, map("pairMid"), map("assetUsd"));
