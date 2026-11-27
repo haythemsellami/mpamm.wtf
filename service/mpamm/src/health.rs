@@ -32,6 +32,58 @@ pub struct HealthBody {
     pub feeds: FeedsView,
     /// Each venue's quote time over the last minute, and its misses.
     pub quotes: std::collections::BTreeMap<String, mpamm_quotes::VenueTiming>,
+    /// What a monitor pages on, active now (empty when all is well).
+    pub alerts: Vec<Alert>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Alert {
+    /// `node_behind`, `ring_lag`, `unrepaired_gap`, `no_final_commit`, or
+    /// `venue_outage` (with `venue`).
+    pub code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub venue: Option<String>,
+    pub msg: String,
+}
+
+/// No execution event for this long: the node has stopped executing.
+pub const NODE_QUIET_MS: u64 = 2_000;
+/// Events the reader may trail the writer by before the ring's history
+/// (2^21 descriptors) is at risk.
+pub const RING_LAG_EVENTS: u64 = 500_000;
+/// No final block committed for this long (blocks finalize every ~400 ms).
+pub const NO_COMMIT_MS: u64 = 3_000;
+
+/// The active alerts (docs/rebuild-plan.md → M14): pure, for the tests.
+pub fn alerts(
+    ring: &FollowView,
+    pipeline: &StatsView,
+    quotes: &std::collections::BTreeMap<String, mpamm_quotes::VenueTiming>,
+    uptime_ms: u64,
+    now: u64,
+) -> Vec<Alert> {
+    let mut out = Vec::new();
+    let mut add = |code, venue: Option<String>, msg: String| out.push(Alert { code, venue, msg });
+    if ring.ring_open && ring.last_event_age_ms.is_some_and(|a| a > NODE_QUIET_MS) {
+        add("node_behind", None, format!("no execution event for {} ms", ring.last_event_age_ms.unwrap_or(0)));
+    }
+    if ring.lag_events > RING_LAG_EVENTS {
+        add("ring_lag", None, format!("the reader trails the ring by {} events", ring.lag_events));
+    }
+    if let Some(h) = pipeline.held.as_deref().filter(|h| h.starts_with("read block")) {
+        add("unrepaired_gap", None, h.to_string());
+    }
+    let since_commit = now.saturating_sub(pipeline.last_commit_unix_ms);
+    if uptime_ms > 30_000 && (pipeline.last_commit_unix_ms == 0 || since_commit > NO_COMMIT_MS) {
+        add("no_final_commit", None, format!("no final block committed for {} ms", since_commit));
+    }
+    for (venue, t) in quotes {
+        if t.published == 0 && t.failed + t.late + t.busy > 0 {
+            let why = t.last_error.clone().unwrap_or_else(|| format!("{} late, {} busy", t.late, t.busy));
+            add("venue_outage", Some(venue.clone()), format!("no quote published in the last minute: {why}"));
+        }
+    }
+    out
 }
 
 /// Each exchange's last message age, and how many registered pairs have a
@@ -93,11 +145,16 @@ pub fn body(h: &Health) -> (HealthBody, bool) {
     let lag = (pipeline.cursor > 0 && ring.newest_block > 0).then(|| ring.newest_block.saturating_sub(pipeline.cursor));
     let feeds = feeds_view(&h.prices, now_ms());
     let quotes = h.quotes.timings().into_iter().collect();
-    (HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds, quotes }, ok)
+    let alerts = alerts(&ring, &pipeline, &quotes, uptime_ms, now_ms());
+    (HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds, quotes, alerts }, ok)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use mpamm_quotes::VenueTiming;
+
     use super::*;
 
     fn ring(open: bool, age: Option<u64>) -> FollowView {
@@ -124,6 +181,32 @@ mod tests {
             holds: 0,
             held: held.map(String::from),
         }
+    }
+
+    #[test]
+    fn alerts_name_what_a_monitor_pages_on() {
+        let now = 1_000_000;
+        let quiet = BTreeMap::new();
+        assert!(alerts(&ring(true, Some(50)), &pipe(now - 400, None), &quiet, 60_000, now).is_empty(), "all well");
+        let codes = |a: Vec<Alert>| a.into_iter().map(|a| a.code).collect::<Vec<_>>();
+        let mut r = ring(true, Some(5_000));
+        r.lag_events = 600_000;
+        let held = pipe(now - 10_000, Some("read block 9 over RPC (Unresolved): rpc error"));
+        assert_eq!(
+            codes(alerts(&r, &held, &quiet, 60_000, now)),
+            ["node_behind", "ring_lag", "unrepaired_gap", "no_final_commit"]
+        );
+        assert!(alerts(&ring(true, Some(5)), &pipe(0, None), &quiet, 10_000, now).is_empty(), "booting: no commit yet");
+        let mut q = BTreeMap::new();
+        q.insert(
+            "hanji".to_string(),
+            VenueTiming { failed: 150, last_error: Some("boom".into()), ..VenueTiming::default() },
+        );
+        q.insert("poe".to_string(), VenueTiming { published: 150, failed: 3, ..VenueTiming::default() });
+        let a = alerts(&ring(true, Some(5)), &pipe(now - 400, None), &q, 60_000, now);
+        assert_eq!(a.len(), 1);
+        assert_eq!((a[0].code, a[0].venue.as_deref()), ("venue_outage", Some("hanji")));
+        assert!(a[0].msg.contains("boom"));
     }
 
     #[test]
