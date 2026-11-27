@@ -193,6 +193,7 @@ async fn harness(fail_first: u32) -> Harness {
         venues,
         fetcher: Fetcher { local: Rpc::new("local", format!("http://{addr}/"), Duration::from_secs(2)), archive: None },
         registry: Registry::get(),
+        prices: mpamm_pricing::Prices::new(Registry::get(), mpamm_pricing::Fees::default()),
         watch: Arc::new(ArcSwap::from_pointee(watch)),
         stats: Arc::new(Stats::default()),
         committed: tx,

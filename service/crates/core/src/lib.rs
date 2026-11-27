@@ -5,4 +5,4 @@ pub mod block;
 pub mod venue;
 
 pub use block::{FinalBlock, FinalLog, FinalTxn, Origin};
-pub use venue::{DecodeCx, Venue, VenueError};
+pub use venue::{DecodeCx, NoPrices, Pricer, Venue, VenueError};

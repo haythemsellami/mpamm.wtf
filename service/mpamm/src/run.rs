@@ -13,6 +13,7 @@ use arc_swap::ArcSwap;
 use mpamm_chain::Rpc;
 use mpamm_core::Venue;
 use mpamm_pipeline::{watch_of, Fetcher, Input, Pipeline, Stats};
+use mpamm_pricing::{Endpoints, Fees, Prices};
 use mpamm_registry::Registry;
 use mpamm_ring::{
     follow::{follow, FollowConfig, FollowStats},
@@ -104,6 +105,9 @@ pub fn run(s: Settings) -> ExitCode {
             stats.cursor.store(c.block, Ordering::Relaxed);
         }
         let (committed, _) = broadcast::channel(1024);
+        let (stop_feeds, feeds_stop) = tokio::sync::watch::channel(false);
+        let prices = Prices::new(registry, Fees::default());
+        prices.spawn(Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10)), Endpoints::default(), feeds_stop);
         let pipeline = Pipeline {
             writer: Writer::spawn(store),
             venues,
@@ -112,6 +116,7 @@ pub fn run(s: Settings) -> ExitCode {
                 archive: s.archive_url.clone().map(|u| Rpc::new("archive", u, Duration::from_secs(30))),
             },
             registry,
+            prices: prices.clone(),
             watch,
             stats: stats.clone(),
             committed,
@@ -123,6 +128,7 @@ pub fn run(s: Settings) -> ExitCode {
         let app = health::router(health::Health {
             ring: ring_stats,
             pipeline: stats,
+            prices: prices.clone(),
             started: Instant::now(),
             stall_ms: s.stall_secs.max(1) * 1000,
         });
@@ -147,6 +153,7 @@ pub fn run(s: Settings) -> ExitCode {
         if tokio::time::timeout(Duration::from_secs(10), pipe).await.is_err() {
             tracing::warn!("pipeline still holding after 10 s; exiting (nothing partial is written)");
         }
+        let _ = stop_feeds.send(true);
         server.abort();
         ExitCode::SUCCESS
     });

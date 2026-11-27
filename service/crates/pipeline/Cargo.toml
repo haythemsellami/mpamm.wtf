@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 mpamm-chain = { path = "../chain" }
 mpamm-core = { path = "../core" }
+mpamm-pricing = { path = "../pricing" }
 mpamm-registry = { path = "../registry" }
 mpamm-ring = { path = "../ring" }
 mpamm-store = { path = "../store" }

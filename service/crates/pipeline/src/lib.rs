@@ -19,6 +19,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use mpamm_core::{DecodeCx, FinalBlock, Venue, VenueError};
+use mpamm_pricing::Prices;
 use mpamm_registry::Registry;
 use mpamm_ring::{Block, MissingReason, WatchSet};
 use mpamm_store::{writer::Writer, BlockCommit, StoreError};
@@ -98,6 +99,8 @@ pub struct Pipeline {
     pub venues: Vec<Arc<dyn Venue>>,
     pub fetcher: Fetcher,
     pub registry: &'static Registry,
+    /// Prices each block is decoded with, as of its own time.
+    pub prices: Arc<Prices>,
     /// The set the reader copies with; the pipeline grows it as venues
     /// discover sources.
     pub watch: Arc<ArcSwap<WatchSet>>,
@@ -168,6 +171,7 @@ impl Pipeline {
             mpamm_core::Origin::Rpc(_) => self.stats.from_rpc.fetch_add(1, Ordering::Relaxed),
         };
         let trades: Vec<Fill> = fills.into_iter().filter(|f| inserted.inserted.contains(&f.id)).collect();
+        self.prices.observe(&trades);
         self.stats.trades.fetch_add(trades.len() as u64, Ordering::Relaxed);
         self.stats.cursor.store(number, Ordering::Relaxed);
         self.stats.last_commit_unix_ms.store(now_ms(), Ordering::Relaxed);
@@ -175,7 +179,8 @@ impl Pipeline {
     }
 
     fn decode(&self, block: &FinalBlock) -> Result<Vec<Fill>, String> {
-        let cx = DecodeCx { registry: self.registry };
+        let pricer = self.prices.at(block.time_ms());
+        let cx = DecodeCx { registry: self.registry, pricer: &pricer };
         let mut all = Vec::new();
         for v in &self.venues {
             all.extend(v.decode(&cx, block).map_err(|e| format!("{}: {e}", v.id()))?);

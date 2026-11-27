@@ -6,6 +6,7 @@ use std::{sync::Arc, time::Instant};
 
 use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use mpamm_pipeline::{Stats, StatsView};
+use mpamm_pricing::Prices;
 use mpamm_ring::live::{now_ms, FollowStats, FollowView};
 use serde::Serialize;
 
@@ -13,6 +14,7 @@ use serde::Serialize;
 pub struct Health {
     pub ring: Arc<FollowStats>,
     pub pipeline: Arc<Stats>,
+    pub prices: Arc<Prices>,
     pub started: Instant,
     pub stall_ms: u64,
 }
@@ -26,6 +28,31 @@ pub struct HealthBody {
     pub lag_blocks: Option<u64>,
     pub ring: FollowView,
     pub pipeline: StatsView,
+    pub feeds: FeedsView,
+}
+
+/// Each exchange's last message age, and how many registered pairs have a
+/// reference right now.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedsView {
+    pub bybit_age_ms: Option<u64>,
+    pub binance_age_ms: Option<u64>,
+    pub kraken_age_ms: Option<u64>,
+    pub pairs_priced: usize,
+    pub pairs: usize,
+}
+
+fn feeds_view(p: &Prices, now: u64) -> FeedsView {
+    let age = |ms: u64| (ms > 0).then(|| now.saturating_sub(ms));
+    let r = p.reference();
+    FeedsView {
+        bybit_age_ms: age(p.feeds.bybit.last_msg_ms()),
+        binance_age_ms: age(p.feeds.binance.last_msg_ms()),
+        kraken_age_ms: age(p.feeds.kraken.last_msg_ms()),
+        pairs_priced: p.registry.pairs.iter().filter(|x| r.mid_for_pair(&x.symbol) > 0.0).count(),
+        pairs: p.registry.pairs.len(),
+    }
 }
 
 pub fn status(
@@ -60,7 +87,8 @@ async fn health(State(h): State<Health>) -> (StatusCode, Json<HealthBody>) {
     let uptime_ms = h.started.elapsed().as_millis() as u64;
     let (status, ok) = status(&ring, &pipeline, uptime_ms, h.stall_ms, now_ms());
     let lag = (pipeline.cursor > 0 && ring.newest_block > 0).then(|| ring.newest_block.saturating_sub(pipeline.cursor));
-    let body = HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline };
+    let feeds = feeds_view(&h.prices, now_ms());
+    let body = HealthBody { status, uptime_s: uptime_ms / 1000, lag_blocks: lag, ring, pipeline, feeds };
     (if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, Json(body))
 }
 

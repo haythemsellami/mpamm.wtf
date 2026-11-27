@@ -1073,6 +1073,7 @@ dependencies = [
  "mpamm-chain",
  "mpamm-core",
  "mpamm-pipeline",
+ "mpamm-pricing",
  "mpamm-registry",
  "mpamm-ring",
  "mpamm-store",
@@ -1114,6 +1115,7 @@ dependencies = [
  "axum",
  "mpamm-chain",
  "mpamm-core",
+ "mpamm-pricing",
  "mpamm-registry",
  "mpamm-ring",
  "mpamm-store",
@@ -1131,6 +1133,7 @@ dependencies = [
  "crc32fast",
  "futures-util",
  "mpamm-chain",
+ "mpamm-core",
  "mpamm-registry",
  "mpamm-types",
  "parking_lot",
@@ -1140,6 +1143,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
