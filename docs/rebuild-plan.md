@@ -277,7 +277,7 @@ test ported:
       the block and asks for a rediscovery
 - [x] Lunarbase (paused; decode only until it resumes): 42 trades over 20,000 blocks of
       2026-08 identical
-- [ ] `tools/verify-venue` (port of `verify-adapter`)
+- [x] `mpamm-tools verify-venue` (port of `verify-adapter`): POE passes every check live
 - [x] The Rust venue guide: [rebuild-venues.md](rebuild-venues.md) (`adapters.md` stays
       for today's TypeScript adapters until the switch-over) venue modules
 

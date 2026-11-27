@@ -88,7 +88,10 @@ decode counts in that block.
   `service/tools/compare-quotes.py`.
 - Gas: `mpamm-tools gas-check --venue <id> --from A --to B` recounts the range from
   receipts, independently of the rules, and must match to the wei.
-- Hand-verify one trade's `usd`, `baseAmount` and `execPx` from the raw log.
+- `mpamm-tools verify-venue --venue <id>` runs the live checklist (registry entry,
+  discovery, quotes, watch set, a recent window decoded, gas rules) and prints a
+  paste-ready fixture; hand-verify that trade's `usd`, `baseAmount` and `execPx` from
+  its raw log.
 - `cargo test --workspace`, and fmt and clippy through `service/scripts/cargo-linux.sh`
   (`fmt --all`, `clippy --workspace --all-targets -- -D warnings`).
 - On the node host the shadow run's `mpamm-tools parity` must stay identical for the
