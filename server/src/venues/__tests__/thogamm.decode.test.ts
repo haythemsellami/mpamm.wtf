@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { decodeEventLog } from 'viem';
+import { decodeEventLog, type AbiEvent } from 'viem';
 import { TOKENS } from '@shared';
 import {
   THOGAMM_ADDRESS,
@@ -273,6 +273,29 @@ describe('ThogAMM mutable registry and xStocks', () => {
     expect(markets.filter((m) => stockKeys.includes(m.baseKey))).toHaveLength(50);
     for (const m of markets) if (stockKeys.includes(m.baseKey)) expect(m.base.decimals).toBe(18);
   });
+  const novemberKeys = ['SMHX', 'SPCXX', 'MUX', 'SKHYX', 'ANTX'];
+  const expanded = [...current, ...novemberKeys.map((key) => TOKENS[key].address)];
+  it('discovers 150 markets in the 18-token pool and keeps wrapped shares separate', () => {
+    const markets = thogammMarketsForTokens(expanded);
+    expect(markets).toHaveLength(150);
+    expect(indexThogammMarkets(markets).size).toBe(300);
+    for (const key of novemberKeys) {
+      const token = TOKENS[key];
+      expect(markets.find((m) => m.market === `${token.symbol}/USDC`)).toMatchObject({ baseKey: key, base: token });
+      expect(markets.some((m) => m.market === `w${token.symbol}/USDC`)).toBe(false);
+    }
+    expect(markets.find((m) => m.market === 'ANTx/SKHYx')).toMatchObject({ baseKey: 'ANTX', quoteKey: 'SKHYX' });
+  });
+  it('decodes the settled SKHYx sale at block 125796479', () => {
+    const fx = JSON.parse(readFileSync(new URL('./fixtures/thogamm-skhyx-fill.json', import.meta.url), 'utf8'));
+    const [source] = createThogammAdapter().logSources();
+    const decoded = decodeEventLog({ abi: source.events as readonly AbiEvent[], data: fx.log.data, topics: fx.log.topics, strict: true });
+    const log = { ...fx.log, ...decoded, transactionHash: fx.transactionHash, blockNumber: BigInt(fx.blockNumber) };
+    const fill = decodeThogammSwap(log, indexThogammMarkets(thogammMarketsForTokens(expanded)), fx.timestamp * 1000, usdForToken);
+    expect(fill).toMatchObject({ id: `thogamm-${fx.transactionHash}-168`, market: 'SKHYx/USDC', side: 'sell', usd: 80.00705 });
+    expect(fill!.baseAmount).toBeCloseTo(0.685490158132930466, 14);
+    expect(fill!.execPx).toBeCloseTo(116.71509656377154, 10);
+  });
   /**
    * The first real xStock fill, recorded (fixtures/thogamm-xstock-fill.json):
    * https://monadscan.com/tx/0xc999c572f634eb3e5f35d21785a52fe441fe540092c6b8b0ac3ac911df703efc
@@ -355,6 +378,13 @@ describe('ThogAMM mutable registry and xStocks', () => {
     expect(revisions[0].markets).toHaveLength(50);
     // from the first on-chain XAUt0<->WBTC swap (block 101,922,564, 2026-09-04)
     expect(revisions[1]).toMatchObject({ source: 'markets', from: '2026-09-04', markets: ['XAUt/BTC'] });
+    expect(revisions[2]).toMatchObject({ source: 'markets', from: '2026-11-17' });
+    expect(revisions[2].markets).toHaveLength(58);
+    expect(revisions[3]).toMatchObject({ source: 'markets', from: '2026-11-27' });
+    expect(revisions[3].markets).toHaveLength(17);
+    const november = [...revisions[2].markets!, ...revisions[3].markets!].sort();
+    const oldMarkets = new Set(thogammMarketsForTokens(current).map((m) => m.market));
+    expect(november).toEqual(thogammMarketsForTokens(expanded).map((m) => m.market).filter((m) => !oldMarkets.has(m)).sort());
     expect(adapter.gasRevisions).toEqual([{ id: 'params-pushed-topic', from: '2026-10-22' }]);
   });
 });
