@@ -139,10 +139,9 @@ const STOCKS_2_FAST_QUOTER: &str = "0xae5b4a1775f05b8818209e35c01630feac99b60b";
 const FASTLANE_AUCTION_HANDLER: &str = "0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58";
 const FASTLANE_SELECTOR: [u8; 4] = [0x0c, 0x7a, 0xbd, 0x22];
 const FASTLANE_TARGET_WORD: usize = 5;
-/// Only gen8+ carry `fastLaneCall`, so today the relay is scoped to these.
-/// The core matches a relay against every destination instead; in practice
-/// that counts the same transactions, since a bid naming gen0–7 could only
-/// revert and Hanji's keeper sends none.
+/// The relay's targets: only gen8+ carry `fastLaneCall` (gen0–7 bytecode
+/// lacks it), so the FastLane route names only these, and adding it rebuilt
+/// gas from gen8's creation day rather than the lifetime.
 const FASTLANE_QUOTERS: [&str; 4] = [FAST_QUOTERS[8], XAUT_FAST_QUOTER, STOCKS_FAST_QUOTER, STOCKS_2_FAST_QUOTER];
 
 /// One of the table's constant addresses.
