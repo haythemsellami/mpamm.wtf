@@ -8,7 +8,11 @@
 //!
 //! `parity`: the shadow run's check, the service's database against
 //! production's public `/api/fills` (see `parity.rs`).
+//!
+//! `depth-at`: depth curves at one block with a frozen reference, the Rust
+//! half of the depth parity check (see `depth.rs`).
 
+mod depth;
 mod migrate;
 mod parity;
 mod verify;
@@ -83,6 +87,29 @@ enum Cmd {
         prices: PathBuf,
         #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
         rpc: String,
+    },
+    /// Depth curves for one market at one block (reads pinned to its hash)
+    /// with a frozen reference, as the service computes them, printed as
+    /// JSON; or, with --follow-secs, passes back to back at the newest block
+    /// with their cadence and cost.
+    DepthAt {
+        #[arg(long)]
+        market: String,
+        /// 0 = the node's newest block.
+        #[arg(long, default_value_t = 0)]
+        block: u64,
+        #[arg(long)]
+        prices: PathBuf,
+        /// Venues quoted (default: every venue).
+        #[arg(long, value_delimiter = ',')]
+        venues: Vec<String>,
+        #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
+        rpc: String,
+        /// Deadline per venue in ms (0 = none, for parity).
+        #[arg(long, default_value_t = 0)]
+        deadline_ms: u64,
+        #[arg(long, default_value_t = 0)]
+        follow_secs: u64,
     },
     /// Copy today's database into the new schema and verify it.
     Migrate {
@@ -577,6 +604,18 @@ async fn main() {
             }
             Err(e) => Err(e),
         },
+        Cmd::DepthAt { market, block, prices, venues, rpc, deadline_ms, follow_secs } => {
+            depth::depth_at(depth::Args {
+                market: &market,
+                block,
+                prices: &prices,
+                venues: &venues,
+                rpc: &rpc,
+                deadline_ms,
+                follow_secs,
+            })
+            .await
+        }
         Cmd::Parity { db, prod, prod_file, hours, from_block, margin, usd_tolerance, drift_max, venues } => {
             parity_cmd(&db, &prod, prod_file.as_deref(), hours, from_block, margin, usd_tolerance, drift_max, venues)
                 .await
