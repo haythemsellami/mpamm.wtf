@@ -111,7 +111,11 @@ measurements the spec needs (proposal delay, execution time, commit timings, rin
 - [x] Record arrival, execution, voted / finalized / verified times, abandoned proposals,
       gaps, expired payloads, reader lag, ring depth; per-proposer arrival
 - [x] First live run on the host (60 s: 0 gaps, lag 0)
-- [ ] 1-hour run analysed: arrival by proposer region, ring depth over time
+- [x] 1-hour run analysed (2026-11-27): 11,915 blocks, 22.1M events, 0 gaps, 0 expired
+      payloads, 0 abandoned, reader lag ≤ 94 events. Arrival p50 47.7 ms / p90 113.5 ms
+      (by proposer: Europe 37 ms, North America East 73 ms, West 95 ms, Asia-Pacific 122 ms);
+      execution p50 7.0 ms / p99 22.7 ms; finalized +573 ms, verified +1,478 ms. Ring depth
+      218–407 s as load ranged 4,600–12,800 events/s.
 - [ ] **Gap repair:** on a sequence gap or expired payload, note the block range and
       fetch it from the local node RPC (`eth_getLogs` by block, `eth_getBlockByNumber`
       with transactions); fall back to the archive when the node lacks it
