@@ -2,6 +2,7 @@
 //! reference comes from, every mid they had for the last hours, ERC-4626
 //! wrapper rates, the pair-terms reference, and the USD pricer decode uses.
 
+pub mod archives;
 pub mod book;
 pub mod feeds;
 pub mod history;

@@ -11,7 +11,9 @@ mpamm-chain = { path = "../chain" }
 mpamm-core = { path = "../core" }
 mpamm-registry = { path = "../registry" }
 mpamm-types = { path = "../types" }
+async-trait = { workspace = true }
 crc32fast = { workspace = true }
+flate2 = "1"
 futures-util = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true }

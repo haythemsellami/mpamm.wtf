@@ -2420,7 +2420,9 @@ dependencies = [
 name = "mpamm-pricing"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "crc32fast",
+ "flate2",
  "futures-util",
  "mpamm-chain",
  "mpamm-core",
