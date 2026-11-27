@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use mpamm_registry::Registry;
 use mpamm_types::{
     DailyVolume, DataSourceMode, Fill, GasResponse, LeaderboardResponse, MarketState, MarkoutCurvesResponse,
-    QuoteSnapshot, QuoteStatsResponse, StreamMessage, TailStatus, ThemeColor, VenueKind, VenueMeta, VenueRole,
-    CURVE_OFFSETS_S, CURVE_QUIET_MOVE_BPS,
+    QuoteSnapshot, QuoteStatsResponse, QuoteStatsRow, StreamMessage, TailStatus, ThemeColor, VenueKind, VenueMeta,
+    VenueRole, CURVE_OFFSETS_S, CURVE_QUIET_MOVE_BPS,
 };
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
@@ -227,16 +227,47 @@ impl ApiSource for FakeSource {
             .collect()
     }
 
+    /// The fixed answer when one is set for this selection; otherwise
+    /// statistics of the full-size, two-sided spreads in `history`.
     fn quote_stats(&self, market: &str, size_usd: f64) -> QuoteStatsResponse {
         let d = self.data.lock();
-        d.stats.clone().filter(|s| s.market == market && s.size_usd == size_usd).unwrap_or(QuoteStatsResponse {
+        if let Some(s) = d.stats.clone().filter(|s| s.market == market && s.size_usd == size_usd) {
+            return s;
+        }
+        let mut spreads: indexmap::IndexMap<&str, Vec<f64>> = indexmap::IndexMap::new();
+        for r in d.history.iter().flat_map(|q| &q.rows) {
+            if r.market == market && r.size_usd == size_usd && r.filled_full && r.one_sided != Some(true) {
+                spreads.entry(r.venue_id.as_str()).or_default().push(r.spread_bps);
+            }
+        }
+        let rows = spreads
+            .into_iter()
+            .map(|(venue, s)| {
+                let n = s.len() as f64;
+                let avg = s.iter().sum::<f64>() / n;
+                let sd = (s.iter().map(|x| (x - avg).powi(2)).sum::<f64>() / n).sqrt();
+                let p = |q| mpamm_types::percentile(&s, q);
+                QuoteStatsRow {
+                    venue_id: venue.into(),
+                    p5: p(0.05),
+                    p25: p(0.25),
+                    p50: p(0.5),
+                    p75: p(0.75),
+                    p95: p(0.95),
+                    avg,
+                    sd,
+                    n: s.len() as u64,
+                }
+            })
+            .collect();
+        QuoteStatsResponse {
             market: market.into(),
             size_usd,
             as_of: d.quotes.ts,
             window_ms: 300_000.0,
             revision: d.quotes.revision.unwrap_or(0),
-            rows: vec![],
-        })
+            rows,
+        }
     }
 
     fn recent_fills(&self) -> Vec<Fill> {

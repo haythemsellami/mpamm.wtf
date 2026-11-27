@@ -13,7 +13,8 @@ workspace.
 | `crates/pipeline` (`mpamm-pipeline`) | Final blocks in strict order: RPC repair (local node, then archive), venue decode, one commit per block; holds instead of skipping. |
 | `crates/store` (`mpamm-store`) | SQLite: every trade, daily volume and gas, the cursor, revisions, venue state; one transaction per final block. |
 | `crates/registry` (`mpamm-registry`) | The market registry, compiled in from `shared/registry.json`, with lookups tested against today's TypeScript. |
-| `crates/types` (`mpamm-types`) | Data types in today's JSON shapes. |
+| `crates/types` (`mpamm-types`) | Data types in today's JSON shapes, REST and stream payloads included. |
+| `crates/api` (`mpamm-api`) | Today's HTTP API and `/stream` protocol (`mpamm.v2.gzip` / `mpamm.v2.json`) on axum, behind the `ApiSource` trait, so the web app runs unchanged against the service. `cargo run -p mpamm-api --example fake` serves synthetic live data on 127.0.0.1:8787 for `npm -w web run dev`. |
 | `crates/chain` (`mpamm-chain`) | JSON-RPC over HTTP (calls, batches, block headers). Errors never carry a URL, so hosted keys can't reach a log. |
 | `reader` (`mpamm-reader`) | The phase-1 tool: follows the ring, records each height's timeline, repairs lost heights over RPC, and writes daily files, a cursor and a health file. Decodes no venue data. |
 
