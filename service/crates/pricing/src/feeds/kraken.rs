@@ -253,6 +253,9 @@ impl Kraken {
                     });
                     match result {
                         Ok(()) => {
+                            if repairing.is_some() {
+                                tracing::info!(target: "feeds", "kraken: {} book repaired", d.symbol);
+                            }
                             self.repairs.remove(&d.symbol);
                         }
                         Err(why) if repairing.is_some() => {
