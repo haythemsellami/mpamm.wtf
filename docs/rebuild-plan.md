@@ -40,10 +40,10 @@ path for M8.
 | M2 | CI, release artifacts, deploy script | 1 | — | registry credentials (publishing only); the unit edit (deploy rehearsal) | In progress |
 | M3 | Service skeleton: crates, config, store, commit pipeline, registry | 2 | M1 | — | Done (types' TS export moves to M11) |
 | M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | Done (archives → M7; USD parity checked in M8) |
-| M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | 5 of 9 decoding venues done |
+| M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | 8 of 10 decoding venues done |
 | M6 | Exact gas and attribution | 2 | M5 | — | Built; 3-day recount pending |
 | M7 | Markouts and analytics | 2 | M4, M5 | — | Built; archives pending |
-| M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Not started |
+| M8 | Shadow run and daily parity (phase-2 gate) | 2 | M5–M7 | env file | Shadow run under way; parity tool built |
 | M9 | Quote engine | 3 | M3, M4 | — | Built; depth curves pending |
 | M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | In progress |
 | M11 | Stream and REST | 4 | M8, M10 | — | In progress |
@@ -251,15 +251,22 @@ Proven with `mpamm-tools decode-range` against `server/scripts/decode-range.ts` 
 same blocks of the live chain (`service/tools/compare-fills.py`), plus every TS fixture
 test ported:
 
-- [ ] Hanji (17 CLOBs, wrapped xStocks, FastLane quoters)
+- [x] Hanji (17 CLOBs, wrapped xStocks, FastLane quoters): ids and every field identical
+      over 20,000 blocks but crypto-quoted USD (each tool priced at its own moment); a
+      2,000-block range decoded by both at once is identical, USD included. The FastLane
+      relay counts only the four quoters that carry `fastLaneCall`
 - [x] Metric (v0 decode-only generation, v1, through a reusable generations composer):
       920 trades over 100,000 blocks identical; v0 by its fixture (older than the node's
       history)
 - [x] WOOFi: 624 trades over 100,000 blocks identical, 6 crypto-quoted markets bit-exact
-- [ ] ThogAMM (proxy upgrades, unwrapped xStocks still unlisted today)
+- [x] ThogAMM (proxy upgrades, unwrapped xStocks still unlisted today): 99 trades over
+      two 20,000-block ranges identical but for MON-quoted USD (live-price drift in whole
+      MON ticks); one range holds a real proxy upgrade and a `MakerTokenAdded`. Token-list
+      changes follow the events (decode reads no chain)
 - [x] POE: 94 trades over 20,000 blocks identical; on the host its 3 live trades matched
       production's id for id
-- [ ] Capricorn
+- [x] Capricorn: 109 trades over two ranges identical; a pool from `PoolCreated` is admitted
+      in its own block and persisted with it
 - [x] BTR (executors): 84 trades over 206,000 blocks identical (crypto-quoted USD within
       the live-price tolerance)
 - [x] Crystal (vault maker scope): no vault trade in the node's history; 18 fixture tests
@@ -310,8 +317,13 @@ the precise anchor, and every analytics endpoint's numbers match today's.
 ### M8 · Shadow run and daily parity (phase-2 gate)
 
 - [ ] Run the service on the host with its own database beside today's production
+      (under way since 2026-11-27 with the 8 ported venues; the first hour found two bugs,
+      both fixed: gas rules read before WOOFi's decode had loaded its oracles held the first
+      block, and reads pinned to a just-proposed block failed until its state was readable)
 - [ ] `tools/parity`: daily diff against today's system: trade id sets, USD per trade,
       volume and counts per venue-day; reports every difference with its cause
+      (`mpamm-tools parity`: trades per venue over a common block window against
+      production's `/api/fills`; volume per venue-day still to add)
 - [ ] Exact-gas check against a chain recount for sampled days
 - [ ] Gap and restart drills during the run
 
