@@ -5,8 +5,12 @@
 //! and prints the trades as JSON (sorted by id) — the Rust half of the
 //! decode parity check; `server/scripts/decode-range.ts` is the other half
 //! and `service/tools/compare-fills.py` diffs the two.
+//!
+//! `parity`: the shadow run's check, the service's database against
+//! production's public `/api/fills` (see `parity.rs`).
 
 mod migrate;
+mod parity;
 
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
@@ -94,6 +98,83 @@ enum Cmd {
         #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
         rpc: String,
     },
+    /// Diff the service's trades against production's over a block window;
+    /// exits 1 on any difference.
+    Parity {
+        /// The service's database (opened read-only).
+        #[arg(long)]
+        db: PathBuf,
+        /// Production's origin; its public /api/fills is read.
+        #[arg(long, default_value = "https://mpamm.wtf")]
+        prod: String,
+        /// A saved /api/fills response instead of fetching one.
+        #[arg(long)]
+        prod_file: Option<PathBuf>,
+        /// How far back both sides are read.
+        #[arg(long, default_value_t = 24.0)]
+        hours: f64,
+        /// First block compared (default: the later side's earliest trade).
+        #[arg(long)]
+        from_block: Option<u64>,
+        /// Blocks left out at the newer end, for production's tail lag.
+        #[arg(long, default_value_t = 20)]
+        margin: u64,
+        /// Relative USD tolerance on crypto-quoted markets.
+        #[arg(long, default_value_t = 0.002)]
+        usd_tolerance: f64,
+        /// Venues compared (default: every venue the service runs).
+        #[arg(long, value_delimiter = ',')]
+        venues: Vec<String>,
+    },
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn parity_cmd(
+    db: &std::path::Path,
+    prod: &str,
+    prod_file: Option<&std::path::Path>,
+    hours: f64,
+    from_block: Option<u64>,
+    margin: u64,
+    usd_tolerance: f64,
+    venues: Vec<String>,
+) -> Result<(), String> {
+    let since_ms = mpamm_ring::live::now_ms() as f64 - hours * 3_600_000.0;
+    let prod_fills: Vec<mpamm_types::Fill> = match prod_file {
+        Some(f) => serde_json::from_slice(&std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?)
+            .map_err(|e| format!("{}: {e}", f.display()))?,
+        None => {
+            let days = (hours / 24.0).ceil().max(1.0);
+            let url = format!("{}/api/fills?days={days}&limit=50000", prod.trim_end_matches('/'));
+            let resp = reqwest::Client::new()
+                .get(&url)
+                .timeout(Duration::from_secs(120))
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                .map_err(|e| format!("{url}: {e}"))?;
+            resp.json().await.map_err(|e| format!("{url}: {e}"))?
+        }
+    };
+    let prod_fills: Vec<_> = prod_fills.into_iter().filter(|f| f.ts >= since_ms).collect();
+    if prod_fills.len() >= 50_000 {
+        eprintln!("warning: production returned its 50,000-fill cap; the oldest blocks may be missing on its side");
+    }
+    let store = mpamm_store::Store::open_readonly(db).map_err(|e| format!("{}: {e}", db.display()))?;
+    let local = store.trades_between(since_ms, f64::MAX, usize::MAX >> 1).map_err(|e| e.to_string())?;
+    let venues: std::collections::BTreeSet<String> = if venues.is_empty() {
+        mpamm_venues::all().iter().flat_map(|v| v.meta()).map(|m| m.id).collect()
+    } else {
+        venues.into_iter().collect()
+    };
+    let window = parity::Window::common(&prod_fills, &local, from_block, margin)
+        .ok_or("no common block window (one side has no trades yet)")?;
+    let reports = parity::compare(&prod_fills, &local, window, &venues, usd_tolerance);
+    if parity::print(window, &reports) {
+        Ok(())
+    } else {
+        Err("the service and production differ".into())
+    }
 }
 
 fn parse_log(l: &Value) -> Option<(u64, [u8; 32], FinalLog)> {
@@ -326,6 +407,9 @@ async fn main() {
         Cmd::Migrate { from, to } => migrate::migrate(&from, &to),
         Cmd::CapturePrices { secs, rpc, out } => capture_prices(secs, &rpc, &out).await,
         Cmd::QuoteAt { venue, block, prices, rpc } => quote_at(&venue, block, &prices, &rpc).await,
+        Cmd::Parity { db, prod, prod_file, hours, from_block, margin, usd_tolerance, venues } => {
+            parity_cmd(&db, &prod, prod_file.as_deref(), hours, from_block, margin, usd_tolerance, venues).await
+        }
     };
     if let Err(e) = r {
         eprintln!("error: {e}");

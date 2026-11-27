@@ -2330,6 +2330,7 @@ dependencies = [
  "mpamm-store",
  "mpamm-types",
  "mpamm-venues",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
