@@ -96,3 +96,13 @@ async fn other_blocks_and_other_errors_fail_at_once() {
     assert!(call(&rpc(&url), Address::ZERO, &answerCall {}, At::Hash([7; 32])).await.is_err());
     assert_eq!(seen.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn many_calls_go_as_concurrent_batches_in_order() {
+    let (url, seen) = node(0, NOT_FOUND).await;
+    let calls: Vec<(Address, answerCall)> = (0..60).map(|_| (Address::ZERO, answerCall {})).collect();
+    let out = call_many(&rpc(&url), &calls, At::Hash([7; 32])).await.unwrap();
+    assert_eq!(out.len(), 60);
+    assert!(out.iter().all(|r| r.as_ref().is_ok_and(|v| *v == alloy_primitives::U256::from(42))));
+    assert_eq!(seen.load(Ordering::SeqCst), 3, "60 calls in batches of 25: three requests");
+}

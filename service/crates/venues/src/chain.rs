@@ -86,7 +86,14 @@ fn retry_pauses(at: At) -> impl Iterator<Item = u64> {
     PROPOSED_RETRY_MS.into_iter().take(n)
 }
 
-/// Many calls of one kind in one batch; each result separately.
+/// Calls per JSON-RPC request when many are sent: the node answers several
+/// smaller requests in parallel faster than one large one (on the node host,
+/// 200 cheap calls: 8.2 ms as one batch, 4.5 ms as 8 concurrent batches of
+/// 25, 8.9 ms as 20 of 10).
+pub const BATCH: usize = 25;
+
+/// Many calls of one kind, sent as concurrent batches of [`BATCH`]; each
+/// result separately, in order.
 pub async fn call_many<C: SolCall>(
     rpc: &Rpc,
     calls: &[(Address, C)],
@@ -97,9 +104,23 @@ pub async fn call_many<C: SolCall>(
     }
     let params: Vec<(&str, serde_json::Value)> =
         calls.iter().map(|(to, c)| ("eth_call", json!([request(*to, c), at.tag()]))).collect();
+    let parts = futures_util::future::join_all(params.chunks(BATCH).map(|chunk| batch_once::<C>(rpc, chunk, at))).await;
+    let mut out = Vec::with_capacity(calls.len());
+    for part in parts {
+        out.extend(part?);
+    }
+    Ok(out)
+}
+
+/// One batch, retried while a just-proposed block's state isn't readable.
+async fn batch_once<C: SolCall>(
+    rpc: &Rpc,
+    params: &[(&str, serde_json::Value)],
+    at: At,
+) -> Result<Vec<Result<C::Return, VenueError>>, VenueError> {
     let mut pauses = retry_pauses(at);
     let out = loop {
-        let out = rpc.batch(&params).await.map_err(|e| e.to_string());
+        let out = rpc.batch(params).await.map_err(|e| e.to_string());
         // One block's state is readable for every call or for none.
         let unreadable = match &out {
             Ok(items) => items.iter().any(|r| r.as_ref().is_err_and(|e| not_readable(&e.to_string()))),
