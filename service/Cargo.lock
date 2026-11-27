@@ -2324,6 +2324,7 @@ dependencies = [
  "mpamm-core",
  "mpamm-pipeline",
  "mpamm-pricing",
+ "mpamm-quotes",
  "mpamm-registry",
  "mpamm-ring",
  "mpamm-store",

@@ -49,6 +49,28 @@ enum Cmd {
     /// Cost one venue's quote-update gas over [from, to] two ways: as the
     /// pipeline does (transaction headers, gas limit × price paid) and from
     /// receipts (gasUsed × effectiveGasPrice), and compare.
+    /// Run the exchange feeds a while and freeze the reference (asset USD,
+    /// pair mids) into a file both quote-at tools read.
+    CapturePrices {
+        #[arg(long, default_value_t = 15)]
+        secs: u64,
+        #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
+        rpc: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Quote one venue at one block (reads pinned to its hash) with a frozen
+    /// reference, and print the rows as JSON.
+    QuoteAt {
+        #[arg(long)]
+        venue: String,
+        #[arg(long)]
+        block: u64,
+        #[arg(long)]
+        prices: PathBuf,
+        #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
+        rpc: String,
+    },
     /// Copy today's database into the new schema and verify it.
     Migrate {
         /// Today's SQLite database (opened read-only).
@@ -226,6 +248,56 @@ async fn gas_check(venue_id: &str, from: u64, to: u64, rpc_url: &str) -> Result<
     Ok(())
 }
 
+async fn capture_prices(secs: u64, rpc_url: &str, out: &std::path::Path) -> Result<(), String> {
+    let registry = Registry::get();
+    let prices = Prices::new(registry, Fees::default());
+    let (_stop, rx) = tokio::sync::watch::channel(false);
+    prices.spawn(Rpc::new("node", rpc_url, Duration::from_secs(10)), Default::default(), rx);
+    tokio::time::sleep(Duration::from_secs(secs)).await;
+    let r = prices.reference();
+    let asset_usd: BTreeMap<String, f64> = registry.assets.keys().map(|k| (k.clone(), r.asset_usd(k))).collect();
+    let pair_mid: BTreeMap<String, f64> =
+        registry.pairs.iter().map(|p| (p.symbol.clone(), r.mid_for_pair(&p.symbol))).collect();
+    let priced = pair_mid.values().filter(|m| **m > 0.0).count();
+    std::fs::write(out, serde_json::to_string_pretty(&json!({ "assetUsd": asset_usd, "pairMid": pair_mid })).unwrap())
+        .map_err(|e| e.to_string())?;
+    eprintln!("{priced}/{} pairs priced → {}", pair_mid.len(), out.display());
+    Ok(())
+}
+
+async fn quote_at(venue_id: &str, block: u64, prices: &std::path::Path, rpc_url: &str) -> Result<(), String> {
+    let registry = Registry::get();
+    let rpc = Rpc::new("node", rpc_url, Duration::from_secs(30));
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(prices).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let map = |k: &str| -> std::collections::HashMap<String, f64> {
+        v[k].as_object()
+            .map(|o| o.iter().map(|(a, b)| (a.clone(), b.as_f64().unwrap_or(0.0))).collect())
+            .unwrap_or_default()
+    };
+    let pricer = mpamm_quotes::FramePricer::fixed(registry, map("pairMid"), map("assetUsd"));
+    let venue = mpamm_venues::all().into_iter().find(|x| x.id() == venue_id).ok_or(format!("no venue {venue_id}"))?;
+    venue.discover(&ChainCx { rpc: &rpc, registry }).await.map_err(|e| e.to_string())?;
+    let header = rpc.block_header(block).await.map_err(|e| e.to_string())?.ok_or(format!("no block {block}"))?;
+    let cx = mpamm_core::QuoteCx {
+        rpc: &rpc,
+        registry,
+        pricer: &pricer,
+        block: mpamm_core::BlockRef { number: block, id: [0; 32], hash: header.hash },
+    };
+    let mut rows = venue.quote(&cx, &registry.sizes_usd).await.map_err(|e| e.to_string())?;
+    rows.sort_by(|a, b| {
+        (a.venue_id.as_str(), a.market.as_str(), a.size_usd.to_bits()).cmp(&(
+            b.venue_id.as_str(),
+            b.market.as_str(),
+            b.size_usd.to_bits(),
+        ))
+    });
+    println!("{}", serde_json::to_string(&rows).unwrap());
+    eprintln!("{venue_id}: {} row(s) at block {block}", rows.len());
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("warn").with_writer(std::io::stderr).init();
@@ -235,6 +307,8 @@ async fn main() {
         }
         Cmd::GasCheck { venue, from, to, rpc } => gas_check(&venue, from, to, &rpc).await,
         Cmd::Migrate { from, to } => migrate::migrate(&from, &to),
+        Cmd::CapturePrices { secs, rpc, out } => capture_prices(secs, &rpc, &out).await,
+        Cmd::QuoteAt { venue, block, prices, rpc } => quote_at(&venue, block, &prices, &rpc).await,
     };
     if let Err(e) = r {
         eprintln!("error: {e}");

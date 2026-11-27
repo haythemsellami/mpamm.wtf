@@ -1,0 +1,37 @@
+// Quotes one venue at one block with TODAY's adapter and a frozen reference
+// (asset USD and pair mids from `mpamm-tools capture-prices`), and prints the
+// rows as JSON: the TypeScript half of the same-block quote parity check
+// (service/tools/compare-quotes.py diffs it with `mpamm-tools quote-at`).
+//
+//   RPC_URL=http://127.0.0.1:18080 npx tsx scripts/quote-at.ts poe 125800000 prices.json > ts.json
+import { readFileSync } from 'node:fs';
+import { createPublicClient, http } from 'viem';
+import { SIZES_USD } from '@shared';
+import { monad } from '../src/chain/rpc.js';
+import { config } from '../src/config.js';
+import { UsdPricer } from '../src/pricer.js';
+import { ADAPTERS } from '../src/venues/registry.js';
+import type { AdapterContext } from '../src/venues/adapter.js';
+
+const [venueId, blockArg, pricesFile] = process.argv.slice(2);
+if (!venueId || !blockArg || !pricesFile) throw new Error('usage: quote-at.ts <venue> <block> <prices.json>');
+const frozen = JSON.parse(readFileSync(pricesFile, 'utf8')) as { assetUsd: Record<string, number>; pairMid: Record<string, number> };
+const client = createPublicClient({ chain: monad, transport: http(process.env.RPC_URL ?? 'http://127.0.0.1:8080', { timeout: 60_000 }) });
+const adapter = ADAPTERS.find((a) => a.venues().some((v) => v.id === venueId));
+if (!adapter?.quote) throw new Error(`no quoting adapter for ${venueId}`);
+const pricer = new UsdPricer((a) => frozen.assetUsd[a] ?? 0, (m) => frozen.pairMid[m] ?? 0, (a) => frozen.assetUsd[a] ?? 0);
+const state = new Map<string, string>();
+const ctx: AdapterContext = {
+  client: client as any,
+  getLogs: (async () => []) as any,
+  pricer,
+  config,
+  note: (code, msg) => console.error(`[note] ${code}: ${msg}`),
+  state: { get: (k) => state.get(k), set: async (k, v) => { state.set(k, v); } },
+};
+await adapter.discover(ctx);
+const rows = await adapter.quote(ctx, SIZES_USD, BigInt(blockArg));
+rows.sort((a, b) => (a.venueId + a.market + String(a.sizeUsd).padStart(8)).localeCompare(b.venueId + b.market + String(b.sizeUsd).padStart(8)));
+console.log(JSON.stringify(rows));
+console.error(`${venueId}: ${rows.length} row(s) at block ${blockArg}`);
+process.exit(0);
