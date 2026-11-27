@@ -340,14 +340,43 @@ async fn gas_check(venue_id: &str, from: u64, to: u64, rpc_url: &str) -> Result<
     let venue = mpamm_venues::all().into_iter().find(|v| v.id() == venue_id).ok_or(format!("no venue {venue_id}"))?;
     venue.discover(&ChainCx { rpc: &rpc, registry }).await.map_err(|e| e.to_string())?;
     let sources = venue.gas_sources().map_err(|e| e.to_string())?.ok_or("venue has no gas sources")?;
-    if !sources.relays.is_empty() || !sources.logs.is_empty() {
-        return Err("gas-check compares destination rules only".into());
-    }
+    // The recount reads receipts, independently of the pipeline's rules: a
+    // transaction is the venue's when it is sent to a destination, when its
+    // receipt holds one of the venue's gas logs, or when it calls a relay
+    // naming one of the relay's targets in its head word.
     let dests: std::collections::HashSet<String> =
         sources.destinations.iter().map(|d| format!("0x{}", hex(d))).collect();
+    let gas_logs: std::collections::HashSet<(String, String)> =
+        sources.logs.iter().map(|(a, t)| (format!("0x{}", hex(a)), format!("0x{}", hex(t)))).collect();
+    let relays: Vec<(String, String, usize, std::collections::HashSet<String>)> = sources
+        .relays
+        .iter()
+        .map(|r| {
+            let targets = if r.targets.is_empty() { &sources.destinations } else { &r.targets };
+            (
+                format!("0x{}", hex(&r.address)),
+                format!("0x{}", hex(&r.selector)),
+                r.target_word,
+                targets.iter().map(|t| hex(t)).collect(),
+            )
+        })
+        .collect();
+    let relayed = |tx: &Value| {
+        let to = tx["to"].as_str().unwrap_or("").to_ascii_lowercase();
+        let input = tx["input"].as_str().unwrap_or("").to_ascii_lowercase();
+        relays.iter().any(|(addr, sel, word, targets)| {
+            let at = 10 + 64 * word; // "0x" + selector, then 32-byte words
+            *addr == to
+                && input.starts_with(sel.as_str())
+                && input.get(at..at + 24).is_some_and(|z| z.bytes().all(|b| b == b'0'))
+                && input.get(at + 24..at + 64).is_some_and(|a| targets.contains(a))
+        })
+    };
+    let watch = venue.watch().map_err(|e| e.to_string())?;
     let venues: Vec<Arc<dyn mpamm_core::Venue>> = vec![venue];
-    let rules = mpamm_pipeline::gas::GasRules::of(&venues).map_err(|e| e.to_string())?;
-    let watch = mpamm_ring::WatchSet::default();
+    // As the pipeline does: each block is decoded first (a venue can load a
+    // gas source there, WOOFi's persisted Wooracles), then the rules read.
+    let state = VenueState::new(std::collections::HashMap::new());
     let (mut a_mon, mut a_txs, mut b_mon, mut b_txs, mut differ) = (0.0f64, 0u64, 0.0f64, 0u64, 0u64);
     let mut n = from;
     while n <= to {
@@ -364,13 +393,34 @@ async fn gas_check(venue_id: &str, from: u64, to: u64, rpc_url: &str) -> Result<
         for ((num, b), r) in nums.iter().zip(bs).zip(rs) {
             let b = b.map_err(|e| format!("block {num}: {e}"))?;
             let r = r.map_err(|e| format!("receipts {num}: {e}"))?;
-            let block = mpamm_core::FinalBlock::from_rpc(&b, &json!([]), &watch, "node").map_err(|e| e.to_string())?;
+            // The pipeline's view: the block with its watched logs, as RPC
+            // repair builds it (the logs taken from the receipts here).
+            let all_logs: Vec<Value> = r
+                .as_array()
+                .ok_or("receipts")?
+                .iter()
+                .flat_map(|rc| rc["logs"].as_array().cloned().unwrap_or_default())
+                .collect();
+            let block = mpamm_core::FinalBlock::from_rpc(&b, &Value::Array(all_logs), &watch, "node")
+                .map_err(|e| e.to_string())?;
+            let cx = DecodeCx { registry, pricer: &mpamm_core::NoPrices, state: &state };
+            let _ = venues[0].decode(&cx, &block);
+            state.take_pending();
+            let rules = mpamm_pipeline::gas::GasRules::of(&venues).map_err(|e| e.to_string())?;
             let acc = rules.accrue(&block);
             let (am, at) = acc.first().map_or((0.0, 0), |g| (g.mon, g.txs));
             let (mut bm, mut bt) = (0.0, 0u64);
-            for rc in r.as_array().ok_or("receipts")? {
+            let txs = b["transactions"].as_array().ok_or("transactions")?;
+            for (i, rc) in r.as_array().ok_or("receipts")?.iter().enumerate() {
                 let to = rc["to"].as_str().unwrap_or("").to_ascii_lowercase();
-                if dests.contains(&to) {
+                let logged = rc["logs"].as_array().is_some_and(|ls| {
+                    ls.iter().any(|l| {
+                        let addr = l["address"].as_str().unwrap_or("").to_ascii_lowercase();
+                        let t0 = l["topics"][0].as_str().unwrap_or("").to_ascii_lowercase();
+                        gas_logs.contains(&(addr, t0))
+                    })
+                });
+                if dests.contains(&to) || logged || txs.get(i).is_some_and(&relayed) {
                     let used = mpamm_chain::parse_quantity_u128(&rc["gasUsed"]).unwrap_or(0);
                     let price = mpamm_chain::parse_quantity_u128(&rc["effectiveGasPrice"]).unwrap_or(0);
                     bm += (used * price) as f64 / 1e18;
