@@ -90,11 +90,15 @@ async fn each_venue_publishes_alone_and_a_slow_one_is_late_only_for_itself() {
     tokio::time::sleep(Duration::from_millis(1000)).await;
     let mut got = Vec::new();
     while let Ok(q) = rx.try_recv() {
-        got.push((q.venue.clone(), q.block, q.rows.len()));
+        got.push((q.venue.clone(), q.block, q.rows.len(), q.outcome));
     }
-    assert!(got.contains(&("fast".into(), 10, 4)), "unregistered markets are dropped: {got:?}");
-    assert!(got.contains(&("fast".into(), 11, 4)));
-    assert!(!got.iter().any(|(v, _, _)| v == "slow"), "missed its deadline");
+    assert!(got.contains(&("fast".into(), 10, 4, Outcome::Published)), "unregistered markets are dropped: {got:?}");
+    assert!(got.contains(&("fast".into(), 11, 4, Outcome::Published)));
+    // Every job is announced; a missed one carries no rows.
+    assert!(got.contains(&("slow".into(), 10, 0, Outcome::Late)), "missed its deadline: {got:?}");
+    assert!(got.contains(&("slow".into(), 11, 0, Outcome::Busy)));
+    assert!(got.contains(&("broken".into(), 10, 0, Outcome::Failed)));
+    assert!(!got.iter().any(|(v, _, n, _)| v == "slow" && *n > 0));
     let t = e.timings();
     assert_eq!((t["slow"].late, t["slow"].busy), (1, 1));
     assert_eq!((t["fast"].published, t["fast"].late), (2, 0));

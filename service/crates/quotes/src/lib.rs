@@ -60,6 +60,9 @@ pub struct VenueQuote {
     pub started_ms: f64,
     pub done_ms: f64,
     pub rows: Vec<QuoteRow>,
+    /// Every job is announced, a missed one with no rows, so a frame waiting
+    /// on the venue need not wait out the deadline.
+    pub outcome: Outcome,
 }
 
 /// How a venue's job for a block ended.
@@ -175,8 +178,30 @@ impl Engine {
     }
 
     fn publish(&self, q: VenueQuote) {
-        self.board.write().put(&q);
+        if q.outcome == Outcome::Published {
+            self.board.write().put(&q);
+        }
         let _ = self.published.send(Arc::new(q));
+    }
+
+    /// Announces a job that published nothing.
+    fn missed(&self, venue: String, block: BlockRef, proposal_ms: f64, started_ms: f64, outcome: Outcome) {
+        self.publish(VenueQuote {
+            venue,
+            block: block.number,
+            block_ref: block,
+            proposal_ms,
+            started_ms,
+            done_ms: now_ms(),
+            rows: Vec::new(),
+            outcome,
+        });
+    }
+
+    /// The ids of the venues quoted on every block (the exchanges' ids come
+    /// with their rows).
+    pub fn venue_ids(&self) -> Vec<String> {
+        self.venues.iter().map(|v| v.id().to_string()).collect()
     }
 
     /// Starts the quote job for a block that just finished executing.
@@ -199,12 +224,14 @@ impl Engine {
                 started_ms: started,
                 done_ms: now_ms(),
                 rows,
+                outcome: Outcome::Published,
             });
         }
         for v in &self.venues {
             let id = v.id().to_string();
             if !self.in_flight.lock().insert(id.clone()) {
                 self.record(&id, 0.0, Outcome::Busy);
+                self.missed(id, block, proposal_ms, started, Outcome::Busy);
                 continue;
             }
             let (me, v, frame, cex_rows) = (self.clone(), v.clone(), frame.clone(), cex_rows.clone());
@@ -228,13 +255,18 @@ impl Engine {
                             started_ms: started,
                             done_ms: now_ms(),
                             rows,
+                            outcome: Outcome::Published,
                         });
                     }
                     Ok(Err(e)) => {
                         me.record(&id, ms, Outcome::Failed);
-                        me.last_error.lock().insert(id, e.to_string());
+                        me.last_error.lock().insert(id.clone(), e.to_string());
+                        me.missed(id, block, proposal_ms, started, Outcome::Failed);
                     }
-                    Err(_) => me.record(&id, ms, Outcome::Late),
+                    Err(_) => {
+                        me.record(&id, ms, Outcome::Late);
+                        me.missed(id, block, proposal_ms, started, Outcome::Late);
+                    }
                 }
             });
         }
