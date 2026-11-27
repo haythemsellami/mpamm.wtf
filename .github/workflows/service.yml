@@ -1,17 +1,22 @@
 name: Service (Rust)
 
 # The Rust rebuild under service/ (docs/rebuild-plan.md → M2). Runs on every
-# push and PR that touches it: format, lints, tests, and an x86-64-v3 release
-# build of the node-host binaries, kept as a workflow artifact named after the
-# commit and the node tag the SDK is pinned to.
+# push and PR that touches it (or the dashboard it serves): format, lints,
+# tests, an x86-64-v3 release build of the node-host binaries, kept as a
+# workflow artifact named after the commit and the node tag the SDK is pinned
+# to, and the dashboard's browser suite against the Rust API.
 on:
   push:
     paths:
       - 'service/**'
+      - 'web/**'
+      - 'shared/**'
       - '.github/workflows/service.yml'
   pull_request:
     paths:
       - 'service/**'
+      - 'web/**'
+      - 'shared/**'
       - '.github/workflows/service.yml'
   workflow_dispatch:
 
@@ -69,8 +74,8 @@ jobs:
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
         run: |
-          cargo build --release --locked --bin mpamm-reader
-          mkdir -p dist && cp target/release/mpamm-reader dist/
+          cargo build --release --locked --bin mpamm --bin mpamm-reader --bin mpamm-tools
+          mkdir -p dist && cp target/release/{mpamm,mpamm-reader,mpamm-tools} dist/
           node_tag=$(grep -oP 'monad-event-ring.*tag = "\K[^"]+' Cargo.toml)
           echo "NODE_TAG=$node_tag" >> "$GITHUB_ENV"
 
@@ -80,3 +85,40 @@ jobs:
           path: service/dist/
           if-no-files-found: error
           retention-days: 30
+
+  dashboard:
+    name: dashboard on the Rust API (browser suite)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: service
+
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+
+      # Today's dashboard suite, served by the Rust API's fake example
+      # (web/playwright.rust.config.ts): the gateway, REST and stream as the
+      # browser uses them, without a chain.
+      - name: Dashboard browser suite against the Rust API
+        run: npm -w web run test:e2e:rust
+
+      - name: Upload browser failures
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dashboard-rust-browser-failures
+          path: web/test-results
+          if-no-files-found: ignore
