@@ -17,9 +17,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, HistoryRevision, Venue, VenueError};
+use mpamm_core::{ChainCx, DecodeCx, EntryPoint, FinalBlock, GasSources, HistoryRevision, QuoteCx, Venue, VenueError};
 use mpamm_ring::WatchSet;
-use mpamm_types::{Fill, VenueMeta};
+use mpamm_types::{Fill, QuoteRow, VenueMeta};
 
 /// The inclusive block span a generation's sources can emit logs in: a
 /// contract's creation block, a retired contract's last activity. `None` =
@@ -57,6 +57,11 @@ pub trait Generation: Send + Sync {
 
     /// The trades of this generation's own contracts in one final block.
     fn decode(&self, cx: &DecodeCx<'_>, block: &FinalBlock) -> Result<Vec<Fill>, VenueError>;
+
+    /// Only a live generation quotes; a retired one has nothing to quote.
+    async fn quote(&self, _cx: &QuoteCx<'_>, _sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        Ok(Vec::new())
+    }
 
     fn markets(&self) -> Vec<String> {
         Vec::new()
@@ -138,6 +143,18 @@ impl Venue for Generations {
             if g.span().contains(block.number) {
                 out.extend(g.decode(cx, block)?);
             }
+        }
+        Ok(out)
+    }
+
+    /// Every generation's rows, in declaration order; an error from any of
+    /// them makes the venue missing for this block (today's `Promise.all`).
+    /// In turn rather than at once: a retired generation answers without a
+    /// read, so only the live one waits on the node.
+    async fn quote(&self, cx: &QuoteCx<'_>, sizes_usd: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+        let mut out = Vec::new();
+        for (_, g) in &self.gens {
+            out.extend(g.quote(cx, sizes_usd).await?);
         }
         Ok(out)
     }
@@ -253,6 +270,8 @@ mod tests {
         watch_fails: bool,
         decode_fails: bool,
         gas: Option<Result<Option<GasSources>, VenueError>>,
+        /// `None` = the trait's default (a retired generation quotes nothing).
+        quote: Option<Result<Vec<QuoteRow>, VenueError>>,
         markets: Vec<String>,
         discovered: AtomicUsize,
         decoded: AtomicUsize,
@@ -284,6 +303,9 @@ mod tests {
                 return Err(VenueError::NotReady("pool announced".into()));
             }
             Ok(vec![fill(&format!("{}-{}", self.addr, block.number))])
+        }
+        async fn quote(&self, _cx: &QuoteCx<'_>, _sizes: &[f64]) -> Result<Vec<QuoteRow>, VenueError> {
+            self.quote.clone().unwrap_or(Ok(Vec::new()))
         }
         fn markets(&self) -> Vec<String> {
             self.markets.clone()
@@ -379,6 +401,57 @@ mod tests {
         let (v, _, _) =
             compose(Gen { addr: 1, gas: burns(1), ..Gen::default() }, Gen { addr: 2, gas: burns(2), ..Gen::default() });
         assert_eq!(v.gas_sources().unwrap().unwrap().destinations, vec![[1; 20], [2; 20]]);
+    }
+
+    fn row(market: &str) -> QuoteRow {
+        QuoteRow {
+            venue_id: "v".into(),
+            market: market.into(),
+            size_usd: 100.0,
+            bid_bps: -1.0,
+            ask_bps: 1.0,
+            bid_px: 1.0,
+            ask_px: 1.0,
+            spread_bps: 2.0,
+            filled_full: true,
+            one_sided: None,
+            fee_bps: 0.0,
+            cex_ask_bps: None,
+            cex_bid_bps: None,
+            ts: 0.0,
+        }
+    }
+
+    async fn quote(v: &Generations) -> Result<Vec<String>, VenueError> {
+        let rpc = mpamm_chain::Rpc::new("test", "", std::time::Duration::from_millis(10));
+        let cx = QuoteCx {
+            rpc: &rpc,
+            registry: Registry::get(),
+            pricer: &NoPrices,
+            block: mpamm_core::BlockRef { number: 1, id: [0; 32], hash: [0; 32] },
+        };
+        Ok(v.quote(&cx, &[100.0]).await?.into_iter().map(|r| r.market).collect())
+    }
+
+    /// Today's composer: every generation's rows, flattened in declaration
+    /// order (a retired one has no quote hook); one failing fails the venue.
+    #[tokio::test]
+    async fn quotes_every_generation_and_fails_when_one_fails() {
+        let (v, _, _) = compose(
+            Gen { addr: 1, ..Gen::default() },
+            Gen { addr: 2, quote: Some(Ok(vec![row("MON/USDC"), row("ETH/USDC")])), ..Gen::default() },
+        );
+        assert_eq!(quote(&v).await.unwrap(), ["MON/USDC", "ETH/USDC"]);
+        let (v, _, _) = compose(
+            Gen { addr: 1, quote: Some(Ok(vec![row("BTC/USDC")])), ..Gen::default() },
+            Gen { addr: 2, quote: Some(Ok(vec![row("MON/USDC")])), ..Gen::default() },
+        );
+        assert_eq!(quote(&v).await.unwrap(), ["BTC/USDC", "MON/USDC"]);
+        let (v, _, _) = compose(
+            Gen { addr: 1, ..Gen::default() },
+            Gen { addr: 2, quote: Some(Err(VenueError::Chain("every leg failed".into()))), ..Gen::default() },
+        );
+        assert_eq!(quote(&v).await, Err(VenueError::Chain("every leg failed".into())));
     }
 
     #[test]
