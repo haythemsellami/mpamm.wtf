@@ -2167,6 +2167,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpamm-analytics"
+version = "0.1.0"
+dependencies = [
+ "indexmap 2.14.2",
+ "mpamm-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mpamm-chain"
 version = "0.1.0"
 dependencies = [
