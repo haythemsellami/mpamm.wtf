@@ -10,6 +10,7 @@ pub mod generations;
 pub mod logs;
 pub mod metric;
 pub mod poe;
+pub mod thogamm;
 pub mod util;
 pub mod woofi;
 
@@ -22,6 +23,7 @@ pub fn all() -> Vec<Arc<dyn Venue>> {
     vec![
         Arc::new(poe::Poe::default()),
         Arc::new(metric::venue()),
+        Arc::new(thogamm::Thogamm::default()),
         Arc::new(crystal::Crystal::default()),
         Arc::new(woofi::Woofi::default()),
         Arc::new(btr::Btr::default()),
