@@ -31,8 +31,8 @@ the deploy rehearsal; M3 has started (ring, chain and registry crates).
 | --- | --- | --- | --- | --- | --- |
 | M1 | Reader hardening and the 7-day gate run | 1 | — | one edit to `mpamm.service` (gate run only) | Gate run under way |
 | M2 | CI, release artifacts, deploy script | 1 | — | registry credentials (publishing only); the unit edit (deploy rehearsal) | In progress |
-| M3 | Service skeleton: crates, config, store, commit pipeline, registry | 2 | M1 | — | In progress |
-| M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | Not started |
+| M3 | Service skeleton: crates, config, store, commit pipeline, registry | 2 | M1 | — | Done (types' TS export moves to M11) |
+| M4 | Pricing: exchange feeds, references, late-decode pricing | 2 | M3 | — | In progress |
 | M5 | Venue discovery and decode ports (11 venues) | 2 | M3, M4 | archive RPC URLs (backfill) | Not started |
 | M6 | Exact gas and attribution | 2 | M5 | — | Not started |
 | M7 | Markouts and analytics | 2 | M4, M5 | — | Not started |
@@ -169,28 +169,39 @@ done with the script.
 
 ### M3 · Service skeleton
 
-- [ ] Workspace crates per *Target layout*; `mpamm` binary with config (file + env),
-      structured logs (`tracing`), and the thread model from the spec (reader on its own
-      core, async runtime for the rest, one SQLite writer thread)
+- [x] Workspace crates per *Target layout* (plus `core`: the final-block shape and the
+      venue trait shared by venues and the pipeline); `mpamm` binary with settings (flags,
+      `[service]` in `mpamm.toml`, secrets from the environment), `tracing` logs, the
+      spec's thread model (pinned ring reader, async runtime, one SQLite writer thread),
+      `GET /api/health` on localhost, clean SIGTERM
 - [x] `registry`: tokens, assets and pairs moved from computed TypeScript to
       `shared/registry.json` (byte-identical values; v1's tests unchanged), read by
       `shared/src/index.ts` and by `crates/registry`, whose lookups are tested against
       today's TypeScript answers (`tests/golden.json`, kept fresh by a server test)
-- [ ] `types`: Fill, QuoteRow, BlockRef, stream message types; TypeScript generation
-      (ts-rs) into `shared/` so the web build consumes them
+- [x] `types`: Fill, QuoteRow, VenueMeta, daily volume and gas in today's JSON shapes
+      (REST stays compatible); the new stream's message types and their TypeScript
+      generation (ts-rs) land with them in M11
 - [x] `ring`: the reader's logic as a library: watch set (logs by address+topic0,
       transaction headers, calldata by `to`), block assembly at `BLOCK_END`, block-level
       log index from `log_count` and `txn_count`, commit-state tracking, abandonment at
       finalization, lost finalizations recovered from parent hashes, `Missing` heights
-- [ ] `store`: new SQLite schema (trades kept forever, daily volume, daily gas with a
-      method flag, cursors, revisions, meta), additive migrations, one transaction per
-      final block including the cursor
-- [ ] `pipeline`: strict block-order commits at Finalized; a gap holds later commits until
-      repaired; fail-closed on any source or decode error
-- [ ] `chain`: local-node client (pinned reads, explicit gas, JSON-RPC batches), archive
-      client with the availability gate, hosted hot client for fallback
-- [ ] Revisions: dated, one-shot history repairs as data (equivalent of
-      `historyRevisions` / `gasRevisions` / `markets`)
+- [x] `store`: new SQLite schema (trades kept forever, daily volume, daily gas marked
+      exact / estimate / mixed, cursors, revisions, venue state, meta); one transaction per
+      final block including the cursor, refusing anything but cursor + 1; volume grows
+      only by trades actually inserted; a newer schema is refused, never wiped
+- [x] `pipeline`: strict block-order commits at Finalized; a lost height is read over RPC
+      (local node, then archive, one client per block) and holds later commits until it
+      is; fail-closed on any read, decode or commit error
+- [x] `chain`: JSON-RPC client (calls, batches, URL-free errors); pinned reads with
+      explicit gas arrive with the quote engine (M9), the hosted hot client with fallback
+      mode (M14)
+- [ ] Revisions: dated, one-shot history repairs as data (`historyRevisions` /
+      `gasRevisions` / `markets`); the table exists, the logic lands with the first venue
+      that declares one (M5)
+
+On the host (2026-11-27), with no venues: every final block committed from the ring at a
+lag of 1–2 blocks, no holds; stopped by SIGTERM and restarted 30 s later, it resumed at
+the cursor + 1 and caught up 159 blocks from the ring.
 
 **Done when:** the binary runs on the host with an empty venue list, commits empty final
 blocks in order with the cursor, survives a restart mid-stream without a gap, and the

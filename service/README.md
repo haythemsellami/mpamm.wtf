@@ -7,7 +7,13 @@ workspace.
 
 | Crate | What it does |
 | --- | --- |
-| `crates/ring` (`mpamm-ring`) | The service's event model, the watch set (what to copy out of the ring), and the block tracker: block assembly, block-level log indexes, commit states, abandoned proposals, and heights the ring lost (`Missing`), reported strictly in order. `sdk.rs` reads the node's ring with the execution-event SDK (Linux only); everything else builds and tests anywhere. |
+| `mpamm` | The service binary: the ring reader on a pinned core, the commit pipeline on the async runtime, one SQLite writer thread, `GET /api/health` on localhost. Venue modules, pricing, quotes and the stream join as their milestones land. |
+| `crates/ring` (`mpamm-ring`) | The event model, the watch set (what to copy out of the ring), and the block tracker: block assembly, block-level log indexes, commit states, abandoned proposals, and heights the ring lost (`Missing`), reported strictly in order. `sdk.rs` reads the node's ring and `follow.rs` is the reader thread's loop (Linux only); everything else builds and tests anywhere. |
+| `crates/core` (`mpamm-core`) | `FinalBlock`, identical whether read from the ring or over RPC, and the `Venue` trait. |
+| `crates/pipeline` (`mpamm-pipeline`) | Final blocks in strict order: RPC repair (local node, then archive), venue decode, one commit per block; holds instead of skipping. |
+| `crates/store` (`mpamm-store`) | SQLite: every trade, daily volume and gas, the cursor, revisions, venue state; one transaction per final block. |
+| `crates/registry` (`mpamm-registry`) | The market registry, compiled in from `shared/registry.json`, with lookups tested against today's TypeScript. |
+| `crates/types` (`mpamm-types`) | Data types in today's JSON shapes. |
 | `crates/chain` (`mpamm-chain`) | JSON-RPC over HTTP (calls, batches, block headers). Errors never carry a URL, so hosted keys can't reach a log. |
 | `reader` (`mpamm-reader`) | The phase-1 tool: follows the ring, records each height's timeline, repairs lost heights over RPC, and writes daily files, a cursor and a health file. Decodes no venue data. |
 
@@ -35,6 +41,25 @@ service/scripts/build-linux.sh    # release binaries → service/dist/
 Never build on the node host: a release build would take the node's cores. The
 first container run fetches the Monad repository with its submodules, which is
 slow; later runs reuse the cached volumes.
+
+## Run the service on the node host
+
+Until `mpamm.service` runs it, by hand, with a test database:
+
+```bash
+scp service/dist/mpamm <node-host>:/tmp/
+ssh <node-host> 'sudo -u mpamm install -m 0755 /tmp/mpamm /var/lib/mpamm/bin/mpamm-test'
+ssh <node-host> 'sudo -u mpamm /var/lib/mpamm/bin/mpamm-test --db /var/lib/mpamm/data-test/mpamm.db --reader-cpu 0'
+ssh <node-host> 'curl -s 127.0.0.1:8787/api/health'
+```
+
+Settings come from flags, then the `[service]` table of `/var/lib/mpamm/mpamm.toml`
+(`db`, `ring`, `rpc_url`, `archive_url_env`, `reader_cpu`, `http`, `finalize_wait_ms`,
+`stall_secs`), then defaults. The hosted archive URL is read only from the environment
+variable named by `archive_url_env` (default `MPAMM_ARCHIVE_RPC_URL`). Once the unit
+points at `/var/lib/mpamm/bin/mpamm`, `service/scripts/deploy.sh <node-host>` installs a
+build with `service/deploy/mpamm.toml`, restarts it and checks health
+(`HEALTH=service`), rolling back if it never becomes healthy.
 
 ## Run the reader on the node host
 
