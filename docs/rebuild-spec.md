@@ -108,7 +108,7 @@ One bare-metal server runs the Monad node, the mpamm service and the database's 
 | --- | --- | --- |
 | Bare-metal host | Monad full node, the mpamm service, SQLite primary | Execution Events are readable only on the node's host. SQLite lives beside its one writer, so no internet link sits inside the counting path. |
 | Railway | Frontend static files; a database replica fed continuously from the host; today's system as a standby origin | An off-host copy restorable in minutes, and a standby that already runs. |
-| Object storage | A continuous copy of the database's write-ahead log (for example Litestream to an S3-compatible bucket, such as a Railway bucket) | Point-in-time recovery if the host is lost. |
+| Object storage | A continuous copy of the database's write-ahead log: Litestream, run by the service, to an S3-compatible bucket (such as a Railway bucket) | Point-in-time recovery if the host is lost. |
 | Viewers | Stream and REST from the host; static files from Railway or a CDN | Proxying the stream through Railway would add a hop to every message. |
 
 **Why the primary database isn't on Railway:** SQLite is a file inside the process that writes it, and the service writes at every final block. A primary on Railway would mean Postgres over the internet. Every count of trades, volume and gas would then depend on the link between two providers. If that link dropped, counting would stop until it came back: correct, but stalled. The replica on Railway gives the off-host copy without that dependency, and it can serve history queries if we ever want them off the node host.

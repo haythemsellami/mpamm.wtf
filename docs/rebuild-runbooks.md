@@ -10,7 +10,7 @@ standby after it. Steps marked *(not yet run)* have not been exercised on the ho
 | --- | --- |
 | Binaries | `/var/lib/mpamm/bin/` (`mpamm`, `mpamm-reader`, `mpamm-tools`); built off the host by `service/scripts/build-linux.sh`, never on it |
 | Settings | `/var/lib/mpamm/mpamm.toml` (`[service]`); secrets only in the environment file the unit loads, never printed or copied |
-| Database | `/var/lib/mpamm/data/mpamm.db` (SQLite, WAL) |
+| Database | `/var/lib/mpamm/data/mpamm.db` (SQLite, WAL); its copy off the host in object storage (*Replication and restore*) |
 | Health | `curl -s 127.0.0.1:8787/api/health`: `status`, `alerts`, ring, pipeline, feeds, per-venue quote timings |
 | Notes | `curl -s 127.0.0.1:8787/api/markets \| jq .state.notes`: every warning the service logged, URLs removed |
 | Log | the unit's journal (`journalctl -u mpamm`); by hand, the file the process writes |
@@ -31,6 +31,7 @@ for `stall_secs`: 503); `no_ring` (the ring can't be opened: 503).
 | `unrepaired_gap` | A block the ring lost can't be read over RPC | Read `pipeline.held`. A block older than the node's history (it starts at its last state sync) needs the archive URL (`archive_url_env`). The pipeline holds; it never skips |
 | `no_final_commit` | Nothing committed for 3 s | With `node_behind`: the node. Alone: read `pipeline.held` and the notes (a venue `NotReady` asks for a rediscovery at once, then holds) |
 | `venue_outage` | A venue published no quote in a minute | `quotes.<venue>.lastError` names the cause (a revert names its reason). Its trades still decode |
+| `replication_down` | The database isn't being copied off the host: replication off (no replica URL), the copier down for 30 s, a copier error in the last minute with no recovery since, or its position (or uploads) still for 2 min while the store commits | Read `replication` on health (`lastExit`, `lastError`) and the `replication.warn` notes. Never a 503: quotes and trades carry on. See *Replication and restore* |
 
 ## Deploy and roll back
 
@@ -104,12 +105,56 @@ job, its day and cursor, each archive node); notes `history.start`, `history.don
 - Today's blocks in a repair are priced with the service's prices at their time; a closed
   day waits for the exchanges' archives (published the next day).
 
+## Replication and restore
+
+The service runs Litestream (`/var/lib/mpamm/bin/litestream`, the release pinned and
+checksummed by `service/scripts/fetch-litestream.sh`) as its child, with
+`/var/lib/mpamm/litestream.yml` (`service/deploy/litestream.yml`; `deploy.sh` installs
+both). The write-ahead log reaches object storage about once a second; a full snapshot is
+taken daily and kept a week, so any second of the last 7 days can be restored. The copier
+is fail-open: it never stops quotes or trades, the service restarts it with a back-off,
+and health reports it (`replication`: `state`, `metrics.txid`, `txidAgeMs`, `putsAgeMs`,
+`lastError`).
+
+- **Turning it on:** the environment file gets `MPAMM_REPLICA_URL`
+  (`s3://<bucket>/mpamm?endpoint=<endpoint>`) and the bucket's keys,
+  `LITESTREAM_ACCESS_KEY_ID` and `LITESTREAM_SECRET_ACCESS_KEY` (whoever owns the file adds
+  them; never in the repo or a chat). `mpamm.toml` already names the binary. Restart, then
+  check that `replication.state` is `running` and `txidAgeMs` and `putsAgeMs` stay under a
+  few seconds.
+- **One copier per replica, ever.** The copier holds `.mpamm.db-litestream.lock` beside the
+  database for its life, and a restarted service waits for the previous copier's final
+  sync. Never run `litestream replicate` by hand against the service's database.
+- **What a restore loses:** the last second or so of writes. Trades in it come back from
+  the chain, because the block cursor commits with its trades and a restored database
+  resumes where its data stops; quote history in that window is gone.
+
+**Restore** (a new host, or a point in time), with the service stopped:
+
+```bash
+export LITESTREAM_ACCESS_KEY_ID=… LITESTREAM_SECRET_ACCESS_KEY=…    # from the env file's owner
+sudo -u mpamm -E /var/lib/mpamm/bin/litestream restore -integrity-check full \
+  -o /var/lib/mpamm/data/mpamm.db 's3://<bucket>/mpamm?endpoint=<endpoint>'
+# a point in time instead of the latest: add -timestamp 2026-11-28T10:00:00Z
+```
+
+Then point `MPAMM_REPLICA_URL` at a **new** path (`…/mpamm-<date>`) before starting: a
+replaced database must not continue the old replica's sequence. Start the service; it
+resumes at the restored cursor + 1, reading older blocks from the ring or the archive.
+Keep the old path until the new one has its first snapshot.
+
+Drilled 2026-11-28 with a file replica: a 349 MB database restored in 5–7 s on the host
+and on a laptop, every table identical to the source, and the service booted on the copy
+resumed at its cursor + 1 with trades matching the shadow run's. A fresh replica starts at
+about five times the compressed database (the first image in L0, L1–L3 and the snapshot);
+L0's copy is pruned after 5 minutes.
+
 ## Host loss *(not yet run)*
 
 1. The standby (today's Railway service) keeps serving; move DNS to it (M15's rollback).
-2. A new host: DevOps provisions the node and the `mpamm` user; restore the database
-   (the replica in object storage once M13 has it; until then, the last copy taken) and
-   deploy. The service catches up from the restored cursor over RPC/archive.
+2. A new host: DevOps provisions the node and the `mpamm` user; restore the database from
+   object storage (*Replication and restore*) and deploy. The service catches up from the
+   restored cursor over RPC/archive.
 
 ## Checks
 

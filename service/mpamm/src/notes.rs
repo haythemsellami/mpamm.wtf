@@ -208,6 +208,7 @@ mod tests {
             tracing::warn!(target: "feeds", "kraken: book checksum mismatch for ANTx/USD; awaiting a fresh snapshot");
             tracing::warn!("discover poe: rpc error at https://node.example/key; retrying");
             tracing::error!(target: "pipeline", "decode block 7: boom");
+            tracing::warn!(target: "replication", "litestream exited (signal: 9 (SIGKILL)); restarting in 1s");
         });
         let list = b.list();
         let got: Vec<(&str, &str)> = list.iter().map(|n| (n.code.as_str(), n.msg.as_str())).collect();
@@ -217,6 +218,7 @@ mod tests {
                 ("feeds.warn", "kraken: book checksum mismatch for ANTx/USD; awaiting a fresh snapshot"),
                 ("service.warn", "discover poe: rpc error at <rpc> retrying"),
                 ("pipeline.error", "decode block 7: boom"),
+                ("replication.warn", "litestream exited (signal: 9 (SIGKILL)); restarting in 1s"),
             ]
         );
         assert!(list.iter().all(|n| n.level == NoteLevel::Warn));

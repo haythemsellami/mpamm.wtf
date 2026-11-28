@@ -79,11 +79,20 @@ example serves the built app): `npm -w web run test:e2e:rust`.
 
 Settings come from flags, then the `[service]` table of `/var/lib/mpamm/mpamm.toml`
 (`db`, `ring`, `rpc_url`, `archive_url_env`, `reader_cpu`, `http`, `web_dist`,
-`finalize_wait_ms`, `stall_secs`, `quote_deadline_ms`, `depth_min_interval_ms`, `archive_cache`), then defaults. The hosted archive URL is read only from the environment
-variable named by `archive_url_env` (default `MPAMM_ARCHIVE_RPC_URL`). Once the unit
-points at `/var/lib/mpamm/bin/mpamm`, `service/scripts/deploy.sh <node-host>` installs a
-build with `service/deploy/mpamm.toml`, restarts it and checks health
-(`HEALTH=service`), rolling back if it never becomes healthy.
+`finalize_wait_ms`, `stall_secs`, `quote_deadline_ms`, `depth_min_interval_ms`, `archive_cache`,
+`litestream`, `litestream_config`, `litestream_addr`, `replica_url_env`), then defaults.
+The hosted archive URL is read only from the environment variable named by
+`archive_url_env` (default `MPAMM_ARCHIVE_RPC_URL`), the replica URL likewise
+(`MPAMM_REPLICA_URL`). Once the unit points at `/var/lib/mpamm/bin/mpamm`,
+`service/scripts/deploy.sh <node-host>` installs a build with `service/deploy/mpamm.toml`
+and `service/deploy/litestream.yml` (and Litestream's pinned binary, after
+`service/scripts/fetch-litestream.sh`), restarts it and checks health (`HEALTH=service`),
+rolling back if it never becomes healthy.
+
+Replication: with `litestream` set and the replica URL in the environment, the service
+runs Litestream as its child, which copies the database's write-ahead log to object
+storage (`mpamm/src/replication.rs`; operations in
+[docs/rebuild-runbooks.md](../docs/rebuild-runbooks.md) → *Replication and restore*).
 
 Markouts the live history couldn't give (trades repaired after an outage, from before a
 restart) are filled from the exchanges' public archives every 10 minutes, once published

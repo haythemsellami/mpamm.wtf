@@ -48,7 +48,7 @@ path for M8.
 | M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | All 11 ported and identical; p90 gate blocked on RPC cores |
 | M11 | Stream and REST | 4 | M8, M10 | — | Today's REST and v2 stream ported; compact protocol left |
 | M12 | Frontend on the new stream | 4 | M11 | CPU set (latency target) | Dashboard unchanged on the Rust API; render rules and timing done; per-venue stream left |
-| M13 | Data migration and replication | 4 | M8 | object storage bucket, archive URLs | Rehearsed on production's database; history repairs built and proven; replication left |
+| M13 | Data migration and replication | 4 | M8 | object storage bucket, archive URLs | Rehearsed on production's database; history repairs built and proven; replication built and its restore drill passed; the bucket left |
 | M14 | Operations readiness | 4 | M11, M13 | hot node URL, TLS hostname, on-call | Alerts, notes, runbooks, fallback mode built and proven; the unit and TLS left |
 | M15 | Switch-over and merge (phase-4 gate) | 4 | M12–M14 | DNS change | Not started |
 | M16 | Edge relays (optional) | 5 | M15 | relay hosting | Only if chosen |
@@ -518,9 +518,28 @@ browser, with proposal → paint p50 at most 200 ms near the host.
         for id; closed-day USD within 1% (fill-time archive prices against production's
         live ones)
   - [ ] A run against the devcore archives *(DevOps: archive URLs in the env file)*
-- [ ] Continuous replication of the new database off the host (write-ahead-log copy to
-      object storage and a replica on Railway) *(DevOps: bucket)*
-- [ ] Restore drill: rebuild the database from the copy on another machine
+- [x] Continuous replication built: Litestream (v0.5.18, pinned and checksummed by
+      `scripts/fetch-litestream.sh`) run by the service as its child
+      (`mpamm/src/replication.rs`), fail-open, restarted with a back-off, one copier per
+      database (a lock it inherits), stopped after its final sync; `replication` on health
+      and the alert `replication_down`. Drill on the host 2026-11-28 (a test instance on a
+      copy of the shadow's database, a file replica): first snapshot 207 MB for the 349 MB
+      database in 4 s, the position moving every second with the commits, Litestream's
+      once-a-minute checkpoint ahead of the service's own; the copier killed → restarted in
+      1 s; the service killed → the copier gone in 1 s; a restart resumed without a new
+      snapshot. Eight minutes steady: one position a second, one checkpoint a minute, the
+      write-ahead log under 1.5 MB, no errors; the replica 828 MB once the first full
+      image left L0, then ~150 KB a minute
+- [ ] Replication to object storage, and a follow-mode replica on Railway
+      (`litestream restore -f`) *(bucket: DevOps, or a Railway bucket)*
+- [x] Restore drill, 2026-11-28: the test instance stopped with SIGTERM (the copier's
+      final sync), the replica restored on the host (6.5 s) and on a laptop (copied in
+      4.5 min, restored in 5 s), `-integrity-check full` passing on both; all 12 tables
+      (574,964 rows) identical to the source by row count and content hash, the cursor
+      the last block committed. The service booted on the restored copy resumed at the
+      cursor + 1, caught up 1,135 blocks from the ring, and its trades over them matched
+      the shadow run's (13 of 13, ids, USD, labels). Again from object storage once the
+      bucket exists
 
 **Done when:** a full migration rehearsal verifies with zero differences, and the restore
 drill completes.
@@ -596,7 +615,7 @@ a deploy replaces the binary at its path and restarts the unit, with no DevOps s
 | Registry credentials for CI publishing | M2 (publishing) | Asked |
 | Bigger event ring at the next node restart | Not blocking | Asked |
 | Hot-fallback node WebSocket (`monadNewHeads`) | M14 | Asked |
-| Object storage bucket | M13 | Asked |
+| Object storage bucket (S3-compatible; a Railway bucket works) | M13 | Asked |
 | TLS hostname, firewall for the public endpoint | M14 | Asked |
 | Node-upgrade notice | Ongoing | Asked |
 | Build toolchain on the host (optional) | — | Asked |
