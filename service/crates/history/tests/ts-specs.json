@@ -1,0 +1,64 @@
+{
+ "poe": {
+  "fromUtc": "2026-05-09",
+  "specs": []
+ },
+ "clober-vault": {
+  "fromUtc": "2025-10-28",
+  "specs": [
+   "history_revision_clober-vault_replay-0921-midnight=clober-vault#replay-0921-midnight:fills:2026-09-18..2026-09-20"
+  ]
+ },
+ "metric": {
+  "fromUtc": "2026-03-30",
+  "specs": [
+   "history_revision_metric_wantx-usdc=metric#wantx-usdc:markets:2026-11-19:wANTx/USDC"
+  ]
+ },
+ "hanji": {
+  "fromUtc": "2026-06-05",
+  "specs": [
+   "history_revision_hanji_replay-0921-midnight=hanji#replay-0921-midnight:fills:2026-09-17..2026-09-20",
+   "history_revision_hanji_xaut-book=hanji#xaut-book:markets:2026-09-21:XAUt/USDC",
+   "history_revision_hanji_wrapped-xstocks=hanji#wrapped-xstocks:markets:2026-11-08:wEWYx/USDC,wNVDAx/USDC,wQQQx/USDC,wSPYx/USDC,wTSLAx/USDC",
+   "history_revision_hanji_wrapped-xstocks-2=hanji#wrapped-xstocks-2:markets:2026-11-19:wANTx/USDC,wMUx/USDC,wSKHYx/USDC,wSMHx/USDC,wSPCXx/USDC"
+  ]
+ },
+ "lunarbase": {
+  "fromUtc": "2026-04-30",
+  "specs": []
+ },
+ "thogamm": {
+  "fromUtc": "2026-07-26",
+  "specs": [
+   "history_revision_thogamm_xstocks-usd-references=thogamm#xstocks-usd-references:markets:2026-10-26:EWYx/AUSD,EWYx/BTC,EWYx/ETH,EWYx/MON,EWYx/QQQx,EWYx/SPYx,EWYx/USDC,EWYx/USDT0,EWYx/XAUt,EWYx/cbBTC,NVDAx/AUSD,NVDAx/BTC,NVDAx/ETH,NVDAx/EWYx,NVDAx/MON,NVDAx/QQQx,NVDAx/SPYx,NVDAx/USDC,NVDAx/USDT0,NVDAx/XAUt,NVDAx/cbBTC,QQQx/AUSD,QQQx/BTC,QQQx/ETH,QQQx/MON,QQQx/SPYx,QQQx/USDC,QQQx/USDT0,QQQx/XAUt,QQQx/cbBTC,SPYx/AUSD,SPYx/BTC,SPYx/ETH,SPYx/MON,SPYx/USDC,SPYx/USDT0,SPYx/XAUt,SPYx/cbBTC,TSLAx/AUSD,TSLAx/BTC,TSLAx/ETH,TSLAx/EWYx,TSLAx/MON,TSLAx/NVDAx,TSLAx/QQQx,TSLAx/SPYx,TSLAx/USDC,TSLAx/USDT0,TSLAx/XAUt,TSLAx/cbBTC",
+   "history_revision_thogamm_xaut-wbtc-quote-basis=thogamm#xaut-wbtc-quote-basis:markets:2026-09-04:XAUt/BTC",
+   "history_revision_thogamm_november-xstocks=thogamm#november-xstocks:markets:2026-11-17:MUx/AUSD,MUx/BTC,MUx/ETH,MUx/EWYx,MUx/MON,MUx/NVDAx,MUx/QQQx,MUx/SMHx,MUx/SPCXx,MUx/SPYx,MUx/TSLAx,MUx/USDC,MUx/USDT0,MUx/XAUt,MUx/cbBTC,SKHYx/AUSD,SKHYx/BTC,SKHYx/ETH,SKHYx/EWYx,SKHYx/MON,SKHYx/MUx,SKHYx/NVDAx,SKHYx/QQQx,SKHYx/SMHx,SKHYx/SPCXx,SKHYx/SPYx,SKHYx/TSLAx,SKHYx/USDC,SKHYx/USDT0,SKHYx/XAUt,SKHYx/cbBTC,SMHx/AUSD,SMHx/BTC,SMHx/ETH,SMHx/EWYx,SMHx/MON,SMHx/NVDAx,SMHx/QQQx,SMHx/SPYx,SMHx/TSLAx,SMHx/USDC,SMHx/USDT0,SMHx/XAUt,SMHx/cbBTC,SPCXx/AUSD,SPCXx/BTC,SPCXx/ETH,SPCXx/EWYx,SPCXx/MON,SPCXx/NVDAx,SPCXx/QQQx,SPCXx/SMHx,SPCXx/SPYx,SPCXx/TSLAx,SPCXx/USDC,SPCXx/USDT0,SPCXx/XAUt,SPCXx/cbBTC",
+   "history_revision_thogamm_anthropic-xstock=thogamm#anthropic-xstock:markets:2026-11-27:ANTx/AUSD,ANTx/BTC,ANTx/ETH,ANTx/EWYx,ANTx/MON,ANTx/MUx,ANTx/NVDAx,ANTx/QQQx,ANTx/SKHYx,ANTx/SMHx,ANTx/SPCXx,ANTx/SPYx,ANTx/TSLAx,ANTx/USDC,ANTx/USDT0,ANTx/XAUt,ANTx/cbBTC"
+  ]
+ },
+ "capricorn": {
+  "fromUtc": "2026-04-01",
+  "specs": []
+ },
+ "crystal": {
+  "fromUtc": "2026-09-20",
+  "specs": [
+   "history_revision_crystal_deploy-day=crystal#deploy-day:2026-10-27"
+  ]
+ },
+ "woofi": {
+  "fromUtc": "2025-12-01",
+  "specs": []
+ },
+ "btr": {
+  "fromUtc": "2026-10-01",
+  "specs": [
+   "history_revision_btr_fill-time-usd=btr#fill-time-usd:2026-10-13"
+  ]
+ },
+ "uniswap-v4": {
+  "fromUtc": null,
+  "specs": []
+ }
+}

@@ -2395,6 +2395,8 @@ dependencies = [
  "axum",
  "futures-util",
  "mpamm-chain",
+ "mpamm-core",
+ "mpamm-venues",
  "parking_lot",
  "serde_json",
  "tokio",
