@@ -116,6 +116,9 @@ job, its day and cursor, each archive node); notes `history.start`, `history.don
 ```bash
 # the service against production's public API, per venue over the blocks both finished
 sudo -u mpamm /var/lib/mpamm/bin/mpamm-tools parity --db /var/lib/mpamm/data/mpamm.db --hours 24
+# after an attribution change, stored UNKNOWN trades decoded before it, labelled again
+# (only category/router/to change; --dry-run lists them first)
+sudo -u mpamm /var/lib/mpamm/bin/mpamm-tools relabel --db /var/lib/mpamm/data/mpamm.db --from <a> --to <b> --dry-run
 # a load test of the stream: N viewers as Execution tabs, beside the service
 sudo -u mpamm /var/lib/mpamm/bin/mpamm-tools stream-load --clients 1000 --secs 60
 # the history repairs a database would run (records adopted markers; run on a copy)

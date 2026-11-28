@@ -19,6 +19,7 @@ mod depth;
 mod load;
 mod migrate;
 mod parity;
+mod relabel;
 mod repair;
 mod verify;
 
@@ -94,6 +95,22 @@ enum Cmd {
         market: String,
         #[arg(long, default_value_t = 1000.0)]
         size: f64,
+    },
+    /// Attribute a block range's stored UNKNOWN trades again with this
+    /// build's tables (after an attribution change); only category, router
+    /// and `to` change.
+    Relabel {
+        #[arg(long)]
+        db: std::path::PathBuf,
+        #[arg(long)]
+        from: u64,
+        #[arg(long)]
+        to: u64,
+        /// A node that holds the range's transactions.
+        #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
+        rpc: String,
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Decode one venue's trades over [from, to] and print them as JSON.
     DecodeRange {
@@ -686,6 +703,7 @@ async fn main() {
         }
         Cmd::GasCheck { venue, from, to, rpc } => gas_check(&venue, from, to, &rpc).await,
         Cmd::Migrate { from, to } => migrate::migrate(&from, &to),
+        Cmd::Relabel { db, from, to, rpc, dry_run } => relabel::relabel(&db, &rpc, from, to, dry_run).await,
         Cmd::StreamLoad { url, clients, secs, ramp_ms, market, size } => {
             load::run(&url, clients, secs, ramp_ms, &market, size).await
         }
