@@ -19,6 +19,8 @@ pub struct Health {
     pub depth: Arc<mpamm_quotes::depth::Depth>,
     pub started: Instant,
     pub stall_ms: u64,
+    /// History repairs, once the service runs them.
+    pub history: Option<crate::history::HistoryHealth>,
 }
 
 #[derive(Serialize)]
@@ -38,6 +40,9 @@ pub struct HealthBody {
     /// Depth curves: the watched markets, pass times over the last minute,
     /// and the venues that missed passes.
     pub depth: mpamm_quotes::depth::DepthView,
+    /// History repairs: jobs, the one running, the archive nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history: Option<crate::history::HistoryView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -162,6 +167,7 @@ pub fn body(h: &Health) -> (HealthBody, bool) {
             quotes,
             alerts,
             depth,
+            history: h.history.as_ref().map(|x| x.view()),
         },
         ok,
     )

@@ -87,6 +87,7 @@ fn health(prices: &Arc<Prices>, engine: &Arc<Engine>, depth: &Arc<Depth>) -> cra
         depth: depth.clone(),
         started: Instant::now(),
         stall_ms: 5_000,
+        history: None,
     }
 }
 

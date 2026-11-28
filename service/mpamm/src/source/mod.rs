@@ -310,6 +310,16 @@ impl ServiceSource {
         }
     }
 
+    /// Stored volume changed outside a block commit (a history repair).
+    pub fn volume_changed(self: &Arc<Self>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = me.reload_volume().await {
+                tracing::warn!("read volume: {e}");
+            }
+        });
+    }
+
     async fn reload_volume(&self) -> Result<(), SourceError> {
         let today = utc_day(now_ms() as f64);
         let t = today.clone();

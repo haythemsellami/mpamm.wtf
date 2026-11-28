@@ -165,8 +165,14 @@ impl Executor {
     }
 
     /// Runs one job to its end, or to the first failure (the job resumes at
-    /// its cursor on the next attempt).
-    pub async fn run(&self, job: &Planned, b0: u64) -> Result<(), String> {
+    /// its cursor on the next attempt). Boxed as `Send` here, where the
+    /// lifetimes are concrete: left to inference, a spawned caller hits the
+    /// compiler's "Send is not general enough" limitation.
+    pub fn run<'a>(&'a self, job: &'a Planned, b0: u64) -> futures_util::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(self.run_job(job, b0))
+    }
+
+    async fn run_job(&self, job: &Planned, b0: u64) -> Result<(), String> {
         let now = (self.now_ms)();
         if let Kind::Fills { until } = &job.kind {
             return self.resum(job, until, now).await;
@@ -304,8 +310,15 @@ impl Executor {
             .map(|(n, _)| *n)
             .collect();
         let batch = self.pool.config().batch.max(1);
-        let bodies: Vec<Vec<Value>> = stream::iter(wanted.chunks(batch).map(|c| c.to_vec()))
-            .map(|c| async move { self.pool.blocks(&c).await.map_err(|e| e.to_string()) })
+        // Futures that own what they use: a stream of ones borrowing `self`
+        // isn't provably Send inside the spawned repair task.
+        let pool = self.pool.clone();
+        let batches: Vec<Vec<u64>> = wanted.chunks(batch).map(<[u64]>::to_vec).collect();
+        let bodies: Vec<Vec<Value>> = stream::iter(batches)
+            .map(move |c| {
+                let pool = pool.clone();
+                async move { pool.blocks(&c).await.map_err(|e| e.to_string()) }
+            })
             .buffered(self.pool.config().concurrency.max(1))
             .try_collect()
             .await?;
@@ -339,14 +352,15 @@ impl Executor {
         let chunk = self.pool.config().chunk.max(1);
         let ranges: Vec<(u64, u64)> =
             (from..=to).step_by(chunk as usize).map(|s| (s, (s + chunk - 1).min(to))).collect();
-        let answers: Vec<Vec<Value>> =
-            stream::iter(ranges)
-                .map(|(a, b)| async move {
-                    self.pool.logs(a, b, addresses).await.map(|l| l.logs).map_err(|e| e.to_string())
-                })
-                .buffered(self.pool.config().concurrency.max(1))
-                .try_collect()
-                .await?;
+        let (pool, addresses) = (self.pool.clone(), Arc::new(addresses.to_vec()));
+        let answers: Vec<Vec<Value>> = stream::iter(ranges)
+            .map(move |(a, b)| {
+                let (pool, addresses) = (pool.clone(), addresses.clone());
+                async move { pool.logs(a, b, &addresses).await.map(|l| l.logs).map_err(|e| e.to_string()) }
+            })
+            .buffered(self.pool.config().concurrency.max(1))
+            .try_collect()
+            .await?;
         let mut by_block = BlockLogs::new();
         for l in answers.into_iter().flatten() {
             let (n, a, t0) = log_key(&l).ok_or("a malformed log")?;

@@ -84,6 +84,13 @@ fn a_job_keeps_its_first_b0_and_finishing_marks_it_applied() {
     assert!(s.history_applied("hanji", "hanji#y:2026-11-01").unwrap(), "what it stood for too");
     s.mark_history("poe", "poe#z:lifetime", 4).unwrap();
     assert!(s.history_applied("poe", "poe#z:lifetime").unwrap());
+    let mut marks = s.history_marks().unwrap();
+    marks.sort();
+    assert_eq!(marks.len(), 3);
+    assert_eq!(marks[2], ("poe".to_string(), "poe#z:lifetime".to_string()));
+    s.set_meta("v1:backfill_done_poe", "1").unwrap();
+    s.set_meta("v10", "no").unwrap();
+    assert_eq!(s.meta_under("v1:").unwrap(), vec![("backfill_done_poe".to_string(), "1".to_string())]);
 }
 
 #[test]

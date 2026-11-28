@@ -29,6 +29,16 @@ pub struct Cli {
     /// Environment variable holding the hosted archive RPC URL.
     #[arg(long)]
     pub archive_url_env: Option<String>,
+    /// Environment variable holding the backup archive RPC URL.
+    #[arg(long)]
+    pub archive_backup_url_env: Option<String>,
+    /// Archive requests in flight (the primary refuses about 8).
+    #[arg(long)]
+    pub archive_concurrency: Option<usize>,
+    /// Operator replays, today's `BACKFILL_RESET` grammar:
+    /// `venue[:from][@nonce]`, comma-separated; each runs once.
+    #[arg(long, env = "MPAMM_HISTORY_RESET")]
+    pub history_reset: Option<String>,
     /// Pin the ring reader thread to this CPU.
     #[arg(long)]
     pub reader_cpu: Option<usize>,
@@ -60,6 +70,9 @@ pub struct ServiceFile {
     pub ring: Option<PathBuf>,
     pub rpc_url: Option<String>,
     pub archive_url_env: Option<String>,
+    pub archive_backup_url_env: Option<String>,
+    pub archive_concurrency: Option<usize>,
+    pub history_reset: Option<String>,
     pub reader_cpu: Option<usize>,
     pub http: Option<SocketAddr>,
     pub web_dist: Option<PathBuf>,
@@ -84,6 +97,10 @@ pub struct Settings {
     pub archive_url_env: String,
     /// The archive URL itself, from the environment (never printed).
     pub archive_url: Option<String>,
+    pub archive_backup_url_env: String,
+    pub archive_backup_url: Option<String>,
+    pub archive_concurrency: usize,
+    pub history_reset: String,
     pub reader_cpu: Option<usize>,
     pub http: SocketAddr,
     pub web_dist: Option<PathBuf>,
@@ -109,12 +126,20 @@ impl Settings {
         let f = read_file(&cli.config)?;
         let archive_url_env =
             cli.archive_url_env.or(f.archive_url_env).unwrap_or_else(|| "MPAMM_ARCHIVE_RPC_URL".into());
+        let archive_backup_url_env = cli
+            .archive_backup_url_env
+            .or(f.archive_backup_url_env)
+            .unwrap_or_else(|| "MPAMM_ARCHIVE_RPC_BACKUP_URL".into());
         Ok(Self {
             db: cli.db.or(f.db).unwrap_or_else(|| "/var/lib/mpamm/data/mpamm.db".into()),
             ring: cli.ring.or(f.ring).unwrap_or_else(|| DEFAULT_RING.into()),
             rpc_url: cli.rpc_url.or(f.rpc_url).unwrap_or_else(|| "http://127.0.0.1:8080".into()),
             archive_url: env(&archive_url_env).filter(|u| !u.is_empty()),
             archive_url_env,
+            archive_backup_url: env(&archive_backup_url_env).filter(|u| !u.is_empty()),
+            archive_backup_url_env,
+            archive_concurrency: cli.archive_concurrency.or(f.archive_concurrency).unwrap_or(4).max(1),
+            history_reset: cli.history_reset.or(f.history_reset).unwrap_or_default(),
             reader_cpu: cli.reader_cpu.or(f.reader_cpu),
             http: cli.http.or(f.http).unwrap_or_else(|| "127.0.0.1:8787".parse().unwrap()),
             web_dist: cli.web_dist.or(f.web_dist),
@@ -151,6 +176,15 @@ mod tests {
         assert_eq!(s.web_dist, None);
         assert_eq!(s.depth_min_interval_ms, 0, "depth follows every block by default");
         assert_eq!(s.archive_cache, PathBuf::from("/var/lib/mpamm/archives"));
+        assert_eq!((s.archive_backup_url.as_deref(), s.archive_concurrency), (None, 4));
+        assert_eq!(s.history_reset, "");
+        let backup = |k: &str| (k == "MPAMM_ARCHIVE_RPC_BACKUP_URL").then(|| "https://b.example/".to_string());
+        let s = Settings::load(cli(&["--config", p.to_str().unwrap(), "--history-reset", "poe:2026-11-01"]), backup)
+            .unwrap();
+        assert_eq!(
+            (s.archive_backup_url.as_deref(), s.history_reset.as_str()),
+            (Some("https://b.example/"), "poe:2026-11-01")
+        );
 
         std::fs::write(&p, "[service]\nreader_cpus = 3\n").unwrap();
         assert!(Settings::load(cli(&["--config", p.to_str().unwrap()]), |_| None).unwrap_err().contains("reader_cpus"));

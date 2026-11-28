@@ -126,6 +126,7 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
         let (committed, _) = broadcast::channel(4096);
         let mut committed_rx = committed.subscribe();
         let source_rx = committed.subscribe();
+        let history_rx = committed.subscribe();
         let writer = Writer::spawn(store);
         let (stop_feeds, feeds_stop) = tokio::sync::watch::channel(false);
         let prices = Prices::new(registry, Fees::default());
@@ -160,6 +161,22 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
         let source_venues = pipeline.venues.clone();
         let pipe = tokio::spawn(pipeline.run(rx));
 
+        // The hosted archive nodes, in order: history repairs read them.
+        let pool = Arc::new(mpamm_history::ArchivePool::new(
+            [("archive", &s.archive_url), ("archive-backup", &s.archive_backup_url)]
+                .into_iter()
+                .filter_map(|(label, url)| url.as_ref().map(|u| Rpc::new(label, u.clone(), Duration::from_secs(60))))
+                .collect(),
+            mpamm_history::PoolConfig { concurrency: s.archive_concurrency, ..Default::default() },
+        ));
+        let history_stats = Arc::new(mpamm_history::Stats::default());
+        // The exchanges' archives: markouts after the fact, and the prices
+        // history repairs decode closed days with.
+        let archives = mpamm_pricing::archives::Archives::new(
+            registry,
+            mpamm_pricing::archives::ArchiveConfig::new(s.archive_cache.clone()),
+        );
+
         // Quotes: every proposed block that finished executing is quoted by
         // every venue, pinned to its hash. Blocks replayed from the ring after
         // a restart are history, not news: only fresh ones are quoted.
@@ -181,6 +198,7 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
             Duration::from_millis(s.quote_deadline_ms),
             Duration::from_millis(s.depth_min_interval_ms),
         );
+        let notes_buffer = notes.clone();
         // The dashboard's source: frames, tape, volume, state, depth, the store.
         let source = ServiceSource::new(
             registry,
@@ -195,6 +213,7 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
                 depth: depth.clone(),
                 started: Instant::now(),
                 stall_ms: s.stall_secs.max(1) * 1000,
+                history: Some(crate::history::HistoryHealth { stats: history_stats.clone(), pool: pool.clone() }),
             },
             s.db.clone(),
             notes,
@@ -215,18 +234,36 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
         // Markouts after the fact: the marks the live history couldn't give
         // (trades repaired after an outage, from before a restart), from the
         // exchanges' archives once they're published.
-        let archives = mpamm_pricing::archives::Archives::new(
-            registry,
-            mpamm_pricing::archives::ArchiveConfig::new(s.archive_cache.clone()),
-        );
         let marks_source = source.clone();
         tokio::spawn(crate::marks::run(
-            archives,
+            archives.clone(),
             writer.clone(),
             Duration::from_secs(120),
             || mpamm_ring::live::now_ms() as f64,
             move |changed| marks_source.on_markouts(changed),
         ));
+
+        // History repairs: planned once the first block is known, then run
+        // beside the pipeline; the trades they insert get their markouts.
+        let (inserted_tx, inserted_rx) = mpsc::unbounded_channel();
+        tokio::spawn(crate::history::mark_inserted(archives.clone(), writer.clone(), inserted_rx, source.clone()));
+        tokio::spawn(crate::history::run(crate::history::Inputs {
+            pool,
+            writer: writer.clone(),
+            registry,
+            prices: prices.clone(),
+            archives: archives.clone(),
+            rpc_url: s.rpc_url.clone(),
+            resets: s.history_reset.clone(),
+            boot_cursor: cursor.as_ref().map(|c| c.block),
+            first_commit: history_rx,
+            stats: history_stats,
+            sink: Arc::new(crate::history::ServiceSink {
+                notes: notes_buffer.clone(),
+                source: source.clone(),
+                inserted: inserted_tx,
+            }),
+        }));
 
         // Markouts: every committed trade is aged against the reference
         // history; a restart resumes the trades still within their horizons.

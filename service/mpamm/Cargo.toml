@@ -11,6 +11,7 @@ mpamm-analytics = { path = "../crates/analytics" }
 mpamm-api = { path = "../crates/api" }
 mpamm-chain = { path = "../crates/chain" }
 mpamm-core = { path = "../crates/core" }
+mpamm-history = { path = "../crates/history" }
 mpamm-markouts = { path = "../crates/markouts" }
 mpamm-pipeline = { path = "../crates/pipeline" }
 mpamm-pricing = { path = "../crates/pricing" }

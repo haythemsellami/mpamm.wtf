@@ -2303,6 +2303,7 @@ dependencies = [
  "mpamm-api",
  "mpamm-chain",
  "mpamm-core",
+ "mpamm-history",
  "mpamm-markouts",
  "mpamm-pipeline",
  "mpamm-pricing",

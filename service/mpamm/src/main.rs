@@ -9,6 +9,7 @@
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 mod health;
+mod history;
 mod marks;
 mod notes;
 #[cfg(target_os = "linux")]

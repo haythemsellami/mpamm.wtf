@@ -212,6 +212,24 @@ impl Store {
         Ok(())
     }
 
+    /// Every applied history definition: (venue, spec).
+    pub fn history_marks(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT venue_id, id FROM revisions WHERE kind = 'history'")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Meta keys under a prefix (the migration's `v1:`), the prefix removed.
+    pub fn meta_under(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT key, value FROM meta WHERE substr(key, 1, length(?1)) = ?1")?;
+        let rows = stmt.query_map([prefix], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?;
+        Ok(rows
+            .collect::<std::result::Result<Vec<(String, String)>, _>>()?
+            .into_iter()
+            .map(|(k, v)| (k[prefix.len()..].to_string(), v))
+            .collect())
+    }
+
     pub fn history_applied(&self, venue: &str, spec: &str) -> Result<bool> {
         self.revision_applied(venue, "history", spec)
     }

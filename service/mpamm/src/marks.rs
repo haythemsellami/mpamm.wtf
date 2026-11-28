@@ -44,9 +44,20 @@ pub struct Sweep {
 pub async fn sweep(archives: &Archives, writer: &Writer, now_ms: f64) -> Result<(Sweep, Vec<Marked>), StoreError> {
     let (from, to) = (now_ms - LOOKBACK_MS, now_ms - AFTER_MS);
     let trades = writer.run(move |st| st.trades_unmarked(from, to, READ)).await?;
+    settle(archives, writer, &trades, now_ms).await
+}
+
+/// Marks these trades from the archives and settles those answered (a
+/// history repair hands over the trades it inserted, at any age).
+pub async fn settle(
+    archives: &Archives,
+    writer: &Writer,
+    trades: &[mpamm_types::Fill],
+    now_ms: f64,
+) -> Result<(Sweep, Vec<Marked>), StoreError> {
     let mut report = Sweep { read: trades.len(), ..Sweep::default() };
     let mut settle: Vec<Marked> = Vec::new();
-    for (id, v) in mark_from_archives(archives, &trades, now_ms).await {
+    for (id, v) in mark_from_archives(archives, trades, now_ms).await {
         match v {
             Verdict::Marked(m) => settle.push((id, m)),
             Verdict::Never(_) => settle.push((id, vec![None; MARKOUT_HORIZONS_S.len()])),
