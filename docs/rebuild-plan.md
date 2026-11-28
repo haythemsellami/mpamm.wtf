@@ -48,7 +48,7 @@ path for M8.
 | M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | All 11 ported and identical; p90 gate blocked on RPC cores |
 | M11 | Stream and REST | 4 | M8, M10 | — | Today's REST and v2 stream ported; compact protocol left |
 | M12 | Frontend on the new stream | 4 | M11 | — | Today's dashboard runs unchanged on the Rust API |
-| M13 | Data migration and replication | 4 | M8 | object storage bucket | Rehearsed on production's database; replication left |
+| M13 | Data migration and replication | 4 | M8 | object storage bucket, archive URLs | Rehearsed on production's database; history repairs built and proven; replication left |
 | M14 | Operations readiness | 4 | M11, M13 | hot fallback WS, TLS hostname, on-call | Alerts, notes, runbooks written; fallback mode left |
 | M15 | Switch-over and merge (phase-4 gate) | 4 | M12–M14 | DNS change | Not started |
 | M16 | Edge relays (optional) | 5 | M15 | relay hosting | Only if chosen |
@@ -476,33 +476,39 @@ browser, with proposal → paint p50 at most 200 ms near the host.
       the tip within 45 s (0 gaps); all 372 closed days match production's `/api/volume`
       exactly ($1,599,917,586.58, 3,261,628 swaps), the dashboard shows the full history, and
       the trades it decodes from that block on are diffed against production hourly
-- [ ] History repairs and backfill (crate `mpamm-history`), read from the hosted archive
+- [x] History repairs and backfill (crate `mpamm-history`), read from the hosted archive
       pool (primary and backup, `MPAMM_ARCHIVE_RPC_URL` / `_BACKUP_URL`) because the
       node keeps blocks only from its last state sync:
   - [x] The archive pool: 1,000-block log ranges, a few requests in flight, every error
         retried on the next node then after a pause, never skipped; a node whose head is
         short of a range never serves it
-  - [ ] One job kind for every repair, per venue: a block range `[from, B0]` re-decoded
+  - [x] One job kind for every repair, per venue: a block range `[from, B0]` re-decoded
         by a venue instance of its own (live decode state untouched), where `B0` is the
         last block an earlier build committed (recorded when the job is first planned:
         blocks after it were decoded by this build). Blocks holding only gas-event logs
-        are not read (no venue decodes them). Each block is priced as of its own time
-        (exchange archives, then the chain's prints)
-  - [ ] Written a day at a time with the job's cursor, in one writer transaction, so a
+        are not read (no venue decodes them). Each block is priced as of its own time:
+        exchange archives for a closed day, the service's prices at that time for today
+  - [x] Written a day at a time with the job's cursor, in one writer transaction, so a
         restart resumes where it stopped. Days the trades table covers (from its first
         complete day on) get their trades replaced and their volume re-summed from them;
         older days get their volume set from the replay. Gas is never touched
-  - [ ] Kinds: `Replay` and an operator's replay (`venue:from[@nonce]`) replace;
+  - [x] Kinds: `Replay` and an operator's replay (`venue:from[@nonce]`) replace;
         `Markets` adds only the listed markets' trades (inserted if absent, so nothing
         is counted twice where trades are stored), priced at fill time (today's TS
-        prices these at the live price); `Fills` re-sums stored trades; a new venue's
-        lifetime is a `Replay` from its `history_from_utc`. On a database with no
-        history, the lifetime replay stands for every revision
-  - [ ] Applied once: today's markers (`v1:history_revision_*`, `v1:backfill_done_*`,
-        `v1:backfill_reset_applied_*`) are adopted when their text matches; a changed
-        definition runs again
-  - [ ] Wired into the service (health, notes, volume reload, markouts for replayed
-        trades), and proven on the host against production
+        prices these at the live price), and stops where a pending replay starts;
+        `Fills` re-sums stored trades; a new venue's lifetime is a `Replay` from its
+        `history_from_utc` and stands for every revision
+  - [x] Applied once: today's markers (`v1:history_revision_*`, `v1:backfill_done_*`,
+        `v1:backfill_reset_applied_*`) are adopted when their text matches (a parity test
+        against today's `revisionTargets` covers all 11 venues); a changed definition runs
+        again. The shadow run on production's migrated database adopted all 22 and ran none
+  - [x] Wired into the service (health, notes, volume reload, markouts for replayed
+        trades); `mpamm-tools repair` runs a database's repairs on a copy. Proven on the
+        host: a ThogAMM replay of 2026-11-27 → today (the node as its archive) wrote day by
+        day, resumed at its cursor after a hold, and matched production's 1,892 trades id
+        for id; closed-day USD within 1% (fill-time archive prices against production's
+        live ones)
+  - [ ] A run against the devcore archives *(DevOps: archive URLs in the env file)*
 - [ ] Continuous replication of the new database off the host (write-ahead-log copy to
       object storage and a replica on Railway) *(DevOps: bucket)*
 - [ ] Restore drill: rebuild the database from the copy on another machine
