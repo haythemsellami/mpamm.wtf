@@ -77,6 +77,16 @@ export const BTR_POOL = '0xbbbbbbbd7060b1ced79c381ead40d73fcb9ae0c6' as const;
  *  Decode-only — its fills are the venue's history. */
 export const BTR_RETIRED_POOL = '0xbbbbbbb04f5b762a4cdd1d89e341e2537e3267e4' as const;
 
+/** BTR's Router (docs "Contract Addresses"): executes an off-chain keeper-
+ *  chosen path across the pools in one transaction. Its own periphery, so a
+ *  direct tx.to to it is this venue's routed flow, not an unknown aggregator. */
+export const BTR_ROUTER = '0xbbbbbbb17647a22d61e49d62a95445b1284b1296' as const;
+
+/** CoopArb v1 (the pool record's `coopArb`): the executor that swapped through
+ *  pool v2. Named on the tape so its flow stays separable from BTR's other
+ *  executors. */
+const BTR_COOP_ARB = '0xbbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf' as const;
+
 const BTR_POOLS: ReadonlySet<string> = new Set([BTR_POOL, BTR_RETIRED_POOL]);
 
 /**
@@ -116,7 +126,7 @@ const BTR_EXECUTORS = [
   '0xbbbbbbb0f219f537a64d41a907192ba41b5225be',
   '0xbbbbbbb1e1dabc155c79f4688cdb462a462f4040',
   '0xbbbbbbb0f8c5d06406a6ff39abe1d514e25ade2e', // 151 swaps, 2026-10-15 → 10-29
-  '0xbbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf', // pool v2
+  BTR_COOP_ARB, // pool v2 (CoopArb v1)
 ] as const;
 
 /** Pool risk-flag bit: the leg may be swapped at all. */
@@ -377,13 +387,17 @@ export function createBtrAdapter(): VenueAdapter {
       return [{ key: 'pool', address: [BTR_POOL, BTR_RETIRED_POOL], events: [event('Swapped'), event('Upgraded')], kind: 'fills' as const }];
     },
 
-    // Takers call a pool directly (swap_qe), or enter through one of BTR's
-    // own executors. An aggregator's router is attributed by the core, not
-    // claimed here.
+    // Takers call a pool directly (swap_qe), or enter through BTR's router or
+    // one of its own executors. An aggregator's router is attributed by the
+    // core, not claimed here.
     entryPoints: () => [
       { address: BTR_POOL },
       { address: BTR_RETIRED_POOL },
-      ...BTR_EXECUTORS.map((address) => ({ address, router: 'BTR' })),
+      { address: BTR_ROUTER, router: 'BTR' },
+      ...BTR_EXECUTORS.map((address) => ({
+        address,
+        router: address === BTR_COOP_ARB ? 'BTR Coop Arb' : 'BTR',
+      })),
     ],
 
     // QUOTE_UPDATE_BURN: BTR's keeper pays for every mark push. A pool keeps

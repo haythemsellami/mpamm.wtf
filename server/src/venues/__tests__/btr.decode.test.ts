@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { decodeEventLog } from 'viem';
 import { describe, expect, it } from 'vitest';
 import { NATIVE_MON, TOKENS } from '@shared';
-import { BTR_POOL, BTR_RETIRED_POOL, btrMarkets, createBtrAdapter, decodeBtrSwap } from '../btr.js';
+import { BTR_POOL, BTR_RETIRED_POOL, BTR_ROUTER, btrMarkets, createBtrAdapter, decodeBtrSwap } from '../btr.js';
 
 const FX = JSON.parse(readFileSync(new URL('./fixtures/btr-swapped.json', import.meta.url), 'utf8'));
 /** the adapter's own declared events, so a drift in its ABI fails here */
@@ -37,15 +37,20 @@ describe('BTR sources', () => {
     expect(sources[0].events.map((e: any) => e.name)).toEqual(['Swapped', 'Upgraded']);
   });
 
-  it("declares the pools as direct entry and BTR's executors as its own periphery", () => {
+  it("declares the pools as direct entry and BTR's router/executors as its own periphery", () => {
     const entries = createBtrAdapter().entryPoints!();
     expect(entries.filter((e) => !e.router).map((e) => e.address)).toEqual([BTR_POOL, BTR_RETIRED_POOL]);
     const periphery = entries.filter((e) => e.router);
-    // the four that fronted the retired pool, and the one on pool v2
-    expect(periphery).toHaveLength(5);
+    // the router, the four that fronted the retired pool, and the one on pool v2
+    expect(periphery).toHaveLength(6);
+    expect(periphery.map((e) => e.address)).toContain(BTR_ROUTER);
+    expect(periphery.find((e) => e.address === BTR_ROUTER)!.router).toBe('BTR');
     expect(periphery.map((e) => e.address)).toContain('0xbbbbbbb0f8c5d06406a6ff39abe1d514e25ade2e');
-    expect(periphery.map((e) => e.address)).toContain('0xbbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf');
-    expect(periphery.every((e) => e.router === 'BTR' && /^0xbbbbbbb[0-9a-f]{33}$/.test(e.address))).toBe(true);
+    // the pool v2 executor is CoopArb, named apart from BTR's other executors
+    expect(periphery.find((e) => e.address === '0xbbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf')!.router).toBe('BTR Coop Arb');
+    expect(periphery
+      .filter((e) => e.address !== '0xbbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf')
+      .every((e) => e.router === 'BTR' && /^0xbbbbbbb[0-9a-f]{33}$/.test(e.address))).toBe(true);
   });
 
   it('samples every known implementation for gas: marks are pushed to the implementation, not the proxy', () => {
