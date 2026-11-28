@@ -50,6 +50,9 @@ use crate::{
 pub trait Sink: Send + Sync {
     fn note(&self, warn: bool, code: &str, venue: &str, msg: &str);
     fn written(&self, venue: &str, day: &str, outcome: &DayOutcome);
+    /// A job finished (after its last day and its marker): what clients hold
+    /// can be reloaded now, once.
+    fn done(&self, _venue: &str) {}
 }
 
 /// Live numbers for the health endpoint.
@@ -266,6 +269,7 @@ impl Executor {
         let done = (self.now_ms)();
         self.writer.run(move |s| s.finish_history_job(&vid, &spec, &covers, done)).await.map_err(|e| e.to_string())?;
         self.sink.note(false, "history.done", &job.venue, &format!("{}: done through block {end}", job.what));
+        self.sink.done(&job.venue);
         Ok(())
     }
 
@@ -295,6 +299,10 @@ impl Executor {
                 if moved.is_empty() { String::new() } else { format!("; {}", moved.join(", ")) }
             ),
         );
+        for (d, before, after) in changed.iter().filter(|(_, b, a)| b != a) {
+            self.sink.written(&job.venue, d, &DayOutcome { before: *before, after: *after, ..DayOutcome::default() });
+        }
+        self.sink.done(&job.venue);
         Ok(())
     }
 

@@ -310,6 +310,29 @@ impl ServiceSource {
         }
     }
 
+    /// A history repair finished: closed days' volume and/or stored trades
+    /// changed. The tape (if trades changed) and volume are read again, and
+    /// clients told to reload what they hold: one resync per repair, never
+    /// per tick (the egress budget).
+    pub fn history_changed(self: &Arc<Self>, closed_days: bool, trades: bool) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            if trades {
+                match me.read(|s| s.trades_between(0.0, f64::MAX, TAPE)).await {
+                    Ok(newest_first) => me.live.lock().tape = newest_first.into_iter().rev().collect(),
+                    Err(e) => tracing::warn!("read the tape: {e}"),
+                }
+                let _ = me.tx.send(StreamMessage::FillResync);
+            }
+            if let Err(e) = me.reload_volume().await {
+                tracing::warn!("read volume: {e}");
+            }
+            if closed_days {
+                let _ = me.tx.send(StreamMessage::VolumeResync);
+            }
+        });
+    }
+
     /// Stored volume changed outside a block commit (a history repair).
     pub fn volume_changed(self: &Arc<Self>) {
         let me = self.clone();

@@ -254,6 +254,7 @@ impl DayLoader for Unpublished {
 struct Recorder {
     notes: Mutex<Vec<(bool, String, String)>>,
     days: Mutex<Vec<(String, DayOutcome)>>,
+    done: std::sync::atomic::AtomicUsize,
 }
 
 impl Sink for Recorder {
@@ -262,6 +263,9 @@ impl Sink for Recorder {
     }
     fn written(&self, _venue: &str, day: &str, outcome: &DayOutcome) {
         self.days.lock().push((day.into(), outcome.clone()));
+    }
+    fn done(&self, _venue: &str) {
+        self.done.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -367,6 +371,7 @@ async fn a_replay_writes_day_by_day_and_resumes_after_a_failure() {
     w.archive.fail.store(true, Ordering::SeqCst);
     let e = w.exec.run(&job(Kind::Replay), B0).await.unwrap_err();
     assert!(e.contains("rate limit"), "{e}");
+    assert_eq!(w.sink.done.load(Ordering::SeqCst), 0, "a held job hasn't finished");
     let j = w.writer.run(|s| s.history_job("fake", "fake#r:2026-11-20")).await.unwrap().unwrap();
     assert_eq!((j.b0, j.cursor), (B0, Some(288)), "through day 1's last block");
     assert_eq!(volume(&w.writer, "2026-11-20").await, VenueDaily { usd: 10.0, swaps: 1 }, "set from the replay");
@@ -380,6 +385,7 @@ async fn a_replay_writes_day_by_day_and_resumes_after_a_failure() {
     // A later attempt (another boot: b0 passed again is ignored) resumes.
     w.archive.fail.store(false, Ordering::SeqCst);
     w.exec.run(&job(Kind::Replay), 999).await.unwrap();
+    assert_eq!(w.sink.done.load(Ordering::SeqCst), 1, "one resync, at the end");
     assert_eq!(
         volume(&w.writer, "2026-11-22").await,
         VenueDaily { usd: 107.0, swaps: 2 },
@@ -451,6 +457,8 @@ async fn a_fills_revision_resums_stored_trades() {
     assert_eq!(volume(&w.writer, "2026-11-21").await, VenueDaily { usd: 7.0, swaps: 2 });
     assert!(w.writer.run(|s| s.history_applied("fake", "fake#f:fills:2026-11-21..2026-11-22")).await.unwrap());
     assert!(w.sink.notes.lock()[0].2.contains("2026-11-21 $1.00/1 → $7.00/2"));
+    assert_eq!(w.sink.days.lock()[0].0, "2026-11-21");
+    assert_eq!(w.sink.done.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

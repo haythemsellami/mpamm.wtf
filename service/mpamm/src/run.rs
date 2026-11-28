@@ -297,6 +297,7 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
                 notes: notes_buffer.clone(),
                 source: source.clone(),
                 inserted: inserted_tx,
+                changed: Default::default(),
             }),
         }));
 

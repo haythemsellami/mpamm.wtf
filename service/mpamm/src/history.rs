@@ -116,6 +116,8 @@ pub struct ServiceSink {
     pub source: Arc<ServiceSource>,
     /// Trades a repair inserted, for their markouts.
     pub inserted: mpsc::UnboundedSender<Vec<String>>,
+    /// What the job running has changed so far, for one resync at its end.
+    pub changed: parking_lot::Mutex<(bool, bool)>,
 }
 
 fn now_ms() -> f64 {
@@ -143,6 +145,16 @@ impl Sink for ServiceSink {
         self.source.volume_changed();
         if !o.inserted.is_empty() {
             let _ = self.inserted.send(o.inserted.clone());
+        }
+        let mut c = self.changed.lock();
+        c.0 |= day != utc_day(now_ms()) && o.before != o.after;
+        c.1 |= o.through_trades;
+    }
+
+    fn done(&self, _venue: &str) {
+        let (closed_days, trades) = std::mem::take(&mut *self.changed.lock());
+        if closed_days || trades {
+            self.source.history_changed(closed_days, trades);
         }
     }
 }

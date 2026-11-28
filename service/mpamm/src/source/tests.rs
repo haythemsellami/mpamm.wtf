@@ -242,6 +242,22 @@ async fn the_dashboard_reads_the_service_through_every_route() {
     assert_eq!(health["status"], "no_ring");
     assert!(health["stream"].is_object(), "the router adds the stream's counters");
 
+    // A history repair rewrote stored trades and closed days: the tape is
+    // read again and clients are told, once, to reload both.
+    store.mark_history("poe", "poe#x:2026-11-01", 1).unwrap();
+    source.history_changed(true, true);
+    assert!(matches!(next(&mut rx, "fill").await, StreamMessage::FillResync));
+    let resync = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let m @ StreamMessage::VolumeResync = rx.recv().await.unwrap() {
+                return m;
+            }
+        }
+    })
+    .await
+    .expect("a volume resync");
+    assert!(resync.is_resync());
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
