@@ -100,12 +100,15 @@ struct Archive {
     full: Arc<Mutex<Vec<u64>>>,
     /// getLogs fails for ranges reaching past block 290 while set.
     fail: Arc<AtomicBool>,
+    /// Blocks below this one aren't held (a node's history starts later).
+    oldest: Arc<std::sync::atomic::AtomicU64>,
 }
 
 async fn archive() -> Archive {
     let full = Arc::new(Mutex::new(Vec::new()));
     let fail = Arc::new(AtomicBool::new(false));
-    let (f, x) = (full.clone(), fail.clone());
+    let oldest = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let (f, x, o) = (full.clone(), fail.clone(), oldest.clone());
     let one = move |req: &Value| -> Value {
         let id = req["id"].clone();
         let q = |v: &Value| u64::from_str_radix(v.as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
@@ -132,7 +135,7 @@ async fn archive() -> Archive {
                 if req["params"][1] == json!(true) {
                     f.lock().push(n);
                 }
-                if n > HEAD {
+                if n > HEAD || n < o.load(Ordering::SeqCst) {
                     Value::Null
                 } else {
                     block_json(n)
@@ -154,7 +157,7 @@ async fn archive() -> Archive {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, Router::new().route("/", post(handler))).await.unwrap() });
-    Archive { url: format!("http://{addr}"), full, fail }
+    Archive { url: format!("http://{addr}"), full, fail, oldest }
 }
 
 /// A venue whose swaps carry their market code in topic 1 and their USD in
@@ -201,6 +204,8 @@ impl Venue for Fake {
             let seen: u64 = cx.state.get("fake", "seen").map_or(0, |s| s.parse().unwrap());
             cx.state.set("fake", "seen", &(seen + 1).to_string());
             let market = if l.topics[1][31] == 2 { "BTC/USDC" } else { "MON/USDC" };
+            // Asks for a crypto price, as a crypto-quoted market would.
+            let _ = cx.pricer.usd_per_token("WMON");
             let usd = u64::from_be_bytes(l.data[24..32].try_into().unwrap()) as f64;
             out.push(Fill {
                 id: format!("fake-0x{}-{}", hex(&l.tx_hash), l.log_index),
@@ -232,6 +237,16 @@ struct NoArchive;
 impl DayLoader for NoArchive {
     async fn load(&self, _: &str, _: &str) -> Result<Option<DayPrices>, ArchiveError> {
         Ok(None)
+    }
+}
+
+/// An exchange archive not published yet: every load fails.
+struct Unpublished;
+
+#[async_trait]
+impl DayLoader for Unpublished {
+    async fn load(&self, _: &str, day: &str) -> Result<Option<DayPrices>, ArchiveError> {
+        Err(ArchiveError::Io(format!("archive {day} is not published yet")))
     }
 }
 
@@ -436,6 +451,34 @@ async fn a_fills_revision_resums_stored_trades() {
     assert_eq!(volume(&w.writer, "2026-11-21").await, VenueDaily { usd: 7.0, swaps: 2 });
     assert!(w.writer.run(|s| s.history_applied("fake", "fake#f:fills:2026-11-21..2026-11-22")).await.unwrap());
     assert!(w.sink.notes.lock()[0].2.contains("2026-11-21 $1.00/1 → $7.00/2"));
+}
+
+#[tokio::test]
+async fn a_node_without_early_blocks_is_never_asked_for_them() {
+    let w = world().await;
+    w.archive.oldest.store(250, Ordering::SeqCst);
+    let mut j = job(Kind::Replay);
+    j.from = "2026-11-22".into();
+    w.exec.run(&j, 400).await.unwrap();
+    assert_eq!(volume(&w.writer, "2026-11-22").await, VenueDaily { usd: 107.0, swaps: 2 });
+    assert_eq!(volume(&w.writer, "2026-11-21").await, VenueDaily { usd: 7.0, swaps: 2 }, "untouched");
+}
+
+#[tokio::test]
+async fn todays_blocks_never_wait_for_an_exchange_archive() {
+    let mut w = world().await;
+    w.exec.closed = Arc::new(ClosedDayPrices::new(Registry::get(), Arc::new(Unpublished)));
+    // Now is day 2: its blocks are priced live; day 1 is closed and waits.
+    w.exec.now_ms = || (day_start_s("2026-11-22").unwrap() * 1000 + 3_600_000) as i64;
+    let mut j = job(Kind::Replay);
+    j.from = "2026-11-22".into();
+    w.exec.run(&j, 400).await.unwrap();
+    assert_eq!(volume(&w.writer, "2026-11-22").await, VenueDaily { usd: 107.0, swaps: 2 });
+    let mut j = job(Kind::Replay);
+    j.spec = "fake#closed:2026-11-21".into();
+    j.from = "2026-11-21".into();
+    let e = w.exec.run(&j, 400).await.unwrap_err();
+    assert!(e.contains("not published yet"), "{e}");
 }
 
 #[test]

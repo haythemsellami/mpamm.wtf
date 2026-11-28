@@ -295,6 +295,22 @@ async fn a_resume_replay_of_a_stored_block_is_skipped() {
 }
 
 #[tokio::test]
+async fn two_producers_never_hold_on_a_gap_nor_read_twice() {
+    let mut h = harness(0).await;
+    h.pipeline.process(Input::Final(ring_block(20, 1))).await;
+    // Fallback mode jumps ahead: 21 and 22 are read over RPC first.
+    h.pipeline.process(Input::Missing { number: 23, reason: MissingReason::Fallback }).await;
+    // The ring catches up with heights already committed: dropped.
+    h.pipeline.process(Input::Final(ring_block(22, 1))).await;
+    h.pipeline.process(Input::Final(ring_block(24, 1))).await;
+    let v = h.pipeline.stats.view();
+    assert_eq!((v.cursor, v.from_ring, v.from_rpc, v.held), (24, 2, 3, None));
+    let got: Vec<u64> = (0..5).map(|_| h.rx.try_recv().unwrap().number).collect();
+    assert_eq!(got, [20, 21, 22, 23, 24]);
+    assert!(h.rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn the_fetched_block_matches_the_ring_block() {
     let h = harness(0).await;
     let watch = h.pipeline.watch.load_full();

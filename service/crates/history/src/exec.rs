@@ -128,10 +128,13 @@ impl Executor {
         v.discover(&ChainCx { rpc: &self.local, registry: self.registry }).await.map_err(|e| e.to_string())
     }
 
-    /// The first block at or after `ts` (seconds) in `lo..=hi`, where `lo`
-    /// is known to be before it; `hi + 1` when even `hi` is earlier. An
-    /// interpolation search over block timestamps, falling back to halving.
-    async fn first_block_at(&self, ts: u64, mut lo: u64, hi: u64) -> Result<u64, String> {
+    /// The first block at or after `ts` (seconds) in `floor..=hi`; `hi + 1`
+    /// when even `hi` is earlier. The search starts a little below the
+    /// target, estimated from the chain's recent block rate, rather than at
+    /// `floor`, which a node holding only recent history can't read; it steps
+    /// back while still too late, then interpolates over block timestamps,
+    /// falling back to halving.
+    async fn first_block_at(&self, ts: u64, floor: u64, hi: u64) -> Result<u64, String> {
         let at =
             |n: u64| async move { Ok::<u64, String>(self.pool.timestamps(&[n]).await.map_err(|e| e.to_string())?[0]) };
         let mut hi_ts = at(hi).await?;
@@ -139,10 +142,26 @@ impl Executor {
             return Ok(hi + 1);
         }
         let mut hi = hi;
-        let mut lo_ts = at(lo).await?;
-        if lo_ts >= ts {
-            return Ok(lo);
-        }
+        let probe = hi.saturating_sub(100).max(floor);
+        let rate = if probe < hi {
+            let p_ts = at(probe).await?;
+            (hi_ts.saturating_sub(p_ts) as f64 / (hi - probe) as f64).max(1e-3)
+        } else {
+            1.0
+        };
+        let mut span = ((hi_ts - ts) as f64 / rate * 1.05).ceil() as u64 + 16;
+        let (mut lo, mut lo_ts) = loop {
+            let lo = hi.saturating_sub(span).max(floor);
+            let lo_ts = at(lo).await?;
+            if lo_ts < ts {
+                break (lo, lo_ts);
+            }
+            if lo == floor {
+                return Ok(floor);
+            }
+            (hi, hi_ts) = (lo, lo_ts);
+            span = span / 2 + 16;
+        };
         let mut halve = false;
         while hi - lo > 1 {
             let guess = if halve || hi_ts <= lo_ts {
@@ -380,22 +399,25 @@ impl Executor {
         block: &FinalBlock,
     ) -> Result<Vec<Fill>, String> {
         let live = self.prices.at(block.time_ms());
+        // Today has no exchange archive yet: its blocks are priced as the
+        // live pipeline prices a late block (the service's prices at that
+        // time). A closed day waits for its archive.
+        let today = utc_day(block.time_ms()) == utc_day((self.now_ms)() as f64);
         let mut tries = 0;
         loop {
             let st: &VenueState = state;
-            let decoded = self
-                .closed
-                .decode(
-                    block.time_ms(),
-                    &live as &dyn Pricer,
-                    |pricer| {
-                        st.take_pending();
-                        venue.decode(&DecodeCx { registry: self.registry, pricer, state: st }, block)
-                    },
-                    |_| {},
-                )
-                .await
-                .map_err(|e| format!("block {}: prices: {e}", block.number))?;
+            let run = |pricer: &dyn Pricer| {
+                st.take_pending();
+                venue.decode(&DecodeCx { registry: self.registry, pricer, state: st }, block)
+            };
+            let decoded = if today {
+                run(&live)
+            } else {
+                self.closed
+                    .decode(block.time_ms(), &live as &dyn Pricer, run, |_| {})
+                    .await
+                    .map_err(|e| format!("block {}: prices: {e}", block.number))?
+            };
             match decoded {
                 Ok(fills) => {
                     let writes = state.take_pending();

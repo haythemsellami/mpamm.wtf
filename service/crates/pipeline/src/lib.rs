@@ -135,8 +135,30 @@ impl Pipeline {
         }
     }
 
-    /// One height, start to commit.
+    /// One input. Two producers feed the pipeline (the ring's tracker and,
+    /// while the node is down, fallback mode), so a height already committed
+    /// is dropped at once, and a height beyond the next one has the heights
+    /// before it read over RPC first: nothing holds on a gap, nothing is
+    /// read twice.
     pub async fn process(&self, input: Input) {
+        let number = match &input {
+            Input::Final(b) => b.start.number,
+            Input::Missing { number, .. } => *number,
+        };
+        let cursor = self.stats.cursor.load(Ordering::Relaxed);
+        if cursor > 0 && number <= cursor {
+            return;
+        }
+        if cursor > 0 {
+            for n in cursor + 1..number {
+                self.process_one(Input::Missing { number: n, reason: MissingReason::Gap }).await;
+            }
+        }
+        self.process_one(input).await;
+    }
+
+    /// One height, start to commit.
+    async fn process_one(&self, input: Input) {
         let block = match input {
             Input::Final(b) if b.start.number <= self.refetch_through.load(Ordering::Relaxed) => {
                 self.repair(b.start.number, MissingReason::Incomplete).await

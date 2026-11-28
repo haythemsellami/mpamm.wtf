@@ -140,6 +140,12 @@ pub enum MissingReason {
     /// The height's finalization event was lost and the parent-hash chain
     /// could not name its block.
     Unresolved,
+    /// A later height reached the pipeline first (two producers: the ring
+    /// and fallback mode): this one is read over RPC before it.
+    Gap,
+    /// Fallback mode: the local node is down, every final height is read
+    /// over RPC.
+    Fallback,
 }
 
 #[derive(Debug, Clone)]

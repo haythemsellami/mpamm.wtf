@@ -126,6 +126,9 @@ pub fn reason_name(r: MissingReason) -> &'static str {
         MissingReason::Incomplete => "incomplete",
         MissingReason::Timeout => "timeout",
         MissingReason::Unresolved => "unresolved",
+        // The service's own reasons; the tracker never emits them.
+        MissingReason::Gap => "gap",
+        MissingReason::Fallback => "fallback",
     }
 }
 
