@@ -47,7 +47,7 @@ path for M8.
 | M9 | Quote engine | 3 | M3, M4 | — | Built, with depth curves |
 | M10 | Venue quote ports and same-block parity (phase-3 gate) | 3 | M5, M9 | CPU set | All 11 ported and identical; p90 gate blocked on RPC cores |
 | M11 | Stream and REST | 4 | M8, M10 | — | Today's REST and v2 stream ported; compact protocol left |
-| M12 | Frontend on the new stream | 4 | M11 | — | Today's dashboard runs unchanged on the Rust API |
+| M12 | Frontend on the new stream | 4 | M11 | CPU set (latency target) | Dashboard unchanged on the Rust API; render rules and timing done; per-venue stream left |
 | M13 | Data migration and replication | 4 | M8 | object storage bucket, archive URLs | Rehearsed on production's database; history repairs built and proven; replication left |
 | M14 | Operations readiness | 4 | M11, M13 | hot node URL, TLS hostname, on-call | Alerts, notes, runbooks, fallback mode built and proven; the unit and TLS left |
 | M15 | Switch-over and merge (phase-4 gate) | 4 | M12–M14 | DNS change | Not started |
@@ -455,9 +455,17 @@ REST endpoint returns the same data as today's for the same window.
 - [ ] Stream client for the new protocol (dictionary, compact schema), keeping the
       SharedWorker connection
 - [ ] Adapter from the new messages to today's view models; per-channel stores
-- [ ] Render rules: late rows greyed up to 3 blocks, trades at Finalized, header ticker
-      with commit state, stall banner
-- [ ] `?timing=1` measuring proposal → paint
+- [x] Render rules: late venues keep their last rows greyed and labelled `−N BLK` for up
+      to 3 blocks, never ★ (`lib/late-venues`); trades at Finalized (the pipeline commits
+      final blocks); the block number marks its commit state; a FEED STALLED banner after
+      1 s without a block, timed on the browser's own clock. Browser suite: 10 tests against
+      both backends (the Rust fake skips a venue every sixth block)
+- [x] `?timing=1` measuring proposal → paint: frames carry `proposalTs`; an overlay shows
+      p50 / p90 of proposal → paint, receive → paint and receive → draw. First reading from
+      the shadow run through an ssh tunnel to a laptop: proposal → receive p50 299 ms, p90
+      365 ms, of which ~190 ms is server side: a frame waits for its slowest venue (quote
+      p90 95–135 ms, bound by the node's 4 RPC cores). The 200 ms target needs per-venue
+      messages (below) and the CPU set
 
 **Done when:** today's four tabs work unchanged on the new backend, verified in the
 browser, with proposal → paint p50 at most 200 ms near the host.
