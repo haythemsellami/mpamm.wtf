@@ -62,6 +62,15 @@ pub const POOL: Address = address!("bbbbbbbd7060b1ced79c381ead40d73fcb9ae0c6");
 /// 120,916,325). Decode-only: its trades are the venue's history.
 pub const RETIRED_POOL: Address = address!("bbbbbbb04f5b762a4cdd1d89e341e2537e3267e4");
 
+/// BTR's Router (docs "Contract Addresses"): runs an off-chain keeper-chosen
+/// path across the pools in one transaction. Its own periphery, so a direct
+/// tx.to to it is this venue's routed flow, not an unknown aggregator.
+pub const ROUTER: Address = address!("bbbbbbb17647a22d61e49d62a95445b1284b1296");
+
+/// CoopArb v1 (the pool record's `coopArb`): the executor that swapped
+/// through pool v2, named on the tape apart from BTR's other executors.
+pub const COOP_ARB: Address = address!("bbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf");
+
 /// Every implementation the two proxies have run, oldest first. APPEND-ONLY:
 /// each is a quote-update destination, and the ABIs were checked against it.
 pub const IMPLEMENTATIONS: [Address; 2] = [
@@ -582,10 +591,17 @@ impl Venue for Btr {
     /// Takers call a pool directly, or enter through one of BTR's own
     /// executors; an aggregator's router is attributed by the core.
     fn entry_points(&self) -> Vec<EntryPoint> {
+        // Takers call a pool directly, or enter through BTR's router or one
+        // of its own executors (the CoopArb executor named on its own, so its
+        // flow stays separable).
         [POOL, RETIRED_POOL]
             .into_iter()
             .map(|a| EntryPoint { address: to_addr(a), router: None })
-            .chain(EXECUTORS.into_iter().map(|a| EntryPoint { address: to_addr(a), router: Some("BTR".into()) }))
+            .chain(std::iter::once(EntryPoint { address: to_addr(ROUTER), router: Some("BTR".into()) }))
+            .chain(EXECUTORS.into_iter().map(|a| EntryPoint {
+                address: to_addr(a),
+                router: Some(if a == COOP_ARB { "BTR Coop Arb" } else { "BTR" }.into()),
+            }))
             .collect()
     }
 

@@ -17,6 +17,7 @@
     "benchmark:live": "tsx scripts/benchmark-live-stream.ts",
     "registry:golden": "tsx scripts/registry-golden.ts",
     "history:specs": "tsx scripts/history-specs.ts",
+    "attribution:golden": "tsx scripts/attribution-golden.ts",
     "analytics:golden": "tsx scripts/analytics-golden.ts"
   },
   "dependencies": {

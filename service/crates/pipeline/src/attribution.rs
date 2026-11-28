@@ -18,50 +18,8 @@
 use std::collections::HashMap;
 
 use mpamm_core::{FinalBlock, Venue};
-use mpamm_registry::parse_address;
 use mpamm_ring::{hex, Addr};
 use mpamm_types::{Fill, FillCategory};
-
-/// Known aggregator and router entry contracts → brand (attribution.ts
-/// KNOWN_ROUTERS, with its provenance notes).
-pub const KNOWN_ROUTERS: &[(&str, &str)] = &[
-    ("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f", "Relay"),
-    ("0xccc88a9d1b4ed6b0eaba998850414b24f1c315be", "Relay"),
-    ("0x6131b5fae19ea4f9d964eac0408e4408b66337b5", "KyberSwap"),
-    ("0x0000000000001ff3684f28c67538d4d072c22734", "0x"),
-    ("0x18556da13313f3532c54711497a8fedac273220e", "LFJ"),
-    ("0x4face5b0ef2757ceb9151d14c036a1135931c70e", "LFJ"),
-    ("0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789", "ERC-4337"),
-    ("0x0000000071727de22e5e9d8baf0edac6f37da032", "ERC-4337"),
-    ("0x97caca78ac2a94c67643d07843f85afaa44a3ea5", "Bungee"),
-    ("0xbd267094d3b410b33f49e8f6ba8b106672746490", "Moose Trade"),
-    ("0xd1b844a2443704bcb2f737a7434513437438b65e", "Moose Trade"),
-];
-
-/// Searcher-only MEV infrastructure → brand (KNOWN_MEV).
-pub const KNOWN_MEV: &[(&str, &str)] = &[
-    ("0xd32edf6642d917dbbe7b8bf8e5d6f5df6a9fff58", "FastLane"),
-    ("0x415669455d93b755efe7f20ef6f1dbdce7f68f7d", "Kubera"),
-    ("0x553037bac82741e7ca05afb48e8538996fd70eca", "Searcher 0x5530"),
-    ("0x2ee25bbbd6795f058876eb206c98f8a55b149d14", "Searcher 0x2ee2"),
-    ("0x53d7071e15121fd2f81958fa2899f6a0f66261fb", "Searcher 0x53d7"),
-];
-
-/// Searcher operator wallets → brand, matched on tx.from only when tx.to
-/// matched nothing (KNOWN_MEV_OPERATORS).
-pub const KNOWN_MEV_OPERATORS: &[(&str, &str)] = &[
-    ("0x256efafed786d24163bedf15d583ea5dbdb4757c", "Kubera"),
-    ("0x22c6a8b73641e9a1e8066a01c71c388e52230659", "Searcher 0x5530"),
-    ("0x8f1661673adb1b4524ee3436d2cb66e2ff0b6845", "Searcher 0x5530"),
-    ("0x66cbc7e161c4683e48decd13ee1f4495ea848e18", "Searcher 0x5530"),
-    ("0x62fd55d9d8bb20f19984b56bfec4f49a5c20f1ab", "Searcher 0x5530"),
-    ("0x000e4334baea5ed508919eb74845f8557e942ccc", "Searcher 0x2ee2"),
-    ("0x826e1446245a0ab5b24888b407dfeb47a4d5749d", "Searcher 0x53d7"),
-];
-
-fn table(rows: &[(&str, &str)]) -> HashMap<Addr, String> {
-    rows.iter().map(|(a, b)| (parse_address(a).expect("valid address"), b.to_string())).collect()
-}
 
 pub struct Attributor {
     routers: HashMap<Addr, String>,
@@ -71,7 +29,9 @@ pub struct Attributor {
 
 impl Default for Attributor {
     fn default() -> Self {
-        Self { routers: table(KNOWN_ROUTERS), mev: table(KNOWN_MEV), operators: table(KNOWN_MEV_OPERATORS) }
+        // Today's tables, read from the file generated from them (mpamm-registry).
+        let t = mpamm_registry::attribution::attribution();
+        Self { routers: t.routers.clone(), mev: t.mev.clone(), operators: t.operators.clone() }
     }
 }
 
@@ -138,6 +98,7 @@ impl Attributor {
 #[cfg(test)]
 mod tests {
     use mpamm_core::{FinalTxn, Origin};
+    use mpamm_registry::parse_address;
     use mpamm_types::Side;
 
     use super::*;

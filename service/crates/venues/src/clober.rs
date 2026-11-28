@@ -154,23 +154,6 @@ pub const CLOBER_VAULT_ADOPTIONS: [(&str, Pos, [&str; 2]); 2] = [
     ),
 ];
 
-/// External routers by brand, as today's attribution KNOWN_ROUTERS
-/// (server/src/attribution.ts): a RouterGateway.Swap naming one of these is
-/// labelled with its brand. Lower-case hex.
-const KNOWN_ROUTERS: &[(&str, &str)] = &[
-    ("0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f", "Relay"),
-    ("0xccc88a9d1b4ed6b0eaba998850414b24f1c315be", "Relay"),
-    ("0x6131b5fae19ea4f9d964eac0408e4408b66337b5", "KyberSwap"),
-    ("0x0000000000001ff3684f28c67538d4d072c22734", "0x"),
-    ("0x18556da13313f3532c54711497a8fedac273220e", "LFJ"),
-    ("0x4face5b0ef2757ceb9151d14c036a1135931c70e", "LFJ"),
-    ("0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789", "ERC-4337"),
-    ("0x0000000071727de22e5e9d8baf0edac6f37da032", "ERC-4337"),
-    ("0x97caca78ac2a94c67643d07843f85afaa44a3ea5", "Bungee"),
-    ("0xbd267094d3b410b33f49e8f6ba8b106672746490", "Moose Trade"),
-    ("0xd1b844a2443704bcb2f737a7434513437438b65e", "Moose Trade"),
-];
-
 pub fn meta() -> VenueMeta {
     VenueMeta {
         id: ID.into(),
@@ -458,8 +441,8 @@ pub fn decode_take(
 /// tx hash → routed-flow attribution from RouterGateway.Swap logs; the last
 /// Swap of a tx wins (today's buildRouterMap).
 pub fn router_info(router: Address) -> RouterInfo {
-    let lower = format!("{router:#x}");
-    let brand = KNOWN_ROUTERS.iter().find(|(a, _)| *a == lower).map(|(_, b)| (*b).to_string());
+    // Today's attribution KNOWN_ROUTERS (mpamm-registry's copy of them).
+    let brand = mpamm_registry::attribution::attribution().routers.get(&router.0 .0).cloned();
     RouterInfo { to: short_hex(&router.to_string()), router: brand }
 }
 

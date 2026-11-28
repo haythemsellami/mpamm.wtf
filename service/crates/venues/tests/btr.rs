@@ -128,17 +128,21 @@ fn one_static_source_carries_both_pools_fills_and_upgrades() {
 }
 
 #[test]
-fn pools_are_direct_entry_and_executors_btr_periphery() {
+fn pools_are_direct_entry_and_the_router_and_executors_btr_periphery() {
     let entries = Btr::default().entry_points();
     let direct: Vec<_> = entries.iter().filter(|e| e.router.is_none()).map(|e| e.address).collect();
     assert_eq!(direct, [to_addr(btr::POOL), to_addr(btr::RETIRED_POOL)]);
     let periphery: Vec<_> = entries.iter().filter(|e| e.router.is_some()).collect();
-    // The four that fronted the retired pool, and the one on pool v2.
-    assert_eq!(periphery.len(), 5);
+    // The router, the four that fronted the retired pool, and the one on pool v2.
+    assert_eq!(periphery.len(), 6);
+    let label = |a: &str| {
+        periphery.iter().find(|e| mpamm_venues::util::addr_hex(&e.address) == a).and_then(|e| e.router.clone())
+    };
+    assert_eq!(label("0xbbbbbbb17647a22d61e49d62a95445b1284b1296").as_deref(), Some("BTR"), "the router");
+    assert_eq!(label("0xbbbbbbb0f8c5d06406a6ff39abe1d514e25ade2e").as_deref(), Some("BTR"));
+    // The pool v2 executor is CoopArb, named apart from BTR's other executors.
+    assert_eq!(label("0xbbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf").as_deref(), Some("BTR Coop Arb"));
     let addrs: Vec<_> = periphery.iter().map(|e| mpamm_venues::util::addr_hex(&e.address)).collect();
-    assert!(addrs.contains(&"0xbbbbbbb0f8c5d06406a6ff39abe1d514e25ade2e".to_string()));
-    assert!(addrs.contains(&"0xbbbbbbb2a9c5b6da52f2cc79f6a306ebcb37e5cf".to_string()));
-    assert!(periphery.iter().all(|e| e.router.as_deref() == Some("BTR")));
     assert!(addrs.iter().all(|a| a.starts_with("0xbbbbbbb") && a.len() == 42));
 }
 

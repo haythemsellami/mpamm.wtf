@@ -8,6 +8,8 @@
 //! native MON and WMON to MON, then canonical wrappers, then alternative
 //! wrappers (`base_asset`).
 
+pub mod attribution;
+
 use std::{collections::HashSet, sync::OnceLock};
 
 use indexmap::IndexMap;
