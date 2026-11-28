@@ -2389,6 +2389,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpamm-history"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "mpamm-chain",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mpamm-markouts"
 version = "0.1.0"
 dependencies = [
