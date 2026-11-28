@@ -32,6 +32,10 @@ pub struct Cli {
     /// Environment variable holding the backup archive RPC URL.
     #[arg(long)]
     pub archive_backup_url_env: Option<String>,
+    /// Environment variable holding the hosted hot node's RPC URL (fallback
+    /// mode; unset: no fallback).
+    #[arg(long)]
+    pub hot_url_env: Option<String>,
     /// Archive requests in flight (the primary refuses about 8).
     #[arg(long)]
     pub archive_concurrency: Option<usize>,
@@ -71,6 +75,7 @@ pub struct ServiceFile {
     pub rpc_url: Option<String>,
     pub archive_url_env: Option<String>,
     pub archive_backup_url_env: Option<String>,
+    pub hot_url_env: Option<String>,
     pub archive_concurrency: Option<usize>,
     pub history_reset: Option<String>,
     pub reader_cpu: Option<usize>,
@@ -99,6 +104,9 @@ pub struct Settings {
     pub archive_url: Option<String>,
     pub archive_backup_url_env: String,
     pub archive_backup_url: Option<String>,
+    pub hot_url_env: String,
+    /// The hosted hot node's URL, from the environment (never printed).
+    pub hot_url: Option<String>,
     pub archive_concurrency: usize,
     pub history_reset: String,
     pub reader_cpu: Option<usize>,
@@ -130,6 +138,7 @@ impl Settings {
             .archive_backup_url_env
             .or(f.archive_backup_url_env)
             .unwrap_or_else(|| "MPAMM_ARCHIVE_RPC_BACKUP_URL".into());
+        let hot_url_env = cli.hot_url_env.or(f.hot_url_env).unwrap_or_else(|| "MPAMM_HOT_RPC_URL".into());
         Ok(Self {
             db: cli.db.or(f.db).unwrap_or_else(|| "/var/lib/mpamm/data/mpamm.db".into()),
             ring: cli.ring.or(f.ring).unwrap_or_else(|| DEFAULT_RING.into()),
@@ -138,6 +147,8 @@ impl Settings {
             archive_url_env,
             archive_backup_url: env(&archive_backup_url_env).filter(|u| !u.is_empty()),
             archive_backup_url_env,
+            hot_url: env(&hot_url_env).filter(|u| !u.is_empty()),
+            hot_url_env,
             archive_concurrency: cli.archive_concurrency.or(f.archive_concurrency).unwrap_or(4).max(1),
             history_reset: cli.history_reset.or(f.history_reset).unwrap_or_default(),
             reader_cpu: cli.reader_cpu.or(f.reader_cpu),
@@ -178,6 +189,7 @@ mod tests {
         assert_eq!(s.archive_cache, PathBuf::from("/var/lib/mpamm/archives"));
         assert_eq!((s.archive_backup_url.as_deref(), s.archive_concurrency), (None, 4));
         assert_eq!(s.history_reset, "");
+        assert_eq!((s.hot_url_env.as_str(), s.hot_url.as_deref()), ("MPAMM_HOT_RPC_URL", None));
         let backup = |k: &str| (k == "MPAMM_ARCHIVE_RPC_BACKUP_URL").then(|| "https://b.example/".to_string());
         let s = Settings::load(cli(&["--config", p.to_str().unwrap(), "--history-reset", "poe:2026-11-01"]), backup)
             .unwrap();

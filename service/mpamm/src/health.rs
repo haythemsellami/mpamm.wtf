@@ -21,6 +21,8 @@ pub struct Health {
     pub stall_ms: u64,
     /// History repairs, once the service runs them.
     pub history: Option<crate::history::HistoryHealth>,
+    /// Fallback mode, when a hosted hot node is configured.
+    pub fallback: Option<Arc<crate::fallback::FallbackStats>>,
 }
 
 #[derive(Serialize)]
@@ -43,12 +45,15 @@ pub struct HealthBody {
     /// History repairs: jobs, the one running, the archive nodes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history: Option<crate::history::HistoryView>,
+    /// Fallback mode: whether it's on, why, and what it fed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<crate::fallback::FallbackView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Alert {
-    /// `node_behind`, `ring_lag`, `unrepaired_gap`, `no_final_commit`, or
-    /// `venue_outage` (with `venue`).
+    /// `node_behind`, `ring_lag`, `unrepaired_gap`, `no_final_commit`,
+    /// `venue_outage` (with `venue`) or `fallback_mode`.
     pub code: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub venue: Option<String>,
@@ -154,7 +159,15 @@ pub fn body(h: &Health) -> (HealthBody, bool) {
     let lag = (pipeline.cursor > 0 && ring.newest_block > 0).then(|| ring.newest_block.saturating_sub(pipeline.cursor));
     let feeds = feeds_view(&h.prices, now_ms());
     let quotes = h.quotes.timings().into_iter().collect();
-    let alerts = alerts(&ring, &pipeline, &quotes, uptime_ms, now_ms());
+    let fallback = h.fallback.as_ref().map(|f| f.view());
+    let mut alerts = alerts(&ring, &pipeline, &quotes, uptime_ms, now_ms());
+    if let Some(f) = fallback.as_ref().filter(|f| f.active) {
+        alerts.push(Alert {
+            code: "fallback_mode",
+            venue: None,
+            msg: format!("fallback mode: {}", f.reason.clone().unwrap_or_default()),
+        });
+    }
     let depth = h.depth.view();
     (
         HealthBody {
@@ -168,6 +181,7 @@ pub fn body(h: &Health) -> (HealthBody, bool) {
             alerts,
             depth,
             history: h.history.as_ref().map(|x| x.view()),
+            fallback,
         },
         ok,
     )

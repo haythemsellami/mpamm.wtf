@@ -73,7 +73,8 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
     // Discovery comes first: the reader must know what to copy from the
     // first block. A venue that can't discover holds the start (fail-closed).
     let boot = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
-    boot.block_on(discover_all(&venues, &local, registry, true));
+    let hot = s.hot_url.clone().map(|u| Rpc::new("hot", u, Duration::from_secs(10)));
+    boot.block_on(discover_all(&venues, &local, hot.as_ref(), registry, true));
     drop(boot);
     let watch = match watch_of(&venues) {
         Ok(w) => Arc::new(ArcSwap::from_pointee(w)),
@@ -84,6 +85,8 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
     };
     tracing::info!("{} venue(s); watching {} log address(es)", venues.len(), watch.load().logs.len());
     let (tx, rx) = mpsc::unbounded_channel::<Input>();
+    // Fallback mode feeds the pipeline too (heights read over RPC).
+    let feed_tx = tx.clone();
     let (exec_tx, mut exec_rx) = mpsc::unbounded_channel::<(mpamm_core::BlockRef, u128)>();
     let stop = Arc::new(AtomicBool::new(false));
     let ring_stats = Arc::new(FollowStats::default());
@@ -131,12 +134,16 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
         let (stop_feeds, feeds_stop) = tokio::sync::watch::channel(false);
         let prices = Prices::new(registry, Fees::default());
         prices.spawn(Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10)), Endpoints::default(), feeds_stop);
+        let skip_local = Arc::new(AtomicBool::new(false));
+        let fallback_stats = s.hot_url.as_ref().map(|_| Arc::new(crate::fallback::FallbackStats::default()));
         let pipeline = Pipeline {
             writer: writer.clone(),
             venues,
             fetcher: Fetcher {
                 local: Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10)),
+                hot: s.hot_url.clone().map(|u| Rpc::new("hot", u, Duration::from_secs(10))),
                 archive: s.archive_url.clone().map(|u| Rpc::new("archive", u, Duration::from_secs(30))),
+                skip_local: skip_local.clone(),
             },
             registry,
             prices: prices.clone(),
@@ -156,6 +163,7 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
         let rediscover_ring = ring_stats.clone();
         // A client made on this runtime (the boot one's connections died with it).
         let local = Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(10));
+        let rediscover_hot = s.hot_url.clone().map(|u| Rpc::new("hot", u, Duration::from_secs(10)));
         let quote_venues = pipeline.venues.clone();
         let depth_venues = pipeline.venues.clone();
         let source_venues = pipeline.venues.clone();
@@ -214,11 +222,38 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
                 started: Instant::now(),
                 stall_ms: s.stall_secs.max(1) * 1000,
                 history: Some(crate::history::HistoryHealth { stats: history_stats.clone(), pool: pool.clone() }),
+                fallback: fallback_stats.clone(),
             },
             s.db.clone(),
             notes,
         );
         source.start(&engine, source_rx);
+
+        // Fallback mode: heads, quotes and final blocks from the hosted hot
+        // node while the local one is down (only with a hot node configured).
+        match (&s.hot_url, &fallback_stats) {
+            (Some(url), Some(fstats)) => {
+                tokio::spawn(
+                    crate::fallback::Driver {
+                        hot: Rpc::new("hot", url.clone(), Duration::from_secs(2)),
+                        hot_quotes: Rpc::new("hot", url.clone(), Duration::from_secs(2)),
+                        local_quotes: Rpc::new("local", s.rpc_url.clone(), Duration::from_secs(2)),
+                        engine: engine.clone(),
+                        ring: ring_stats.clone(),
+                        pipeline: stats.clone(),
+                        feed: feed_tx,
+                        skip_local,
+                        stats: fstats.clone(),
+                        notes: notes_buffer.clone(),
+                    }
+                    .run(),
+                );
+            }
+            _ => {
+                drop(feed_tx);
+                tracing::info!("fallback mode off: no hosted hot node ({})", s.hot_url_env);
+            }
+        }
 
         let quotes = engine.clone();
         tokio::spawn(async move {
@@ -327,7 +362,7 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
                     _ = every.tick() => {}
                     _ = asked.notified() => tokio::time::sleep(Duration::from_secs(5)).await,
                 }
-                discover_all(&rediscover_venues, &local, registry, false).await;
+                discover_all(&rediscover_venues, &local, rediscover_hot.as_ref(), registry, false).await;
                 match watch_of(&rediscover_venues) {
                     Ok(w) if w != **rediscover_watch.load() => {
                         let newest = rediscover_ring.newest_block.load(Ordering::Relaxed);
@@ -385,12 +420,29 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
 
 /// Discovers every venue. At boot each is retried until it succeeds; later
 /// a failure keeps what the venue already holds (discovery only merges).
-async fn discover_all(venues: &[Arc<dyn Venue>], rpc: &Rpc, registry: &'static Registry, boot: bool) {
+/// With the local node down, the hosted hot node answers instead.
+async fn discover_all(
+    venues: &[Arc<dyn Venue>],
+    rpc: &Rpc,
+    hot: Option<&Rpc>,
+    registry: &'static Registry,
+    boot: bool,
+) {
     let cx = mpamm_core::ChainCx { rpc, registry };
     for v in venues {
         let mut delay = Duration::from_secs(1);
         loop {
-            match v.discover(&cx).await {
+            let r = match v.discover(&cx).await {
+                Err(local) => match hot {
+                    Some(h) => v
+                        .discover(&mpamm_core::ChainCx { rpc: h, registry })
+                        .await
+                        .map_err(|e| format!("local: {local}; hot: {e}")),
+                    None => Err(local.to_string()),
+                },
+                Ok(()) => Ok(()),
+            };
+            match r {
                 Ok(()) => break,
                 Err(e) if boot => {
                     tracing::warn!("discover {}: {e}; retrying in {delay:?}", v.id());

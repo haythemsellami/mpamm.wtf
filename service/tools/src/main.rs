@@ -388,7 +388,8 @@ async fn decode_blocks(
     // Each block with watched logs is read exactly as the pipeline's RPC
     // repair reads it (full transactions, the watched logs), so decode sees
     // what it would see in the service.
-    let fetcher = mpamm_pipeline::Fetcher { local: rpc.clone(), archive: None };
+    let fetcher =
+        mpamm_pipeline::Fetcher { local: rpc.clone(), hot: None, archive: None, skip_local: Default::default() };
     let mut state = VenueState::default();
     let mut fills = Vec::new();
     let gas_logs: std::collections::HashSet<([u8; 20], [u8; 32])> =

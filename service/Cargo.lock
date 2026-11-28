@@ -2467,6 +2467,7 @@ dependencies = [
 name = "mpamm-quotes"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "mpamm-chain",
  "mpamm-core",

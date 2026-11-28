@@ -8,6 +8,7 @@
 //! their milestones land (docs/rebuild-plan.md).
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+mod fallback;
 mod health;
 mod history;
 mod marks;

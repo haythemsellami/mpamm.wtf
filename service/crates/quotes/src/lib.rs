@@ -132,7 +132,9 @@ impl Board {
 
 pub struct Engine {
     pub venues: Vec<Arc<dyn Venue>>,
-    pub rpc: Rpc,
+    /// The node quote reads go to: the local one, or the hosted one in
+    /// fallback mode (`use_rpc`).
+    rpc: arc_swap::ArcSwap<Rpc>,
     pub prices: Arc<Prices>,
     pub registry: &'static Registry,
     pub sizes: Vec<f64>,
@@ -157,7 +159,7 @@ impl Engine {
         let (published, _) = broadcast::channel(4096);
         Arc::new(Self {
             venues,
-            rpc,
+            rpc: arc_swap::ArcSwap::from_pointee(rpc),
             prices,
             registry,
             sizes: registry.sizes_usd.clone(),
@@ -168,6 +170,17 @@ impl Engine {
             timings: Mutex::new(HashMap::new()),
             last_error: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Sends quote reads to another node from the next job on (fallback mode
+    /// and back); jobs in flight finish on the node they started on.
+    pub fn use_rpc(&self, rpc: Rpc) {
+        self.rpc.store(Arc::new(rpc));
+    }
+
+    /// The label of the node quote reads go to.
+    pub fn rpc_label(&self) -> String {
+        self.rpc.load().label().to_string()
     }
 
     fn record(&self, venue: &str, ms: f64, outcome: Outcome) {
@@ -240,7 +253,8 @@ impl Engine {
             let (me, v, frame, cex_rows) = (self.clone(), v.clone(), frame.clone(), cex_rows.clone());
             tokio::spawn(async move {
                 let t0 = Instant::now();
-                let cx = QuoteCx { rpc: &me.rpc, registry: me.registry, pricer: &*frame, block };
+                let rpc = me.rpc.load_full();
+                let cx = QuoteCx { rpc: &rpc, registry: me.registry, pricer: &*frame, block };
                 let r = tokio::time::timeout(me.deadline, v.quote(&cx, &me.sizes)).await;
                 // A dropped (timed-out) job is cancelled: the slot frees now.
                 me.in_flight.lock().remove(&id);
