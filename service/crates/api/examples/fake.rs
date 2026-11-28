@@ -148,11 +148,14 @@ fn quote_bps(m: &Model, size: f64, skew: f64) -> Option<(f64, f64)> {
 
 fn quotes_frame(rng: &mut Rng, mids: &BTreeMap<&str, f64>, block: u64, now: f64, sizes: &[f64]) -> QuoteSnapshot {
     let mut rows = Vec::new();
+    // Every sixth block one venue misses its deadline, as real ones do: the
+    // dashboard keeps its last rows, greyed, for up to 3 blocks.
+    let late = block.is_multiple_of(6).then_some("clober-vault");
     for market in MARKETS {
         let mid = mid(mids, market);
         for &size in sizes {
             let cex = 1.0 + 0.6 * (size / 100.0).log10();
-            for m in MODELS.iter().filter(|m| m.markets.contains(market)) {
+            for m in MODELS.iter().filter(|m| m.markets.contains(market) && Some(m.id) != late) {
                 let skew = rng.normal() * 0.8;
                 let Some((bid, ask)) = quote_bps(m, size, skew) else { continue };
                 let (bid, ask) = (bid - rng.next() * 1.5, ask + rng.next() * 1.5);
@@ -194,6 +197,7 @@ fn quotes_frame(rng: &mut Rng, mids: &BTreeMap<&str, f64>, block: u64, now: f64,
     QuoteSnapshot {
         block_hash: Some(format!("0x{}", rng.hex(64))),
         revision: None,
+        proposal_ts: Some((now - 60.0).round()),
         block,
         mon_usd: mids["MON"],
         ts: now,

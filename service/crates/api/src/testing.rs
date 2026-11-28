@@ -130,6 +130,7 @@ impl FakeSource {
         let quotes = QuoteSnapshot {
             block_hash: None,
             revision: None,
+            proposal_ts: None,
             block: state.block,
             mon_usd: state.mon_usd,
             ts: 0.0,

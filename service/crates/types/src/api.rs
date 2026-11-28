@@ -118,6 +118,10 @@ pub struct QuoteSnapshot {
     pub block_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<u64>,
+    /// The block's proposal time (epoch ms): what `?timing=1` measures
+    /// proposal → paint from. Rounded to the ms (the stream's byte budget).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_ts: Option<f64>,
     pub block: u64,
     pub mon_usd: f64,
     /// Frame emission time: the chart's timestamp.
@@ -133,6 +137,7 @@ impl QuoteSnapshot {
         QuoteSnapshot {
             block_hash: self.block_hash.clone(),
             revision: self.revision,
+            proposal_ts: self.proposal_ts,
             block: self.block,
             mon_usd: self.mon_usd,
             ts: self.ts,

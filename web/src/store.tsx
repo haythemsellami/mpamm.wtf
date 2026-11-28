@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type R
 import type { MarketState, StreamState, QuoteSnapshot, QuoteStatsResponse, Fill, DailyVolume, VenueMeta, LeaderboardResponse, GasResponse, MarkoutCurvesResponse } from '@shared';
 import { pairOf, cexForBase, QUOTE_CHART_WINDOW_MS, QUOTE_STATS_REFRESH_MS } from '@shared';
 import { fetchMarkets, fetchFills, fetchLeaderboard, fetchMarkoutCurves, fetchGas, fetchQuoteHistory, fetchQuoteStats, connectDashboardStream } from './lib/api';
+import { trackLate, type LateState, type LateVenue } from './lib/late-venues';
 import { pathForTab, tabFromPath, urlForTab, type Tab } from './lib/tab-route';
 import { appendQuoteSnapshot, quoteFrameTime, type QuoteSeries } from './lib/quote-series';
 import type { Theme } from './theme';
@@ -55,6 +56,9 @@ interface Dashboard extends UiState {
   conn: 'connecting' | 'live' | 'reconnecting';
   state: MarketState | null;
   quotes: QuoteSnapshot | null;
+  /** Venues that missed the newest frame, with their last rows (≤ 3 blocks
+   *  old): shown greyed, never compared (lib/late-venues). */
+  late: LateVenue[];
   volume: DailyVolume[];
   fills: Fill[];
   /** server-side aggregates for the CURRENT leaderboard window (lbWin). */
@@ -121,6 +125,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<MarketState | null>(null);
   const stateBlockRef = useRef(0);
   const [quotes, setQuotes] = useState<QuoteSnapshot | null>(null);
+  const [late, setLate] = useState<LateVenue[]>([]);
+  const lateRef = useRef<LateState | null>(null);
   const [quoteStats, setQuoteStats] = useState<QuoteStatsResponse | null>(null);
   const [volume, setVolume] = useState<DailyVolume[]>([]);
   const [fills, setFills] = useState<Fill[]>([]);
@@ -353,6 +359,9 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         if (current && quotesObservedRef.current && msg.data.block < current.block
           && (msg.data.revision ?? 0) === (current.revision ?? 0)) return;
         quotesObservedRef.current = true;
+        const tracked = trackLate(lateRef.current, msg.data, ui.pair, ui.size);
+        lateRef.current = tracked.state;
+        setLate(tracked.late);
         setQuotes(msg.data); pushSnapshot(msg.data); setFrame((f) => f + 1);
       }
       else if (msg.ch === 'volume') {
@@ -374,6 +383,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         wasDropped.v = true;
         quotesRef.current = null;
         quotesObservedRef.current = false;
+        lateRef.current = null;
+        setLate([]);
         // A new connection must request fresh history, even when the previous
         // request is pending. Pre-drop frames may belong to a replaced branch.
         seedFetchRef.current = null;
@@ -484,7 +495,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }, [venuesById, reference]);
 
   const api = useMemo<Dashboard>(() => ({
-    ...ui, conn, state, quotes, volume, fills, lb, lbDay, curves, gas, frame,
+    ...ui, conn, state, quotes, late, volume, fills, lb, lbDay, curves, gas, frame,
     venues, displayVenues, baselines, reference, references, referenceFor, venuesById,
     series: seriesRef.current, quoteStats,
     set: (k, v) => setUi((s) => ({ ...s, [k]: v })),
@@ -501,7 +512,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setFrame((f) => f + 1);
     },
     resetLb: () => setUi((s) => ({ ...s, lbWin: '24H', lbGroup: 'PROTOCOL', lbHz: 'T+0S', lbWinners: true, lbTop: 25, cvFlow: 'ALL', cvRoute: 'ALL', cvEntry: 'ALL' })),
-  }), [ui, conn, state, quotes, quoteStats, volume, fills, lb, lbDay, curves, gas, frame, venues, displayVenues, baselines, reference, references, referenceFor, venuesById]);
+  }), [ui, conn, state, quotes, late, quoteStats, volume, fills, lb, lbDay, curves, gas, frame, venues, displayVenues, baselines, reference, references, referenceFor, venuesById]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }

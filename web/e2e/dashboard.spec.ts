@@ -224,3 +224,22 @@ test('xStock references show token/USD conversion', async ({ page }) => {
   await expect(page.getByText(/actual xStock token book on Kraken/)).toBeVisible();
   await page.screenshot({ path: test.info().outputPath('xstocks-mobile.png'), fullPage: true });
 });
+
+test('a venue that misses a block stays greyed with its age, and the timing overlay reports each hop', async ({ page, request }) => {
+  test.setTimeout(30_000);
+  await page.goto('/?timing=1');
+  await expect(page.locator('[data-quote-block]')).toBeVisible();
+  // The Rust fake skips one venue every sixth block; today's sim may never.
+  const rust = (await (await request.get('/api/quotes')).json()).proposalTs !== undefined;
+  if (rust) {
+    const late = page.locator('[data-late]').first();
+    await expect(late).toBeVisible({ timeout: 15_000 });
+    await expect(late).toContainText('BLK');
+    expect(Number(await late.getAttribute('data-late'))).toBeLessThanOrEqual(3);
+  }
+  const overlay = page.locator('[data-timing-overlay]');
+  await expect(overlay).toBeVisible();
+  await expect(overlay.locator('[data-hop="receive → paint"]')).not.toContainText('—', { timeout: 15_000 });
+  if (rust) await expect(overlay.locator('[data-hop="proposal → paint"]')).not.toContainText('—');
+});
+

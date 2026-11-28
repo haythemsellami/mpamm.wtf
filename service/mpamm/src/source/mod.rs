@@ -112,6 +112,7 @@ impl ServiceSource {
         let empty = QuoteSnapshot {
             block_hash: None,
             revision: None,
+            proposal_ts: None,
             block: 0,
             mon_usd: 0.0,
             ts: 0.0,

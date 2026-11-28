@@ -104,6 +104,7 @@ pub fn quotes(block: u64, rows: Vec<QuoteRow>) -> QuoteSnapshot {
     QuoteSnapshot {
         block_hash: Some(format!("0x{}", "ab".repeat(32))),
         revision: None,
+        proposal_ts: None,
         block,
         mon_usd: 0.024,
         ts: 100.0,

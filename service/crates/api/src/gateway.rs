@@ -514,6 +514,7 @@ fn select(topic: &StreamTopic, message: &StreamMessage, baselines: &HashSet<Stri
             StreamMessage::Quotes(Box::new(QuoteSnapshot {
                 block_hash: q.block_hash.clone(),
                 revision: q.revision,
+                proposal_ts: q.proposal_ts,
                 block: q.block,
                 mon_usd: q.mon_usd,
                 ts: q.ts,
@@ -942,7 +943,16 @@ mod tests {
     }
 
     fn quotes(block: u64, rows: Vec<QuoteRow>) -> QuoteSnapshot {
-        QuoteSnapshot { block_hash: None, revision: None, block, mon_usd: 0.024, ts: 100.0, rows, frame: None }
+        QuoteSnapshot {
+            block_hash: None,
+            revision: None,
+            proposal_ts: None,
+            block,
+            mon_usd: 0.024,
+            ts: 100.0,
+            rows,
+            frame: None,
+        }
     }
 
     fn source() -> Arc<FakeSource> {

@@ -142,6 +142,7 @@ impl Assembler {
         QuoteSnapshot {
             block_hash: Some(format!("0x{}", mpamm_ring::hex(&p.hash))),
             revision: Some(self.revision),
+            proposal_ts: Some(p.proposal_ms.round()),
             block: p.number,
             mon_usd,
             ts: now,

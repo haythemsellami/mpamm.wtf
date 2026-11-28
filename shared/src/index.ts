@@ -369,6 +369,9 @@ export interface QuoteSnapshot {
   blockHash?: string;
   /** Increments when a replacement invalidates retained speculative samples. */
   revision?: number;
+  /** The block's proposal time (epoch ms, rounded): what `?timing=1`
+   *  measures proposal → paint from. Absent from producers that don't know it. */
+  proposalTs?: number;
   block: number;
   monUsd: number;
   /** Frame emission time (equal to `frame.emittedAt` when `frame` is present).

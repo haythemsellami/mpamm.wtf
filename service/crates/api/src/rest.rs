@@ -163,6 +163,7 @@ async fn bootstrap(State(app): State<App>, RawQuery(raw): RawQuery) -> Response 
     let quotes = QuoteSnapshot {
         block_hash: None,
         revision: None,
+        proposal_ts: None,
         block: state.block,
         mon_usd: state.mon_usd,
         ts: app.now(),

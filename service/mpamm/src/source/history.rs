@@ -225,7 +225,16 @@ mod tests {
     }
 
     fn frame(block: u64, ts: f64, revision: u64, rows: Vec<QuoteRow>) -> QuoteSnapshot {
-        QuoteSnapshot { block_hash: None, revision: Some(revision), block, mon_usd: 0.02, ts, rows, frame: None }
+        QuoteSnapshot {
+            block_hash: None,
+            revision: Some(revision),
+            proposal_ts: None,
+            block,
+            mon_usd: 0.02,
+            ts,
+            rows,
+            frame: None,
+        }
     }
 
     #[test]
