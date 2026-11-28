@@ -68,6 +68,21 @@ node, or from the archive when the node's history no longer reaches them. The pi
 holds until every block is read; nothing is skipped. A resync from a node snapshot
 whose history starts after the cursor needs the archive URL.
 
+## Fallback mode
+
+With `MPAMM_HOT_RPC_URL` in the env file, the service switches to the hosted hot node by
+itself when the local node goes quiet for 5 s, its ring can't be read (a node upgrade this
+build doesn't know), or it trails the hosted head by more than 10 blocks for 30 s: quotes
+read the hosted node, final blocks are read over RPC (gas stays exact), discovery asks it.
+It switches back after 10 healthy seconds on the ring. `/api/health` → `fallback` (and the
+`fallback_mode` alert) while it's on; notes `fallback.enter` / `fallback.exit`.
+
+- Nothing to do while it runs; fix the node. Viewers see quotes a few hundred ms later.
+- Node upgrades: upgrade the node, let the service run in fallback until the matching
+  build is deployed, then deploy it (the ring is read again; fallback ends on its own).
+- Without the variable there is no fallback: a node outage stalls quotes and trades until
+  it's back (the pipeline holds; nothing is lost).
+
 ## History repairs
 
 A build that changes what a venue decodes ships a dated revision; a new venue brings its

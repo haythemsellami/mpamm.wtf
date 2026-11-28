@@ -49,7 +49,7 @@ path for M8.
 | M11 | Stream and REST | 4 | M8, M10 | — | Today's REST and v2 stream ported; compact protocol left |
 | M12 | Frontend on the new stream | 4 | M11 | — | Today's dashboard runs unchanged on the Rust API |
 | M13 | Data migration and replication | 4 | M8 | object storage bucket, archive URLs | Rehearsed on production's database; history repairs built and proven; replication left |
-| M14 | Operations readiness | 4 | M11, M13 | hot fallback WS, TLS hostname, on-call | Alerts, notes, runbooks written; fallback mode left |
+| M14 | Operations readiness | 4 | M11, M13 | hot node URL, TLS hostname, on-call | Alerts, notes, runbooks, fallback mode built and proven; the unit and TLS left |
 | M15 | Switch-over and merge (phase-4 gate) | 4 | M12–M14 | DNS change | Not started |
 | M16 | Edge relays (optional) | 5 | M15 | relay hosting | Only if chosen |
 | M17 | In-process EVM (optional) | 6 | M10 | — | Only if needed |
@@ -520,8 +520,18 @@ drill completes.
 
 - [ ] One unit, `mpamm.service`; the service pins its threads to the CPU set agreed with
       DevOps; environment and secrets layout
-- [ ] Fallback mode: heads, quotes and final-block reads from the hosted hot node when the
-      local node is down *(DevOps: hot node WebSocket with `monadNewHeads`)*
+- [x] Fallback mode: heads, quotes and final-block reads from the hosted hot node
+      (`MPAMM_HOT_RPC_URL`) when the local node goes quiet for 5 s, its ring can't be read,
+      or it trails the hosted head by more than 10 blocks for 30 s; back after 10 healthy
+      seconds. The pipeline takes heights from two producers (drops committed ones, reads
+      skipped ones first), so the switch needs no handshake. Proven on the host with a test
+      instance (no ring, a dead local RPC, the node standing in for the hosted one): in 6 s
+      it switched, committed 1,838 blocks over RPC with no hold, quoted all 11 venues on the
+      hosted node, and its trades matched the shadow's exactly; with the ring linked in it
+      switched back 11 s later, and across both switches 63 trades over 2,244 blocks matched
+      the shadow's with no difference
+- [ ] The hosted head over `monadNewHeads` instead of a 250 ms poll *(DevOps: hot node
+      WebSocket and its URL in the env file)*
 - [x] Alerts: node behind, ring lag, unrepaired gap, no final commit for 3 s, venue outages
       (`alerts` on `/api/health`, for whatever monitor DevOps attaches); `state.notes` on
       `/api/markets` keeps every warning, URLs removed
