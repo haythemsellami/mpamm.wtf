@@ -11,6 +11,7 @@
 //! One writer (the pipeline, through `writer::Writer`); readers open their
 //! own read-only connections, which WAL lets run beside the writer.
 
+pub mod history;
 pub mod writer;
 
 use std::{collections::BTreeMap, path::Path};
@@ -273,6 +274,7 @@ impl Store {
             _ => {}
         }
         self.conn.execute_batch(SCHEMA)?;
+        history::migrate(&self.conn)?;
         self.set_meta("schema_version", SCHEMA_VERSION)?;
         Ok(())
     }
