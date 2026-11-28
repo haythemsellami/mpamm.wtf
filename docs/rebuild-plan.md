@@ -476,6 +476,33 @@ browser, with proposal → paint p50 at most 200 ms near the host.
       the tip within 45 s (0 gaps); all 372 closed days match production's `/api/volume`
       exactly ($1,599,917,586.58, 3,261,628 swaps), the dashboard shows the full history, and
       the trades it decodes from that block on are diffed against production hourly
+- [ ] History repairs and backfill (crate `mpamm-history`), read from the hosted archive
+      pool (primary and backup, `MPAMM_ARCHIVE_RPC_URL` / `_BACKUP_URL`) because the
+      node keeps blocks only from its last state sync:
+  - [x] The archive pool: 1,000-block log ranges, a few requests in flight, every error
+        retried on the next node then after a pause, never skipped; a node whose head is
+        short of a range never serves it
+  - [ ] One job kind for every repair, per venue: a block range `[from, B0]` re-decoded
+        by a venue instance of its own (live decode state untouched), where `B0` is the
+        last block an earlier build committed (recorded when the job is first planned:
+        blocks after it were decoded by this build). Blocks holding only gas-event logs
+        are not read (no venue decodes them). Each block is priced as of its own time
+        (exchange archives, then the chain's prints)
+  - [ ] Written a day at a time with the job's cursor, in one writer transaction, so a
+        restart resumes where it stopped. Days the trades table covers (from its first
+        complete day on) get their trades replaced and their volume re-summed from them;
+        older days get their volume set from the replay. Gas is never touched
+  - [ ] Kinds: `Replay` and an operator's replay (`venue:from[@nonce]`) replace;
+        `Markets` adds only the listed markets' trades (inserted if absent, so nothing
+        is counted twice where trades are stored), priced at fill time (today's TS
+        prices these at the live price); `Fills` re-sums stored trades; a new venue's
+        lifetime is a `Replay` from its `history_from_utc`. On a database with no
+        history, the lifetime replay stands for every revision
+  - [ ] Applied once: today's markers (`v1:history_revision_*`, `v1:backfill_done_*`,
+        `v1:backfill_reset_applied_*`) are adopted when their text matches; a changed
+        definition runs again
+  - [ ] Wired into the service (health, notes, volume reload, markouts for replayed
+        trades), and proven on the host against production
 - [ ] Continuous replication of the new database off the host (write-ahead-log copy to
       object storage and a replica on Railway) *(DevOps: bucket)*
 - [ ] Restore drill: rebuild the database from the copy on another machine
