@@ -12,15 +12,14 @@
 //! nothing later starts while one holds, so a venue's repairs keep theirs.
 
 use std::{
-    collections::{HashMap, HashSet},
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
 use mpamm_chain::Rpc;
 use mpamm_history::{
+    boot::{prepare, run_jobs},
     exec::{Executor, Sink, Stats},
-    plan::{parse_resets, plan, Reset, Start, VenueHistory},
     ArchivePool,
 };
 use mpamm_pricing::{
@@ -177,98 +176,22 @@ pub async fn run(mut i: Inputs) {
         },
     };
     let today = utc_day(now_ms());
-    let w = i.writer.clone();
-    let t = today.clone();
-    let read =
-        w.run(move |s| Ok((s.trades_from(&t)?, s.history_marks()?, s.meta_under("v1:")?, s.all_venue_state()?))).await;
-    let (trades_from, marks, v1, committed) = match read {
-        Ok(r) => r,
+    let venues = mpamm_venues::all();
+    let prepared = match prepare(&i.writer, &i.pool, &venues, &i.resets, &today, now_ms() as i64, &*i.sink).await {
+        Ok(p) => p,
         Err(e) => {
-            i.sink.note(true, "history.held", "service", &format!("repairs not planned: store: {e}"));
+            i.sink.note(true, "history.held", "service", &format!("repairs not planned: {e}"));
             return;
         }
     };
-    let applied: HashSet<(String, String)> = marks.into_iter().collect();
-    let v1: HashMap<String, String> = v1.into_iter().collect();
-
-    // Operator replays: a block start replays its whole day.
-    let (entries, bad) = parse_resets(&i.resets);
-    for b in bad {
-        i.sink.note(true, "history.invalid", "service", &b);
-    }
-    let mut resets = Vec::new();
-    for e in entries {
-        let from = match e.from {
-            None => None,
-            Some(Start::Day(d)) => Some(d),
-            Some(Start::Block(n)) => match i.pool.timestamps(&[n]).await {
-                Ok(ts) => Some(utc_day(ts[0] as f64 * 1000.0)),
-                Err(err) => {
-                    i.sink.note(
-                        true,
-                        "history.held",
-                        &e.venue,
-                        &format!("operator replay {:?}: block {n}: {err}", e.entry),
-                    );
-                    continue;
-                }
-            },
-        };
-        resets.push(Reset { entry: e.entry, venue: e.venue, from });
-    }
-
-    let venues = mpamm_venues::all();
-    let histories: Vec<VenueHistory> = venues
-        .iter()
-        .map(|v| VenueHistory {
-            id: v.id().to_string(),
-            revisions: v.history_revisions(),
-            from_utc: v.history_from_utc().map(str::to_string),
-        })
-        .collect();
-    let p = plan(
-        &histories,
-        &resets,
-        &today,
-        &trades_from,
-        |v, s| applied.contains(&(v.to_string(), s.to_string())),
-        |k| v1.get(k).cloned(),
-    );
-
-    let now = now_ms() as i64;
-    let marks: Vec<(String, String)> =
-        p.adopt.iter().cloned().chain(p.refused.iter().map(|(v, s, _)| (v.clone(), s.clone()))).collect();
-    if !marks.is_empty() {
-        let m = marks.clone();
-        if let Err(e) = w
-            .run(move |s| {
-                for (v, spec) in &m {
-                    s.mark_history(v, spec, now)?;
-                }
-                Ok(())
-            })
-            .await
-        {
-            i.sink.note(true, "history.held", "service", &format!("marking adopted repairs: {e}"));
-            return;
-        }
-    }
+    let p = &prepared.plan;
     if !p.adopt.is_empty() {
         tracing::info!(target: "history", "{} repair(s) today's service already applied, adopted", p.adopt.len());
     }
-    for (v, _, why) in &p.refused {
-        i.sink.note(false, "history.refused", v, why);
-    }
-    for why in &p.waiting {
-        i.sink.note(false, "history.waiting", "service", why);
-    }
-    for why in &p.invalid {
-        i.sink.note(true, "history.invalid", "service", why);
-    }
-    i.stats.jobs_left.store(p.jobs.len() as u64, Ordering::Relaxed);
     tracing::info!(
         target: "history",
-        "b0 {b0}; trades stored from {trades_from}; {} repair(s) to run{}",
+        "b0 {b0}; trades stored from {}; {} repair(s) to run{}",
+        prepared.trades_from,
         p.jobs.len(),
         p.jobs.iter().map(|j| format!(" [{} {}]", j.venue, j.what)).collect::<String>()
     );
@@ -284,7 +207,6 @@ pub async fn run(mut i: Inputs) {
         );
         return;
     }
-
     let exec = Executor {
         pool: i.pool.clone(),
         writer: i.writer.clone(),
@@ -293,30 +215,13 @@ pub async fn run(mut i: Inputs) {
         prices: i.prices.clone(),
         local: Rpc::new("local", i.rpc_url.clone(), Duration::from_secs(10)),
         venues,
-        committed,
-        trades_from,
+        committed: prepared.committed.clone(),
+        trades_from: prepared.trades_from.clone(),
         sink: i.sink.clone(),
         stats: i.stats.clone(),
         now_ms: || mpamm_ring::live::now_ms() as i64,
     };
-    for job in &p.jobs {
-        let mut pause = RETRY_MIN;
-        loop {
-            match exec.run(job, b0).await {
-                Ok(()) => break,
-                Err(e) => {
-                    *i.stats.last_error.lock() = Some(format!("{} {}: {e}", job.venue, job.what));
-                    i.sink.note(true, "history.held", &job.venue, &format!("{}: {e}; retrying", job.what));
-                    tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(RETRY_MAX);
-                }
-            }
-        }
-        *i.stats.last_error.lock() = None;
-        i.stats.jobs_done.fetch_add(1, Ordering::Relaxed);
-        i.stats.jobs_left.fetch_sub(1, Ordering::Relaxed);
-    }
-    *i.stats.current.lock() = None;
+    let _ = run_jobs(&exec, &p.jobs, b0, Some((RETRY_MIN, RETRY_MAX))).await;
 }
 
 /// Marks the trades repairs insert, from the exchanges' archives.

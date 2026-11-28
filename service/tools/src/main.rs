@@ -18,6 +18,7 @@
 mod depth;
 mod migrate;
 mod parity;
+mod repair;
 mod verify;
 
 use std::{
@@ -43,6 +44,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run a database's history repairs (revisions, a new venue's lifetime,
+    /// operator replays) as the service would, up to its cursor. Run it on a
+    /// copy.
+    Repair {
+        #[arg(long)]
+        db: std::path::PathBuf,
+        /// Operator replays: `venue[:from][@nonce]`, comma-separated.
+        #[arg(long, default_value = "")]
+        reset: String,
+        /// Environment variables holding archive URLs, in order.
+        #[arg(long, value_delimiter = ',', default_value = "MPAMM_ARCHIVE_RPC_URL,MPAMM_ARCHIVE_RPC_BACKUP_URL")]
+        archive_url_env: Vec<String>,
+        /// An archive URL without a key (the local node), tried first.
+        #[arg(long)]
+        archive_url: Option<String>,
+        /// The local node (venue discovery, live prices).
+        #[arg(long, env = "RPC_URL", default_value = "http://127.0.0.1:8080")]
+        rpc: String,
+        #[arg(long, default_value_t = 1000)]
+        chunk: u64,
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+        /// Where the exchanges' archives are cached.
+        #[arg(long, default_value = "/var/lib/mpamm/archives")]
+        cache: std::path::PathBuf,
+        /// Run the exchange feeds this long first (prices no archive gives).
+        #[arg(long, default_value_t = 20)]
+        live_prices_secs: u64,
+        /// Print the plan and stop (adopted markers are still recorded).
+        #[arg(long)]
+        plan_only: bool,
+    },
     /// Decode one venue's trades over [from, to] and print them as JSON.
     DecodeRange {
         #[arg(long)]
@@ -633,6 +666,35 @@ async fn main() {
         }
         Cmd::GasCheck { venue, from, to, rpc } => gas_check(&venue, from, to, &rpc).await,
         Cmd::Migrate { from, to } => migrate::migrate(&from, &to),
+        Cmd::Repair {
+            db,
+            reset,
+            archive_url_env,
+            archive_url,
+            rpc,
+            chunk,
+            concurrency,
+            cache,
+            live_prices_secs,
+            plan_only,
+        } => {
+            let archive_urls = archive_url
+                .into_iter()
+                .chain(archive_url_env.iter().filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty())))
+                .collect();
+            repair::repair(repair::Args {
+                db,
+                resets: reset,
+                archive_urls,
+                rpc,
+                chunk,
+                concurrency,
+                cache,
+                live_prices_secs,
+                plan_only,
+            })
+            .await
+        }
         Cmd::CapturePrices { secs, rpc, out } => capture_prices(secs, &rpc, &out).await,
         Cmd::QuoteAt { venue, block, prices, rpc } => quote_at(&venue, block, &prices, &rpc).await,
         Cmd::VerifyVenue { venue, rpc, span, warm_secs } => match verify::verify(&venue, &rpc, span, warm_secs).await {

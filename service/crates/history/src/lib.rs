@@ -4,6 +4,7 @@
 //! pool and written beside the live pipeline without ever counting a trade
 //! twice.
 
+pub mod boot;
 pub mod exec;
 pub mod plan;
 pub mod pool;
