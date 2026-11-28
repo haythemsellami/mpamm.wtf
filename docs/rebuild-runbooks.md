@@ -28,7 +28,7 @@ for `stall_secs`: 503); `no_ring` (the ring can't be opened: 503).
 | --- | --- | --- |
 | `node_behind` | No execution event for 2 s | Check the node (`monad-execution`, `monad-bft`); quotes and trades wait on it. Fallback mode is not built yet |
 | `ring_lag` | The reader trails the ring by 500k events (the ring holds ~2^21) | The reader's core is starved: check the CPU pin (`reader_cpu`) and what else runs there |
-| `unrepaired_gap` | A block the ring lost can't be read over RPC | Read `pipeline.held`. A block older than the node's history (~17 h on this host) needs the archive URL (`archive_url_env`). The pipeline holds; it never skips |
+| `unrepaired_gap` | A block the ring lost can't be read over RPC | Read `pipeline.held`. A block older than the node's history (it starts at its last state sync) needs the archive URL (`archive_url_env`). The pipeline holds; it never skips |
 | `no_final_commit` | Nothing committed for 3 s | With `node_behind`: the node. Alone: read `pipeline.held` and the notes (a venue `NotReady` asks for a rediscovery at once, then holds) |
 | `venue_outage` | A venue published no quote in a minute | `quotes.<venue>.lastError` names the cause (a revert names its reason). Its trades still decode |
 
@@ -68,6 +68,27 @@ node, or from the archive when the node's history no longer reaches them. The pi
 holds until every block is read; nothing is skipped. A resync from a node snapshot
 whose history starts after the cursor needs the archive URL.
 
+## History repairs
+
+A build that changes what a venue decodes ships a dated revision; a new venue brings its
+lifetime. On boot the service plans them (`history: b0 …; N repair(s) to run` in the
+log), adopts what today's service already applied, and runs the rest one at a time from
+the archive pool, a day per transaction. Progress is on `/api/health` → `history` (the
+job, its day and cursor, each archive node); notes `history.start`, `history.done`,
+`history.held` (a job waiting: an archive down, prices not published), `history.invalid`.
+
+- **Rehearse first**, on a copy, with the build that ships it:
+  `mpamm-tools repair --db <copy> [--reset venue:from@n] [--plan-only]`. Days the node
+  still holds can use it as the archive (`--archive-url http://127.0.0.1:8080`).
+- **An operator replay** (a gap no code change describes): add
+  `history_reset = "venue:YYYY-MM-DD@1"` to `[service]` in `mpamm.toml` (or
+  `MPAMM_HISTORY_RESET`) and restart. Each entry runs once; bump `@n` to run it again.
+- **A held job** retries at its cursor with a growing pause (30 s to 10 min); nothing is
+  written for the day it holds on. Fix the cause (usually the archive URL or an archive
+  not yet published for a closed day); no restart is needed.
+- Today's blocks in a repair are priced with the service's prices at their time; a closed
+  day waits for the exchanges' archives (published the next day).
+
 ## Host loss *(not yet run)*
 
 1. The standby (today's Railway service) keeps serving; move DNS to it (M15's rollback).
@@ -80,6 +101,8 @@ whose history starts after the cursor needs the archive URL.
 ```bash
 # the service against production's public API, per venue over the blocks both finished
 sudo -u mpamm /var/lib/mpamm/bin/mpamm-tools parity --db /var/lib/mpamm/data/mpamm.db --hours 24
+# the history repairs a database would run (records adopted markers; run on a copy)
+sudo -u mpamm /var/lib/mpamm/bin/mpamm-tools repair --db <copy> --plan-only
 # one venue's gas over a block range, recounted from receipts independently of its rules
 sudo -u mpamm /var/lib/mpamm/bin/mpamm-tools gas-check --venue hanji --from <a> --to <b>
 ```

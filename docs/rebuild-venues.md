@@ -64,6 +64,9 @@ A venue whose gas source isn't resolved returns `NotReady`: the block holds rath
 than undercount. The rules are read after the block's decode, so a source loaded in
 decode counts in that block.
 
+Decode must never read a gas-event log (`logs` above): history repairs skip blocks that
+hold only those, which is what keeps a replay of a busy keeper venue fast.
+
 ## Redeploys and history
 
 - A redeploy keeps the venue id: write a generation for the new contracts and
@@ -72,7 +75,15 @@ decode counts in that block.
 - A change to what a venue decodes ships its own repair: a `HistoryRevision` with
   `id`, `from` and its `source`: `Replay` (re-decode from `from`), `Fills { until }`
   (re-sum stored trades over a window; nothing re-priced) or `Markets(&[..])` (a newly
-  listed market's history only).
+  listed market's history only). The service applies it once per database
+  (`mpamm-history`): the venue's days from `from` up to the last block the previous
+  build committed are decoded again from the archive pool, on an instance of the
+  module of its own, a day per transaction. `history_from_utc` is where a new venue's
+  lifetime replay starts.
+- The definition text is the applied marker, exactly as today's TypeScript writes it: add
+  the revision on both sides until the switch-over and run `npm -w server run
+  history:specs` (the parity test `crates/history/tests/ts_specs.rs` fails otherwise).
+  Rehearse it with `mpamm-tools repair --db <copy>` before it ships.
 
 ## Verifying (required before a venue is done)
 
