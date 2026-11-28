@@ -243,4 +243,29 @@ impl ArchivePool {
         }
         Ok(out)
     }
+
+    /// Block timestamps (seconds), in the order asked, `batch` per request.
+    pub async fn timestamps(&self, numbers: &[u64]) -> Result<Vec<u64>, PoolError> {
+        let mut out = Vec::with_capacity(numbers.len());
+        for chunk in numbers.chunks(self.cfg.batch.max(1)) {
+            let to = chunk.iter().copied().max().unwrap_or(0);
+            let what = format!("{} header(s) up to {to}", chunk.len());
+            let (ts, _) = self
+                .first(&what, to, |rpc| async move {
+                    let headers = rpc.block_headers(chunk).await.map_err(|e| e.to_string())?;
+                    let mut ts = Vec::with_capacity(headers.len());
+                    for (n, h) in chunk.iter().zip(headers) {
+                        match h.map_err(|e| format!("block {n}: {e}"))? {
+                            Some(h) if h.number == *n => ts.push(h.timestamp),
+                            Some(h) => return Err(format!("asked for block {n}, got {}", h.number)),
+                            None => return Err(format!("no block {n}")),
+                        }
+                    }
+                    Ok(ts)
+                })
+                .await?;
+            out.extend(ts);
+        }
+        Ok(out)
+    }
 }

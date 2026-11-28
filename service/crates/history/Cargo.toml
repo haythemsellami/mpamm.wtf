@@ -9,6 +9,12 @@ publish.workspace = true
 [dependencies]
 mpamm-chain = { path = "../chain" }
 mpamm-core = { path = "../core" }
+mpamm-pipeline = { path = "../pipeline" }
+mpamm-pricing = { path = "../pricing" }
+mpamm-registry = { path = "../registry" }
+mpamm-ring = { path = "../ring" }
+mpamm-store = { path = "../store" }
+mpamm-types = { path = "../types" }
 futures-util = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
@@ -16,6 +22,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+mpamm-types = { path = "../types" }
 mpamm-venues = { path = "../venues" }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }

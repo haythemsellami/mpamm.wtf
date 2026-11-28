@@ -4,8 +4,10 @@
 //! pool and written beside the live pipeline without ever counting a trade
 //! twice.
 
+pub mod exec;
 pub mod plan;
 pub mod pool;
 
+pub use exec::{Executor, Progress, Sink, Stats};
 pub use plan::{plan, Kind, Plan, Planned, Reset, VenueHistory};
 pub use pool::{ArchivePool, Logs, NodeStats, PoolConfig, PoolError};
