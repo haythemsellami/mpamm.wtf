@@ -1,0 +1,20 @@
+[package]
+name = "mpamm-analytics"
+version = "0.1.0"
+description = "The leaderboard and markout-curve aggregations, answering exactly as today's TypeScript does"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mpamm-registry = { path = "../registry" }
+mpamm-types = { path = "../types" }
+indexmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The parity test reads TypeScript's shortest round-trip floats; without this
+# serde_json may parse one an ulp off, and the error would surface as a
+# rounding difference that isn't in the port.
+serde_json = { workspace = true, features = ["float_roundtrip"] }

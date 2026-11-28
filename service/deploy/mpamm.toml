@@ -1,0 +1,24 @@
+# Settings for the binaries mpamm.service runs on the node host, installed as
+# /var/lib/mpamm/mpamm.toml by service/scripts/deploy.sh. Flags on the command
+# line override these. No secrets here: hosted RPC URLs come from the unit's
+# environment file, which DevOps owns.
+
+[reader]
+# The one core no node daemon is pinned to on the first node host.
+cpu = 0
+
+[service]
+# The ring reader thread's core (the rest of the service runs unpinned until
+# DevOps sets a CPU set for it).
+reader_cpu = 0
+# The dashboard served beside the API (web/dist, copied to the host).
+web_dist = "/var/lib/mpamm/web/dist"
+# One depth pass a second at most, as today's production runs it: the node's
+# RPC has 4 cores, and with every venue quoting each block they are the
+# bottleneck (realtime quotes come first).
+depth_min_interval_ms = 1000
+# Replication: the service runs Litestream (its pinned binary, fetched by
+# scripts/fetch-litestream.sh) with /var/lib/mpamm/litestream.yml. It copies
+# once the environment file holds MPAMM_REPLICA_URL and the bucket's keys;
+# until then health reports `replication_down` ("no replica URL").
+litestream = "/var/lib/mpamm/bin/litestream"

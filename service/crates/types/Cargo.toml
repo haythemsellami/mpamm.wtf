@@ -1,0 +1,12 @@
+[package]
+name = "mpamm-types"
+version = "0.1.0"
+description = "The service's data types; their JSON matches the shapes in shared/src/index.ts"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+indexmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

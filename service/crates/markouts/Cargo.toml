@@ -1,0 +1,15 @@
+[package]
+name = "mpamm-markouts"
+version = "0.1.0"
+description = "Markouts and markout curves, aged live against the pair-terms reference history, and after the fact from the exchanges' archives"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mpamm-pricing = { path = "../pricing" }
+mpamm-registry = { path = "../registry" }
+mpamm-types = { path = "../types" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util"] }

@@ -1,0 +1,42 @@
+# The Rust rebuild (docs/rebuild-spec.md). One workspace for every crate of the
+# service; the execution-event SDK is pinned to the node's own release tag,
+# because the event ring's schema hash ties a reader build to a node version.
+[workspace]
+resolver = "2"
+members = ["reader", "crates/ring", "crates/chain", "crates/registry", "crates/types", "crates/store", "crates/core", "crates/pipeline", "crates/pricing", "crates/venues", "crates/markouts", "crates/quotes", "crates/analytics", "crates/api", "crates/history", "mpamm", "tools"]
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[workspace.dependencies]
+monad-event-ring = { git = "https://github.com/category-labs/monad", tag = "v0.16.5" }
+monad-exec-events = { git = "https://github.com/category-labs/monad", tag = "v0.16.5" }
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+signal-hook = "0.3"
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+toml = "0.8"
+indexmap = { version = "2", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+arc-swap = "1"
+tracing = "0.1"
+alloy-primitives = "1"
+alloy-sol-types = "1"
+async-trait = "0.1"
+crc32fast = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+parking_lot = "0.12"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+debug = "line-tables-only"

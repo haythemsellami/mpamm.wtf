@@ -1,0 +1,16 @@
+[package]
+name = "mpamm-core"
+version = "0.1.0"
+description = "What venue modules and the pipeline share: final blocks, the venue trait, watch-set declarations"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mpamm-ring = { path = "../ring" }
+mpamm-registry = { path = "../registry" }
+mpamm-types = { path = "../types" }
+mpamm-chain = { path = "../chain" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }

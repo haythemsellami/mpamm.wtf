@@ -46,6 +46,8 @@ VENUES=myvenue BACKFILL=off MARKOUT_BACKFILL=off GAS_METRIC=off npm run dev
 | [docs/architecture.md](docs/architecture.md) | How it works — propAMM scope, quote/fill paths, persist-forward indexer, pair-terms CEX references, data model, API |
 | [docs/spec.md](docs/spec.md) | The venue-agnostic design spec — invariants, contracts, key decisions |
 | [docs/deploy.md](docs/deploy.md) | Hosting — single container on Railway (IaC in `.railway/`), restore runbook, configuration knobs |
+| [docs/rebuild-spec.md](docs/rebuild-spec.md) | Draft: the Rust rebuild on its own Monad node — Execution Events, one-block quotes, rollout gates |
+| [docs/rebuild-plan.md](docs/rebuild-plan.md) | The rebuild's implementation plan — milestones M1–M17, tasks, done-when checks, DevOps tracker |
 
 The pixel-level design source lives under [`design/`](design/).
 

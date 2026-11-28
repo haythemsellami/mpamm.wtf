@@ -100,28 +100,34 @@ export function ExecutionTab() {
 
   // legend — active venues at selected pair/size, sorted by spread
   const legend = useMemo(() => {
-    const leg = active.map((v) => {
-      const r = row(v, size);
-      return {
-        id: v.id, name: displayName(v), color: venueColor(v, d.theme), baseline: v.role === 'baseline',
-        spread: r?.spreadBps ?? 0, bid: r?.bidBps ?? 0, ask: r?.askBps ?? 0,
-        // realized buy-MON cost vs the reference-as-taker, + = on-chain worse (docs/architecture.md: fill stream)
-        vsCex: r?.cexAskBps, has: !!r,
-        // a one-sided quote has only one executable side (the other is thin/backstop);
-        // a partial quote (filledFull=false) exhausts before the full notional.
-        oneSided: !!r?.oneSided, hasBid: (r?.bidPx ?? 0) > 0, hasAsk: (r?.askPx ?? 0) > 0,
-        full: r?.filledFull ?? true,
-      };
-    }).filter((x) => x.has);
+    const entry = (v: VenueMeta, r: QuoteRow | undefined, late = 0) => ({
+      id: v.id, name: displayName(v), color: venueColor(v, d.theme), baseline: v.role === 'baseline',
+      spread: r?.spreadBps ?? 0, bid: r?.bidBps ?? 0, ask: r?.askBps ?? 0,
+      // realized buy-MON cost vs the reference-as-taker, + = on-chain worse (docs/architecture.md: fill stream)
+      vsCex: r?.cexAskBps, has: !!r,
+      // a one-sided quote has only one executable side (the other is thin/backstop);
+      // a partial quote (filledFull=false) exhausts before the full notional.
+      oneSided: !!r?.oneSided, hasBid: (r?.bidPx ?? 0) > 0, hasAsk: (r?.askPx ?? 0) > 0,
+      full: r?.filledFull ?? true,
+      // blocks behind the newest frame (0 = fresh): greyed, listed last, never ★
+      late,
+    });
+    const leg = active.map((v) => entry(v, row(v, size))).filter((x) => x.has);
     // executable full-size two-sided rows first (by spread), then partial, then one-sided
     const rank = (x: { oneSided: boolean; full: boolean }) => (x.oneSided ? 2 : !x.full ? 1 : 0);
     leg.sort((a, b) => rank(a) - rank(b) || a.spread - b.spread);
+    // a venue that missed the newest block keeps its last rows for up to 3 blocks
+    for (const l of d.late) {
+      const v = active.find((x) => x.id === l.venueId);
+      const r = l.rows.find((x) => x.sizeUsd === size);
+      if (v && r && !leg.some((x) => x.id === v.id)) leg.push(entry(v, r, l.age));
+    }
     return leg;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [d.quotes, d.venueToggles, d.venues, pair, size, d.frame, d.theme]);
+  }, [d.quotes, d.late, d.venueToggles, d.venues, pair, size, d.frame, d.theme]);
   // tightest = tightest genuinely-executable quote (full-size + two-sided), by
-  // id — baselines are a comparison overlay, never ★-eligible.
-  const tight = legend.find((x) => !x.oneSided && x.full && !x.baseline)?.id;
+  // id — baselines are a comparison overlay, never ★-eligible, nor late rows.
+  const tight = legend.find((x) => !x.oneSided && x.full && !x.baseline && !x.late)?.id;
 
   // BID_ASK_DEPTH — the active venues, resolved to the id/label/colour the
   // toggle row uses. The chart derives its lines AND its legend from exactly
@@ -258,14 +264,18 @@ export function ExecutionTab() {
               <div>VENUE</div><div style={{ textAlign: 'right' }}>SPREAD</div><div style={{ textAlign: 'right' }}>BID</div><div style={{ textAlign: 'right' }}>ASK</div><div style={{ textAlign: 'right' }}>vs CEX</div>
             </div>
             {legend.map((r) => (
-              <div key={r.id} style={{ display: 'grid', gridTemplateColumns: '1fr 42px 42px 42px 50px', gap: '2px 6px', fontSize: 11, padding: '4px 0', alignItems: 'center' }}>
+              <div key={r.id} data-late={r.late || undefined}
+                title={r.late ? `missed the last ${r.late} block${r.late > 1 ? 's' : ''}: these are its last quotes, greyed until it quotes again (hidden after 3 blocks)` : undefined}
+                style={{ display: 'grid', gridTemplateColumns: '1fr 42px 42px 42px 50px', gap: '2px 6px', fontSize: 11, padding: '4px 0', alignItems: 'center', opacity: r.late ? 0.45 : 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                   <span style={{ width: 8, height: 8, borderRadius: 2, background: r.color, flex: 'none' }} />
                   <span style={{ color: C.text2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{r.name}</span>
                   {/* keep the venue cell on ONE line so the numeric cells stay aligned across rows
                       (a wrapped name grows the row and drops the numbers below the name's baseline).
                       one-sided venues need no badge — the n/a bid/ask already shows it. */}
-                  {!r.full
+                  {r.late
+                    ? <span style={{ flex: 'none', fontSize: 7.5, color: C.faint2, border: `1px solid ${C.line}`, borderRadius: 3, padding: '0 3px', letterSpacing: '.04em' }}>−{r.late} BLK</span>
+                    : !r.full
                     ? <span title="liquidity exhausts before the full notional — the price shown is for a partial fill, not executable at the full size" style={{ flex: 'none', fontSize: 7.5, color: C.amber, border: `1px solid color-mix(in srgb, var(--amber) 45%, transparent)`, borderRadius: 3, padding: '0 3px', letterSpacing: '.04em' }}>PARTIAL</span>
                     : r.id === tight
                       ? <span style={{ flex: 'none', fontSize: 9, color: C.green }}>★</span>

@@ -11,3 +11,7 @@ dist/
 .zcode/
 test-results/
 playwright-report/
+
+# Rust service build output
+service/target/
+service/dist/

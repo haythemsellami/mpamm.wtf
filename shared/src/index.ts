@@ -6,6 +6,8 @@
  * the simulator (SimDataSource); the frontend never knows which.
  */
 
+import registry from '../registry.json' with { type: 'json' };
+
 // ──────────────────────────────────────────────────────────────────────────
 // Domain vocabulary
 // ──────────────────────────────────────────────────────────────────────────
@@ -119,76 +121,30 @@ export interface TokenInfo {
 export const NATIVE_MON = '0x0000000000000000000000000000000000000000';
 export const WMON_ADDRESS = '0x3bd359c1119da7da1d913d1c4d2b7c461115433a';
 
-// ANTx is the historical asset key for the wrapped share. Keep it for stored prices.
-const xStocks = [
-  ['SPYx', '0x90a2a4c76b5d8c0bc892a69ea28aa775a8f2dd48'],
-  ['QQQx', '0xa753a7395cae905cd615da0b82a53e0560f250af'],
-  ['EWYx', '0x299c95eb52bfd5bc98d924bce17197b64864589b'],
-  ['NVDAx', '0xc845b2894dbddd03858fd2d643b4ef725fe0849d'],
-  ['TSLAx', '0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0'],
-  ['SMHx', '0x8d512a03600981b8e86556fd5c0fbdd726fe1821'],
-  ['SPCXx', '0x68fa48b1c2fe52b3d776e1953e0e782b5044ce28'],
-  ['MUx', '0xf6a873bae4ba1b304e45df52a4b7d176e1c6a8c4'],
-  ['SKHYx', '0x58100046a4afcd4ee4fadbd4244f3f895a341c56'],
-  ['ANTx', '0x909369940f22dc1c143ac78753a33f41597138b1'],
-] as const;
-const stockAssets = xStocks.map(([symbol, address]) => ({
-  key: symbol === 'ANTx' ? 'ANTX' : symbol, symbol, token: symbol.toUpperCase(), address,
-}));
-
-// Each wrapped unit has its own market and price history. Keep ANTx's existing asset key.
-const wrappedXStocks = [
-  ['TSLAx', '0xc3fdbe3a68ee5de461d30415a8165cf9aefe1171'],
-  ['NVDAx', '0xa8ddb5cd96b5222afe198316e9a57caa642850d5'],
-  ['SPYx', '0xe7e553cd128f0011777323a0b44a7b96ea1cb540'],
-  ['QQQx', '0x4c1ae29c159838fc1b224636e28e086eb69101f7'],
-  ['EWYx', '0x021b40617982074748c81a19d22046cc2548c3be'],
-  ['ANTx', '0xabec6aeab037b77c09a2a99264f9c81a35b02649'],
-  ['SPCXx', '0x8e2eed8b8b5e13ea7bf38e50d7821d2c57309072'],
-  ['MUx', '0xe2047ee3bddb5c99ae428ab83df63f8730698e30'],
-  ['SKHYx', '0x6215a58ed045d71f2561aaabe54f4c885c522998'],
-  ['SMHx', '0x23c4bddea5e7e284fb4027c6050bc5e6f7fae23f'],
-] as const;
-const shareAssets = wrappedXStocks.map(([underlying, address]) => {
-  const symbol = `w${underlying}`;
-  return { underlying, address, symbol, token: symbol.toUpperCase(), key: underlying === 'ANTx' ? 'ANTx' : symbol };
-});
-
-export const TOKENS: Record<string, TokenInfo> = {
-  USDC: { symbol: 'USDC', address: '0x754704bc059f8c67012fed69bc8a327a5aafb603', decimals: 6, stable: true, usdtCross: 'USDCUSDT', usdCross: 'USDC/USD' },
-  USDT0: { symbol: 'USDT0', address: '0xe7cd86e13ac4309349f30b3435a9d337750fc82d', decimals: 6, stable: true, usdCross: 'USDT/USD' }, // Tether's omnichain USDT — ≡ USDT, no cross
-  AUSD: { symbol: 'AUSD', address: '0x00000000efe302beaa2b3e6e1b18d08d69a9012a', decimals: 6, stable: true, usdCross: 'AUSD/USD' }, // no USDT cross; Kraken lists AUSD/USD
-  USD1: { symbol: 'USD1', address: '0x111111d2bf19e43c34263401e0cad979ed1cdb61', decimals: 18, stable: true, usdtCross: 'USD1USDT' },
-  WMON: { symbol: 'WMON', address: WMON_ADDRESS, decimals: 18, stable: false },
-  MON: { symbol: 'MON', address: NATIVE_MON, decimals: 18, stable: false },
-  WBTC: { symbol: 'WBTC', address: '0x0555e30da8f98308edb960aa94c0db47230d2b9c', decimals: 8, stable: false },
-  WETH: { symbol: 'WETH', address: '0xee8c0e9f1bffb4eb878d8f15f368a02a35481242', decimals: 18, stable: false },
-  XAUT0: {
-    symbol: 'XAUt0',
-    // checksummed: viem refuses to ABI-encode a mixed-case address whose EIP-55
-    // checksum doesn't match (InvalidAddressError) — which surfaced inside
-    // multicall as a per-leg "returned no data" failure and, fail-closed,
-    // took POE (and with it the whole fills tail) offline on 2026-09-16.
-    address: '0x01bFF41798a0BcF287b996046Ca68b395DbC1071',
-    decimals: 6,
-    stable: false,
-    // Tether Gold (1 XAUt0 = 1 fine troy oz, Swiss vault). ThogAMM added it to
-    // its on-chain token registry (pool 0xce389e78…, read via getTokens on
-    // 2026-09-15: 8 tokens, 56 directed markets). Volatile like a base asset —
-    // never a $1 stable. Priced DIRECTLY as Binance XAUTUSDT (the same XAUt
-    // instrument trades there, so no PAXG-parity proxy is involved).
-  },
-  // Unwrapped, rebasing xStocks. Event amounts and Kraken books already use
-  // rebased token units; applying an issuer multiplier again double-counts it.
-  ...Object.fromEntries(stockAssets.map(({ token, symbol, address }) =>
-    [token, { symbol, address, decimals: 18, stable: false }])),
-  ...Object.fromEntries(shareAssets.map(({ token, symbol, address, underlying }) =>
-    [token, { symbol, address, decimals: 18, stable: false, underlyingXStock: underlying }])),
-  // Coinbase wrapped BTC (Hanji's BTC representation). NO CEX lists a cbBTC/BTC
-  // basis pair, so cbBTC pairs use wrapBasisOverride: '' (parity — Coinbase 1:1
-  // mint/redeem keeps it ~sub-bp) with a UI caveat, unlike WBTC's live WBTCBTC.
-  CBBTC: { symbol: 'cbBTC', address: '0xd18b7ec58cdf4876f6afebd3ed1730e4ce10414b', decimals: 8, stable: false, baseAsset: 'BTC' },
-};
+/**
+ * The registry is data (shared/registry.json), read here and by the Rust
+ * service, so the two can never disagree. Notes on entries that the JSON
+ * cannot carry:
+ *
+ *  - XAUt0's address stays CHECKSUMMED: viem refuses to ABI-encode a
+ *    mixed-case address whose EIP-55 checksum doesn't match, which surfaced
+ *    inside multicall as a per-leg "returned no data" failure and, fail-closed,
+ *    took POE (and the whole fills tail) offline on 2026-09-16. Tether Gold is
+ *    priced DIRECTLY as Binance XAUTUSDT, never as a $1 stable.
+ *  - Unwrapped xStocks (SPYX, QQQX, …) are rebasing: event amounts and Kraken
+ *    books already use rebased units, so no issuer multiplier is applied. The
+ *    unwrapped ANTx's asset key is ANTX: the wrapped share keeps the
+ *    historical key ANTx, under which its prices are stored.
+ *  - Wrapped xStocks (WSPYX, …) are ERC-4626 shares of the rebasing xStock
+ *    (`underlyingXStock`), each with its own market and price history; ANTx
+ *    keeps its original asset key.
+ *  - cbBTC (Hanji's BTC) has no CEX cbBTC/BTC basis pair, so its pairs use
+ *    `wrapBasisOverride: ''` (parity, Coinbase 1:1 mint/redeem) with a UI
+ *    caveat, unlike WBTC's live WBTCBTC.
+ *  - USDT0 is Tether's own USDT on Monad: no cross. AUSD has no USDT cross
+ *    (approximated as USDT for crypto pairs); Kraken lists AUSD/USD.
+ */
+export const TOKENS: Record<string, TokenInfo> = registry.tokens as unknown as Record<string, TokenInfo>;
 
 /** A set of every token address that denotes MON (WMON wrapper + native MON). */
 export const MON_ADDRESSES: ReadonlySet<string> = new Set([WMON_ADDRESS.toLowerCase(), NATIVE_MON]);
@@ -231,20 +187,10 @@ export interface AssetSpec {
 }
 
 /** The base-asset registry. Add an asset here + a pool in an adapter to list it. */
-export const ASSETS: Record<string, AssetSpec> = {
-  MON: { key: 'MON', symbol: 'MON', token: 'WMON', cex: 'bybit', cexSymbol: 'MONUSDT' },
-  BTC: { key: 'BTC', symbol: 'BTC', token: 'WBTC', cex: 'binance', cexSymbol: 'BTCUSDT', wrapBasisSymbol: 'WBTCBTC' },
-  ETH: { key: 'ETH', symbol: 'ETH', token: 'WETH', cex: 'binance', cexSymbol: 'ETHUSDT' },
-  // XAUt0 IS native XAUt (Tether Gold itself trades as Binance XAUTUSDT), so —
-  // like WETH — no wrap basis applies: the CEX reference is the same instrument
-  // the on-chain token redeems for, not a proxy for it (PAXG exists but would
-  // introduce an untraded XAUt/PAXG basis; the direct symbol avoids it).
-  XAUt: { key: 'XAUt', symbol: 'XAUt', token: 'XAUT0', cex: 'binance', cexSymbol: 'XAUTUSDT' },
-  ...Object.fromEntries(stockAssets.map(({ key, symbol, token }): [string, AssetSpec] =>
-    [key, { key, symbol, token, cex: 'kraken', cexSymbol: `${symbol}/USD` }])),
-  ...Object.fromEntries(shareAssets.map(({ key, symbol, token, underlying }): [string, AssetSpec] =>
-    [key, { key, symbol, token, cex: 'kraken', cexSymbol: `${underlying}/USD` }])),
-};
+/** XAUt0 IS native XAUt (Tether Gold trades as Binance XAUTUSDT), so like
+ *  WETH no wrap basis applies: the reference is the same instrument the token
+ *  redeems for. Data: shared/registry.json. */
+export const ASSETS: Record<string, AssetSpec> = registry.assets as unknown as Record<string, AssetSpec>;
 
 /** A tracked market: a base asset vs a quote. `symbol` is the display key used
  *  as `Fill.market` / `QuoteRow.market` (e.g. 'BTC/USDC'). The quote is a USD
@@ -275,51 +221,13 @@ export interface Pair {
  *  market), reference rows exist for exactly these, and markouts are routed by
  *  them. Venues quote/land fills on whichever they have a pool for; pairs no
  *  propAMM venue quotes are hidden by the UI. */
-export const PAIRS: Pair[] = [
-  { symbol: 'MON/USDC', base: 'MON', quote: 'USDC' },
-  { symbol: 'BTC/USDC', base: 'BTC', quote: 'USDC' },
-  { symbol: 'ETH/USDC', base: 'ETH', quote: 'USDC' },
-  { symbol: 'MON/USDT0', base: 'MON', quote: 'USDT0' },
-  { symbol: 'MON/AUSD', base: 'MON', quote: 'AUSD' },
-  { symbol: 'MON/USD1', base: 'MON', quote: 'USD1' },
-  { symbol: 'BTC/USDT0', base: 'BTC', quote: 'USDT0' },
-  { symbol: 'BTC/AUSD', base: 'BTC', quote: 'AUSD' },
-  { symbol: 'ETH/USDT0', base: 'ETH', quote: 'USDT0' },
-  { symbol: 'ETH/AUSD', base: 'ETH', quote: 'AUSD' },
-  // Hanji's markets (cbBTC ≠ WBTC — distinct market symbols so each wrapper
-  // gets ITS OWN reference basis; sharing 'BTC/USDC' would mis-mark cbBTC by
-  // the live WBTC basis). NB pairFor(base, quote) resolves the CANONICAL pair
-  // (first match) — token-specific pairs like these are referenced by symbol.
-  { symbol: 'cbBTC/USDC', base: 'BTC', quote: 'USDC', wrapBasisOverride: '' },
-  { symbol: 'cbBTC/USDT0', base: 'BTC', quote: 'USDT0', wrapBasisOverride: '' },
-  { symbol: 'cbBTC/AUSD', base: 'BTC', quote: 'AUSD', wrapBasisOverride: '' },
-  { symbol: 'MON/ETH', base: 'MON', quote: 'ETH', quoteKind: 'asset' },
-  { symbol: 'BTC/MON', base: 'BTC', quote: 'MON', quoteKind: 'asset' },
-  { symbol: 'BTC/ETH', base: 'BTC', quote: 'ETH', quoteKind: 'asset' },
-  { symbol: 'cbBTC/MON', base: 'BTC', quote: 'MON', quoteKind: 'asset', wrapBasisOverride: '' },
-  { symbol: 'cbBTC/ETH', base: 'BTC', quote: 'ETH', quoteKind: 'asset', wrapBasisOverride: '' },
-  // WBTC/cbBTC applies WBTCBTC to the WBTC base leg. The asset-quoted reference
-  // uses native BTC for the cbBTC quote leg, so cbBTC parity is implicit rather
-  // than a wrap-basis override.
-  { symbol: 'WBTC/cbBTC', base: 'BTC', quote: 'BTC', quoteKind: 'asset' },
-  // Stable/stable crosses have no base-asset benchmark and remain unlisted.
-  { symbol: 'XAUt/USDC', base: 'XAUt', quote: 'USDC' },
-  { symbol: 'XAUt/USDT0', base: 'XAUt', quote: 'USDT0' },
-  { symbol: 'XAUt/AUSD', base: 'XAUt', quote: 'AUSD' },
-  { symbol: 'XAUt/MON', base: 'XAUt', quote: 'MON', quoteKind: 'asset' },
-  { symbol: 'XAUt/ETH', base: 'XAUt', quote: 'ETH', quoteKind: 'asset' },
-  // WBTC, the canonical BTC token, first: pairFor(base, quote) resolves the
-  // first match, and the cbBTC cross is referenced by its symbol.
-  { symbol: 'XAUt/BTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset', quoteWrapBasisSymbol: 'WBTCBTC' },
-  { symbol: 'XAUt/cbBTC', base: 'XAUt', quote: 'BTC', quoteKind: 'asset' },
-  ...stockAssets.flatMap(({ key: base, symbol }, i, stocks): Pair[] => [
-    ...['USDC', 'USDT0', 'AUSD'].map((quote) => ({ symbol: `${symbol}/${quote}`, base, quote })),
-    ...['MON', 'ETH', 'XAUt', ...stocks.slice(0, i).map((a) => a.key)].map((quote): Pair => ({ symbol: `${symbol}/${ASSETS[quote].symbol}`, base, quote, quoteKind: 'asset' })),
-    { symbol: `${symbol}/BTC`, base, quote: 'BTC', quoteKind: 'asset', quoteWrapBasisSymbol: 'WBTCBTC' },
-    { symbol: `${symbol}/cbBTC`, base, quote: 'BTC', quoteKind: 'asset' },
-  ]),
-  ...shareAssets.map(({ key, symbol }) => ({ symbol: `${symbol}/USDC`, base: key, quote: 'USDC' })),
-];
+export const PAIRS: Pair[] = registry.pairs as unknown as Pair[];
+// Order matters: pairFor(base, quote) resolves the FIRST match, so the
+// canonical token's pair comes first (WBTC before cbBTC: 'BTC/USDC' before
+// 'cbBTC/USDC', 'XAUt/BTC' before 'XAUt/cbBTC'); token-specific pairs are
+// referenced by symbol. cbBTC pairs carry their own symbols so each wrapper
+// gets its own reference basis. Stable/stable crosses have no base-asset
+// benchmark and stay unlisted.
 
 /** Market symbols (derived from the pair registry). */
 export const MARKETS: readonly string[] = PAIRS.map((p) => p.symbol);
@@ -461,6 +369,9 @@ export interface QuoteSnapshot {
   blockHash?: string;
   /** Increments when a replacement invalidates retained speculative samples. */
   revision?: number;
+  /** The block's proposal time (epoch ms, rounded): what `?timing=1`
+   *  measures proposal → paint from. Absent from producers that don't know it. */
+  proposalTs?: number;
   block: number;
   monUsd: number;
   /** Frame emission time (equal to `frame.emittedAt` when `frame` is present).

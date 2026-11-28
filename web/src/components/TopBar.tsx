@@ -5,6 +5,9 @@ import { useDashboard, type Tab } from '../store';
 import { useViewport } from '../lib/viewport';
 import { clockSec, fmtInt, fmtLag } from '../lib/format';
 
+/** No new quote frame for this long: the feed is stalled. */
+export const STALL_MS = 1_000;
+
 const TABS: { id: Tab; label: string }[] = [
   { id: 'exec', label: 'EXECUTION' },
   { id: 'volume', label: 'VOLUME' },
@@ -24,7 +27,15 @@ export function TopBar() {
   const displayed = d.tab === 'exec' ? d.quotes : d.state;
   const monPx = displayed ? displayed.monUsd.toFixed(5) : '—';
   const block = displayed && displayed.block > 0 ? fmtInt(displayed.block) : '—';
-  const stale = useSnapshotStale(d.tab === 'exec' ? d.quotes?.ts : undefined);
+  // When THIS browser last saw a new quote frame: the stall check never
+  // compares the server's clock with the viewer's. No new block for 1 s (a
+  // block is ~0.4 s) is a stalled feed (docs/rebuild-spec.md → Render rules).
+  const [seenAt, setSeenAt] = useState<number>();
+  useEffect(() => {
+    if (d.tab === 'exec' && d.quotes) setSeenAt(Date.now());
+  }, [d.tab, d.quotes?.block, d.quotes?.revision]); // eslint-disable-line react-hooks/exhaustive-deps
+  const stale = useSnapshotStale(d.tab === 'exec' ? seenAt : undefined, STALL_MS);
+  const stalledFor = stale && seenAt ? Math.max(1, Math.floor((Date.now() - seenAt) / 1000)) : 0;
   const liveColor = d.conn === 'live' ? C.green : d.conn === 'reconnecting' ? C.amber : C.faint;
 
   // RPC failover health (live source only — sim has no RPC, chip hidden).
@@ -61,9 +72,10 @@ export function TopBar() {
       : `Fill ingest is catching up: about ${lag} behind the chain (block ${fmtInt(tail.block)}). Recent fills and volume are still arriving. Quotes are live.`;
 
   return (
+    <div style={{ position: 'sticky', top: 0, zIndex: 50 }}>
     <div style={{
       display: 'flex', alignItems: 'center', gap: 16, height: 42, padding: '0 16px',
-      borderBottom: `1px solid ${C.line}`, position: 'sticky', top: 0, zIndex: 50, background: C.panel,
+      borderBottom: `1px solid ${C.line}`, background: C.panel,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
         {/* OFFICIAL Monad logomark (brand kit path, verbatim) — stays brand purple in both themes. */}
@@ -121,9 +133,18 @@ export function TopBar() {
         )}
         {!compact && roomy && <span>MON <span style={{ color: C.text }}>${monPx}</span></span>}
         {/* on mobile the label words go — the block number and clock read as themselves */}
-        <span title={d.tab === 'exec' ? 'Block of the displayed quotes' : 'Latest observed block'} style={{ whiteSpace: 'nowrap' }}>{!mobile && 'BLOCK '}<span data-quote-block={d.tab === 'exec' ? displayed?.block : undefined} style={{ color: stale ? C.amber : C.text }}>{block}</span>{stale && <span style={{ color: C.amber }}> · STALE</span>}</span>
+        <span title={d.tab === 'exec' ? 'Block of the displayed quotes: read at proposal, its first commit state. Trades, volume and gas move only when blocks are final.' : 'Latest observed block'} style={{ whiteSpace: 'nowrap' }}>{!mobile && 'BLOCK '}<span data-quote-block={d.tab === 'exec' ? displayed?.block : undefined} style={{ color: stale ? C.amber : C.text }}>{block}</span>{d.tab === 'exec' && displayed && displayed.block > 0 && !stale && <span data-commit-state="proposed" aria-label="proposed" style={{ display: 'inline-block', width: 5, height: 5, marginLeft: 4, borderRadius: '50%', border: `1px solid ${C.green}`, verticalAlign: 'middle' }} />}{stale && <span style={{ color: C.amber }}> · STALE</span>}</span>
         {(mobile ? !tail : !tablet && roomy) && <span style={{ whiteSpace: 'nowrap' }}>{!mobile && 'UTC '}<span style={{ color: C.text }}>{clock}</span></span>}
       </div>
+    </div>
+    {stale && d.conn === 'live' && (
+      <div role="alert" data-stalled={stalledFor} style={{
+        padding: '4px 16px', fontSize: 10, letterSpacing: '.04em', color: C.amber, background: C.panel,
+        borderBottom: `1px solid color-mix(in srgb, var(--amber) 45%, transparent)`,
+      }}>
+        FEED STALLED · no new block for {stalledFor}s · last block {block}. Quotes resume as soon as blocks arrive.
+      </div>
+    )}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { TopBar } from './components/TopBar';
+import { TimingOverlay } from './components/TimingOverlay';
 import { BottomNav } from './components/BottomNav';
 import { Tour } from './components/Tour';
 import { useViewport } from './lib/viewport';
@@ -33,6 +34,7 @@ export function App() {
     <div style={mobile ? { paddingBottom: 'calc(64px + env(safe-area-inset-bottom))' } : undefined}>
       <Tour />
       <TopBar />
+      <TimingOverlay />
       {tab === 'exec' && <ExecutionTab />}
       {tab === 'volume' && <VolumeTab />}
       {tab === 'markouts' && <MarkoutsTab />}
