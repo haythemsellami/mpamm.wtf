@@ -2536,6 +2536,8 @@ name = "mpamm-tools"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "flate2",
+ "futures-util",
  "mpamm-chain",
  "mpamm-core",
  "mpamm-history",
@@ -2548,11 +2550,13 @@ dependencies = [
  "mpamm-store",
  "mpamm-types",
  "mpamm-venues",
+ "parking_lot",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "tracing",
  "tracing-subscriber",
 ]

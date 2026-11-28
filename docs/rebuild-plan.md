@@ -442,7 +442,8 @@ most 60 ms. *(DevOps: CPU set for the service.)*
       Measured live on today's v2 protocol, 2026-11-27, 60 s, one Execution tab (state +
       MON/USDC $1k quotes, gzip): the Rust service 2.84 KB/s (3.9 frames/s), today's
       production 3.58 KB/s (4.2 frames/s); the compact protocol is now an optimization,
-      not a requirement
+      not a requirement. Again 2026-11-28 with all 11 venues and `proposalTs`, the same
+      minute on both: the service 3.79 KB/s, production 3.89 KB/s
 
 **Done when:** a recorded session replays through the stream within budget, and every
 REST endpoint returns the same data as today's for the same window.
@@ -546,7 +547,12 @@ drill completes.
 - [ ] Runbooks: node upgrade (rebuild against the new SDK tag), node resets, host loss,
       rollback to the standby (written: [rebuild-runbooks.md](rebuild-runbooks.md); restart
       run twice on the shadow run, the rest not yet run)
-- [ ] Load test at peak traffic (replay or synthetic) with the node under load
+- [x] Load test with the node under load (`mpamm-tools stream-load`: viewers subscribed as
+      an Execution tab, run beside the shadow run, 2026-11-28): 250 and then 1,000 viewers
+      for 60 s each, all connected, none cut, no sequence gap, no slow client; 3.8 KB/s per
+      viewer (3.8 MB/s in all at 1,000); proposal → receive p50 178 → 188 ms, p90 246 →
+      244 ms; the service at 10–30% of one core and 290 MB; venue quote times and the
+      pipeline's lag unchanged (production had 1 viewer that hour)
 - [ ] Public endpoint: TLS hostname, firewall *(DevOps)*
 - [ ] Rewrite `AGENTS.md` and `docs/deploy.md` for the Rust service (AGENTS.md has a rebuild
       section; the full rewrite and deploy.md wait for the switch-over, while today's

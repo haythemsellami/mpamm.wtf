@@ -16,6 +16,7 @@
 //! half of the depth parity check (see `depth.rs`).
 
 mod depth;
+mod load;
 mod migrate;
 mod parity;
 mod repair;
@@ -75,6 +76,24 @@ enum Cmd {
         /// Print the plan and stop (adopted markers are still recorded).
         #[arg(long)]
         plan_only: bool,
+    },
+    /// Many viewers on the stream at once (state and one quote topic each, as
+    /// an Execution tab): bytes and messages per viewer, sequence gaps, cuts,
+    /// and proposal → receive. Run it beside the service for the latency.
+    StreamLoad {
+        #[arg(long, default_value = "ws://127.0.0.1:8787/stream")]
+        url: String,
+        #[arg(long, default_value_t = 100)]
+        clients: usize,
+        #[arg(long, default_value_t = 60)]
+        secs: u64,
+        /// Between two connections, so the start isn't one burst.
+        #[arg(long, default_value_t = 5)]
+        ramp_ms: u64,
+        #[arg(long, default_value = "MON/USDC")]
+        market: String,
+        #[arg(long, default_value_t = 1000.0)]
+        size: f64,
     },
     /// Decode one venue's trades over [from, to] and print them as JSON.
     DecodeRange {
@@ -667,6 +686,9 @@ async fn main() {
         }
         Cmd::GasCheck { venue, from, to, rpc } => gas_check(&venue, from, to, &rpc).await,
         Cmd::Migrate { from, to } => migrate::migrate(&from, &to),
+        Cmd::StreamLoad { url, clients, secs, ramp_ms, market, size } => {
+            load::run(&url, clients, secs, ramp_ms, &market, size).await
+        }
         Cmd::Repair {
             db,
             reset,
