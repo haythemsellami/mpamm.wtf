@@ -74,9 +74,13 @@ export const KNOWN_ROUTERS: ReadonlyMap<string, string> = new Map([
   // are user-facing entry contracts; executor/solver are solver-side contracts
   // that still receive the fill's tx (a solver submitting straight to a venue,
   // or a settlement/bridge/relayer contract) — the same reasoning as the
-  // Relay/Bungee solver entries above. One deliberate omission: Mayan's
+  // Relay/Bungee solver entries above. Deliberate omissions: Mayan's
   // fast-mctp fee manager (0x5984…c7e56) is router-callback plumbing, never a
-  // tx.to, so it is not listed.
+  // tx.to. ThogAMM's proxy (0x80c7…7210) is the registry's "solver AMM" entry
+  // but must NOT be listed: it is also TAKERBOT's taker side (thogamm.ts), so
+  // another venue's fill whose tx.to is the proxy is the operator's own taker
+  // trade — callers are keeper EOAs with millions of txs, one selector — not a
+  // routed user. ThogAMM's own fills are already DIRECT via its entryPoints.
   // Uniswap — UniversalRouter, SwapRouter/02, v2 router, UniswapX reactor.
   ['0x000000000ac008f7e07210cfb6648e40249232c2', 'Uniswap'],
   ['0x0d97dc33264bfc1c226207428a79b26757fb9dc3', 'Uniswap'],
@@ -178,8 +182,6 @@ export const KNOWN_ROUTERS: ReadonlyMap<string, string> = new Map([
   ['0x956df8424b556f0076e8abf5481605f5a791cc7f', 'Fly'],
   ['0xcfbaa9cfce952ca4f4069874ff1df8c05e37a3c7', 'Enso'],
   ['0xbddf3556701b7ecca5d69416cffd7f86d37e52b3', 'Kuru'],
-  // ThogAMM — a solver AMM: its keeper routes into other venues in one tx.
-  ['0x80c74517bcc2d67ffe02d3ed886796272f647210', 'ThogAMM'],
   // Relay — v2.1 router/ApprovalProxy, depository, receiver.
   ['0x3ec130b627944cad9b2750300ecb0a695da522b6', 'Relay'],
   ['0x4cd00e387622c35bddb9b4c962c136462338bc31', 'Relay'],
@@ -255,7 +257,12 @@ export const KNOWN_MEV: ReadonlyMap<string, string> = new Map([
   // on purpose: searchers whose every sample went through an unidentified
   // intermediary (0x54dd14b7…, unverified, no public tag) — not provable — and
   // EIP-7702 delegated EOAs (0xeed8…, 0x700c…), which are accounts, not
-  // contracts. No operator wallet is listed: the census has 1–3 sampled txs per
+  // contracts. Also out: 0xb995eadd…, which matched the census shape but is
+  // a user-wallet fleet, not an operator's executor — 93 distinct callers over
+  // 4.7 h of prod fills (2026-11-28), sampled callers at nonce 1–8, one
+  // selector, 134k txs lifetime. Two samples per executor cannot tell those
+  // apart: check distinct callers and their nonces before adding another.
+  // No operator wallet is listed: the census has 1–3 sampled txs per
   // executor, which proves a caller but not sole-caller or deployer.
   ['0x050fa056bf556c023915e65392e136e7630ed860', 'Searcher 0x050f'],
   ['0x1b5e936dff9970057f2ba38bbdc5800e813634d7', 'Searcher 0x1b5e'],
@@ -280,7 +287,6 @@ export const KNOWN_MEV: ReadonlyMap<string, string> = new Map([
   ['0xaf400cc399b47a0d9cbe219e84fb377334678934', 'Searcher 0xaf40'],
   ['0xb07838cd5b17d0be026efc66d9735739a827c962', 'Searcher 0xb078'],
   ['0xb61e5b77cb96d93075d0779ea1e7c9f988d1490a', 'Searcher 0xb61e'],
-  ['0xb995eadd54ffd519decc1e2ead64781245d474cd', 'Searcher 0xb995'],
   ['0xc44bc3187cd5084bac87af0710ccb3e52041a70d', 'Searcher 0xc44b'],
   ['0xcacc0490661882cf9cb0c60bfe52cf5d662a608f', 'Searcher 0xcacc'],
   ['0xd8de03d6460ed4d700592d47a800626e003b29a9', 'Searcher 0xd8de'],

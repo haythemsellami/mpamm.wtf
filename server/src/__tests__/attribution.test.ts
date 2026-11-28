@@ -48,7 +48,6 @@ const FLOW_ROUTERS: ReadonlyArray<readonly [brand: string, entry: string]> = [
   ['Squid', '0x073e81d92bd8b39562106819d12346240606f04a'],
   ['SushiSwap', '0xac4c6e212a361c968f1725b4d055b47e63f80b75'],
   ['Symbiosis', '0x292fc50e4eb66c3f6514b9e402dbc25961824d62'],
-  ['ThogAMM', '0x80c74517bcc2d67ffe02d3ed886796272f647210'],
   ['Uniswap', '0x000000000ac008f7e07210cfb6648e40249232c2'],
   ['de1', '0x07749429d3d9047a966b28a489500325bac9f1b6'],
   ['deBridge', '0x43de2d77bf8027e25dbd179b491e8d64f38398aa'],
@@ -80,7 +79,6 @@ const FLOW_SEARCHERS: ReadonlyArray<readonly [brand: string, entry: string]> = [
   ['Searcher 0xaf40', '0xaf400cc399b47a0d9cbe219e84fb377334678934'],
   ['Searcher 0xb078', '0xb07838cd5b17d0be026efc66d9735739a827c962'],
   ['Searcher 0xb61e', '0xb61e5b77cb96d93075d0779ea1e7c9f988d1490a'],
-  ['Searcher 0xb995', '0xb995eadd54ffd519decc1e2ead64781245d474cd'],
   ['Searcher 0xc44b', '0xc44bc3187cd5084bac87af0710ccb3e52041a70d'],
   ['Searcher 0xcacc', '0xcacc0490661882cf9cb0c60bfe52cf5d662a608f'],
   ['Searcher 0xd8de', '0xd8de03d6460ed4d700592d47a800626e003b29a9'],
@@ -301,12 +299,23 @@ describe('FillAttributor', () => {
   });
 
   it('registers the full vetted Monad flow set', () => {
-    // 11 seed routers + 87 vetted routers/solvers; 5 seed MEV + 32 searcher executors
-    expect(KNOWN_ROUTERS.size).toBe(98);
-    expect(KNOWN_MEV.size).toBe(37);
-    // every representative is on one of the two maps, and nowhere in both
+    // 11 seed routers + 86 vetted routers/solvers; 5 seed MEV + 31 searcher executors
+    expect(KNOWN_ROUTERS.size).toBe(97);
+    expect(KNOWN_MEV.size).toBe(36);
+    // every representative is on one of the two maps (disjointness is locked above)
     for (const [, entry] of [...FLOW_ROUTERS, ...FLOW_SEARCHERS]) {
       expect(KNOWN_ROUTERS.has(entry) || KNOWN_MEV.has(entry)).toBe(true);
+    }
+  });
+
+  it('keeps out the two contracts the sources list but the chain contradicts', () => {
+    // ThogAMM's proxy is also TAKERBOT's taker side: tx.to == proxy on another
+    // venue's fill is the operator's own trade. 0xb995… is a user-wallet fleet.
+    const THOGAMM = '0x80c74517bcc2d67ffe02d3ed886796272f647210';
+    const WALLET_FLEET = '0xb995eadd54ffd519decc1e2ead64781245d474cd';
+    for (const m of [KNOWN_ROUTERS, KNOWN_MEV, KNOWN_MEV_OPERATORS]) {
+      expect(m.has(THOGAMM)).toBe(false);
+      expect(m.has(WALLET_FLEET)).toBe(false);
     }
   });
 });
