@@ -89,6 +89,7 @@ fn health(prices: &Arc<Prices>, engine: &Arc<Engine>, depth: &Arc<Depth>) -> cra
         stall_ms: 5_000,
         history: None,
         fallback: None,
+        replication: None,
     }
 }
 

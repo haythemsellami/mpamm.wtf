@@ -207,6 +207,33 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
             Duration::from_millis(s.depth_min_interval_ms),
         );
         let notes_buffer = notes.clone();
+        // Replication: Litestream copies the database off the host, as this
+        // service's child (fail-open; see replication.rs).
+        let replication = s.litestream.as_ref().map(|_| crate::replication::ReplicationStats::new());
+        let (stop_replication, replication_rx) = tokio::sync::watch::channel(false);
+        let replication_task = match (&s.litestream, &replication, &s.replica_url) {
+            (Some(bin), Some(stats), Some(url)) => Some(tokio::spawn(crate::replication::run(
+                crate::replication::Config {
+                    bin: bin.clone(),
+                    config: s.litestream_config.clone(),
+                    addr: s.litestream_addr,
+                    db: std::fs::canonicalize(&s.db).unwrap_or_else(|_| s.db.clone()),
+                    replica_url: url.clone(),
+                    restart_min: crate::replication::RESTART_MIN,
+                },
+                stats.clone(),
+                replication_rx,
+            ))),
+            (Some(_), Some(stats), None) => {
+                tracing::warn!("replication off: no replica URL ({})", s.replica_url_env);
+                stats.off(format!("no replica URL ({})", s.replica_url_env));
+                None
+            }
+            _ => {
+                tracing::info!("replication off: no Litestream binary configured");
+                None
+            }
+        };
         // The dashboard's source: frames, tape, volume, state, depth, the store.
         let source = ServiceSource::new(
             registry,
@@ -223,6 +250,7 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
                 stall_ms: s.stall_secs.max(1) * 1000,
                 history: Some(crate::history::HistoryHealth { stats: history_stats.clone(), pool: pool.clone() }),
                 fallback: fallback_stats.clone(),
+                replication: replication.clone(),
             },
             s.db.clone(),
             notes,
@@ -410,6 +438,11 @@ pub fn run(s: Settings, notes: Arc<crate::notes::NoteBuffer>) -> ExitCode {
         // of it was written.
         if tokio::time::timeout(Duration::from_secs(10), pipe).await.is_err() {
             tracing::warn!("pipeline still holding after 10 s; exiting (nothing partial is written)");
+        }
+        // The copier last: its final sync carries the last commit.
+        let _ = stop_replication.send(true);
+        if let Some(t) = replication_task {
+            let _ = tokio::time::timeout(crate::replication::STOP_WAIT + Duration::from_secs(5), t).await;
         }
         let _ = stop_feeds.send(true);
         server.abort();

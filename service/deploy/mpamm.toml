@@ -17,3 +17,8 @@ web_dist = "/var/lib/mpamm/web/dist"
 # RPC has 4 cores, and with every venue quoting each block they are the
 # bottleneck (realtime quotes come first).
 depth_min_interval_ms = 1000
+# Replication: the service runs Litestream (its pinned binary, fetched by
+# scripts/fetch-litestream.sh) with /var/lib/mpamm/litestream.yml. It copies
+# once the environment file holds MPAMM_REPLICA_URL and the bucket's keys;
+# until then health reports `replication_down` ("no replica URL").
+litestream = "/var/lib/mpamm/bin/litestream"

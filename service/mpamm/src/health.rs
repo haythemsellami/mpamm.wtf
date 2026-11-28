@@ -23,6 +23,8 @@ pub struct Health {
     pub history: Option<crate::history::HistoryHealth>,
     /// Fallback mode, when a hosted hot node is configured.
     pub fallback: Option<Arc<crate::fallback::FallbackStats>>,
+    /// The database's copy off the host, when a Litestream binary is configured.
+    pub replication: Option<Arc<crate::replication::ReplicationStats>>,
 }
 
 #[derive(Serialize)]
@@ -48,12 +50,15 @@ pub struct HealthBody {
     /// Fallback mode: whether it's on, why, and what it fed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback: Option<crate::fallback::FallbackView>,
+    /// Replication: the copier's state, position and errors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication: Option<crate::replication::ReplicationView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Alert {
     /// `node_behind`, `ring_lag`, `unrepaired_gap`, `no_final_commit`,
-    /// `venue_outage` (with `venue`) or `fallback_mode`.
+    /// `venue_outage` (with `venue`), `fallback_mode` or `replication_down`.
     pub code: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub venue: Option<String>,
@@ -168,6 +173,13 @@ pub fn body(h: &Health) -> (HealthBody, bool) {
             msg: format!("fallback mode: {}", f.reason.clone().unwrap_or_default()),
         });
     }
+    let replication = h.replication.as_ref().map(|r| r.view(now_ms()));
+    if let Some(why) =
+        replication.as_ref().and_then(|r| crate::replication::trouble(r, pipeline.last_commit_unix_ms, now_ms()))
+    {
+        // Fail-open: an alert, never a 503 (quotes and trades don't depend on it).
+        alerts.push(Alert { code: "replication_down", venue: None, msg: why });
+    }
     let depth = h.depth.view();
     (
         HealthBody {
@@ -182,6 +194,7 @@ pub fn body(h: &Health) -> (HealthBody, bool) {
             depth,
             history: h.history.as_ref().map(|x| x.view()),
             fallback,
+            replication,
         },
         ok,
     )

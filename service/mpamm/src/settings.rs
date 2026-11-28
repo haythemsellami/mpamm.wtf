@@ -65,6 +65,19 @@ pub struct Cli {
     /// Where the exchanges' archives are cached (markouts after the fact).
     #[arg(long)]
     pub archive_cache: Option<PathBuf>,
+    /// The Litestream binary; set, the service runs it to copy the database
+    /// off the host (replication).
+    #[arg(long)]
+    pub litestream: Option<PathBuf>,
+    /// Litestream's config (`service/deploy/litestream.yml`).
+    #[arg(long)]
+    pub litestream_config: Option<PathBuf>,
+    /// Litestream's metrics listener; the service passes it to the config.
+    #[arg(long)]
+    pub litestream_addr: Option<SocketAddr>,
+    /// Environment variable holding the replica URL (the bucket).
+    #[arg(long)]
+    pub replica_url_env: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -86,6 +99,10 @@ pub struct ServiceFile {
     pub quote_deadline_ms: Option<u64>,
     pub depth_min_interval_ms: Option<u64>,
     pub archive_cache: Option<PathBuf>,
+    pub litestream: Option<PathBuf>,
+    pub litestream_config: Option<PathBuf>,
+    pub litestream_addr: Option<SocketAddr>,
+    pub replica_url_env: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -117,6 +134,13 @@ pub struct Settings {
     pub quote_deadline_ms: u64,
     pub depth_min_interval_ms: u64,
     pub archive_cache: PathBuf,
+    pub litestream: Option<PathBuf>,
+    pub litestream_config: PathBuf,
+    pub litestream_addr: SocketAddr,
+    pub replica_url_env: String,
+    /// The replica URL, from the environment (it can name the bucket; never
+    /// printed).
+    pub replica_url: Option<String>,
 }
 
 pub const DEFAULT_RING: &str = "/var/lib/hugetlbfs/user/monad/pagesize-2MB/event-rings/monad-exec-events";
@@ -139,6 +163,7 @@ impl Settings {
             .or(f.archive_backup_url_env)
             .unwrap_or_else(|| "MPAMM_ARCHIVE_RPC_BACKUP_URL".into());
         let hot_url_env = cli.hot_url_env.or(f.hot_url_env).unwrap_or_else(|| "MPAMM_HOT_RPC_URL".into());
+        let replica_url_env = cli.replica_url_env.or(f.replica_url_env).unwrap_or_else(|| "MPAMM_REPLICA_URL".into());
         Ok(Self {
             db: cli.db.or(f.db).unwrap_or_else(|| "/var/lib/mpamm/data/mpamm.db".into()),
             ring: cli.ring.or(f.ring).unwrap_or_else(|| DEFAULT_RING.into()),
@@ -159,6 +184,17 @@ impl Settings {
             quote_deadline_ms: cli.quote_deadline_ms.or(f.quote_deadline_ms).unwrap_or(150),
             depth_min_interval_ms: cli.depth_min_interval_ms.or(f.depth_min_interval_ms).unwrap_or(0),
             archive_cache: cli.archive_cache.or(f.archive_cache).unwrap_or_else(|| "/var/lib/mpamm/archives".into()),
+            litestream: cli.litestream.or(f.litestream),
+            litestream_config: cli
+                .litestream_config
+                .or(f.litestream_config)
+                .unwrap_or_else(|| "/var/lib/mpamm/litestream.yml".into()),
+            litestream_addr: cli
+                .litestream_addr
+                .or(f.litestream_addr)
+                .unwrap_or_else(|| "127.0.0.1:9091".parse().unwrap()),
+            replica_url: env(&replica_url_env).filter(|u| !u.is_empty()),
+            replica_url_env,
         })
     }
 }
@@ -190,6 +226,12 @@ mod tests {
         assert_eq!((s.archive_backup_url.as_deref(), s.archive_concurrency), (None, 4));
         assert_eq!(s.history_reset, "");
         assert_eq!((s.hot_url_env.as_str(), s.hot_url.as_deref()), ("MPAMM_HOT_RPC_URL", None));
+        assert_eq!((s.litestream.as_ref(), s.replica_url.as_ref()), (None, None), "replication off by default");
+        assert_eq!(s.litestream_config, PathBuf::from("/var/lib/mpamm/litestream.yml"));
+        assert_eq!(
+            (s.litestream_addr, s.replica_url_env.as_str()),
+            ("127.0.0.1:9091".parse().unwrap(), "MPAMM_REPLICA_URL")
+        );
         let backup = |k: &str| (k == "MPAMM_ARCHIVE_RPC_BACKUP_URL").then(|| "https://b.example/".to_string());
         let s = Settings::load(cli(&["--config", p.to_str().unwrap(), "--history-reset", "poe:2026-11-01"]), backup)
             .unwrap();
@@ -203,5 +245,14 @@ mod tests {
         let s = Settings::load(cli(&["--config", dir.join("absent.toml").to_str().unwrap()]), |_| None).unwrap();
         assert_eq!((s.reader_cpu, s.archive_url), (None, None));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_deployed_settings_file_parses() {
+        // deploy.sh installs it as /var/lib/mpamm/mpamm.toml; an unknown key
+        // would stop the service at boot.
+        let f: FileConfig = toml::from_str(include_str!("../../deploy/mpamm.toml")).unwrap();
+        assert_eq!(f.service.litestream, Some(PathBuf::from("/var/lib/mpamm/bin/litestream")));
+        assert_eq!(f.service.reader_cpu, Some(0));
     }
 }

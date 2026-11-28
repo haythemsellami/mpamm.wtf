@@ -13,6 +13,7 @@ mod health;
 mod history;
 mod marks;
 mod notes;
+mod replication;
 #[cfg(target_os = "linux")]
 mod run;
 mod settings;

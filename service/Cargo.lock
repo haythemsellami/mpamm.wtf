@@ -2314,6 +2314,7 @@ dependencies = [
  "mpamm-types",
  "mpamm-venues",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
