@@ -1,0 +1,34 @@
+# Litestream, run by the mpamm service as its child (service/mpamm/src/replication.rs):
+# the database's write-ahead log copied off the host continuously
+# (docs/rebuild-spec.md → Object storage). Installed as /var/lib/mpamm/litestream.yml
+# by service/scripts/deploy.sh, with the pinned binary from scripts/fetch-litestream.sh.
+#
+# No secrets here. The service passes MPAMM_DB (its own database) and
+# MPAMM_LITESTREAM_ADDR; the unit's environment file holds MPAMM_REPLICA_URL
+# (s3://<bucket>/mpamm?endpoint=<endpoint>, or file:///… for a drill) and the
+# bucket's keys, LITESTREAM_ACCESS_KEY_ID and LITESTREAM_SECRET_ACCESS_KEY, which
+# Litestream reads itself.
+#
+# One copier per replica path, ever: two copiers can leave a replica that won't
+# restore. The service holds a lock for its copier, so never run
+# `litestream replicate` by hand against the service's database.
+
+# Prometheus metrics, read by the service for /api/health (localhost only).
+addr: "${MPAMM_LITESTREAM_ADDR}"
+
+logging:
+  level: info
+
+# A full snapshot a day, kept a week: 7 days of point-in-time recovery, and a
+# restore replays at most a day of compacted changes on top of a snapshot.
+# What a restore misses at the end (the last second or so) is re-read from the
+# chain: the block cursor commits with its trades, so a restored database
+# resumes where its data stops. Only quote history in that window is lost.
+snapshot:
+  interval: 24h
+  retention: 168h
+
+dbs:
+  - path: "${MPAMM_DB}"
+    replica:
+      url: "${MPAMM_REPLICA_URL}"

@@ -71,6 +71,19 @@ scp -q "$src" "$host:$tmp"
 # Settings travel with the binary (service/deploy/mpamm.toml, no secrets).
 scp -q "$(dirname "$0")/../deploy/mpamm.toml" "$host:$tmp.toml"
 ssh "$host" "sudo -u mpamm install -m 0644 $tmp.toml /var/lib/mpamm/mpamm.toml && rm -f $tmp.toml"
+# Replication: Litestream's config always; its pinned binary
+# (scripts/fetch-litestream.sh) when fetched and not already on the host.
+scp -q "$(dirname "$0")/../deploy/litestream.yml" "$host:$tmp.litestream.yml"
+ssh "$host" "sudo -u mpamm install -m 0644 $tmp.litestream.yml /var/lib/mpamm/litestream.yml && rm -f $tmp.litestream.yml"
+ls_bin=$(dirname "$0")/../dist/litestream
+if [[ -x "$ls_bin" ]]; then
+  want=$(shasum -a 256 "$ls_bin" | cut -d' ' -f1)
+  have=$(ssh "$host" "sudo -u mpamm sha256sum /var/lib/mpamm/bin/litestream 2>/dev/null | cut -d' ' -f1" || true)
+  if [[ "$want" != "$have" ]]; then
+    scp -q "$ls_bin" "$host:$tmp.litestream"
+    ssh "$host" "sudo -u mpamm install -D -m 0755 $tmp.litestream /var/lib/mpamm/bin/litestream && rm -f $tmp.litestream"
+  fi
+fi
 ssh "$host" "sudo -u mpamm install -D -m 0755 $tmp $bin.new && rm -f $tmp \
   && { sudo -u mpamm test -x $bin && sudo -u mpamm cp -f $bin $bin.prev || true; } \
   && sudo -u mpamm mv -f $bin.new $bin"
